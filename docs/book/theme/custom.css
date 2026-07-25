@@ -1,0 +1,364 @@
+/* ── IBX docs custom polish ─────────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+    --ibx-accent: #f59e0b;
+    --ibx-accent-strong: #fbbf24;
+    --ibx-accent-soft: rgba(245, 158, 11, 0.12);
+    --ibx-accent-faint: rgba(245, 158, 11, 0.06);
+    --ibx-border: rgba(127, 127, 127, 0.18);
+    --ibx-border-strong: rgba(127, 127, 127, 0.28);
+}
+
+/* ── Typography ─────────────────────────────────────────────────────────── */
+
+html, body, .content, .menu-title, .sidebar {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss01';
+    letter-spacing: -0.005em;
+}
+
+.content {
+    font-size: 16px;
+    line-height: 1.72;
+}
+
+.content h1 {
+    font-weight: 800;
+    font-size: 2.4rem;
+    letter-spacing: -0.025em;
+    margin-top: 1.5rem;
+    margin-bottom: 1.25rem;
+    line-height: 1.15;
+}
+
+.content h2 {
+    font-weight: 700;
+    font-size: 1.55rem;
+    letter-spacing: -0.018em;
+    margin-top: 3rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--ibx-border);
+}
+
+.content h3 {
+    font-weight: 600;
+    font-size: 1.18rem;
+    letter-spacing: -0.012em;
+    margin-top: 2rem;
+}
+
+.content h4 {
+    font-weight: 600;
+    font-size: 1.02rem;
+    margin-top: 1.5rem;
+}
+
+.content p, .content li {
+    line-height: 1.72;
+}
+
+.content a, .content a:visited {
+    color: var(--ibx-accent);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 120ms ease;
+}
+.content a:hover {
+    border-bottom-color: var(--ibx-accent);
+}
+
+/* ── Code ───────────────────────────────────────────────────────────────── */
+
+code, pre, .hljs {
+    font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+    font-size: 13.5px;
+}
+
+pre {
+    border: 1px solid var(--ibx-border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    overflow-x: auto;
+}
+
+pre > code.hljs {
+    background: transparent !important;
+    padding: 0 !important;
+}
+
+:not(pre) > code {
+    background: var(--ibx-accent-soft);
+    border: 1px solid var(--ibx-accent-faint);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 0.88em;
+}
+
+.content pre > .buttons {
+    opacity: 0.5;
+    transition: opacity 120ms ease;
+}
+.content pre:hover > .buttons {
+    opacity: 1;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────────── */
+
+.sidebar {
+    font-size: 14px;
+    border-right: 1px solid var(--ibx-border);
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 18px 14px;
+}
+
+.chapter li.chapter-item {
+    line-height: 1.5;
+    margin: 1px 0;
+}
+
+.chapter li.chapter-item a,
+.chapter li.chapter-item > a {
+    padding: 6px 10px;
+    border-radius: 6px;
+    transition: background 120ms ease, color 120ms ease;
+}
+
+.chapter li.chapter-item a:hover {
+    background: var(--ibx-accent-faint);
+    color: var(--ibx-accent) !important;
+}
+
+.chapter li.chapter-item a.active {
+    background: var(--ibx-accent-soft);
+    color: var(--ibx-accent) !important;
+    font-weight: 600;
+}
+
+.chapter .part-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.6;
+    margin: 1.5rem 10px 0.5rem;
+}
+
+/* ── Top menu bar ───────────────────────────────────────────────────────── */
+
+#menu-bar {
+    border-bottom: 1px solid var(--ibx-border);
+}
+
+.menu-title {
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    font-size: 16px;
+}
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+
+.content table {
+    border-collapse: collapse;
+    margin: 1.25rem 0;
+    border: 1px solid var(--ibx-border);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 14.5px;
+}
+
+.content table th,
+.content table td {
+    border: none;
+    border-bottom: 1px solid var(--ibx-border);
+    padding: 9px 14px;
+    text-align: left;
+}
+
+.content table th {
+    background: var(--ibx-accent-faint);
+    font-weight: 600;
+    color: var(--ibx-accent);
+    border-bottom: 1px solid var(--ibx-border-strong);
+}
+
+.content table tr:last-child td {
+    border-bottom: none;
+}
+
+/* ── Blockquotes ────────────────────────────────────────────────────────── */
+
+.content blockquote {
+    border-left: 3px solid var(--ibx-accent);
+    background: var(--ibx-accent-faint);
+    padding: 0.6rem 1.1rem;
+    border-radius: 0 6px 6px 0;
+    margin: 1.25rem 0;
+    color: inherit;
+    opacity: 0.92;
+}
+.content blockquote > :first-child { margin-top: 0; }
+.content blockquote > :last-child { margin-bottom: 0; }
+
+/* ── Hero (landing page) ────────────────────────────────────────────────── */
+
+.ibx-hero {
+    text-align: center;
+    padding: 3rem 1rem 1.5rem;
+    margin: -1rem 0 2.5rem;
+    border-bottom: 1px solid var(--ibx-border);
+}
+
+.ibx-hero .ibx-logo {
+    display: block;
+    width: 100%;
+    max-width: 560px;
+    height: auto;
+    margin: 0 auto 1.75rem;
+    border-radius: 12px;
+    border: 1px solid var(--ibx-border);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
+}
+
+.ibx-hero h1 {
+    font-size: 3.4rem !important;
+    font-weight: 800 !important;
+    letter-spacing: -0.035em !important;
+    line-height: 1.05 !important;
+    margin: 0 0 0.6rem !important;
+    border: 0 !important;
+    background: linear-gradient(135deg, var(--ibx-accent) 0%, var(--ibx-accent-strong) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    display: inline-block;
+}
+
+.ibx-hero .ibx-tagline {
+    font-size: 1.25rem;
+    opacity: 0.78;
+    margin: 0 auto 2rem;
+    max-width: 640px;
+    line-height: 1.5;
+}
+
+.ibx-hero .ibx-cta {
+    display: inline-flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.ibx-hero .ibx-cta a {
+    display: inline-block;
+    padding: 11px 22px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 14.5px;
+    text-decoration: none !important;
+    border: 1px solid transparent !important;
+    transition: transform 100ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.ibx-hero .ibx-cta a.primary {
+    background: var(--ibx-accent);
+    color: #0f1320 !important;
+}
+.ibx-hero .ibx-cta a.primary:hover {
+    background: var(--ibx-accent-strong);
+    transform: translateY(-1px);
+}
+
+.ibx-hero .ibx-cta a.secondary {
+    background: var(--ibx-accent-faint);
+    color: var(--ibx-accent) !important;
+    border: 1px solid var(--ibx-accent-soft) !important;
+}
+.ibx-hero .ibx-cta a.secondary:hover {
+    background: var(--ibx-accent-soft);
+    transform: translateY(-1px);
+}
+
+/* ── Feature grid (landing page) ────────────────────────────────────────── */
+
+.ibx-features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin: 2rem 0 2.5rem;
+}
+
+.ibx-feature {
+    background: var(--ibx-accent-faint);
+    border: 1px solid var(--ibx-border);
+    border-radius: 10px;
+    padding: 1.3rem 1.4rem;
+    transition: border-color 160ms ease, transform 160ms ease;
+}
+.ibx-feature:hover {
+    border-color: var(--ibx-accent-soft);
+    transform: translateY(-2px);
+}
+
+.ibx-feature h3 {
+    margin: 0 0 0.4rem !important;
+    font-size: 1rem !important;
+    font-weight: 700;
+    color: var(--ibx-accent);
+}
+
+.ibx-feature p {
+    margin: 0 !important;
+    font-size: 14px;
+    opacity: 0.82;
+    line-height: 1.6;
+}
+
+/* ── Stat strip (benchmarks) ────────────────────────────────────────────── */
+
+.ibx-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1px;
+    background: var(--ibx-border);
+    border: 1px solid var(--ibx-border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 2rem 0;
+}
+
+.ibx-stat {
+    background: var(--bg);
+    padding: 1.4rem 1.2rem;
+    text-align: center;
+}
+
+.ibx-stat .ibx-stat-value {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--ibx-accent);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    margin-bottom: 0.25rem;
+}
+
+.ibx-stat .ibx-stat-label {
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.65;
+    font-weight: 500;
+}
+
+/* ── Light-theme fallback ───────────────────────────────────────────────── */
+
+.light .ibx-hero .ibx-cta a.primary,
+.rust .ibx-hero .ibx-cta a.primary {
+    color: #fff !important;
+}

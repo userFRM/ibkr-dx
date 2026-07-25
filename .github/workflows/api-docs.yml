@@ -1,0 +1,41 @@
+name: Update API docs
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.target_commitish }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate API docs
+        run: python scripts/gen_api_docs.py
+
+      - name: Create PR if changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/book/src/api/rust-reference.md \
+                  docs/book/src/api/python-reference.md \
+                  docs/book/src/reference/coverage-data.md
+          git diff --cached --quiet && echo "No changes" && exit 0
+          BRANCH="docs/api-${{ github.event.release.tag_name }}"
+          git checkout -b "$BRANCH"
+          git commit -m "Update API docs for ${{ github.event.release.tag_name }}"
+          git push origin "$BRANCH"
+          gh pr create --title "Update API docs for ${{ github.event.release.tag_name }}" \
+            --body "Auto-generated API docs update." --base main --head "$BRANCH"
