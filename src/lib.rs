@@ -100,3 +100,21 @@ pub use api::{EClient, EClientConfig, Wrapper};
 
 /// What a session is opened with: the same type [`EClient`] takes.
 pub use api::EClientConfig as Config;
+
+/// What an exercise states beyond the instruction itself, as
+/// [`EClient::exercise_options`] takes it.
+pub use client_core::ExerciseStates;
+
+/// The protocol level this client speaks: what `server_version` reports on a
+/// connected session.
+pub use client_core::PROTOCOL_LEVEL;
+
+/// The first request id this client keeps for itself.
+///
+/// From here up the ids are this client's own: the numbers its answering
+/// calls ask under, the requests the engine makes itself, and the value that
+/// stands for a message naming no request. A request a caller numbers in the
+/// answering calls' band is refused. An error or answer carrying an id at or
+/// above this one answers no request a caller made; ibapi and ib_async number
+/// with 32-bit signed ids, which never reach it.
+pub const FIRST_RESERVED_REQUEST_ID: i64 = bridge::ReferenceState::ASK_ID_BASE as i64;

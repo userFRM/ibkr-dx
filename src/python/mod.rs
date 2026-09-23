@@ -108,6 +108,7 @@ fn ibkr_dx(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let _ = crate::logging::try_init_from_env("warn");
     }
     compat::register(m)?;
+    m.add("FIRST_RESERVED_REQUEST_ID", crate::FIRST_RESERVED_REQUEST_ID)?;
     Ok(())
 }
 

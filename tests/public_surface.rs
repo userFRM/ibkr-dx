@@ -21,6 +21,7 @@ use ibkr_dx::api::types::{
 };
 use ibkr_dx::api::{EClient, EClientConfig, Wrapper};
 use ibkr_dx::{EClient as RootEClient, Refusal as RootRefusal};
+use ibkr_dx::{ExerciseStates, FIRST_RESERVED_REQUEST_ID, PROTOCOL_LEVEL};
 
 // ── Reachable because a program already reaches it ──────────────────────────
 //
@@ -59,3 +60,17 @@ fn what_a_caller_configures_is_reachable_from_the_root() {
     let _: ibkr_dx::reliability::ReconnectConfig = Default::default();
     let _ = ibkr_dx::error_codes::Refusal::NOT_CONNECTED;
 }
+
+/// What a program needs to name to call the whole of `EClient`: the exercise
+/// statement `exercise_options` takes, the protocol level `server_version`
+/// reports, and where the ids this client keeps for itself begin.
+#[test]
+fn what_a_public_call_takes_is_nameable() {
+    let stated: ExerciseStates = ExerciseStates::default();
+    let _ = stated;
+}
+
+const _: () = assert!(PROTOCOL_LEVEL > 0);
+const _: () = assert!(FIRST_RESERVED_REQUEST_ID == 0xC000_0000);
+// Every id ibapi or ib_async can number a request with is below it.
+const _: () = assert!((i32::MAX as i64) < FIRST_RESERVED_REQUEST_ID);
