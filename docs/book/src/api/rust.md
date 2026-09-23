@@ -10,10 +10,9 @@ The same `EClient` also carries [the calls that answer](#calls-that-answer) and
 
 `Contract` and `Order` are at `ibkr_dx::api::client::{Contract, Order}`.
 
-## Building the reference
+## The full reference
 
-The crate is not published to an index, so there is no docs.rs page for it.
-Build the reference from the source:
+Build the full reference from the source:
 
 ```bash
 cargo doc --no-deps --open

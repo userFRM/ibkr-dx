@@ -7,7 +7,7 @@ page, so a layout that answers none of those lines means no such program ever
 reached its first statement, whatever else was exported.
 
 Under these names, porting is the one rename a person would guess at — `ibapi`
-becomes `ibkr_dx` — and the vendor's own sample files import unchanged after it.
+becomes `ibkr_dx` — and the TWS API's sample programs import unchanged after it.
 Nothing here is a second implementation: each module is a view of what `ibkr_dx`
 already publishes, and `ibkr_dx.client.EClient is ibkr_dx.EClient`.
 """

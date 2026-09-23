@@ -404,9 +404,9 @@ impl EClient {
 
     /// Subscribe to real-time 5-second bars. Matches `reqRealTimeBars` in C++.
     ///
-    /// `bar_size` is taken and not applied. The venue's real-time bar is five
-    /// seconds and there is no field asking for another; the reference client
-    /// takes the number and sends none either.
+    /// `bar_size` has no effect, as on a gateway: a real-time bar is five
+    /// seconds, and the venue's request carries no bar size. A gateway reads
+    /// the number and does not use it.
     pub fn req_real_time_bars(
         &self, req_id: i64, contract: &Contract,
         _bar_size: i32, what_to_show: &str, use_rth: bool,

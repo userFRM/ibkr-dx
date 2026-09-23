@@ -36,9 +36,9 @@ len(perms["STK"])                            # 92 order types and attributes
 client.permitted_order_types("FUT")          # or None, if the type is not permitted at all
 ```
 
-Through the API a program discovers this by being refused. A security type
-absent from this map is one the venue answers with an Inactive order and no
-text at all, which is why this client refuses it first and says why.
+Through the API a program discovers this by being refused. An order for a
+security type absent from this map is refused before it is sent, with the
+reason on the error callback.
 
 ## Which algorithms this account may use
 
@@ -144,16 +144,15 @@ client.paired_figures(1, 546)           # [(coordinate, volatility), …]
 client.closing_option_model(1)          # {'delta': …, 'rho': …, 'fugit': …, …}
 ```
 
-### Series a subscription can be refused by silence
+### Series that are acknowledged and state nothing
 
-Not every series is served to every account. The venue acknowledges the
-subscription, assigns it a tag, and then states nothing — it answers a series an
-account cannot see with silence rather than with a refusal, so there is no error
-to read. On the session this was written from, six behaved that way: 490, 546,
-669, 700, 726 and 733. The same six on the same account, minutes apart, over
-both a paper and a live login.
+Some series are acknowledged and then say nothing: the venue assigns the
+subscription a tag and states nothing on it, with no error to read. On the
+session this was written from, six behaved that way: 490, 546, 669, 700, 726
+and 733. The same six on the same account, minutes apart, over both a paper and
+a live login.
 
-An empty result from any of the calls above is therefore two things at once: a
+An empty result from any of the calls above can mean two things: a
 series the venue has nothing to say about for that contract, or one this account
 is not entitled to. The subscription list in account management is what tells
 them apart.
@@ -169,11 +168,9 @@ Two consequences worth stating plainly:
 
 - **None of this is derived.** Every figure above is stated by the venue,
   read off the session. Nothing here computes what the venue did not say.
-- **The door opens one way.** A program moves to this client without changing a
-  line; a program that then calls one of these cannot move back to a gateway,
-  because a gateway has no message to carry it. That is the trade for reaching
-  what the documented API never named, and the calls are listed again under
-  [Limits](./limits.md) so it is visible before it is made.
+- **A gateway has no message for these.** A program that calls one runs here
+  and not against a gateway, so a program that has to run against both leaves
+  them alone.
 
 ## The same calls in Rust
 

@@ -181,8 +181,9 @@ impl EClient {
 
     /// Cancel PnL subscription. Matches `cancelPnL` in C++.
     ///
-    /// Nothing withdraws one on this wire, and the engine says so: what stops
-    /// is the reporting, not the venue.
+    /// The updates stop. The venue has no message withdrawing the subscription
+    /// itself, on a gateway as here, so the updates stopping is what the call
+    /// does.
     pub fn cancel_pnl(&self, req_id: i64) {
         self.core.unsubscribe_pnl(req_id);
         if let Err(why) = self.send(ControlCommand::CancelPnl { req_id }) {

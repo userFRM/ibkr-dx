@@ -135,7 +135,7 @@ client.asynchronous  # read-only attribute
 
 #### `server_version`
 
-The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session, as the reference client answers before its greeting.  In the reference architecture this number is the API level of the process a program is talking to. That process was the vendor's gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Nothing above it is: attached orders (218), the configuration requests (219, 221), `hedgeMaxSize` (223) and `conditionsIncludeOvernight` (226) are absent. Below it, a program that believes the number is wrong about the following, and every one fails loudly on use rather than quietly:  * Order fields this protocol does not carry, refused by name on `error` under 321 when the order is placed: `optOutSmartRouting` (56), `smartComboRoutingParams` (57), the delta-neutral settling, clearing and open/close fields (58, 66), `scaleInitFillQty` (60), `scaleTable` (69), `orderMiscOptions` (70), `algoId` (71), `randomizePrice` (76), `dontUseAutoPriceForHedge` (141), `whatIfType` (217). * Requests and fields that do not exist here, an `AttributeError`: the four `verify*` calls (70), `cancelContractData` and `cancelHistoricalTicks` (215). * A withdrawal stating a manual time, an operator or who entered it (169, 192), and an execution filter stating `lastNDays` or `specificDates` (200): refused by name on `error`. * One callback nothing fires, said on the call that would produce it: `orderBound` (144) after `reqAutoOpenOrders`. It is the one case that is quiet at run time: a program that waits on it waits, and only the doc says why.  Every other gate at or below 217 names a request, field or callback that is here and carried.
+The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session, as the reference client answers before its greeting.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Nothing above it is: attached orders (218), the configuration requests (219, 221), `hedgeMaxSize` (223) and `conditionsIncludeOvernight` (226) are absent. Below it, a program that believes the number is wrong about the following, and every one fails loudly on use rather than quietly:  * Order fields this protocol does not carry, refused by name on `error` under 321 when the order is placed: `optOutSmartRouting` (56), `smartComboRoutingParams` (57), the delta-neutral settling, clearing and open/close fields (58, 66), `scaleInitFillQty` (60), `scaleTable` (69), `orderMiscOptions` (70), `algoId` (71), `randomizePrice` (76), `dontUseAutoPriceForHedge` (141), `whatIfType` (217). * Requests and fields that do not exist here, an `AttributeError`: the four `verify*` calls (70), `cancelContractData` and `cancelHistoricalTicks` (215). * A withdrawal stating a manual time, an operator or who entered it (169, 192), and an execution filter stating `lastNDays` or `specificDates` (200): refused by name on `error`. Every other gate at or below 217 names a request, field or callback that is here and carried.
 
 ```python
 def server_version()
@@ -209,7 +209,7 @@ def events_lost()
 
 #### `poll`
 
-Run the event loop. Deliver everything waiting, once, and return.  `run` owns the thread it is called on, which a program with an event loop of its own cannot give it: an asyncio framework has to drive the callbacks from its own loop, and a blocking loop leaves it nowhere to stand. This is one pass of the same dispatch.
+Deliver everything waiting, once, and return.  `run` owns the thread it is called on, which a program with an event loop of its own cannot give it: an asyncio framework has to drive the callbacks from its own loop, and a blocking loop leaves it nowhere to stand. This is one pass of the same dispatch.
 
 ```python
 def poll()
@@ -368,7 +368,7 @@ def matching_symbols(pattern)
 
 #### `news_headlines`
 
-The option chains an underlying has, answered rather than only sent.  The client this follows returns them. Sending the request and returning nothing left a program that assigned the result holding nothing, with no way to tell that from an underlying with no options at all. The headlines the venue holds for a contract.  Answers rather than reporting through the wrapper, because a program written against the reference client reads the return value.
+The headlines the venue holds for a contract.  Answers rather than reporting through the wrapper, because a program written against the reference client reads the return value.
 
 ```python
 def news_headlines(con_id, provider_codes, start_date_time, end_date_time, total_results)
@@ -793,7 +793,7 @@ def req_global_cancel(order_cancel=None)
 
 #### `req_ids`
 
-Request next valid order ID.  `num_ids` is taken and not applied. Ids are handed out one at a time here, as the reference client does whatever number is asked for.  Before a session exists there is no counter to answer from: the id an account may next use is the venue's to state. Answering announces zero, which names no order the venue will hold and is refused on placement. Reported the way the reference client reports every request made before connecting.
+Request next valid order ID.  `num_ids` has no effect, as on a gateway: the next valid id is answered whatever number is asked for.  Before a session exists there is no counter to answer from: the id an account may next use is the venue's to state. Answering announces zero, which names no order the venue will hold and is refused on placement. Reported the way the reference client reports every request made before connecting.
 
 ```python
 def req_ids(num_ids=1)
@@ -847,7 +847,7 @@ def req_all_open_orders()
 
 #### `req_auto_open_orders`
 
-Binding an order placed elsewhere to this session.  The reference client asks a local process to hand over orders a person entered by hand in front of it. There is no such process here and no such person, so there is nothing to hand over, and this reports that rather than returning as though the binding were in place.  Reported rather than returning silently: a caller told nothing waits for orders that will not arrive.  `order_bound` is never fired here, and not because of this call: it follows asking for the open orders, not asking to bind them. The reference architecture partitions an account's orders by the client that placed them, and on being asked for the open ones it claims those that belong to no client for client nought — a control message to the venue, whose answer is what that callback carries. There is no such partition here: every session is told about every order on the account, so there is nothing to claim, and claiming it would change who owns an order at the venue to no end. The permanent id the callback pairs with arrives on the order's status and on its fills.  `b_auto_bind` is taken and not applied. Whether it asks to bind or to stop binding, the answer is the same: this session hears about every order on the account either way.
+Binding orders entered elsewhere to this client.  Served for client 0. Any other client is refused with 327, as a gateway refuses a client other than 0. On a gateway, client 0's flag turns binding on or off; here what binding asks for is the default, since this session is told about every order on the account, whoever entered it. So `b_auto_bind` changes nothing whichever way it is set, and nothing goes to the venue.  `order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
 
 ```python
 def req_auto_open_orders(b_auto_bind)
@@ -1040,7 +1040,7 @@ def req_mkt_depth(req_id, contract, num_rows=5, is_smart_depth=False, mkt_depth_
 
 #### `cancel_mkt_depth`
 
-Cancel market depth.  `is_smart_depth` is taken and not applied. A book is withdrawn by the request that asked for it, and this client remembers which kind that was, so the caller restating it changes nothing.
+Cancel market depth.  `is_smart_depth` has no effect: a book is withdrawn by the request that asked for it, and this client remembers which kind that was. Stated as the book was asked for, it withdraws the same book a gateway would.
 
 ```python
 def cancel_mkt_depth(req_id, is_smart_depth=False)
@@ -1055,7 +1055,7 @@ def cancel_mkt_depth(req_id, is_smart_depth=False)
 
 #### `req_real_time_bars`
 
-Request real-time 5-second bars.  `bar_size` and `real_time_bars_options` are taken and not applied. The venue's real-time bar is five seconds and there is no field asking for another, and this protocol's request carries no free-form option list.
+Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  `real_time_bars_options` is taken and not applied. This protocol's request carries no free-form option list.
 
 ```python
 def req_real_time_bars(req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=[])
@@ -2059,7 +2059,7 @@ def req_family_codes()
 
 #### `set_server_log_level`
 
-How much to log about this session, 1 to 5.  Recorded locally rather than sent: this wire carries no log-level request. A level outside 1 to 5 is refused rather than reported back as `warn`, which would tell a caller they had a level that does not exist.
+How much to log about this session, 1 to 5.  1 to 5 set this client's logger to error, warn, info, debug and trace. A gateway applies the level to its own log; this client, which serves the caller in its place, applies it to the logger it installed. Nothing goes to the venue, which has no message for it. Where the program installed a logger of its own, the call says so on `error` rather than reporting a level it did not set. A level outside 1 to 5 is refused rather than reported back as `warn`, which would tell a caller they had a level that does not exist.
 
 ```python
 def set_server_log_level(log_level=2)
@@ -3106,7 +3106,7 @@ One bond matching a description, with its terms: what it pays, how and when, whe
 
 #### `delta_neutral_validation`
 
-The contract the venue paired with a delta-neutral order.
+The contract the venue paired with a delta-neutral order.  A gateway sends it. No message this client receives carries the pairing it reports, so nothing here fires it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3117,7 +3117,7 @@ The contract the venue paired with a delta-neutral order.
 
 #### `reroute_mkt_data_req`
 
-The contract a market-data request should be asked for under instead.  The reference client answers a request on a contract the venue reroutes — a contract for difference standing for a share — with the contract and venue to ask again under. Nothing on this connection has been seen to state one, so nothing here fires this.
+The contract a market-data request should be asked for under instead.  A gateway sends it when a request is to be asked for under another contract and venue — a contract for difference standing for a share. Nothing this connection receives has been seen to state one, so nothing here fires it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3141,7 +3141,7 @@ The same, for a request for the book rather than the quote.
 
 #### `tick_efp`
 
-An exchange-for-physical quote, which the reference client reports on a callback of its own rather than as a price. This client carries the tick types such a quote is numbered under and does not assemble them into this record.
+An exchange-for-physical quote. Declared by the TWS API and never fired on a gateway, so it fires here as it does there: never.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3159,7 +3159,7 @@ An exchange-for-physical quote, which the reference client reports on a callback
 
 #### `verify_message_api`
 
-A step in the handshake a third-party program makes with a terminal before that terminal will carry its requests. There is no terminal between this client and the venue, so nothing here fires these four.
+A step in the TWS API's verification handshake. Declared by the TWS API and never fired on a gateway, so these four fire here as they do there: never.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3202,7 +3202,7 @@ Whether that one was accepted.
 
 #### `win_error`
 
-What the reference client reports when its own socket layer fails on Windows. This client has no such layer: trouble on a connection reaches a caller on the error callback.
+Declared by the TWS API as `winError`. No message on the wire carries it, and the TWS API's Python client declares it and never raises it, so it fires here as it does there: never. Here, trouble on a connection reaches a caller on the error callback.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

@@ -344,8 +344,8 @@ KNOWN_DESCRIPTIONS: dict[str, str] = {
     "wsh_event_data": "Wall Street Horizon event data.",
     "bond_contract_details": "Bond contract details.",
     "delta_neutral_validation": "Delta-neutral validation response.",
-    "calculate_implied_volatility": "Calculate option implied volatility. Not yet implemented.",
-    "calculate_option_price": "Calculate option theoretical price. Not yet implemented.",
+    "calculate_implied_volatility": "Calculate option implied volatility.",
+    "calculate_option_price": "Calculate option theoretical price.",
     "cancel_calculate_implied_volatility": "Cancel implied volatility calculation.",
     "cancel_calculate_option_price": "Cancel option price calculation.",
     "exercise_options": "Exercise or lapse a long option position.",
@@ -355,8 +355,8 @@ KNOWN_DESCRIPTIONS: dict[str, str] = {
     "cancel_news_bulletins": "Cancel news bulletin subscription.",
     "req_current_time": "Request current server time.",
     "req_current_time_in_millis": "Request current server time in milliseconds.",
-    "request_fa": "Request FA data. Not yet implemented.",
-    "replace_fa": "Replace FA data. Not yet implemented.",
+    "request_fa": "Request FA data.",
+    "replace_fa": "Replace FA data.",
     "query_display_groups": "Query display groups.",
     "subscribe_to_group_events": "Subscribe to display group events.",
     "unsubscribe_from_group_events": "Unsubscribe from display group events.",
@@ -367,8 +367,8 @@ KNOWN_DESCRIPTIONS: dict[str, str] = {
     "req_family_codes": "Request family codes.",
     "set_server_log_level": "Set server log level (1=error..5=trace).",
     "req_user_info": "Request user info (white branding ID).",
-    "req_wsh_meta_data": "Request Wall Street Horizon metadata. Not yet implemented.",
-    "req_wsh_event_data": "Request Wall Street Horizon event data. Not yet implemented.",
+    "req_wsh_meta_data": "Request Wall Street Horizon metadata.",
+    "req_wsh_event_data": "Request Wall Street Horizon event data.",
 }
 
 
@@ -1026,7 +1026,9 @@ IBAPI_ECLIENT: list[tuple[str, str, str]] = [
     ("Display Groups", "update_display_group", "updateDisplayGroup"),
     # WSH
     ("WSH", "req_wsh_meta_data", "reqWshMetaData"),
+    ("WSH", "cancel_wsh_meta_data", "cancelWshMetaData"),
     ("WSH", "req_wsh_event_data", "reqWshEventData"),
+    ("WSH", "cancel_wsh_event_data", "cancelWshEventData"),
 ]
 
 IBAPI_EWRAPPER: list[tuple[str, str]] = [
@@ -1112,10 +1114,10 @@ IBAPI_EWRAPPER: list[tuple[str, str]] = [
     ("Other", "delta_neutral_validation"),
     ("WSH", "wsh_meta_data"),
     ("WSH", "wsh_event_data"),
-    # Defined by the reference API and not fired here, which is a difference
-    # worth counting rather than one worth leaving out of the denominator: the
-    # notes state each and why, and a total that omitted them would say this
-    # client answers everything there is.
+    # Declared by the TWS API and not fired here. Counted rather than left out
+    # of the denominator, and told apart below: a callback a gateway sends and
+    # this client does not is a difference, and one that never fires on a
+    # gateway is not.
     #
     # `config` used to sit here and does not belong: it is this client's own
     # connection record, and no reference client has a callback of that name.
@@ -1123,23 +1125,15 @@ IBAPI_EWRAPPER: list[tuple[str, str]] = [
     # that nothing was measured against.
     ("Market Data", "reroute_mkt_data_req"),
     ("Market Data", "reroute_mkt_depth_req"),
-    # An exchange-for-physical quote, which the reference client reports on a
-    # callback of its own. This client reads the tick types it is carried
-    # under and fires nothing, so a program written against that callback
-    # hears nothing where the reference client speaks.
+    # An exchange-for-physical quote. Never fired on a gateway.
     ("Market Data", "tick_efp"),
-    # The handshake a third-party program makes with a terminal before that
-    # terminal will carry its requests. There is no terminal between this
-    # client and the venue to make it with, so nothing here can fire them —
-    # which is a real difference to a program that implements them, and is
-    # counted as one.
+    # The verification handshake. None of these four fires on a gateway.
     ("Connection", "verify_message_api"),
     ("Connection", "verify_completed"),
     ("Connection", "verify_and_auth_message_api"),
     ("Connection", "verify_and_auth_completed"),
-    # What the reference client reports when its own socket layer fails on
-    # Windows. This client has no such layer and reports transport trouble on
-    # the error callback like everything else.
+    # No message on the wire carries it; the TWS API's Python client declares
+    # it and never raises it. Transport trouble here reaches the error callback.
     ("Connection", "win_error"),
 ]
 
@@ -1260,19 +1254,21 @@ def _evidence_index() -> tuple[str, str]:
     return live, _read_all(offline_files)
 
 
-def _evidence(name: str, live: str, offline: str, stub_names: set[str]) -> str:
+def _evidence(name: str, live: str, offline: str, stub_names: set[str], spelled: str = "") -> str:
     """How a call's status was established. Derived, never asserted.
 
     A call is credited to the live session only when the suite that runs
     against a real account names it, and to the offline suites only when a
-    test names it. Nothing here is hand-maintained, so nothing here can go
-    quietly out of date.
+    test names it — in either spelling, since the Python suite calls it by the
+    TWS API's own name as often as by this client's. Nothing here is
+    hand-maintained, so nothing here can go quietly out of date.
     """
     if name in stub_names:
         return "States why it cannot be served"
-    if name in live:
+    named = [n for n in (name, spelled) if n]
+    if any(n in live for n in named):
         return "Live session"
-    if name in offline:
+    if any(n in offline for n in named):
         return "Offline suites"
     return "Not exercised"
 
@@ -1299,10 +1295,9 @@ def _status_icon(name: str, impl_set: set[str], stub_names: set[str]) -> str:
 #: Empty, and kept so the next one has somewhere to go.
 #:
 #: `set_server_log_level` was the last of them to leave. The protocol carries no
-#: message asking the venue to change how loudly it talks, and the counterpart
-#: sends none either — it keeps what a caller states and logs by it. A drop-in
-#: replacement is the thing serving the caller, so the level a caller states is
-#: this client's own, and it is applied rather than written down.
+#: message asking the venue to change how loudly it talks; a gateway applies the
+#: level to its own log, and this client, which serves the caller in its place,
+#: applies it to the logger it installed.
 STUB_METHODS: set[str] = {
     # The options a reference client hands its gateway on the greeting, for the
     # gateway to read. There is no gateway between this client and the venue,
@@ -1314,9 +1309,8 @@ STUB_METHODS: set[str] = {
     "set_connect_options",
 }
 
-#: Callbacks nothing fires. Each for its own reason, and none of them a
-#: message this client fails to read: they name state the venue does not send
-#: here.
+#: Callbacks a gateway sends and nothing here fires. What each is and why is on
+#: the Limits page.
 STUB_CALLBACKS = {
     # Nothing in this protocol reaches the sender of one: not a market-data
     # request, not an order carrying a hedge. There is no first request after
@@ -1326,18 +1320,25 @@ STUB_CALLBACKS = {
     # reroutes one. Nothing on this connection has been seen to state one.
     "reroute_mkt_data_req",
     "reroute_mkt_depth_req",
-    # An exchange-for-physical quote. The tick types it is numbered under are
-    # carried; they are not assembled into the record this reports.
+}
+
+#: Callbacks the TWS API declares that never fire on a gateway. Declared here
+#: so a program implementing one compiles and runs, and never fired — as on a
+#: gateway. Not a stub: nothing is left out that a gateway would deliver.
+#:
+#: `connect_ack` and `connection_closed` are not here: no gateway message
+#: carries either, and the TWS API's own client raises both itself, so they
+#: fire on a gateway as they fire here.
+GATEWAY_SENDS_NONE = {
+    # An exchange-for-physical quote.
     "tick_efp",
-    # The handshake a third-party program makes with a terminal before that
-    # terminal will carry its requests. There is no terminal here to make it
-    # with, so these four can never fire.
+    # The verification handshake.
     "verify_message_api",
     "verify_completed",
     "verify_and_auth_message_api",
     "verify_and_auth_completed",
-    # What the reference client reports when its own socket layer fails on
-    # Windows. This client has no such layer.
+    # No message on the wire carries it; the TWS API's Python client declares
+    # it and never raises it. Transport trouble here reaches the error callback.
     "win_error",
 }
 
@@ -1355,9 +1356,16 @@ def generate_coverage_md(ver: str) -> str:
         "",
         "Canonical IB API methods vs ibkr-dx implementation status.",
         "",
-        "- **Y** = Implemented",
-        "- **STUB** = Accepts call but not wired to server (logs warning or no-op)",
+        "- **Y** = Implemented: a call is served; a callback is declared and fired",
+        "  whenever what it reports arrives",
+        "- **STUB** = Present and not served: a call reports why on the error",
+        "  callback; a callback is declared and not fired here, although a gateway",
+        "  sends it",
         "- **-** = Not present",
+        "",
+        "The callback table also says whether each callback fires at all for a",
+        "program on a gateway. Six declared by the TWS API never do, so they fire",
+        "neither there nor here.",
         "",
         "The evidence column says how each status was established, and is",
         "derived rather than asserted: a call is credited to the live session",
@@ -1404,22 +1412,23 @@ def generate_coverage_md(ver: str) -> str:
         current_cat = cat
         r = _status_icon(name, rust_methods, STUB_METHODS)
         p = _status_icon(name, py_methods, STUB_METHODS)
-        e = _evidence(name, live, offline, STUB_METHODS)
+        e = _evidence(name, live, offline, STUB_METHODS, cpp_name)
         out.append(f"| {display_cat} | `{name}` | `{cpp_name}` | {r} | {p} | {e} |")
     out.append("")
 
     # EWrapper table
     out.append("## EWrapper Callbacks")
     out.append("")
-    out.append("| Category | Callback | Rust | Python |")
-    out.append("|----------|----------|:----:|:------:|")
+    out.append("| Category | Callback | Rust | Python | Fires on a gateway |")
+    out.append("|----------|----------|:----:|:------:|:------------------:|")
     current_cat = ""
     for cat, name in IBAPI_EWRAPPER:
         display_cat = cat if cat != current_cat else ""
         current_cat = cat
         r = _status_icon(name, rust_wrapper, STUB_CALLBACKS)
         p = _status_icon(name, py_wrapper, STUB_CALLBACKS)
-        out.append(f"| {display_cat} | `{name}` | {r} | {p} |")
+        sent = "no" if name in GATEWAY_SENDS_NONE else "yes"
+        out.append(f"| {display_cat} | `{name}` | {r} | {p} | {sent} |")
     out.append("")
 
     return "\n".join(out)

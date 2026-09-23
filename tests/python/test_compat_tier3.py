@@ -612,8 +612,8 @@ def test_the_end_of_a_series_names_the_range_it_covered():
     """A caller pages backwards by feeding the start in as its next end.
 
     Given two empty strings, as it was, every page asked for was the page
-    already held. The counterpart states the range the request named — not one
-    read off the reply, which carries a range of its own that it reads only for
+    already held. A gateway states the range the request named — not one read
+    off the reply, which carries a range of its own that it reports only for
     ticks.
     """
     ends = []

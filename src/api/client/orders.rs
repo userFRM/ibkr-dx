@@ -1076,29 +1076,18 @@ impl EClient {
 
     /// Automatically bind future orders to this client. Matches `reqAutoOpenOrders` in
     /// C++.
-    /// Bind orders entered elsewhere to this client.
     ///
-    /// Nothing goes to the venue; this is answered locally, setting
-    /// a property of its own and refusing it for any client but the one those
-    /// orders bind to. What that property gates does not arise here — this
-    /// session is told about every order on the account, whether it placed
-    /// them or not — and this surface names no client, so there is nothing to
-    /// refuse and nothing left to do.
+    /// What binding asks for is the default here: this session is told about
+    /// every order on the account, whoever entered it. Nothing goes to the
+    /// venue. On a gateway, client 0's flag turns binding on or off; here every
+    /// session is already told about every order, so `b_auto_bind` changes
+    /// nothing. This surface names no client, so there is no other client to
+    /// refuse.
     ///
-    /// [`Wrapper::order_bound`] is never fired here, and not because of this
-    /// call: it follows asking for the open orders, not asking to bind them.
-    /// The reference architecture partitions an account's orders by the client
-    /// that placed them, and on being asked for the open ones it claims those
-    /// that belong to no client for client nought — a control message to the
-    /// venue, whose answer is what that callback carries. There is no such
-    /// partition here: every session is told about every order on the account,
-    /// so there is nothing to claim, and claiming it would change who owns an
-    /// order at the venue to no end. The permanent id the callback pairs with
-    /// arrives on the order's status and on its fills.
-    ///
-    /// `b_auto_bind` is taken and not applied. Whether it asks to bind or to
-    /// stop binding, the answer is the same: this session hears about every
-    /// order on the account either way.
+    /// [`Wrapper::order_bound`] does not follow from this call. It is fired once
+    /// for each order the venue restates when the session opens that this
+    /// session did not place, pairing the venue's permanent id with the order
+    /// id it is reached under here.
     pub fn req_auto_open_orders(&self, _b_auto_bind: bool) {}
 
     /// Request execution reports. Matches `reqExecutions` in C++.

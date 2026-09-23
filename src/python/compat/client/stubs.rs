@@ -454,10 +454,14 @@ impl EClient {
 
     /// How much to log about this session, 1 to 5.
     ///
-    /// Recorded locally rather than sent: this wire carries no log-level
-    /// request. A level outside 1 to 5 is refused rather than reported back as
-    /// `warn`, which would tell a caller they had a level that does not
-    /// exist.
+    /// 1 to 5 set this client's logger to error, warn, info, debug and trace. A
+    /// gateway applies the level to its own log; this client, which serves the
+    /// caller in its place, applies it to the logger it installed. Nothing goes
+    /// to the venue, which has no message for it. Where the program installed
+    /// a logger of its own, the call says so on `error` rather than reporting a
+    /// level it did not set. A level outside 1 to 5 is refused rather than
+    /// reported back as `warn`, which would tell a caller they had a level
+    /// that does not exist.
     #[pyo3(signature = (log_level=2))]
     fn set_server_log_level(&self, py: Python<'_>, log_level: i32) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };

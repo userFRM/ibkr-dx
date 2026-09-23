@@ -215,9 +215,8 @@ def reported() -> dict[str, str]:
 def held() -> dict[str, str]:
     """Fields this client acts on itself rather than sending or refusing.
 
-    The counterpart this replaces reads some of what the reference client sends
-    it and never puts it on the wire — an order held back is created there and
-    not transmitted. Such a field is neither carried nor refused, and it is not
+    A gateway acts on some of what the TWS API sends it and never puts it on
+    the wire — an order held back is created there and not transmitted. Such a field is neither carried nor refused, and it is not
     dropped either: something happens because it was set. Counted apart so that
     a field genuinely going nowhere still shows up as one.
     """

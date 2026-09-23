@@ -27,16 +27,17 @@ why the example keeps `market_maker` alongside price and size.
 The example collects for the whole window and prints once at the end, not on
 every update. `DURATION_SECS` sets that window; the default is 15.
 
+After a reconnect the venue restates the book from the top. The client reports
+that on `error` as 317, the TWS API's notice that a book was reset, before the
+first new level arrives — as a gateway does. Empty the book on it, or the
+levels that follow land on top of the old ones.
+
 ## Limits
 
 A depth subscription the venue will not serve is refused, and the refusal
 arrives on the `error` callback. The example prints an em dash for a side with
 no levels rather than failing, so a book that never started shows up as zero
 updates rather than as an error.
-
-After a reconnect the venue restarts the book from the top. The client reports
-that as `error` 317 before the first new level arrives; empty the book on it,
-or the levels that follow land on top of the old ones.
 
 A contract whose security type and exchange are both left off is sent as it
 stands, and an unnamed exchange is read as the smart destination. Naming a

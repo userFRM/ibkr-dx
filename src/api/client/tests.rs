@@ -2720,10 +2720,10 @@ fn place_order_empty_tif_is_day() {
 
 // ── an order held back is kept, not refused and not sent ──
 
-/// The field is one the reference client sends to its counterpart, not one the
-/// venue reads, and that counterpart holds the order rather than working it.
-/// This client stands where it stood, so the holding is this client's: nothing
-/// goes out, nothing is refused, and an order that transmits sends it.
+/// The field is one the TWS API sends to a gateway, not one the venue reads,
+/// and a gateway holds the order rather than working it. This client stands
+/// where the gateway stood, so the holding is this client's: nothing goes out,
+/// nothing is refused, and an order that transmits sends it.
 #[test]
 fn an_order_held_back_reaches_neither_the_venue_nor_a_refusal() {
     let (client, rx, shared) = test_client();

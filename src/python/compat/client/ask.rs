@@ -470,11 +470,6 @@ impl EClient {
             .collect()
     }
 
-    /// The option chains an underlying has, answered rather than only sent.
-    ///
-    /// The client this follows returns them. Sending the request and returning
-    /// nothing left a program that assigned the result holding nothing, with
-    /// no way to tell that from an underlying with no options at all.
     /// The headlines the venue holds for a contract.
     ///
     /// Answers rather than reporting through the wrapper, because a program

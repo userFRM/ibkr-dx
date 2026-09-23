@@ -37,9 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client.req_mkt_data(1, &spy, "", false, false)?;
     std::thread::sleep(std::time::Duration::from_secs(2));
-    if let Some(instrument) = client.instrument_of(spy.con_id) {
-        let quote = client.shared_state().market.quote(instrument);
-        println!("bid {} ask {}", quote.bid, quote.ask);
+    if let Some(quote) = client.quote(1) {
+        // Prices are held as integers scaled by `PRICE_SCALE`.
+        let scale = ibkr_dx::types::PRICE_SCALE as f64;
+        println!("bid {:.2} ask {:.2}", quote.bid as f64 / scale, quote.ask as f64 / scale);
     }
 
     client.disconnect();

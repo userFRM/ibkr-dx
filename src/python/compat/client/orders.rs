@@ -718,8 +718,8 @@ impl EClient {
 
     /// Request next valid order ID.
     ///
-    /// `num_ids` is taken and not applied. Ids are handed out one at a time
-    /// here, as the reference client does whatever number is asked for.
+    /// `num_ids` has no effect, as on a gateway: the next valid id is answered
+    /// whatever number is asked for.
     ///
     /// Before a session exists there is no counter to answer from: the id an
     /// account may next use is the venue's to state. Answering announces zero,
@@ -840,30 +840,19 @@ impl EClient {
         self.req_open_orders(py)
     }
 
-    /// Binding an order placed elsewhere to this session.
+    /// Binding orders entered elsewhere to this client.
     ///
-    /// The reference client asks a local process to hand over orders a person
-    /// entered by hand in front of it. There is no such process here and no
-    /// such person, so there is nothing to hand over, and this reports that
-    /// rather than returning as though the binding were in place.
+    /// Served for client 0. Any other client is refused with 327, as a gateway
+    /// refuses a client other than 0. On a gateway, client 0's flag turns
+    /// binding on or off; here what binding asks for is the default, since this
+    /// session is told about every order on the account, whoever entered it.
+    /// So `b_auto_bind` changes nothing whichever way it is set, and nothing
+    /// goes to the venue.
     ///
-    /// Reported rather than returning silently: a caller told nothing waits
-    /// for orders that will not arrive.
-    ///
-    /// `order_bound` is never fired here, and not because of this call: it
-    /// follows asking for the open orders, not asking to bind them. The
-    /// reference architecture partitions an account's orders by the client
-    /// that placed them, and on being asked for the open ones it claims those
-    /// that belong to no client for client nought — a control message to the
-    /// venue, whose answer is what that callback carries. There is no such
-    /// partition here: every session is told about every order on the account,
-    /// so there is nothing to claim, and claiming it would change who owns an
-    /// order at the venue to no end. The permanent id the callback pairs with
-    /// arrives on the order's status and on its fills.
-    ///
-    /// `b_auto_bind` is taken and not applied. Whether it asks to bind or to
-    /// stop binding, the answer is the same: this session hears about every
-    /// order on the account either way.
+    /// `order_bound` does not follow from this call. It is fired once for each
+    /// order the venue restates when the session opens that this session did
+    /// not place, pairing the venue's permanent id with the order id it is
+    /// reached under here.
     #[pyo3(signature = (b_auto_bind))]
     fn req_auto_open_orders(&self, b_auto_bind: bool) -> PyResult<()> {
         // Nothing goes to the wire. The request is refused for any client id

@@ -7,11 +7,14 @@ per client, and a mark in each, can.
 
 Every column is read from the client it names — not recalled, not asserted:
 
-  TWS API     the canonical list this repository already generates, which is
-              IBKR's own Python client's surface
-  ibapi       that client, imported and enumerated
+  TWS API     the canonical list this repository already generates
+  ibapi       IBKR's own Python client, imported and enumerated
   ib_async    the widely used asynchronous client, imported and enumerated
-  ibkr-dx         this client, from the coverage matrix the build already checks
+  ibkr-dx     this client, from the coverage matrix the build already checks
+
+A reference client's mark says a method exists and nothing more: enumerating a
+package cannot say what a method does. This client's marks say what it does,
+and the evidence column says how that was established.
 
 A column can only be written for a client that is installed. One that is not
 is left out of the table entirely rather than filled with guesses, and the page
@@ -60,6 +63,24 @@ EXTRA_PATHS = [
 #: and a reader porting a program needs to tell them apart.
 SERVED, TAKEN, ABSENT = "●", "◐", "·"
 
+#: Columns that describe a row rather than a client, and are not counted.
+NOT_A_CLIENT = {"Evidence", "Fires on a gateway", "Answered from"}
+
+#: Calls beyond the canonical list that answer from this client itself — its
+#: own state, a measurement it takes, or a helper — rather than from anything
+#: the venue states. Every other row there asks the venue or reads what it
+#: stated. Named by their spelling-free form, so either surface's name matches.
+#:
+#: Hand-kept, and checked: a name here that no longer appears in that table
+#: fails the run rather than standing as a claim about nothing.
+LOCAL = {
+    "checkconnected", "connectwithevents", "eventslost", "instrumentof",
+    "keeprecord", "lastrtt", "lastrttms", "nextorderid", "nextsharedid",
+    "parsealgoparams", "poll", "reset", "run", "serverversion", "session",
+    "sessionover", "sessiontokenbytes", "setconnectoptions", "sharedstate",
+    "startapi", "unreadwire", "waitfordata",
+}
+
 
 def as_camel(snake: str) -> str:
     """`req_mkt_data` as a Python client spells it: `reqMktData`."""
@@ -102,6 +123,7 @@ def rows_from_coverage():
                 "cpp": cells[2].strip("`"),
                 "rust": cells[3],
                 "python": cells[4],
+                "evidence": cells[5] if len(cells) > 5 else "",
             })
         elif section == "backs" and len(cells) >= 4 and cells[1].startswith("`"):
             backs.append({
@@ -111,6 +133,7 @@ def rows_from_coverage():
                 "cpp": cells[1].strip("`"),
                 "rust": cells[2],
                 "python": cells[3],
+                "gateway_sends": len(cells) < 5 or cells[4] != "no",
             })
     # The category cell is left blank on continuation rows in that file.
     for group in (calls, backs):
@@ -153,7 +176,7 @@ def surface_from_reference(page: str):
     return names or None
 
 
-def surface_of(module_name, *attr_paths):
+def surface_of(module_name, *attr_paths, kind=inspect.isfunction):
     """Every public method a client's classes define, or None where absent.
 
     More than one class may be named, and the answer is their union: a client
@@ -186,8 +209,12 @@ def surface_of(module_name, *attr_paths):
                 break
         if obj is None or obj is module:
             continue
+        # `kind` is what counts as a method. A compiled class's methods are
+        # descriptors rather than functions, and asked for functions alone it
+        # answered with only the ones given a second spelling in Python — so
+        # every call whose two spellings are one word read as absent.
         names |= {
-            name for name, _ in inspect.getmembers(obj, inspect.isfunction)
+            name for name, _ in inspect.getmembers(obj, kind)
             if not name.startswith("_")
         }
     if not names:
@@ -304,12 +331,12 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
     if README_OPEN not in text or README_SHUT not in text:
         return
 
-    calls_by = {n: (s, t, a) for n, s, t, a in counted(calls, columns)}
-    backs_by = {n: (s, t, a) for n, s, t, a in counted(backs, back_columns)}
+    calls_by = {n: (s, t, a) for n, s, t, a in counted(calls, columns) if n not in NOT_A_CLIENT}
+    backs_by = {n: (s, t, a) for n, s, t, a in counted(backs, back_columns) if n not in NOT_A_CLIENT}
     # One line per client, and this client's two surfaces last, because they
     # are the answer and the rest is what the answer is measured against.
     ours = [n for n in calls_by if n.startswith("ibkr-dx")]
-    theirs = [n for n in calls_by if not n.startswith("ibkr-dx") and n != "Gateway wire"]
+    theirs = [n for n in calls_by if not n.startswith("ibkr-dx")]
 
     def row(name):
         served, taken, absent = calls_by.get(name, (0, 0, 0))
@@ -320,11 +347,11 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         if absent:
             missing.append(f"{absent} absent")
         if taken:
-            missing.append(f"{taken} taken, not applied")
+            missing.append(f"{taken} present, not served")
         if b_taken:
-            missing.append(f"{b_taken} callback taken, not applied"
+            missing.append(f"{b_taken} callback declared, not fired"
                            if b_taken == 1 else
-                           f"{b_taken} callbacks taken, not applied")
+                           f"{b_taken} callbacks declared, not fired")
         if b_absent:
             missing.append(f"{b_absent} callbacks absent")
         note = ", ".join(missing) or "nothing missing"
@@ -336,7 +363,7 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         return "| " + " | ".join(cells) + " |"
 
     summary = [
-        "| Client | Calls carried | Callbacks carried | |",
+        "| Client | Calls | Callbacks | |",
         "| --- | ---: | ---: | --- |",
     ] + [row(n) for n in theirs + ours]
 
@@ -344,6 +371,7 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
     # reports it instead of claiming there is none.
     gone = sum(calls_by.get(n, (0, 0, 0))[2] + backs_by.get(n, (0, 0, 0))[2] for n in ours)
     held = sum(calls_by.get(n, (0, 0, 0))[1] + backs_by.get(n, (0, 0, 0))[1] for n in ours)
+    unsent = sum(1 for r in backs if not r.get("gateway_sends", True))
     if gone:
         verdict = (
             f"**{gone} of them are absent here**, counted rather than left out of "
@@ -351,18 +379,17 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         )
     else:
         verdict = (
-            "**Nothing on that list is absent here.** "
-            + (f"{held // max(len(ours), 1)} exist and never fire, because the venue "
-               "states nothing on this connection for them to carry: there is no terminal "
-               "between this client and the venue to make a verification handshake with, "
-               "no socket layer of the reference client's own to report an error from, "
-               "this connection does not reroute a request to another contract, and "
-               "neither an exchange-for-physical quote nor a delta-neutral pairing is "
-               "stated on it — a share, a fund and two futures were read together and the "
-               "venue stated fifteen kinds of tick, none of them those. Each says so where "
-               "it is declared, so a program that implements one still compiles and runs. "
+            "**Every call and callback on that list is present on both surfaces.** "
+            + (f"{held // max(len(ours), 1)} callbacks are declared and not fired: "
+               "nothing this connection receives has been seen to state a reroute to "
+               "another contract, or a delta-neutral pairing. Each says so where it is "
+               "declared, so a program that implements one still compiles and runs. "
                if held else "")
-            + "Everything else is carried."
+            + (f"{unsent} more are declared by the TWS API and never fire on a gateway — "
+               "the four steps of the verification handshake, the exchange-for-physical "
+               "quote, and `win_error`, which no message on the wire carries — so they "
+               "fire here exactly as often as there: never."
+               if unsent else "")
         )
 
     block = [
@@ -371,22 +398,21 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         "## Capabilities",
         "",
         f"One row per capability, one column per client — every one of the "
-        f"{len(calls)} calls and {len(backs)} callbacks the documented API names, "
-        "read from each client rather than recalled.",
+        f"{len(calls)} calls and {len(backs)} callbacks on the canonical list of the "
+        "TWS API's requests and callbacks, read from each client rather than recalled.",
         "",
     ] + summary + [
         "",
         verdict,
     ] + ([
         "",
-        f"**And {len(beyond)} more beyond that list.** The connection a terminal opens "
-        "carries more than the documented calls describe — what the venue permits this "
-        "account, which algorithms it offers, the order defaults it fills an order's "
-        "blanks from, what it says about an issuer, which session holds the account — "
-        "and a client that speaks that connection can answer them. Most have no call in "
-        "the documented API at all; a few are one a reference client happens to name "
-        "too, and the table below marks which is which, under *Beyond the canonical "
-        "list*.",
+        f"**And {len(beyond)} more beyond that list.** The venue states more on a "
+        "session than the documented calls ask for — what it permits this account, "
+        "which algorithms it offers, the order defaults it fills an order's blanks "
+        "from, what it says about an issuer, which session holds the account — and "
+        "this client answers for those too, beside helpers and instrumentation of its "
+        "own. The table under *Beyond the canonical list* says which each is, and "
+        "which a reference client also names.",
     ] if beyond else []) + [
         "",
         "Every figure here is read from the client it names, on the machine that "
@@ -394,8 +420,8 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         "filled in from memory.",
         "",
         "<details>",
-        "<summary><b>The whole table — every call, every callback, and what the "
-        "gateway connection carries beyond them</b></summary>",
+        "<summary><b>The whole table — every call, every callback, and the calls "
+        "beyond them</b></summary>",
         "",
     ]
     # The page itself, minus its own title and the note about where it comes
@@ -408,9 +434,12 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
     block += body + [
         "</details>",
         "",
+        # Absolute, because the readme is also the package page on the
+        # registries, where a path relative to the repository leads nowhere.
         "The same table stands on its own in "
-        "[docs/capabilities.md](docs/capabilities.md), and what each claim rests "
-        "on is in [docs/evidence.md](docs/evidence.md).",
+        "[docs/capabilities.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md), "
+        "and what each claim rests on is in "
+        "[docs/evidence.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/evidence.md).",
         "",
         README_SHUT,
     ]
@@ -431,19 +460,17 @@ def main() -> int:
     ibapi_backs, _ = surface_of("ibapi.wrapper", "EWrapper")
     async_calls, async_v = surface_of("ib_async", "client.Client", "IB")
     async_backs, _ = surface_of("ib_async", "wrapper.Wrapper", "IB")
+    # The transport alone: the requests ib_async sends as TWS API messages, as
+    # opposed to the helpers its facade builds on them.
+    async_wire, _ = surface_of("ib_async", "client.Client")
 
-    # What the connection carries, which is what puts a row in this table at
-    # all. Constant by construction and kept anyway: the whole point of the
-    # page is the gap between this column and the next one, and a reader
-    # cannot see a gap against a column that is not there.
-    columns = [("Gateway wire", lambda r: SERVED)]
+    columns = []
     read = [
-        "**Gateway wire** — the connection a terminal opens. Every row is "
-        "something it carries: either the documented API names it, or this "
-        "client was written after reading it off that connection.",
-        "**TWS API** — the documented surface, as this repository generates it "
-        "from source. Where this column is empty and the one beside it is not, "
-        "the connection carries something the documented API never named.",
+        "**TWS API** — the canonical list this repository keeps of the TWS API's "
+        "requests and callbacks, in `scripts/gen_api_docs.py`. Beyond that list, a "
+        "call is marked here where the TWS API's own client, or ib_async's "
+        "transport, has a method by that name; a helper of ib_async's facade "
+        "is not.",
     ]
     if ibapi_calls is not None:
         columns.append(("ibapi", lambda r: mark(known(r, ibapi_calls))))
@@ -461,18 +488,34 @@ def main() -> int:
             "enumerated across both the transport and the facade, because it "
             "carries some calls on one and some on the other."
         )
-    columns.insert(1, ("TWS API", lambda r: SERVED if r.get("documented", True) else ABSENT))
+    columns.insert(0, ("TWS API", lambda r: SERVED if r.get("documented", True) else ABSENT))
     columns += [
         ("ibkr-dx Rust", lambda r: ours(r["rust"])),
         ("ibkr-dx Python", lambda r: ours(r["python"])),
     ]
+    read += [
+        "**ibkr-dx Rust** and **ibkr-dx Python** — this client's two surfaces, "
+        "from the coverage matrix `scripts/gen_api_docs.py` generates from the "
+        "source. A mark here says what the call does, not only that it exists.",
+        "**Evidence** — how this client's status for a call was established: named "
+        "by a suite that opens a session, named only by the offline suites, or "
+        "not named by a test.",
+        "**Fires on a gateway** — whether the callback fires at all for a program "
+        "on a gateway. The TWS API declares six that never do.",
+        "**Answered from** — beyond the canonical list, whether a call asks the "
+        "venue or reads what it stated, or answers from this client itself: its "
+        "own state, a measurement it takes, or a helper.",
+    ]
+    call_columns = columns + [("Evidence", lambda r: r.get("evidence", ""))]
 
-    back_columns = [("Gateway wire", lambda r: SERVED)]
+    back_columns = [
+        ("TWS API", lambda r: SERVED),
+        ("Fires on a gateway", lambda r: "yes" if r.get("gateway_sends", True) else "no"),
+    ]
     if ibapi_backs is not None:
         back_columns.append(("ibapi", lambda r: mark(known(r, ibapi_backs))))
     if async_backs is not None:
         back_columns.append(("ib_async", lambda r: mark(known(r, async_backs))))
-    back_columns.insert(1, ("TWS API", lambda r: SERVED))
     back_columns += [
         ("ibkr-dx Rust", lambda r: ours(r["rust"])),
         ("ibkr-dx Python", lambda r: ours(r["python"])),
@@ -488,17 +531,20 @@ def main() -> int:
         "whether anything you already use is missing — which is a question about",
         "the columns, not about the rows.",
         "",
-        "**Every row is something the gateway connection carries.** Most of them",
-        "the documented API names too, and those are the rows a port has to",
-        "match. The last table is the rest: what that connection carries and the",
-        "documented API never named — the terminal reads it, so it is on the",
-        "wire, and a client that speaks the wire can answer it.",
+        "The first two tables are the canonical list of the TWS API's calls and",
+        "callbacks, which are the rows a port has to match. The last is what this",
+        "client answers beyond them.",
+        "",
+        "Presence and behaviour are marked apart. A reference client's mark says a",
+        "method exists, read by importing the package and listing its methods;",
+        "it says nothing about what the method does. This client's mark says what",
+        "the call does, and the evidence column says how that was established.",
         "",
         f"| Mark | Meaning |",
         "| :---: | --- |",
-        f"| {SERVED} | Carried: the call exists and does what it says |",
-        f"| {TAKEN} | Taken and not applied: the call exists and reports why it cannot be served, rather than failing to exist |",
-        f"| {ABSENT} | Absent: no such call |",
+        f"| {SERVED} | Present. For ibkr-dx, also served: a call does what it names; a callback is fired whenever what it reports arrives |",
+        f"| {TAKEN} | Present and not served: a call reports why on the error callback; a callback is declared and not fired here, although a gateway sends it |",
+        f"| {ABSENT} | Absent |",
         "",
         "Each column is read from the client it names, on the machine that",
         "generated this page:",
@@ -511,7 +557,7 @@ def main() -> int:
     ]
 
     out += table(
-        calls, columns, "Calls",
+        calls, call_columns, "Calls",
         "What a program asks the venue for.",
     )
     out += table(
@@ -526,7 +572,7 @@ def main() -> int:
     # marking both surfaces carried invented a Rust column, and calls that
     # exist only in the binding were published as Rust's too.
     beyond: list[str] = []
-    ours_extra, _ = surface_of("ibkr_dx", "EClient")
+    ours_extra, _ = surface_of("ibkr_dx", "EClient", kind=inspect.isroutine)
     rust_extra = surface_from_reference("rust-reference.md")
     if ours_extra is not None:
         # Both tables above, not only the calls. The Rust surface is read off
@@ -567,39 +613,50 @@ def main() -> int:
                         if plain(n) in rust_plain else "-",
                 "python": ("STUB" if plain(n) in stubs else "Y")
                           if plain(n) in {plain(m) for m in ours_extra} else "-",
-                # The documented surface names it after all where a reference
-                # client does: the canonical list this page is built from is
-                # not the whole of what that client publishes.
+                # The documented surface names it after all where the TWS
+                # API's own client, or ib_async's transport, has a method by
+                # that name: the canonical list this page is built from is not
+                # the whole of that surface. A helper ib_async's facade builds
+                # on top of the messages is not a TWS API call.
                 "documented": bool(
                     (ibapi_calls and known({"snake": n, "camel": n, "cpp": n}, ibapi_calls))
-                    or (async_calls and known({"snake": n, "camel": n, "cpp": n}, async_calls))
+                    or (async_wire and known({"snake": n, "camel": n, "cpp": n}, async_wire))
                 ),
+                "answered_from": "this client" if plain(n) in LOCAL else "venue",
             } for n in extra]
+            stale = LOCAL - {plain(n) for n in extra}
+            if stale:
+                print(f"LOCAL names calls this table no longer has: {', '.join(sorted(stale))}")
+                return 1
+            beyond_columns = (
+                [("Answered from", lambda r: r["answered_from"])] + columns
+            )
             out += table(
-                rows, columns, "Beyond the canonical list",
-                "The terminal's own connection carries more than the documented\n"
-                "surface names, and this client speaks that connection — so some of\n"
-                "what it answers has no call in the API at all. These fall into three\n"
-                "kinds, and the table does not try to sort them: things the venue\n"
-                "states that no documented call asks for (what it permits this\n"
-                "account, which algorithms it offers, the order defaults it holds,\n"
-                "what it says about an issuer, which session holds the account); the\n"
-                "same question answered rather than delivered on a callback; and this\n"
-                "client's own instrumentation, which is about the client and not the\n"
-                "venue.\n\n"
-                "A mark against a reference client here means it happens to name the\n"
-                "same thing, not that the documented API does.",
+                rows, beyond_columns, "Beyond the canonical list",
+                "What this client answers that the canonical list does not name.\n"
+                "Three kinds, told apart by the *Answered from* column and by the\n"
+                "reference columns: what the venue states that no documented call\n"
+                "asks for (what it permits this account, which algorithms it offers,\n"
+                "the order defaults it holds, what it says about an issuer, which\n"
+                "session holds the account); a question answered in one call rather\n"
+                "than delivered on a callback; and this client's own state, helpers\n"
+                "and instrumentation, which are about the client and not the venue.\n\n"
+                "A mark against a reference client here means it names the same\n"
+                "thing; a mark under TWS API means the TWS API's own client, or\n"
+                "ib_async's transport, has a method by that name.",
             )
 
     totals = []
     for name, fn in columns:
+        if name in NOT_A_CLIENT:
+            continue
         served = sum(1 for r in calls if fn(r) == SERVED)
         taken = sum(1 for r in calls if fn(r) == TAKEN)
         totals.append(f"| {name} | {served} | {taken} | {len(calls) - served - taken} |")
     out += [
         "## Calls, counted",
         "",
-        "| Client | Carried | Taken, not applied | Absent |",
+        f"| Client | Present {SERVED} | Present, not served {TAKEN} | Absent {ABSENT} |",
         "| --- | ---: | ---: | ---: |",
     ] + totals + [""]
 

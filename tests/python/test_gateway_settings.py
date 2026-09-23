@@ -34,7 +34,7 @@ def test_a_gateway_setting_with_no_counterpart_says_so_rather_than_vanishing():
 
 #: Every setting a gateway carries, less the ones that only move a window
 #: about, and the name this client answers each by. `None` means the answer is
-#: recorded under the gateway's own spelling.
+#: recorded under the gateway's spelling.
 #:
 #: A caller migrating looks a name up and expects an answer, so the names have
 #: to be written down somewhere or the claim is only a claim. Several settings

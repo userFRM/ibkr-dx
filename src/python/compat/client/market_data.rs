@@ -411,9 +411,9 @@ impl EClient {
 
     /// Cancel market depth.
     ///
-    /// `is_smart_depth` is taken and not applied. A book is withdrawn by the
-    /// request that asked for it, and this client remembers which kind that
-    /// was, so the caller restating it changes nothing.
+    /// `is_smart_depth` has no effect: a book is withdrawn by the request that
+    /// asked for it, and this client remembers which kind that was. Stated as
+    /// the book was asked for, it withdraws the same book a gateway would.
     #[pyo3(signature = (req_id, is_smart_depth=false))]
     fn cancel_mkt_depth(&self, py: Python<'_>, req_id: i64, is_smart_depth: bool) -> PyResult<()> {
         let _ = is_smart_depth;
@@ -433,9 +433,12 @@ impl EClient {
 
     /// Request real-time 5-second bars.
     ///
-    /// `bar_size` and `real_time_bars_options` are taken and not applied. The
-    /// venue's real-time bar is five seconds and there is no field asking for
-    /// another, and this protocol's request carries no free-form option list.
+    /// `bar_size` has no effect, as on a gateway: a real-time bar is five
+    /// seconds, and the venue's request carries no bar size. A gateway reads
+    /// the number and does not use it.
+    ///
+    /// `real_time_bars_options` is taken and not applied. This protocol's
+    /// request carries no free-form option list.
     #[pyo3(signature = (req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=Vec::new()))]
     fn req_real_time_bars(
         &self,

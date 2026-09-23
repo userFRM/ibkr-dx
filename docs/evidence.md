@@ -14,22 +14,22 @@ or a recorded server response — not from code inspection.
 | ⛔ Unavailable | Not carried by the protocol; the call returns an error stating the reason |
 | ✅ Documented | A property of the venue rather than a call: established by observation against IBKR production servers, with nothing for this client to implement |
 
-Verification runs against a paper account on IBKR production servers, and the order path has additionally been run once end to end on a funded account during regular hours. Where a market or data set is not entitled to that account, the entitlement response is recorded as the result.
+Verification runs against a paper account on IBKR production servers, and the order path has additionally been run once end to end on a funded account during regular hours. Where the venue refused a request, or acknowledged it and stated nothing, that answer is recorded as the result.
 
 | | |
 | --- | --- |
 | Requests | 82. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 154. 118 are sent; 29 have no field in the protocol to carry them and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
-| Rust and Python | the same request produces the same call on both, compared against live responses |
-| Tests | 3,535 offline, and 184 more that live in the suites run against a broker session |
+| Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
+| Tests | 3,537 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
 | Measure | Count |
 | --- | --- |
-| Canonical calls | 78 |
-| Served, Rust | 78 |
-| Served, Python | 78 |
+| Canonical calls | 80 |
+| Served, Rust | 80 |
+| Served, Python | 80 |
 | Taken and not applied, Rust | 0 |
 | Taken and not applied, Python | 0 |
 | Canonical callbacks | 90 |
@@ -38,9 +38,12 @@ Verification runs against a paper account on IBKR production servers, and the or
 
 Counted from the source by `scripts/gen_api_docs.py` and checked against this
 table by `scripts/check_status_counts.py`, both of which CI runs. A figure
-here that the source stops supporting fails the build rather than standing. The two surfaces carry the same calls and the same callbacks: a
-program written against either finds the same thing, and a call that cannot be
-served says so on both rather than being absent from one.
+here that the source stops supporting fails the build rather than standing. On
+the canonical calls and callbacks the two surfaces agree: a program written
+against either finds the same thing, and a call that cannot be served says so
+on both rather than being absent from one. Beyond that list each surface
+carries calls of its own, some spelled differently and a few on one side only;
+the capability table has a column for each.
 
 ### Calls not served
 
@@ -50,21 +53,16 @@ matrix, which CI checks against the source.
 
 None, and none taken and not applied either.
 
-`set_server_log_level` was the last of those. The protocol carries no message
-asking the venue to change how loudly it talks, and the counterpart sends none
-either: it keeps the level a caller states and logs by it. A drop-in
-replacement is the thing serving the caller, so the level a caller states is
-this client's own — it is applied to the logger this client installed, while
-the session runs. Where a program installed its own logger, that one is not
-this client's to move and the call says so rather than reporting a level it did
-not change.
+`set_server_log_level` is served without reaching the venue, whose protocol has
+no message for it. A gateway applies the level to its own log; this client,
+which serves the caller in its place, applies it to the logger it installed.
+Where a program installed its own logger, that one is the program's, and the
+call says so rather than reporting a level it did not set.
 
-The two that stood here before it — the advisor configuration request and its
-replacement — are not among them, and neither is their answer: the request goes
-to the venue like every other call, and the venue's reply is read and handed
-over on `receive_fa`, `replace_fa_end` and the error callback. What is
-unverified is the content of that reply, which needs an advisor account to see,
-and the status row below says so.
+The advisor configuration request and its replacement go to the venue like
+every other call, and the venue's reply is read and handed over on
+`receive_fa`, `replace_fa_end` and the error callback. The content of that
+reply needs an advisor account to see, and the status row below says so.
 
 ## Test inventory
 
@@ -72,7 +70,7 @@ and the status row below says so.
 | --- | ---: | :---: |
 | Rust unit and integration | 2,691 | No |
 | Rust, live | 9 | Yes |
-| Python | 844 | No |
+| Python | 846 | No |
 | Python, live | 124 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -81,10 +79,11 @@ in each suite and fails the gate when this table disagrees with it, so a figure
 here cannot go quietly out of date as the suites grow.
 
 
-42 of the 44 capabilities are verified against IBKR production servers. Of the
-other two, advisor configuration reaches the server and needs an advisor
-account to see what it answers, and session lifetime is a property of the venue
-rather than a call this client makes.
+42 of the 45 capabilities are verified against IBKR production servers. Of the
+other three, advisor configuration reaches the server and needs an advisor
+account to see what it answers, two order types are checked by the offline
+suites only, and session lifetime is a property of the venue rather than a call
+this client makes.
 
 Every figure above is measured on each commit, and the build fails if one moves.
 
@@ -110,23 +109,23 @@ Every figure above is measured on each commit, and the build fails if one moves.
 | Tick-by-tick trades | ✅ Supported | 67,785 trades over a 20-minute session; 327 in the first twenty seconds of one subscription. A stream is asked for by the venue's id for the contract, which is resolved first when the caller states a description, and by the name the caller used: `Last` and `AllLast` are two queries the venue answers apart, and which trades are on which is the venue's to say — measured on a liquid future, 104 and 139 records over two windows of the same length |
 | Real-time bars | ✅ Supported | Five-second bars streaming during regular hours, each carrying open, high, low, close and volume, alongside a book on the same session |
 | Trading halt status | ✅ Supported | Tick 437 decoded from status mask and status index; `src/bin/capture_status.rs` |
-| Tick attributes | ✅ Supported | Per-trade `unreported` and `pastLimit`, read from the marks the venue writes beside a print. They were read from the size for a long time, and varied because sizes vary; a frame the venue sent is now kept in the tests, and on it no mark is set and the sizes are 1, 2, 1, 4, 1 |
-| Venue map behind the exchange mask | ✅ Supported | Asked for beside the quote and answered at regular trading hours with 18 venues, each with the letter the mask's bits refer to. Outside those hours the server states none, and a venue's letter is empty until it does |
+| Tick attributes | ✅ Supported | Per-trade `unreported` and `pastLimit`, read from the marks the venue writes beside a print, not from the size. A frame the venue sent is kept in the tests: on it no mark is set and the sizes are 1, 2, 1, 4, 1 |
+| Venue map behind the exchange mask | ✅ Supported | Asked for beside the quote and answered at regular trading hours with 18 venues, each with the letter the mask's bits refer to. Outside those hours the venue states none, to a gateway as to this client, and a venue's letter is empty until it does |
 
-**Depth entitlements.** On this account IEX answers — its Level II is fee-waived
-— and returns 227 levels on one SPY subscription; NASDAQ and CME refuse by name,
-and the refusal reaches the caller. A book asked for on no particular venue is
-acknowledged and produces nothing, which is what an account with no aggregate
-entitlement is answered with.
+**Depth.** On this account IEX answered, with 227 levels on one SPY
+subscription; NASDAQ and CME refused by name, and the refusal reached the
+caller. A book asked for on no particular venue was acknowledged and produced
+nothing.
 
 ## Orders
 
 | Capability | Status | Verification |
 | --- | :---: | --- |
-| 24 order types | ✅ Supported | `whatIf` preview accepted by the server for each; `tests/ib_paper_compat`. Every type this client places is previewed as itself |
-| Order fields | ✅ Supported | An order has 154 fields. 118 are sent. 29 have no field in this protocol to carry them, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what the counterpart this replaces does with it. A check on every commit fails if a field starts being dropped |
+| 24 order types | ✅ Supported | The check every placement passes accepts 24, each sent as itself: MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MIT, LIT, MTL, MKT PRT, STP PRT, REL, PASSV REL, PEG MKT, PEG MID, PEG BEST, PEG BENCH, MIDPX, SNAP MKT, SNAP MID, SNAP PRI and BOX TOP. Every one but PEG BEST and BOX TOP is placed against the venue by `tests/ib_paper_compat` or the Python live suites |
+| PEG BEST and BOX TOP | 🔬 Implemented | Built and checked by the order builder's offline tests, `src/engine/hot_loop/order_builder/tests.rs`; no suite here places them against the venue |
+| Order fields | ✅ Supported | An order has 154 fields. 118 are sent. 29 have no field in this protocol to carry them, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
-| Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) in [ib_async-dx](https://github.com/userFRM/ib_async-dx), `tests/ib_paper_compat` Phase 9 / 9b |
+| Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn) in [ib_async-dx](https://github.com/userFRM/ib_async-dx); `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |
 | Conditions | ✅ Supported | All 6 types (price, volume, percent change, margin, execution, time) accepted and held by the server; `tests/ib_paper_compat` Phase 60 |
 | Order acceptance | ✅ Supported | Every change to an order answers with the order as this client sent it and the status it is now in, which is the pair the protocol answers a change with. 45 orders placed, modified and withdrawn over a 15-cycle session, every one reaching Cancelled, with no error |
@@ -147,13 +146,13 @@ entitlement is answered with.
 
 | Capability | Status | Verification |
 | --- | :---: | --- |
-| Contract details | ✅ Supported | 11 of 12 resolved across 9 countries; the 12th matched 2 contracts and returned an ambiguity error rather than a selection; `src/bin/capture_global.rs` |
+| Contract details | ✅ Supported | 12 lookups across 9 countries: 11 resolved to one contract, and the 12th matched 2 and was refused as ambiguous rather than resolved to one, as ib_async's `qualifyContracts` declines to pick one; `src/bin/capture_global.rs` |
 | Option chains, symbol search | ✅ Supported | `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx) |
 | Scanners, fundamentals | ✅ Supported | 697 KB scanner parameter set, fundamental report; `tests/python/test_historical_and_scanner.py` |
 | News | ✅ Supported | 117 providers parsed. Headline retrieval requires a news subscription; this account holds none, and every provider returns an empty result set |
 | Exchange directory | ✅ Supported | 203 exchanges, in the two sections the venue states them in: shares and derivatives. What each carries and which group each aggregates into are not stated by the venue and are not stated here |
 | Corporate events calendar | ✅ Supported | 43 event types with their field schemas, 179 KB, over the security-definition connection; an event query is answered with a well-formed result and can be withdrawn. Event content needs a subscription — see the note below. `src/bin/capture_calendar.rs` |
-| Implied volatility, option price | ✅ Supported | The venue computes the model and publishes it per option on a subscription of its own, and that is what a caller asking for volatility or greeks is given. Solved here is only a hypothetical the caller supplies — a price, or a volatility — because the protocol carries no request that carries one; solved against the venue's own model it reproduces the venue's price to the cent on 2 contracts. `src/bin/capture_option_model.rs` |
+| Implied volatility, option price | ✅ Supported | The venue computes the model and publishes it per option on a subscription of its own, and that is what a caller asking for volatility or greeks is given. A hypothetical the caller supplies — a price, or a volatility — is solved against that model where the call is made, as a gateway solves it, and is answered with nothing where no model has been published; solved here it reproduces the venue's price to the cent on 2 contracts. `src/bin/capture_option_model.rs` |
 
 **Corporate events data.** Event content requires a Wall Street Horizon
 subscription; this account holds none, so every query — by contract and by
@@ -178,10 +177,11 @@ on malformed input.** Every parser is given each prefix of a well-formed frame,
 that frame with a byte replaced at each position, and runs that are not frames
 at all (`tests/malformed_input.rs`).
 
-## Protocol constraints
+## Constraints
 
-These are properties of the IBKR protocol, not of this implementation. The
-official gateway behaves the same way.
+What a request meets here. Each says whether it is the protocol's or this
+client's own allocation; what a gateway answers the same way is on
+[Venue behaviour](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html).
 
 - **29 order fields are not transmitted.** For each, the protocol either
   carries no tag at all, or carries one the server rejects by name
@@ -197,18 +197,17 @@ official gateway behaves the same way.
   from the caller cannot be told apart from one allocated here. This client
   allocates the same way, from one upward, and keys its subscriptions on it.
 - **A request id states four bytes, and the top quarter of that range is this
-  client's own.** A caller numbers requests below `0xC000_0000`; at and above
-  it are the ids this client allocates for the questions it asks on a caller's
-  behalf, and above `0xF000_0000` the ones the engine asks for itself. An id
-  outside what a caller may use is refused by number rather than answered,
-  because answered it would be indistinguishable from one of this client's own
-  and its reply withheld. An order may be numbered wider — the venue takes a
-  wider one — but an order id reused as a request id has to satisfy this, and
-  the interface this client mirrors encourages one counter for both.
+  client's own allocation.** A caller numbers requests below `0xC000_0000`; at
+  and above it are the ids this client allocates for the questions it asks on a
+  caller's behalf, and above `0xF000_0000` the ones the engine asks for itself.
+  A negative id is refused, and so is one inside the range, by number rather
+  than answered, because answered it would be indistinguishable from one of
+  this client's own and its reply withheld. An order may be numbered wider —
+  the venue takes a wider one — but an order id reused as a request id has to
+  satisfy this, and the interface this client mirrors encourages one counter
+  for both.
 - **`keepUpToDate` queries are closed on first response.** Continuation is
   provided by folding the 5-second bar stream into the requested bar size.
-- **Historical execution reports require a window within 7 days.** A request
-  without one is rejected in full.
 - **The option-exercise interest rate series is not served.**
   `OptExInterestRate` is accepted as a tick query against an option contract
   and rejected by name against the underlying, and every window tested returns
@@ -221,22 +220,17 @@ official gateway behaves the same way.
   while on the same contract in the same session top of book streams
   continuously and a historical tick request is answered. The server holds the
   data and does not stream it.
-- **The fourth integer on tick 437 has no stated meaning.** The tick carries
-  four: a status mask, a number, an index naming one status, and one more. The
-  protocol establishes no unit for the last two, so any reading of them would be
-  invented rather than found; both are carried on the tick as sent, so a caller
-  who knows what they mean has them.
 
 ## Sessions
 
-An account takes one logon at a time. The venue states this at connect, names
-the session already holding the account, and states when that session logged
-in.
+A login holds one session at a time, and each program opens its own. The venue
+states this at connect, names the session already holding the login, and
+states when that session logged in.
 
 | Behaviour | Status | Verification |
 | --- | :---: | --- |
-| The session holding the account is reported to the caller | ✅ Supported | `competing_session()` returns the address, the logon time, and whether this session may trade. A read-only flag from the venue is carried as stated |
-| A logon later than this one is another client, and keeps the account | ✅ Supported | A reconnect that finds one reports it and stops; retrying cannot change it. Both times are read from the venue's clock, so two machines' clocks cannot decide it |
+| The session holding the login is reported to the caller | ✅ Supported | `competing_session()` returns the address, the logon time, and whether this session may trade. A read-only flag from the venue is carried as stated |
+| A logon later than this one is another session, and keeps the login | ✅ Supported | A reconnect that finds one reports it and stops; retrying cannot change it. Both times are read from the venue's clock, so two machines' clocks cannot decide it |
 | A logon at or before this one is this session's own, still being reaped | ✅ Supported | The reconnect completes over it, which is what an ordinary recovery is |
 | The heartbeat is the interval the venue answered with | ✅ Supported | The interval a logon proposes is not what it is held to; the answer is read from the logon response and applied on every reconnect |
 | A reconnect follows the venue | ✅ Supported | It uses the hosts this session reached the venue through, on the port the venue named in its redirect, and stops walking hosts when one answers and refuses |
@@ -253,20 +247,14 @@ not hold. `scripts/endurance.py --minutes 175`.
 
 That check takes every subscription out and puts it back each cycle, which no
 other check here does, and it is the only one that sees what a long-running
-program sees. Run it before believing a change to the quote path — at any hour:
-a book is asked for on a currency pair and trades on a crypto pair, both of
-which answer when New York is shut, so the two streams it holds to arriving are
-answerable outside the session as well as inside it. Which of them answer is a
-question about what the account subscribes to rather than about this client: a
-book nobody subscribes to is answered with nothing at all on some venues and
-refused by name on others, and both read from here as a stream that did not
-arrive.
-
-An order's round trip can be checked at any hour: `scripts/order_round_trip.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx)
-places a limit far under the market on a contract that trades nearly around the
-clock, changes its price, withdraws it, and reads back what the venue did with
-each step. The paper suite's own order phases name US shares and wait for the
-New York session.
+program sees. Run it before believing a change to the quote path, while US
+shares trade: it requires a book and a trade stream to arrive at least once.
+Outside those hours the currency pair's book on `IDEALPRO` has been seen to
+arrive, while the crypto pair's trade stream is acknowledged and carries
+nothing (see the constraint above), so the trade check needs US shares
+trading. On the account measured, a book was refused by name on
+some venues and acknowledged with nothing on others; both read from here as a
+stream that did not arrive.
 
 ## Architectural differences from a gateway process
 
@@ -291,12 +279,14 @@ One, and it is this client's own.
 
 ## Refusals
 
-A request this client will not send is reported through `error(reqId, code,
-message)` and the call returns rather than raising. The code is the one the
-TWS API defines for that class: 321 for a request that fails validation, 200
-for a contract description that matches nothing, 504 for a call with no
-session, and 327 for binding orders entered elsewhere, which is refused for
-every client but the one they bind to. Construction and
+A request this client will not send is reported on the error callback, and the
+call returns rather than raising. In Python that is
+`error(reqId, errorTime, errorCode, errorString, advancedOrderRejectJson)`; in
+Rust, `Wrapper::error(req_id, error_code, error_string, advanced_order_reject_json)`.
+The code is the one the TWS API defines for that class: 321 for a request that
+fails validation, 200 for a contract description that matches nothing, 504 for
+a call with no session, and 327 for binding orders entered elsewhere from any
+client but client 0, as a gateway refuses a client other than 0. Construction and
 configuration raise, as does a synchronous call with a return value.
 
 ## Calls
@@ -313,12 +303,14 @@ configuration raise, as does a synchronous call with a return value.
 | **News** | `req_news_providers`, `req_news_article`, `req_historical_news`, `req_news_bulletins`, `cancel_news_bulletins` |
 | **Fundamental** | `req_fundamental_data`, `cancel_fundamental_data` |
 | **Options** | `calculate_implied_volatility`, `cancel_calculate_implied_volatility`, `calculate_option_price`, `cancel_calculate_option_price`, `exercise_options` |
-| **Other** | `req_current_time`, `req_user_info`, `req_family_codes`, `req_soft_dollar_tiers`, `set_server_log_level`, `req_wsh_meta_data`, `req_wsh_event_data`, `query_display_groups`, `subscribe_to_group_events` |
+| **Other** | `req_current_time`, `req_user_info`, `req_family_codes`, `req_soft_dollar_tiers`, `set_server_log_level`, `req_wsh_meta_data`, `cancel_wsh_meta_data`, `req_wsh_event_data`, `cancel_wsh_event_data`, `query_display_groups`, `subscribe_to_group_events` |
 
-**Order types.** MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MTL,
-MIT, LIT, MKT PRT, STP PRT, REL, PEG MKT, PEG MID, MIDPRICE, SNAP MKT,
-SNAP MID, SNAP PRI, BOX TOP. Algos: VWAP, TWAP, Arrival Price, Close Price,
-Dark Ice, PctVol. Conditions: price, volume, percent change, margin, execution
+**Order types.** The 24 the check every placement passes accepts: MKT, LMT,
+STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MIT, LIT, MTL, MKT PRT, STP PRT, REL,
+PASSV REL, PEG MKT, PEG MID, PEG BEST, PEG BENCH, MIDPX, SNAP MKT, SNAP MID,
+SNAP PRI and BOX TOP. PEG MIDPT, MIDPRICE, SNAP MIDPT, SNAP PRIM and PEGBENCH
+are accepted as other spellings of five of them. Algos: VWAP, TWAP, Arrival
+Price, Close Price, Dark Ice, PctVol. Conditions: price, volume, percent change, margin, execution
 and time. Brackets, one-cancels-all, and combinations with a price per leg.
 
 **Settings.** The gateway's configuration file is replaced by settings on the

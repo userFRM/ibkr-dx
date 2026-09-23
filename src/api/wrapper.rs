@@ -290,29 +290,27 @@ pub trait Wrapper {
 
     /// The contract the venue paired with a delta-neutral order.
     ///
-    /// The venue states no such pairing on this connection — nothing it sends
-    /// carries one, under any name — so nothing here fires this. A delta-neutral
-    /// order is sent and answered like any other; what the reference client
-    /// reports back on this callback has no message behind it here.
+    /// A gateway sends it. No message this client receives carries the pairing
+    /// it reports, under any name, so nothing here fires it. A delta-neutral
+    /// order is sent and answered like any other.
     fn delta_neutral_validation(
         &mut self, req_id: i64, con_id: i64, delta: f64, price: f64,
     ) {
     }
 
-    // ── Defined by the reference client, and never fired here ──
+    // ── Declared by the TWS API, and not fired here ──
     //
-    // Each exists so a program written against that client compiles and runs
+    // Each exists so a program written against that API compiles and runs
     // against this one, and each says why it stays silent. Left undeclared, a
     // port that implements one does not build; declared and undocumented, it
     // waits for a call that is never coming.
 
     /// The contract a market-data request should be asked for under instead.
     ///
-    /// The reference client answers a request on a contract the venue reroutes
-    /// — a contract for difference standing for a share — with the contract
-    /// and venue to ask again under. This connection does not reroute: asked to,
-    /// it says so and serves nothing, so a request that cannot be served is
-    /// refused in the venue's own words instead.
+    /// A gateway sends it when a request is to be asked for under another
+    /// contract and venue — a contract for difference standing for a share.
+    /// Nothing this connection receives has been seen to state one, so nothing
+    /// here fires it.
     fn reroute_mkt_data_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
         let _ = (req_id, con_id, exchange);
     }
@@ -322,14 +320,10 @@ pub trait Wrapper {
         let _ = (req_id, con_id, exchange);
     }
 
-    /// An exchange-for-physical quote, which the reference client reports on a
-    /// callback of its own rather than as a price.
+    /// An exchange-for-physical quote.
     ///
-    /// The venue states none of it on this connection. The numbers such a quote
-    /// would be stated under are carried here, in the list this client answers
-    /// by name; what never arrives under them is the quote. Read across a
-    /// share, a fund and two futures, the venue stated fifteen kinds of tick
-    /// and not one of them was one of these.
+    /// Declared by the TWS API and never fired on a gateway, so it fires here
+    /// as it does there: never.
     #[allow(clippy::too_many_arguments)]
     fn tick_efp(
         &mut self, req_id: i64, tick_type: i32, basis_points: f64,
@@ -341,11 +335,10 @@ pub trait Wrapper {
                  dividends_to_last_trade_date);
     }
 
-    /// A step in the handshake a third-party program makes with a terminal
-    /// before that terminal will carry its requests.
+    /// A step in the TWS API's verification handshake.
     ///
-    /// There is no terminal between this client and the venue, so there is no
-    /// handshake to make and nothing here fires these four.
+    /// Declared by the TWS API and never fired on a gateway, so these four fire
+    /// here as they do there: never.
     fn verify_message_api(&mut self, api_data: &str) { let _ = api_data; }
     /// Whether that handshake was accepted.
     fn verify_completed(&mut self, is_successful: bool, error_text: &str) {
@@ -360,11 +353,12 @@ pub trait Wrapper {
         let _ = (is_successful, error_text);
     }
 
-    /// What the reference client reports when its own socket layer fails on
-    /// Windows.
+    /// Declared by the TWS API as `winError`.
     ///
-    /// This client has no such layer: trouble on a connection reaches a caller
-    /// on the error callback, with the reason the transport gave.
+    /// No message on the wire carries it, and the TWS API's Python client
+    /// declares it and never raises it, so it fires here as it does there:
+    /// never. Here, trouble on a connection reaches a caller on the error
+    /// callback, with the reason the transport gave.
     fn win_error(&mut self, text: &str, last_error: i32) { let _ = (text, last_error); }
 
     // ── Histogram ──

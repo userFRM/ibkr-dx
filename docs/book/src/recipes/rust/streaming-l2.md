@@ -28,15 +28,16 @@ why the example keeps `market_maker` alongside price and size.
 The example collects for the whole window and prints each book once at the end,
 not on every update. `DURATION_SECS` sets that window; the default is 15.
 
+After a reconnect the venue restates the book from the top. The client reports
+that on `error` as 317, the TWS API's notice that a book was reset, before the
+first new level arrives — as a gateway does. Empty the book on it, or the
+levels that follow land on top of the old ones.
+
 ## Limits
 
 A depth subscription the venue will not serve is refused, and the refusal
 arrives on the `error` callback. A book that stays empty means the subscription
 never started, not that the market is empty.
-
-After a reconnect the venue restarts the book from the top. The client reports
-that as `error` 317 before the first new level arrives; empty the book on it,
-or the levels that follow land on top of the old ones.
 
 The example asserts at the end that both books received updates and that neither
 is empty, so it panics rather than reporting success on a feed that never

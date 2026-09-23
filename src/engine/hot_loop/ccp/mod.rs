@@ -345,9 +345,8 @@ fn known_unread(subtype: &str) -> Option<&'static str> {
     match subtype {
         "93" => Some(
             "it answers the account and position subscription this client sends, and carries \
-             the account, that request's own id and two flags — nothing the subscription does \
-             not deliver itself. Named in the vendor's own inventory as a dimension response, \
-             which is what it would carry on an account that had dimensions",
+             the account, that request's own id and two flags: on this account, nothing the \
+             subscription does not deliver itself. It is named as a dimension response",
         ),
         _ => None,
     }
@@ -1295,9 +1294,8 @@ impl CcpState {
                         // type and fills parts of an order the caller left
                         // unstated from them, so what sets exist is a fact
                         // What a contract pays out, answered under the id
-                        // the query went out with. The reference terminal's
-                        // own option model reads its dividend schedule off
-                        // this, and nothing here had ever asked for one.
+                        // the query went out with. An option model needs the
+                        // dividend schedule this states.
                         "20" => self.handle_dividends_answer(&parsed, shared),
                         // about every order placed from here.
                         //
@@ -1791,8 +1789,8 @@ impl CcpState {
             }
             // A message type nothing here reads. Named once, like an unread
             // user message: the out-of-band types carry position and account
-            // data, and the vendor's own client treats an unrecognised one as
-            // an error rather than as nothing.
+            // data, and an unrecognised one is worth a line rather than
+            // nothing.
             other => {
                 if self.unread_types.insert(other.to_string()) {
                     shared.market.note_unread_wire("trading", format!("type {other}"));
@@ -2471,8 +2469,8 @@ impl CcpState {
     ///
     /// A session dropped without this is one the venue has to time out, and
     /// this account permits only one at a time: the next connection then races
-    /// a session the venue still believes is live. The vendor's own client
-    /// sends it, and states why it is going.
+    /// a session the venue still believes is live. A gateway sends one too,
+    /// stating why it is going.
     pub(crate) fn send_logout(
         &mut self,
         ccp_conn: &mut Option<Connection>,

@@ -66,9 +66,9 @@ arrives under the number the reference client publishes it under:
 | `619` | the slow mark, on `tick_price` 79 |
 | `787` | the odd lot: both prices on `tick_price` 105 and 106, their sizes on `tick_size` 107 and 108, where each is quoted on `tick_string` 109 and 110 |
 
-Numbers outside that set exist, and the protocol will not take them: the series
-they name are the terminal's own, and stating one is refused rather than served.
-An entry that is not a number is reported rather than sent.
+Any other number is asked for the same way, as a series of its own. What the
+venue states on series the TWS API has no tick for is read through the calls
+under [Beyond the documented API](../../reference/beyond-the-api.md).
 
 One subscription per contract. To change the mode on a contract, cancel first.
 

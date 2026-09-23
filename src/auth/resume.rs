@@ -1,15 +1,10 @@
-//! Carrying a session across a restart.
+//! Offering a session again after a restart.
 //!
 //! A login is expensive and, on an account with a second factor, needs a human.
-//! A process that must be restarted overnight cannot ask for one, which is why
-//! the terminal keeps its session on disk and picks it up again — the
-//! "autorestart" file, and the reason a gateway without one dies at the nightly
-//! maintenance window and does not come back.
-//!
-//! This is the same idea in the same shape: the session written encrypted,
-//! readable only by its owner, and offered on the next connect. It is an
-//! optimisation, never a requirement — a session that is missing, unreadable,
-//! stale or refused just means logging in again.
+//! A process restarted overnight cannot ask for one. So the session can be
+//! written encrypted, readable only by its owner, and offered on the next
+//! connect. It is an optimisation, never a requirement — a session that is
+//! missing, unreadable, stale or refused just means logging in again.
 
 use std::fs;
 use std::io;

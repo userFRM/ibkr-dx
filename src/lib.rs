@@ -8,7 +8,7 @@
 //! # Where to start
 //!
 //! [`api`] is the surface a program touches, and the only part covered by the
-//! compatibility promise. It carries the reference client's own shape:
+//! compatibility promise. It carries the TWS API's shape:
 //!
 //! - [`EClient`] for requests and [`Wrapper`] for what arrives
 //!
@@ -25,8 +25,8 @@
 //! ```
 //!
 //! In Python, the same surface is `ibkr_dx.EClient` and `ibkr_dx.EWrapper`.
-//! For the `ib_async` interface, [ib_async-dx](https://github.com/userFRM/ib_async-dx)
-//! is the drop-in successor for `ib_async`.
+//! For `ib_async`, use [ib_async-dx](https://github.com/userFRM/ib_async-dx),
+//! which runs it on this engine.
 //!
 //! # Everything else
 //!

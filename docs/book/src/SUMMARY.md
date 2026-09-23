@@ -36,6 +36,7 @@
 
 # Reference
 
+- [Venue behaviour](./reference/venue-behaviour.md)
 - [Limits](./reference/limits.md)
 - [Endpoint coverage](./reference/coverage.md)
 - [Wire coverage](./reference/wire-coverage.md)

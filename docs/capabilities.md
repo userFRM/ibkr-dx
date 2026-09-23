@@ -7,25 +7,31 @@ put where a gateway was, so the question is not what it can do but
 whether anything you already use is missing — which is a question about
 the columns, not about the rows.
 
-**Every row is something the gateway connection carries.** Most of them
-the documented API names too, and those are the rows a port has to
-match. The last table is the rest: what that connection carries and the
-documented API never named — the terminal reads it, so it is on the
-wire, and a client that speaks the wire can answer it.
+The first two tables are the canonical list of the TWS API's calls and
+callbacks, which are the rows a port has to match. The last is what this
+client answers beyond them.
+
+Presence and behaviour are marked apart. A reference client's mark says a
+method exists, read by importing the package and listing its methods;
+it says nothing about what the method does. This client's mark says what
+the call does, and the evidence column says how that was established.
 
 | Mark | Meaning |
 | :---: | --- |
-| ● | Carried: the call exists and does what it says |
-| ◐ | Taken and not applied: the call exists and reports why it cannot be served, rather than failing to exist |
-| · | Absent: no such call |
+| ● | Present. For ibkr-dx, also served: a call does what it names; a callback is fired whenever what it reports arrives |
+| ◐ | Present and not served: a call reports why on the error callback; a callback is declared and not fired here, although a gateway sends it |
+| · | Absent |
 
 Each column is read from the client it names, on the machine that
 generated this page:
 
-- **Gateway wire** — the connection a terminal opens. Every row is something it carries: either the documented API names it, or this client was written after reading it off that connection.
-- **TWS API** — the documented surface, as this repository generates it from source. Where this column is empty and the one beside it is not, the connection carries something the documented API never named.
+- **TWS API** — the canonical list this repository keeps of the TWS API's requests and callbacks, in `scripts/gen_api_docs.py`. Beyond that list, a call is marked here where the TWS API's own client, or ib_async's transport, has a method by that name; a helper of ib_async's facade is not.
 - **ibapi** — IBKR's own Python client, version `9.81.1-1`, imported and enumerated. This is the copy published to PyPI; the version IBKR distributes directly is numbered 10.x and names calls this one predates, so a gap in this column is a gap in the copy that was read and not necessarily in the client you have.
 - **ib_async** — version `2.1.0`, imported and enumerated across both the transport and the facade, because it carries some calls on one and some on the other.
+- **ibkr-dx Rust** and **ibkr-dx Python** — this client's two surfaces, from the coverage matrix `scripts/gen_api_docs.py` generates from the source. A mark here says what the call does, not only that it exists.
+- **Evidence** — how this client's status for a call was established: named by a suite that opens a session, named only by the offline suites, or not named by a test.
+- **Fires on a gateway** — whether the callback fires at all for a program on a gateway. The TWS API declares six that never do.
+- **Answered from** — beyond the canonical list, whether a call asks the venue or reads what it stated, or answers from this client itself: its own state, a measurement it takes, or a helper.
 
 A client that is not installed is left out of the table rather than
 filled in from memory. A mark here is a thing that was read.
@@ -34,292 +40,293 @@ filled in from memory. A mark here is a thing that was read.
 
 What a program asks the venue for.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
+| Category | Call | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python | Evidence |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Connection | `connect` | ● | ● | ● | ● | ● | ● |
-|  | `disconnect` | ● | ● | ● | ● | ● | ● |
-|  | `is_connected` | ● | ● | ● | ● | ● | ● |
-|  | `set_server_log_level` | ● | ● | ● | ● | ● | ● |
-|  | `req_current_time` | ● | ● | ● | ● | ● | ● |
-|  | `req_current_time_in_millis` | ● | ● | · | · | ● | ● |
-| Market Data | `req_mkt_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_mkt_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_market_data_type` | ● | ● | ● | ● | ● | ● |
-|  | `req_tick_by_tick_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_tick_by_tick_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_mkt_depth` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_mkt_depth` | ● | ● | ● | ● | ● | ● |
-|  | `req_mkt_depth_exchanges` | ● | ● | ● | ● | ● | ● |
-|  | `req_smart_components` | ● | ● | ● | ● | ● | ● |
-|  | `req_real_time_bars` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_real_time_bars` | ● | ● | ● | ● | ● | ● |
-| Historical Data | `req_historical_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_historical_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_head_time_stamp` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_head_time_stamp` | ● | ● | ● | ● | ● | ● |
-|  | `req_historical_ticks` | ● | ● | ● | ● | ● | ● |
-|  | `req_histogram_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_histogram_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_historical_schedule` | ● | ● | · | ● | ● | ● |
-| Orders | `place_order` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_order` | ● | ● | ● | ● | ● | ● |
-|  | `req_open_orders` | ● | ● | ● | ● | ● | ● |
-|  | `req_all_open_orders` | ● | ● | ● | ● | ● | ● |
-|  | `req_auto_open_orders` | ● | ● | ● | ● | ● | ● |
-|  | `req_ids` | ● | ● | ● | ● | ● | ● |
-|  | `req_global_cancel` | ● | ● | ● | ● | ● | ● |
-|  | `req_completed_orders` | ● | ● | ● | ● | ● | ● |
-| Executions | `req_executions` | ● | ● | ● | ● | ● | ● |
-| Account | `req_account_updates` | ● | ● | ● | ● | ● | ● |
-|  | `req_account_summary` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_account_summary` | ● | ● | ● | ● | ● | ● |
-|  | `req_positions` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_positions` | ● | ● | ● | ● | ● | ● |
-|  | `req_pnl` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_pnl` | ● | ● | ● | ● | ● | ● |
-|  | `req_pnl_single` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_pnl_single` | ● | ● | ● | ● | ● | ● |
-|  | `req_managed_accts` | ● | ● | ● | ● | ● | ● |
-|  | `req_account_updates_multi` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_account_updates_multi` | ● | ● | ● | ● | ● | ● |
-|  | `req_positions_multi` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_positions_multi` | ● | ● | ● | ● | ● | ● |
-| Contract | `req_contract_details` | ● | ● | ● | ● | ● | ● |
-|  | `req_matching_symbols` | ● | ● | ● | ● | ● | ● |
-|  | `req_market_rule` | ● | ● | ● | ● | ● | ● |
-| Scanner | `req_scanner_parameters` | ● | ● | ● | ● | ● | ● |
-|  | `req_scanner_subscription` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_scanner_subscription` | ● | ● | ● | ● | ● | ● |
-| News | `req_news_providers` | ● | ● | ● | ● | ● | ● |
-|  | `req_news_article` | ● | ● | ● | ● | ● | ● |
-|  | `req_historical_news` | ● | ● | ● | ● | ● | ● |
-|  | `req_news_bulletins` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_news_bulletins` | ● | ● | ● | ● | ● | ● |
-| Fundamental | `req_fundamental_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_fundamental_data` | ● | ● | ● | ● | ● | ● |
-| Options | `calculate_implied_volatility` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_calculate_implied_volatility` | ● | ● | ● | ● | ● | ● |
-|  | `calculate_option_price` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_calculate_option_price` | ● | ● | ● | ● | ● | ● |
-|  | `exercise_options` | ● | ● | ● | ● | ● | ● |
-|  | `req_sec_def_opt_params` | ● | ● | ● | ● | ● | ● |
-| Reference | `req_soft_dollar_tiers` | ● | ● | ● | ● | ● | ● |
-|  | `req_family_codes` | ● | ● | ● | ● | ● | ● |
-|  | `req_user_info` | ● | ● | · | ● | ● | ● |
-| Financial Advisor | `request_fa` | ● | ● | ● | ● | ● | ● |
-|  | `replace_fa` | ● | ● | ● | ● | ● | ● |
-| Display Groups | `query_display_groups` | ● | ● | ● | ● | ● | ● |
-|  | `subscribe_to_group_events` | ● | ● | ● | ● | ● | ● |
-|  | `unsubscribe_from_group_events` | ● | ● | ● | ● | ● | ● |
-|  | `update_display_group` | ● | ● | ● | ● | ● | ● |
-| WSH | `req_wsh_meta_data` | ● | ● | · | ● | ● | ● |
-|  | `req_wsh_event_data` | ● | ● | · | ● | ● | ● |
+| Connection | `connect` | ● | ● | ● | ● | ● | Live session |
+|  | `disconnect` | ● | ● | ● | ● | ● | Live session |
+|  | `is_connected` | ● | ● | ● | ● | ● | Live session |
+|  | `set_server_log_level` | ● | ● | ● | ● | ● | Live session |
+|  | `req_current_time` | ● | ● | ● | ● | ● | Live session |
+|  | `req_current_time_in_millis` | ● | · | · | ● | ● | Live session |
+| Market Data | `req_mkt_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_mkt_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_market_data_type` | ● | ● | ● | ● | ● | Live session |
+|  | `req_tick_by_tick_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_tick_by_tick_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_mkt_depth` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_mkt_depth` | ● | ● | ● | ● | ● | Live session |
+|  | `req_mkt_depth_exchanges` | ● | ● | ● | ● | ● | Live session |
+|  | `req_smart_components` | ● | ● | ● | ● | ● | Live session |
+|  | `req_real_time_bars` | ● | ● | ● | ● | ● | Offline suites |
+|  | `cancel_real_time_bars` | ● | ● | ● | ● | ● | Live session |
+| Historical Data | `req_historical_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_historical_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_head_time_stamp` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_head_time_stamp` | ● | ● | ● | ● | ● | Live session |
+|  | `req_historical_ticks` | ● | ● | ● | ● | ● | Live session |
+|  | `req_histogram_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_histogram_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_historical_schedule` | ● | · | ● | ● | ● | Live session |
+| Orders | `place_order` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_order` | ● | ● | ● | ● | ● | Live session |
+|  | `req_open_orders` | ● | ● | ● | ● | ● | Live session |
+|  | `req_all_open_orders` | ● | ● | ● | ● | ● | Live session |
+|  | `req_auto_open_orders` | ● | ● | ● | ● | ● | Live session |
+|  | `req_ids` | ● | ● | ● | ● | ● | Live session |
+|  | `req_global_cancel` | ● | ● | ● | ● | ● | Live session |
+|  | `req_completed_orders` | ● | ● | ● | ● | ● | Live session |
+| Executions | `req_executions` | ● | ● | ● | ● | ● | Live session |
+| Account | `req_account_updates` | ● | ● | ● | ● | ● | Live session |
+|  | `req_account_summary` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_account_summary` | ● | ● | ● | ● | ● | Live session |
+|  | `req_positions` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_positions` | ● | ● | ● | ● | ● | Live session |
+|  | `req_pnl` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_pnl` | ● | ● | ● | ● | ● | Live session |
+|  | `req_pnl_single` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_pnl_single` | ● | ● | ● | ● | ● | Live session |
+|  | `req_managed_accts` | ● | ● | ● | ● | ● | Live session |
+|  | `req_account_updates_multi` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_account_updates_multi` | ● | ● | ● | ● | ● | Live session |
+|  | `req_positions_multi` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_positions_multi` | ● | ● | ● | ● | ● | Live session |
+| Contract | `req_contract_details` | ● | ● | ● | ● | ● | Live session |
+|  | `req_matching_symbols` | ● | ● | ● | ● | ● | Live session |
+|  | `req_market_rule` | ● | ● | ● | ● | ● | Live session |
+| Scanner | `req_scanner_parameters` | ● | ● | ● | ● | ● | Live session |
+|  | `req_scanner_subscription` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_scanner_subscription` | ● | ● | ● | ● | ● | Live session |
+| News | `req_news_providers` | ● | ● | ● | ● | ● | Live session |
+|  | `req_news_article` | ● | ● | ● | ● | ● | Live session |
+|  | `req_historical_news` | ● | ● | ● | ● | ● | Live session |
+|  | `req_news_bulletins` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_news_bulletins` | ● | ● | ● | ● | ● | Live session |
+| Fundamental | `req_fundamental_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_fundamental_data` | ● | ● | ● | ● | ● | Live session |
+| Options | `calculate_implied_volatility` | ● | ● | ● | ● | ● | Offline suites |
+|  | `cancel_calculate_implied_volatility` | ● | ● | ● | ● | ● | Offline suites |
+|  | `calculate_option_price` | ● | ● | ● | ● | ● | Offline suites |
+|  | `cancel_calculate_option_price` | ● | ● | ● | ● | ● | Offline suites |
+|  | `exercise_options` | ● | ● | ● | ● | ● | Offline suites |
+|  | `req_sec_def_opt_params` | ● | ● | ● | ● | ● | Live session |
+| Reference | `req_soft_dollar_tiers` | ● | ● | ● | ● | ● | Live session |
+|  | `req_family_codes` | ● | ● | ● | ● | ● | Live session |
+|  | `req_user_info` | ● | · | ● | ● | ● | Live session |
+| Financial Advisor | `request_fa` | ● | ● | ● | ● | ● | Offline suites |
+|  | `replace_fa` | ● | ● | ● | ● | ● | Offline suites |
+| Display Groups | `query_display_groups` | ● | ● | ● | ● | ● | Live session |
+|  | `subscribe_to_group_events` | ● | ● | ● | ● | ● | Live session |
+|  | `unsubscribe_from_group_events` | ● | ● | ● | ● | ● | Live session |
+|  | `update_display_group` | ● | ● | ● | ● | ● | Live session |
+| WSH | `req_wsh_meta_data` | ● | · | ● | ● | ● | Offline suites |
+|  | `cancel_wsh_meta_data` | ● | · | ● | ● | ● | Offline suites |
+|  | `req_wsh_event_data` | ● | · | ● | ● | ● | Offline suites |
+|  | `cancel_wsh_event_data` | ● | · | ● | ● | ● | Offline suites |
 
 ## Callbacks
 
 What the venue says back. `ib_async` delivers these as events as well as methods, so a mark here says the method exists on its wrapper, not that the information is unavailable by another route.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
+| Category | Call | TWS API | Fires on a gateway | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Connection | `connect_ack` | ● | ● | ● | ● | ● | ● |
-|  | `connection_closed` | ● | ● | ● | ● | ● | ● |
-|  | `next_valid_id` | ● | ● | ● | ● | ● | ● |
-|  | `managed_accounts` | ● | ● | ● | ● | ● | ● |
-|  | `error` | ● | ● | ● | ● | ● | ● |
-|  | `current_time` | ● | ● | ● | ● | ● | ● |
-|  | `current_time_in_millis` | ● | ● | · | · | ● | ● |
-| Market Data | `tick_price` | ● | ● | ● | · | ● | ● |
-|  | `tick_size` | ● | ● | ● | ● | ● | ● |
-|  | `tick_string` | ● | ● | ● | ● | ● | ● |
-|  | `tick_generic` | ● | ● | ● | ● | ● | ● |
-|  | `tick_snapshot_end` | ● | ● | ● | ● | ● | ● |
-|  | `market_data_type` | ● | ● | ● | ● | ● | ● |
-|  | `tick_req_params` | ● | ● | ● | ● | ● | ● |
-| Orders | `order_status` | ● | ● | ● | ● | ● | ● |
-|  | `open_order` | ● | ● | ● | ● | ● | ● |
-|  | `open_order_end` | ● | ● | ● | ● | ● | ● |
-|  | `order_bound` | ● | ● | ● | ● | ● | ● |
-| Executions | `exec_details` | ● | ● | ● | ● | ● | ● |
-|  | `exec_details_end` | ● | ● | ● | ● | ● | ● |
-|  | `commission_and_fees_report` | ● | ● | ● | ● | ● | ● |
-| Account | `update_account_value` | ● | ● | ● | ● | ● | ● |
-|  | `update_portfolio` | ● | ● | ● | ● | ● | ● |
-|  | `update_account_time` | ● | ● | ● | ● | ● | ● |
-|  | `account_download_end` | ● | ● | ● | ● | ● | ● |
-|  | `account_summary` | ● | ● | ● | ● | ● | ● |
-|  | `account_summary_end` | ● | ● | ● | ● | ● | ● |
-|  | `position` | ● | ● | ● | ● | ● | ● |
-|  | `position_end` | ● | ● | ● | ● | ● | ● |
-|  | `pnl` | ● | ● | ● | ● | ● | ● |
-|  | `pnl_single` | ● | ● | ● | ● | ● | ● |
-|  | `position_multi` | ● | ● | ● | ● | ● | ● |
-|  | `position_multi_end` | ● | ● | ● | ● | ● | ● |
-|  | `account_update_multi` | ● | ● | ● | ● | ● | ● |
-|  | `account_update_multi_end` | ● | ● | ● | ● | ● | ● |
-| Contract | `contract_details` | ● | ● | ● | ● | ● | ● |
-|  | `contract_details_end` | ● | ● | ● | ● | ● | ● |
-|  | `bond_contract_details` | ● | ● | ● | ● | ● | ● |
-|  | `symbol_samples` | ● | ● | ● | ● | ● | ● |
-| Historical Data | `historical_data` | ● | ● | ● | ● | ● | ● |
-|  | `historical_data_end` | ● | ● | ● | ● | ● | ● |
-|  | `historical_data_update` | ● | ● | ● | ● | ● | ● |
-|  | `head_timestamp` | ● | ● | ● | ● | ● | ● |
-|  | `historical_ticks` | ● | ● | ● | ● | ● | ● |
-|  | `historical_ticks_bid_ask` | ● | ● | ● | ● | ● | ● |
-|  | `historical_ticks_last` | ● | ● | ● | ● | ● | ● |
-|  | `histogram_data` | ● | ● | ● | ● | ● | ● |
-|  | `historical_schedule` | ● | ● | · | ● | ● | ● |
-| Market Depth | `update_mkt_depth` | ● | ● | ● | ● | ● | ● |
-|  | `update_mkt_depth_l2` | ● | ● | ● | ● | ● | ● |
-|  | `mkt_depth_exchanges` | ● | ● | ● | ● | ● | ● |
-| Tick-by-Tick | `tick_by_tick_all_last` | ● | ● | ● | ● | ● | ● |
-|  | `tick_by_tick_bid_ask` | ● | ● | ● | ● | ● | ● |
-|  | `tick_by_tick_mid_point` | ● | ● | ● | ● | ● | ● |
-| Scanner | `scanner_data` | ● | ● | ● | ● | ● | ● |
-|  | `scanner_data_end` | ● | ● | ● | ● | ● | ● |
-|  | `scanner_parameters` | ● | ● | ● | ● | ● | ● |
-| News | `news_providers` | ● | ● | ● | ● | ● | ● |
-|  | `news_article` | ● | ● | ● | ● | ● | ● |
-|  | `historical_news` | ● | ● | ● | ● | ● | ● |
-|  | `historical_news_end` | ● | ● | ● | ● | ● | ● |
-|  | `tick_news` | ● | ● | ● | ● | ● | ● |
-|  | `update_news_bulletin` | ● | ● | ● | ● | ● | ● |
-| Real-Time Bars | `real_time_bar` | ● | ● | ● | ● | ● | ● |
-| Fundamental | `fundamental_data` | ● | ● | ● | ● | ● | ● |
-| Market Rules | `market_rule` | ● | ● | ● | ● | ● | ● |
-| Completed Orders | `completed_order` | ● | ● | ● | ● | ● | ● |
-|  | `completed_orders_end` | ● | ● | ● | ● | ● | ● |
-| Options | `tick_option_computation` | ● | ● | ● | ● | ● | ● |
-|  | `security_definition_option_parameter` | ● | ● | ● | ● | ● | ● |
-|  | `security_definition_option_parameter_end` | ● | ● | ● | ● | ● | ● |
-| Reference | `smart_components` | ● | ● | ● | ● | ● | ● |
-|  | `soft_dollar_tiers` | ● | ● | ● | ● | ● | ● |
-|  | `family_codes` | ● | ● | ● | ● | ● | ● |
-|  | `user_info` | ● | ● | · | ● | ● | ● |
-| FA | `receive_fa` | ● | ● | ● | ● | ● | ● |
-|  | `replace_fa_end` | ● | ● | ● | · | ● | ● |
-| Display Groups | `display_group_list` | ● | ● | ● | · | ● | ● |
-|  | `display_group_updated` | ● | ● | ● | · | ● | ● |
-| Other | `delta_neutral_validation` | ● | ● | ● | ● | ◐ | ◐ |
-| WSH | `wsh_meta_data` | ● | ● | · | ● | ● | ● |
-|  | `wsh_event_data` | ● | ● | · | ● | ● | ● |
-| Market Data | `reroute_mkt_data_req` | ● | ● | ● | · | ◐ | ◐ |
-|  | `reroute_mkt_depth_req` | ● | ● | ● | · | ◐ | ◐ |
-|  | `tick_efp` | ● | ● | ● | ● | ◐ | ◐ |
-| Connection | `verify_message_api` | ● | ● | ● | · | ◐ | ◐ |
-|  | `verify_completed` | ● | ● | ● | · | ◐ | ◐ |
-|  | `verify_and_auth_message_api` | ● | ● | ● | · | ◐ | ◐ |
-|  | `verify_and_auth_completed` | ● | ● | ● | · | ◐ | ◐ |
-|  | `win_error` | ● | ● | ● | · | ◐ | ◐ |
+| Connection | `connect_ack` | ● | yes | ● | ● | ● | ● |
+|  | `connection_closed` | ● | yes | ● | ● | ● | ● |
+|  | `next_valid_id` | ● | yes | ● | ● | ● | ● |
+|  | `managed_accounts` | ● | yes | ● | ● | ● | ● |
+|  | `error` | ● | yes | ● | ● | ● | ● |
+|  | `current_time` | ● | yes | ● | ● | ● | ● |
+|  | `current_time_in_millis` | ● | yes | · | · | ● | ● |
+| Market Data | `tick_price` | ● | yes | ● | · | ● | ● |
+|  | `tick_size` | ● | yes | ● | ● | ● | ● |
+|  | `tick_string` | ● | yes | ● | ● | ● | ● |
+|  | `tick_generic` | ● | yes | ● | ● | ● | ● |
+|  | `tick_snapshot_end` | ● | yes | ● | ● | ● | ● |
+|  | `market_data_type` | ● | yes | ● | ● | ● | ● |
+|  | `tick_req_params` | ● | yes | ● | ● | ● | ● |
+| Orders | `order_status` | ● | yes | ● | ● | ● | ● |
+|  | `open_order` | ● | yes | ● | ● | ● | ● |
+|  | `open_order_end` | ● | yes | ● | ● | ● | ● |
+|  | `order_bound` | ● | yes | ● | ● | ● | ● |
+| Executions | `exec_details` | ● | yes | ● | ● | ● | ● |
+|  | `exec_details_end` | ● | yes | ● | ● | ● | ● |
+|  | `commission_and_fees_report` | ● | yes | ● | ● | ● | ● |
+| Account | `update_account_value` | ● | yes | ● | ● | ● | ● |
+|  | `update_portfolio` | ● | yes | ● | ● | ● | ● |
+|  | `update_account_time` | ● | yes | ● | ● | ● | ● |
+|  | `account_download_end` | ● | yes | ● | ● | ● | ● |
+|  | `account_summary` | ● | yes | ● | ● | ● | ● |
+|  | `account_summary_end` | ● | yes | ● | ● | ● | ● |
+|  | `position` | ● | yes | ● | ● | ● | ● |
+|  | `position_end` | ● | yes | ● | ● | ● | ● |
+|  | `pnl` | ● | yes | ● | ● | ● | ● |
+|  | `pnl_single` | ● | yes | ● | ● | ● | ● |
+|  | `position_multi` | ● | yes | ● | ● | ● | ● |
+|  | `position_multi_end` | ● | yes | ● | ● | ● | ● |
+|  | `account_update_multi` | ● | yes | ● | ● | ● | ● |
+|  | `account_update_multi_end` | ● | yes | ● | ● | ● | ● |
+| Contract | `contract_details` | ● | yes | ● | ● | ● | ● |
+|  | `contract_details_end` | ● | yes | ● | ● | ● | ● |
+|  | `bond_contract_details` | ● | yes | ● | ● | ● | ● |
+|  | `symbol_samples` | ● | yes | ● | ● | ● | ● |
+| Historical Data | `historical_data` | ● | yes | ● | ● | ● | ● |
+|  | `historical_data_end` | ● | yes | ● | ● | ● | ● |
+|  | `historical_data_update` | ● | yes | ● | ● | ● | ● |
+|  | `head_timestamp` | ● | yes | ● | ● | ● | ● |
+|  | `historical_ticks` | ● | yes | ● | ● | ● | ● |
+|  | `historical_ticks_bid_ask` | ● | yes | ● | ● | ● | ● |
+|  | `historical_ticks_last` | ● | yes | ● | ● | ● | ● |
+|  | `histogram_data` | ● | yes | ● | ● | ● | ● |
+|  | `historical_schedule` | ● | yes | · | ● | ● | ● |
+| Market Depth | `update_mkt_depth` | ● | yes | ● | ● | ● | ● |
+|  | `update_mkt_depth_l2` | ● | yes | ● | ● | ● | ● |
+|  | `mkt_depth_exchanges` | ● | yes | ● | ● | ● | ● |
+| Tick-by-Tick | `tick_by_tick_all_last` | ● | yes | ● | ● | ● | ● |
+|  | `tick_by_tick_bid_ask` | ● | yes | ● | ● | ● | ● |
+|  | `tick_by_tick_mid_point` | ● | yes | ● | ● | ● | ● |
+| Scanner | `scanner_data` | ● | yes | ● | ● | ● | ● |
+|  | `scanner_data_end` | ● | yes | ● | ● | ● | ● |
+|  | `scanner_parameters` | ● | yes | ● | ● | ● | ● |
+| News | `news_providers` | ● | yes | ● | ● | ● | ● |
+|  | `news_article` | ● | yes | ● | ● | ● | ● |
+|  | `historical_news` | ● | yes | ● | ● | ● | ● |
+|  | `historical_news_end` | ● | yes | ● | ● | ● | ● |
+|  | `tick_news` | ● | yes | ● | ● | ● | ● |
+|  | `update_news_bulletin` | ● | yes | ● | ● | ● | ● |
+| Real-Time Bars | `real_time_bar` | ● | yes | ● | ● | ● | ● |
+| Fundamental | `fundamental_data` | ● | yes | ● | ● | ● | ● |
+| Market Rules | `market_rule` | ● | yes | ● | ● | ● | ● |
+| Completed Orders | `completed_order` | ● | yes | ● | ● | ● | ● |
+|  | `completed_orders_end` | ● | yes | ● | ● | ● | ● |
+| Options | `tick_option_computation` | ● | yes | ● | ● | ● | ● |
+|  | `security_definition_option_parameter` | ● | yes | ● | ● | ● | ● |
+|  | `security_definition_option_parameter_end` | ● | yes | ● | ● | ● | ● |
+| Reference | `smart_components` | ● | yes | ● | ● | ● | ● |
+|  | `soft_dollar_tiers` | ● | yes | ● | ● | ● | ● |
+|  | `family_codes` | ● | yes | ● | ● | ● | ● |
+|  | `user_info` | ● | yes | · | ● | ● | ● |
+| FA | `receive_fa` | ● | yes | ● | ● | ● | ● |
+|  | `replace_fa_end` | ● | yes | ● | · | ● | ● |
+| Display Groups | `display_group_list` | ● | yes | ● | · | ● | ● |
+|  | `display_group_updated` | ● | yes | ● | · | ● | ● |
+| Other | `delta_neutral_validation` | ● | yes | ● | ● | ◐ | ◐ |
+| WSH | `wsh_meta_data` | ● | yes | · | ● | ● | ● |
+|  | `wsh_event_data` | ● | yes | · | ● | ● | ● |
+| Market Data | `reroute_mkt_data_req` | ● | yes | ● | · | ◐ | ◐ |
+|  | `reroute_mkt_depth_req` | ● | yes | ● | · | ◐ | ◐ |
+|  | `tick_efp` | ● | no | ● | ● | ● | ● |
+| Connection | `verify_message_api` | ● | no | ● | · | ● | ● |
+|  | `verify_completed` | ● | no | ● | · | ● | ● |
+|  | `verify_and_auth_message_api` | ● | no | ● | · | ● | ● |
+|  | `verify_and_auth_completed` | ● | no | ● | · | ● | ● |
+|  | `win_error` | ● | no | ● | · | ● | ● |
 
 ## Beyond the canonical list
 
-The terminal's own connection carries more than the documented
-surface names, and this client speaks that connection — so some of
-what it answers has no call in the API at all. These fall into three
-kinds, and the table does not try to sort them: things the venue
-states that no documented call asks for (what it permits this
-account, which algorithms it offers, the order defaults it holds,
-what it says about an issuer, which session holds the account); the
-same question answered rather than delivered on a callback; and this
-client's own instrumentation, which is about the client and not the
-venue.
+What this client answers that the canonical list does not name.
+Three kinds, told apart by the *Answered from* column and by the
+reference columns: what the venue states that no documented call
+asks for (what it permits this account, which algorithms it offers,
+the order defaults it holds, what it says about an issuer, which
+session holds the account); a question answered in one call rather
+than delivered on a callback; and this client's own state, helpers
+and instrumentation, which are about the client and not the venue.
 
-A mark against a reference client here means it happens to name the
-same thing, not that the documented API does.
+A mark against a reference client here means it names the same
+thing; a mark under TWS API means the TWS API's own client, or
+ib_async's transport, has a method by that name.
 
-| Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
+| Call | Answered from | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `account` | ● | · | · | · | ● | · |
-| `accountSnapshot` | ● | · | · | · | · | ● |
-| `adjustments` | ● | · | · | · | ● | · |
-| `adjustmentsFor` | ● | · | · | · | ● | ● |
-| `algorithms` | ● | · | · | · | ● | · |
-| `algorithmsFor` | ● | · | · | · | ● | ● |
-| `await_order` | ● | · | · | · | ● | · |
-| `calendar_events` | ● | · | · | · | ● | · |
-| `calendar_schema` | ● | · | · | · | ● | · |
-| `cancelAdjustments` | ● | · | · | · | ● | ● |
-| `cancel_historical_news` | ● | · | · | · | ● | · |
-| `cancelOrderByPermId` | ● | · | · | · | ● | ● |
-| `cancelWshEventData` | ● | ● | · | ● | ● | ● |
-| `cancelWshMetaData` | ● | ● | · | ● | ● | ● |
-| `ccpSessionId` | ● | · | · | · | ● | ● |
-| `checkConnected` | ● | · | · | · | · | ● |
-| `closingOptionModel` | ● | · | · | · | ● | ● |
-| `closingOptionModelByInstrument` | ● | · | · | · | ● | ● |
-| `companyData` | ● | · | · | · | ● | ● |
-| `companyDataSeries` | ● | · | · | · | ● | ● |
-| `competingSession` | ● | · | · | · | ● | ● |
-| `connect_with_events` | ● | · | · | · | ● | · |
-| `contractFigures` | ● | · | · | · | ● | ● |
-| `contractFiguresByInstrument` | ● | · | · | · | ● | ● |
-| `corporateActions` | ● | · | · | · | ● | ● |
-| `enabledFeatures` | ● | · | · | · | ● | ● |
-| `eventsLost` | ● | · | · | · | ● | ● |
-| `getAccountId` | ● | · | · | · | · | ● |
-| `instrument_of` | ● | · | · | · | ● | · |
-| `keep_record` | ● | · | · | · | ● | · |
-| `last_rtt` | ● | · | · | · | ● | · |
-| `lastRttMs` | ● | · | · | · | · | ● |
-| `matchingSymbols` | ● | · | · | · | ● | ● |
-| `miscUrl` | ● | · | · | · | ● | ● |
-| `newsHeadlines` | ● | · | · | · | ● | ● |
-| `nextOrderId` | ● | · | · | · | ● | ● |
-| `nextSharedId` | ● | · | · | · | ● | ● |
-| `numberedFigures` | ● | · | · | · | ● | ● |
-| `numberedFiguresSeries` | ● | · | · | · | ● | ● |
-| `option_chain` | ● | · | · | · | ● | · |
-| `optionChains` | ● | · | · | · | · | ● |
-| `optionModel` | ● | · | · | · | ● | ● |
-| `optionModelByInstrument` | ● | · | · | · | ● | ● |
-| `orderPermissions` | ● | · | · | · | ● | ● |
-| `orderPresets` | ● | · | · | · | ● | ● |
-| `pairedFigures` | ● | · | · | · | ● | ● |
-| `pairedFiguresSeries` | ● | · | · | · | ● | ● |
-| `parse_algo_params` | ● | · | · | · | ● | · |
-| `permittedOrderTypes` | ● | · | · | · | ● | ● |
-| `positions` | ● | ● | · | ● | ● | · |
-| `positionsElsewhere` | ● | · | · | · | ● | ● |
-| `qualifyContract` | ● | · | · | · | ● | ● |
-| `qualifyContracts` | ● | ● | · | ● | ● | ● |
-| `quote` | ● | · | · | · | ● | · |
-| `quoteByInstrument` | ● | · | · | · | ● | ● |
-| `reqAdjustments` | ● | · | · | · | ● | ● |
-| `reqMktDataEx` | ● | · | · | · | ● | ● |
-| `reqPing` | ● | · | · | · | ● | ● |
-| `reqSpreadScan` | ● | · | · | · | ● | ● |
-| `scan` | ● | · | · | · | ● | · |
-| `scannedStrategies` | ● | · | · | · | ● | ● |
-| `schedule` | ● | ● | · | ● | ● | · |
-| `serverVersion` | ● | ● | ● | ● | · | ● |
-| `session` | ● | · | · | · | ● | · |
-| `session_over` | ● | · | · | · | ● | · |
-| `session_token_bytes` | ● | · | · | · | ● | · |
-| `setConnectOptions` | ● | ● | · | ● | · | ◐ |
-| `setNewsProviders` | ● | · | · | · | ● | ● |
-| `shared_state` | ● | · | · | · | ● | · |
-| `shortSaleRestricted` | ● | · | · | · | ● | ● |
-| `shortSaleRestrictedByInstrument` | ● | · | · | · | ● | ● |
-| `startApi` | ● | ● | ● | ● | · | ● |
-| `statedFigures` | ● | · | · | · | ● | ● |
-| `statedFiguresSeries` | ● | · | · | · | ● | ● |
-| `statedRows` | ● | · | · | · | ● | ● |
-| `tradingSchedule` | ● | · | · | · | · | ● |
-| `twsConnectionTime` | ● | ● | ● | · | · | ● |
-| `unread_wire` | ● | · | · | · | ● | · |
-| `valuesElsewhere` | ● | · | · | · | ● | ● |
-| `waitForData` | ● | · | · | · | ● | ● |
-| `what_if_order` | ● | ● | · | ● | ● | · |
+| `account` | venue | · | · | · | ● | · |
+| `accountSnapshot` | venue | · | · | · | · | ● |
+| `adjustments` | venue | · | · | · | ● | · |
+| `adjustmentsFor` | venue | · | · | · | ● | ● |
+| `algorithms` | venue | · | · | · | ● | ● |
+| `algorithmsFor` | venue | · | · | · | ● | ● |
+| `await_order` | venue | · | · | · | ● | · |
+| `calendar_events` | venue | · | · | · | ● | · |
+| `calendar_schema` | venue | · | · | · | ● | · |
+| `cancelAdjustments` | venue | · | · | · | ● | ● |
+| `cancel_historical_news` | venue | · | · | · | ● | · |
+| `cancelOrderByPermId` | venue | · | · | · | ● | ● |
+| `ccpSessionId` | venue | · | · | · | ● | ● |
+| `checkConnected` | this client | · | · | · | · | ● |
+| `closingOptionModel` | venue | · | · | · | ● | ● |
+| `closingOptionModelByInstrument` | venue | · | · | · | ● | ● |
+| `companyData` | venue | · | · | · | ● | ● |
+| `companyDataSeries` | venue | · | · | · | ● | ● |
+| `competingSession` | venue | · | · | · | ● | ● |
+| `connect_with_events` | this client | · | · | · | ● | · |
+| `contractFigures` | venue | · | · | · | ● | ● |
+| `contractFiguresByInstrument` | venue | · | · | · | ● | ● |
+| `corporateActions` | venue | · | · | · | ● | ● |
+| `enabledFeatures` | venue | · | · | · | ● | ● |
+| `eventsLost` | this client | · | · | · | ● | ● |
+| `getAccountId` | venue | · | · | · | · | ● |
+| `instrument_of` | this client | · | · | · | ● | · |
+| `keep_record` | this client | · | · | · | ● | · |
+| `last_rtt` | this client | · | · | · | ● | · |
+| `lastRttMs` | this client | · | · | · | · | ● |
+| `matchingSymbols` | venue | · | · | · | ● | ● |
+| `miscUrl` | venue | · | · | · | ● | ● |
+| `newsHeadlines` | venue | · | · | · | ● | ● |
+| `nextOrderId` | this client | · | · | · | ● | ● |
+| `nextSharedId` | this client | · | · | · | ● | ● |
+| `numberedFigures` | venue | · | · | · | ● | ● |
+| `numberedFiguresSeries` | venue | · | · | · | ● | ● |
+| `option_chain` | venue | · | · | · | ● | · |
+| `optionChains` | venue | · | · | · | · | ● |
+| `optionModel` | venue | · | · | · | ● | ● |
+| `optionModelByInstrument` | venue | · | · | · | ● | ● |
+| `orderPermissions` | venue | · | · | · | ● | ● |
+| `orderPresets` | venue | · | · | · | ● | ● |
+| `pairedFigures` | venue | · | · | · | ● | ● |
+| `pairedFiguresSeries` | venue | · | · | · | ● | ● |
+| `parse_algo_params` | this client | · | · | · | ● | · |
+| `permittedOrderTypes` | venue | · | · | · | ● | ● |
+| `poll` | this client | · | · | · | · | ● |
+| `positions` | venue | · | · | ● | ● | · |
+| `positionsElsewhere` | venue | · | · | · | ● | ● |
+| `qualifyContract` | venue | · | · | · | ● | ● |
+| `qualifyContracts` | venue | · | · | ● | ● | ● |
+| `quote` | venue | · | · | · | ● | ● |
+| `quoteByInstrument` | venue | · | · | · | ● | ● |
+| `reqAdjustments` | venue | · | · | · | ● | ● |
+| `reqMktDataEx` | venue | · | · | · | ● | ● |
+| `reqPing` | venue | · | · | · | ● | ● |
+| `reqSpreadScan` | venue | · | · | · | ● | ● |
+| `reset` | this client | ● | ● | ● | · | ● |
+| `run` | this client | ● | ● | ● | · | ● |
+| `scan` | venue | · | · | · | ● | · |
+| `scannedStrategies` | venue | · | · | · | ● | ● |
+| `schedule` | venue | · | · | ● | ● | · |
+| `serverVersion` | this client | ● | ● | ● | · | ● |
+| `session` | this client | · | · | · | ● | · |
+| `session_over` | this client | · | · | · | ● | · |
+| `session_token_bytes` | this client | · | · | · | ● | · |
+| `setConnectOptions` | this client | ● | · | ● | · | ◐ |
+| `setNewsProviders` | venue | · | · | · | ● | ● |
+| `shared_state` | this client | · | · | · | ● | · |
+| `shortSaleRestricted` | venue | · | · | · | ● | ● |
+| `shortSaleRestrictedByInstrument` | venue | · | · | · | ● | ● |
+| `startApi` | this client | ● | ● | ● | · | ● |
+| `statedFigures` | venue | · | · | · | ● | ● |
+| `statedFiguresSeries` | venue | · | · | · | ● | ● |
+| `statedRows` | venue | · | · | · | ● | ● |
+| `tradingSchedule` | venue | · | · | · | · | ● |
+| `twsConnectionTime` | venue | ● | ● | · | · | ● |
+| `unread_wire` | this client | · | · | · | ● | · |
+| `valuesElsewhere` | venue | · | · | · | ● | ● |
+| `waitForData` | this client | · | · | · | ● | ● |
+| `what_if_order` | venue | · | · | ● | ● | · |
 
 ## Calls, counted
 
-| Client | Carried | Taken, not applied | Absent |
+| Client | Present ● | Present, not served ◐ | Absent · |
 | --- | ---: | ---: | ---: |
-| Gateway wire | 78 | 0 | 0 |
-| TWS API | 78 | 0 | 0 |
-| ibapi | 73 | 0 | 5 |
-| ib_async | 77 | 0 | 1 |
-| ibkr-dx Rust | 78 | 0 | 0 |
-| ibkr-dx Python | 78 | 0 | 0 |
+| TWS API | 80 | 0 | 0 |
+| ibapi | 73 | 0 | 7 |
+| ib_async | 79 | 0 | 1 |
+| ibkr-dx Rust | 80 | 0 | 0 |
+| ibkr-dx Python | 80 | 0 | 0 |
 

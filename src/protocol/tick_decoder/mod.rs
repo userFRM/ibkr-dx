@@ -168,9 +168,9 @@ pub const O_ASK_EXCH: u64 = 17;
 /// cite measurements against daily bars and wall-clock samples.
 ///
 /// The venue does state a halt, but carries it elsewhere: as a generic tick
-/// under id 437, whose payload is three big-endian 32-bit ints
-/// (a status bitmask, a timestamp, a status index) rather than anything in this
-/// stream. Its statuses are a named set, each carrying an index and a mask of
+/// under id 437, whose payload opens with three big-endian 32-bit ints
+/// (a status bitmask, a timestamp, a status index) and carries a fourth that
+/// is not interpreted, rather than anything in this stream. Its statuses are a named set, each carrying an index and a mask of
 /// one shifted by it: exchange open at 0,
 /// regulatory halt at 1, volatility halt at 2, short-sale restriction at 3, and
 /// no-status-available at 16 rather than at its position in the enum. "Halted"

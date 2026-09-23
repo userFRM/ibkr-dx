@@ -1102,8 +1102,8 @@ fn an_algo_flag_time_or_risk_aversion_the_caller_did_not_state_is_not_sent() {
 /// Conditions are joined the way the caller joined them.
 ///
 /// Each condition states how it joins the next: `a` for AND, `o` for OR. The
-/// last joins nothing and states `n` whatever it holds, which is how the
-/// counterpart writes it. Every condition but the last used to go as `a`, so
+/// last joins nothing and states `n` whatever it holds, which is how a
+/// gateway writes it. Every condition but the last used to go as `a`, so
 /// an order the caller joined with OR reached the venue joined with AND: not
 /// refused, a different order.
 #[test]
@@ -2922,8 +2922,8 @@ mod outside_rth_polarity_tests {
         );
     }
 
-    /// A ladder and a hedge each go out under the tags the vendor's own
-    /// attributes declare for them. Without them an order asking for either
+    /// A ladder and a hedge each go out under the tags the protocol names for
+    /// them. Without them an order asking for either
     /// would go out plain: one order for the whole size, or a position with
     /// nothing against it.
     #[test]

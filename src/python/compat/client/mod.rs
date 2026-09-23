@@ -812,8 +812,8 @@ impl EClient {
     /// the reference client answers before its greeting.
     ///
     /// In the reference architecture this number is the API level of the
-    /// process a program is talking to. That process was the vendor's gateway,
-    /// which announced it and had every request gated on it; here it is this
+    /// process a program is talking to. That process was a gateway, which
+    /// announced it and had every request gated on it; here it is this
     /// client, so the number is a statement about this client and not a
     /// reading off the venue, whose logon names no such level.
     ///
@@ -835,11 +835,6 @@ impl EClient {
     /// * A withdrawal stating a manual time, an operator or who entered it
     ///   (169, 192), and an execution filter stating `lastNDays` or
     ///   `specificDates` (200): refused by name on `error`.
-    /// * One callback nothing fires, said on the call that would produce it:
-    ///   `orderBound` (144) after `reqAutoOpenOrders`. It is the one case that
-    ///   is quiet at run time: a program that waits on it waits, and only the
-    ///   doc says why.
-    ///
     /// Every other gate at or below 217 names a request, field or callback
     /// that is here and carried.
     fn server_version(&self) -> Option<i32> {
@@ -920,7 +915,6 @@ impl EClient {
         self.events_lost.load(Ordering::Acquire)
     }
 
-    /// Run the event loop.
     /// Deliver everything waiting, once, and return.
     ///
     /// `run` owns the thread it is called on, which a program with an event

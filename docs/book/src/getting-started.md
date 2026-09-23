@@ -7,10 +7,9 @@
 * Rust 1.89 or newer. Both install routes compile the engine.
 * Python 3.11 or newer, for the Python surface.
 
-There is no package on crates.io and none on PyPI. Everything below installs
-from the repository.
-
 ## Install
+
+Both routes build from the repository.
 
 ### Rust
 
@@ -25,14 +24,24 @@ ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx" }
 pip install "git+https://github.com/userFRM/ibkr-dx"
 ```
 
-The build backend is [maturin](https://www.maturin.rs/), which compiles the
-Rust core and produces the extension module. `pyproject.toml` already names the
-features it needs, so there is nothing to pass.
+The package imports as `ibkr_dx`. The build backend is
+[maturin](https://www.maturin.rs/), which compiles the Rust core into the
+extension module, and `pyproject.toml` names the features it needs, so there is
+nothing to pass. It builds for CPython 3.11 to 3.14 and the free-threaded
+3.14t; the free-threaded 3.13t is not supported.
 
-Working on the client itself, build it in place instead:
+Either route compiles the engine, so it needs Rust 1.89 or newer and, on Linux,
+the OpenSSL headers and `pkg-config` (`libssl-dev` on Debian and Ubuntu,
+`openssl-devel` on Fedora and RHEL).
+
+### From the source
+
+Working on the client itself, build it in place:
 
 ```bash
-uv venv .venv --python 3.13
+git clone https://github.com/userFRM/ibkr-dx
+cd ibkr-dx
+uv venv .venv
 source .venv/bin/activate          # .venv\Scripts\activate on Windows
 uv pip install maturin
 maturin develop
@@ -90,6 +99,11 @@ and the shape of the prompt as the venue's to state rather than as described.
 Use a paper account while you are writing something. A live account is a live
 account.
 
+**One program per login.** Each program opens its own session, and a login
+holds one session at a time: a second program on the same login takes the
+first one's session, and the venue names the host that took it. Give each
+program that runs at the same time a login of its own.
+
 One place reads the environment instead of the call: the programs under
 `examples/` read `IB_USERNAME` and `IB_PASSWORD`:
 
@@ -105,10 +119,10 @@ by capability.
 
 | Language | Surface | Pick it when |
 | --- | --- | --- |
-| Python | `ibkr_dx.EClient` / `EWrapper` | Your program is written against `ibapi`. Change `ibapi` to `ibkr_dx` in its imports. |
+| Python | `ibkr_dx.EClient` / `EWrapper` | Your program is written against `ibapi`. Change `ibapi` to `ibkr_dx` in its imports, and its connect call to the one above. |
 | Rust | `EClient` / `Wrapper` | You are porting a TWS API program and want its callbacks. |
 
-> **Want ib_async's easier API?** [ib_async-dx](https://github.com/userFRM/ib_async-dx) runs it on this engine — the drop-in successor for ib_async.
+> For ib_async, use [ib_async-dx](https://github.com/userFRM/ib_async-dx), which runs it on this engine.
 
 ## Hello, world
 

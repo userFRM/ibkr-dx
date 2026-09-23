@@ -25,9 +25,9 @@ session's quotes move.
 `model_code` is taken and not applied. There is no model portfolio to name here,
 so pass `""`.
 
-`cancel_pnl` stops the reporting on this side. Nothing on this wire withdraws
-the subscription at the venue, so treat it as "stop telling me", not "stop
-sending".
+`cancel_pnl` stops the updates. The venue has no message withdrawing the
+subscription itself, on a gateway as here, so the updates stopping is what the
+call does.
 
 An account with no position reports zeros. Pair this with the limit-order recipe
 if you want to watch the numbers move.

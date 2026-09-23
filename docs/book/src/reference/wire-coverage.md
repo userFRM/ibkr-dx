@@ -2,8 +2,8 @@
 
 *Auto-generated from source — do not edit.*
 
-Which messages this client speaks. A claim to replace the vendor's
-gateway is a claim about messages rather than about method names, so
+Which messages this client speaks. A claim to stand where a gateway
+stood is a claim about messages rather than about method names, so
 this is taken from the dispatch tables and the message builders
 themselves, and CI regenerates it and fails if it has drifted.
 
@@ -95,13 +95,13 @@ A user message carries what it is for on tag 6040.
 | `B` | News |
 | `U` | User message |
 | `d` | Security definition |
-| `AL` | not named here |
-| `AP` | not named here |
-| `DO` | not named here |
-| `DP` | not named here |
-| `EB` | not named here |
+| `AL` | Account update, holdings held away |
+| `AP` | Position update, held away |
+| `DO` | Position update, shown but not held |
+| `DP` | Position update, reported apart |
+| `EB` | End of a batch |
 | `RL` | Account update |
-| `UL` | not named here |
+| `UL` | Account update, holdings reported apart |
 | `UM` | Account update |
 | `UP` | Position update |
 | `UT` | Account update |

@@ -1,8 +1,9 @@
-"""A JVM-free Interactive Brokers client.
+"""An Interactive Brokers client with no gateway and no JVM.
 
-``EClient``/``EWrapper`` carry the reference client's shape — a request under an
-id, an answer later on a callback — so a program written against that client
-runs here unchanged.
+``EClient``/``EWrapper`` carry the TWS API's shape — a request under an id, an
+answer later on a callback. A program written against ``ibapi`` moves here by
+changing its imports and its connect call; where an answer differs from a
+gateway's, the Limits page of the documentation says so.
 """
 
 import inspect

@@ -4,9 +4,16 @@
 
 Canonical IB API methods vs ibkr-dx implementation status.
 
-- **Y** = Implemented
-- **STUB** = Accepts call but not wired to server (logs warning or no-op)
+- **Y** = Implemented: a call is served; a callback is declared and fired
+  whenever what it reports arrives
+- **STUB** = Present and not served: a call reports why on the error
+  callback; a callback is declared and not fired here, although a gateway
+  sends it
 - **-** = Not present
+
+The callback table also says whether each callback fires at all for a
+program on a gateway. Six declared by the TWS API never do, so they fire
+neither there nor here.
 
 The evidence column says how each status was established, and is
 derived rather than asserted: a call is credited to the live session
@@ -22,8 +29,8 @@ that did not run.
 
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
-| **EClient methods** | 78 | 78 impl, 0 stub | 78 impl, 0 stub |
-| **EWrapper callbacks** | 90 | 81 impl, 9 stub | 81 impl, 9 stub |
+| **EClient methods** | 80 | 80 impl, 0 stub | 80 impl, 0 stub |
+| **EWrapper callbacks** | 90 | 87 impl, 3 stub | 87 impl, 3 stub |
 
 ## EClient Methods
 
@@ -106,99 +113,101 @@ that did not run.
 |  | `unsubscribe_from_group_events` | `unsubscribeFromGroupEvents` | Y | Y | Live session |
 |  | `update_display_group` | `updateDisplayGroup` | Y | Y | Live session |
 | WSH | `req_wsh_meta_data` | `reqWshMetaData` | Y | Y | Offline suites |
+|  | `cancel_wsh_meta_data` | `cancelWshMetaData` | Y | Y | Offline suites |
 |  | `req_wsh_event_data` | `reqWshEventData` | Y | Y | Offline suites |
+|  | `cancel_wsh_event_data` | `cancelWshEventData` | Y | Y | Offline suites |
 
 ## EWrapper Callbacks
 
-| Category | Callback | Rust | Python |
-|----------|----------|:----:|:------:|
-| Connection | `connect_ack` | Y | Y |
-|  | `connection_closed` | Y | Y |
-|  | `next_valid_id` | Y | Y |
-|  | `managed_accounts` | Y | Y |
-|  | `error` | Y | Y |
-|  | `current_time` | Y | Y |
-|  | `current_time_in_millis` | Y | Y |
-| Market Data | `tick_price` | Y | Y |
-|  | `tick_size` | Y | Y |
-|  | `tick_string` | Y | Y |
-|  | `tick_generic` | Y | Y |
-|  | `tick_snapshot_end` | Y | Y |
-|  | `market_data_type` | Y | Y |
-|  | `tick_req_params` | Y | Y |
-| Orders | `order_status` | Y | Y |
-|  | `open_order` | Y | Y |
-|  | `open_order_end` | Y | Y |
-|  | `order_bound` | Y | Y |
-| Executions | `exec_details` | Y | Y |
-|  | `exec_details_end` | Y | Y |
-|  | `commission_and_fees_report` | Y | Y |
-| Account | `update_account_value` | Y | Y |
-|  | `update_portfolio` | Y | Y |
-|  | `update_account_time` | Y | Y |
-|  | `account_download_end` | Y | Y |
-|  | `account_summary` | Y | Y |
-|  | `account_summary_end` | Y | Y |
-|  | `position` | Y | Y |
-|  | `position_end` | Y | Y |
-|  | `pnl` | Y | Y |
-|  | `pnl_single` | Y | Y |
-|  | `position_multi` | Y | Y |
-|  | `position_multi_end` | Y | Y |
-|  | `account_update_multi` | Y | Y |
-|  | `account_update_multi_end` | Y | Y |
-| Contract | `contract_details` | Y | Y |
-|  | `contract_details_end` | Y | Y |
-|  | `bond_contract_details` | Y | Y |
-|  | `symbol_samples` | Y | Y |
-| Historical Data | `historical_data` | Y | Y |
-|  | `historical_data_end` | Y | Y |
-|  | `historical_data_update` | Y | Y |
-|  | `head_timestamp` | Y | Y |
-|  | `historical_ticks` | Y | Y |
-|  | `historical_ticks_bid_ask` | Y | Y |
-|  | `historical_ticks_last` | Y | Y |
-|  | `histogram_data` | Y | Y |
-|  | `historical_schedule` | Y | Y |
-| Market Depth | `update_mkt_depth` | Y | Y |
-|  | `update_mkt_depth_l2` | Y | Y |
-|  | `mkt_depth_exchanges` | Y | Y |
-| Tick-by-Tick | `tick_by_tick_all_last` | Y | Y |
-|  | `tick_by_tick_bid_ask` | Y | Y |
-|  | `tick_by_tick_mid_point` | Y | Y |
-| Scanner | `scanner_data` | Y | Y |
-|  | `scanner_data_end` | Y | Y |
-|  | `scanner_parameters` | Y | Y |
-| News | `news_providers` | Y | Y |
-|  | `news_article` | Y | Y |
-|  | `historical_news` | Y | Y |
-|  | `historical_news_end` | Y | Y |
-|  | `tick_news` | Y | Y |
-|  | `update_news_bulletin` | Y | Y |
-| Real-Time Bars | `real_time_bar` | Y | Y |
-| Fundamental | `fundamental_data` | Y | Y |
-| Market Rules | `market_rule` | Y | Y |
-| Completed Orders | `completed_order` | Y | Y |
-|  | `completed_orders_end` | Y | Y |
-| Options | `tick_option_computation` | Y | Y |
-|  | `security_definition_option_parameter` | Y | Y |
-|  | `security_definition_option_parameter_end` | Y | Y |
-| Reference | `smart_components` | Y | Y |
-|  | `soft_dollar_tiers` | Y | Y |
-|  | `family_codes` | Y | Y |
-|  | `user_info` | Y | Y |
-| FA | `receive_fa` | Y | Y |
-|  | `replace_fa_end` | Y | Y |
-| Display Groups | `display_group_list` | Y | Y |
-|  | `display_group_updated` | Y | Y |
-| Other | `delta_neutral_validation` | STUB | STUB |
-| WSH | `wsh_meta_data` | Y | Y |
-|  | `wsh_event_data` | Y | Y |
-| Market Data | `reroute_mkt_data_req` | STUB | STUB |
-|  | `reroute_mkt_depth_req` | STUB | STUB |
-|  | `tick_efp` | STUB | STUB |
-| Connection | `verify_message_api` | STUB | STUB |
-|  | `verify_completed` | STUB | STUB |
-|  | `verify_and_auth_message_api` | STUB | STUB |
-|  | `verify_and_auth_completed` | STUB | STUB |
-|  | `win_error` | STUB | STUB |
+| Category | Callback | Rust | Python | Fires on a gateway |
+|----------|----------|:----:|:------:|:------------------:|
+| Connection | `connect_ack` | Y | Y | yes |
+|  | `connection_closed` | Y | Y | yes |
+|  | `next_valid_id` | Y | Y | yes |
+|  | `managed_accounts` | Y | Y | yes |
+|  | `error` | Y | Y | yes |
+|  | `current_time` | Y | Y | yes |
+|  | `current_time_in_millis` | Y | Y | yes |
+| Market Data | `tick_price` | Y | Y | yes |
+|  | `tick_size` | Y | Y | yes |
+|  | `tick_string` | Y | Y | yes |
+|  | `tick_generic` | Y | Y | yes |
+|  | `tick_snapshot_end` | Y | Y | yes |
+|  | `market_data_type` | Y | Y | yes |
+|  | `tick_req_params` | Y | Y | yes |
+| Orders | `order_status` | Y | Y | yes |
+|  | `open_order` | Y | Y | yes |
+|  | `open_order_end` | Y | Y | yes |
+|  | `order_bound` | Y | Y | yes |
+| Executions | `exec_details` | Y | Y | yes |
+|  | `exec_details_end` | Y | Y | yes |
+|  | `commission_and_fees_report` | Y | Y | yes |
+| Account | `update_account_value` | Y | Y | yes |
+|  | `update_portfolio` | Y | Y | yes |
+|  | `update_account_time` | Y | Y | yes |
+|  | `account_download_end` | Y | Y | yes |
+|  | `account_summary` | Y | Y | yes |
+|  | `account_summary_end` | Y | Y | yes |
+|  | `position` | Y | Y | yes |
+|  | `position_end` | Y | Y | yes |
+|  | `pnl` | Y | Y | yes |
+|  | `pnl_single` | Y | Y | yes |
+|  | `position_multi` | Y | Y | yes |
+|  | `position_multi_end` | Y | Y | yes |
+|  | `account_update_multi` | Y | Y | yes |
+|  | `account_update_multi_end` | Y | Y | yes |
+| Contract | `contract_details` | Y | Y | yes |
+|  | `contract_details_end` | Y | Y | yes |
+|  | `bond_contract_details` | Y | Y | yes |
+|  | `symbol_samples` | Y | Y | yes |
+| Historical Data | `historical_data` | Y | Y | yes |
+|  | `historical_data_end` | Y | Y | yes |
+|  | `historical_data_update` | Y | Y | yes |
+|  | `head_timestamp` | Y | Y | yes |
+|  | `historical_ticks` | Y | Y | yes |
+|  | `historical_ticks_bid_ask` | Y | Y | yes |
+|  | `historical_ticks_last` | Y | Y | yes |
+|  | `histogram_data` | Y | Y | yes |
+|  | `historical_schedule` | Y | Y | yes |
+| Market Depth | `update_mkt_depth` | Y | Y | yes |
+|  | `update_mkt_depth_l2` | Y | Y | yes |
+|  | `mkt_depth_exchanges` | Y | Y | yes |
+| Tick-by-Tick | `tick_by_tick_all_last` | Y | Y | yes |
+|  | `tick_by_tick_bid_ask` | Y | Y | yes |
+|  | `tick_by_tick_mid_point` | Y | Y | yes |
+| Scanner | `scanner_data` | Y | Y | yes |
+|  | `scanner_data_end` | Y | Y | yes |
+|  | `scanner_parameters` | Y | Y | yes |
+| News | `news_providers` | Y | Y | yes |
+|  | `news_article` | Y | Y | yes |
+|  | `historical_news` | Y | Y | yes |
+|  | `historical_news_end` | Y | Y | yes |
+|  | `tick_news` | Y | Y | yes |
+|  | `update_news_bulletin` | Y | Y | yes |
+| Real-Time Bars | `real_time_bar` | Y | Y | yes |
+| Fundamental | `fundamental_data` | Y | Y | yes |
+| Market Rules | `market_rule` | Y | Y | yes |
+| Completed Orders | `completed_order` | Y | Y | yes |
+|  | `completed_orders_end` | Y | Y | yes |
+| Options | `tick_option_computation` | Y | Y | yes |
+|  | `security_definition_option_parameter` | Y | Y | yes |
+|  | `security_definition_option_parameter_end` | Y | Y | yes |
+| Reference | `smart_components` | Y | Y | yes |
+|  | `soft_dollar_tiers` | Y | Y | yes |
+|  | `family_codes` | Y | Y | yes |
+|  | `user_info` | Y | Y | yes |
+| FA | `receive_fa` | Y | Y | yes |
+|  | `replace_fa_end` | Y | Y | yes |
+| Display Groups | `display_group_list` | Y | Y | yes |
+|  | `display_group_updated` | Y | Y | yes |
+| Other | `delta_neutral_validation` | STUB | STUB | yes |
+| WSH | `wsh_meta_data` | Y | Y | yes |
+|  | `wsh_event_data` | Y | Y | yes |
+| Market Data | `reroute_mkt_data_req` | STUB | STUB | yes |
+|  | `reroute_mkt_depth_req` | STUB | STUB | yes |
+|  | `tick_efp` | Y | Y | no |
+| Connection | `verify_message_api` | Y | Y | no |
+|  | `verify_completed` | Y | Y | no |
+|  | `verify_and_auth_message_api` | Y | Y | no |
+|  | `verify_and_auth_completed` | Y | Y | no |
+|  | `win_error` | Y | Y | no |

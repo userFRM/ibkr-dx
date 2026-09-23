@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Write down which wires this client speaks, from the source that speaks them.
 
-A drop-in claim is a claim about messages, not about method names. This reads
-the dispatch tables and the message builders and publishes what they cover, so
-the claim can be checked rather than believed.
+A claim to stand where a gateway stood is a claim about messages, not about
+method names. This reads the dispatch tables and the message builders and
+publishes what they cover, so the claim can be checked rather than believed.
 
 The page carries a completeness claim, so this errs toward failing loudly:
 an unknown constant, an unbalanced block or a dispatch table it cannot find
@@ -37,6 +37,13 @@ TRADING = SHARED | {
     "c": "Security definition request", "d": "Security definition",
     "UT": "Account update", "UM": "Account update", "RL": "Account update",
     "UP": "Position update",
+    # The account's holdings kept apart from its own, and the figures that
+    # describe them: held away at another broker, shown but not held, or
+    # reported apart without a reason stated.
+    "AP": "Position update, held away", "DO": "Position update, shown but not held",
+    "DP": "Position update, reported apart",
+    "AL": "Account update, holdings held away", "UL": "Account update, holdings reported apart",
+    "EB": "End of a batch",
 }
 MARKET_DATA = SHARED | {
     "G": "Tick payload, binary", "L": "Ticker setup", "P": "Tick",
@@ -261,8 +268,8 @@ def main() -> None:
         "",
         "*Auto-generated from source — do not edit.*",
         "",
-        "Which messages this client speaks. A claim to replace the vendor's",
-        "gateway is a claim about messages rather than about method names, so",
+        "Which messages this client speaks. A claim to stand where a gateway",
+        "stood is a claim about messages rather than about method names, so",
         "this is taken from the dispatch tables and the message builders",
         "themselves, and CI regenerates it and fails if it has drifted.",
         "",

@@ -598,7 +598,7 @@ pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str)
 
 #### `cancel_pnl`
 
-Cancel PnL subscription. Nothing withdraws one on this wire, and the engine says so: what stops is the reporting, not the venue.
+Cancel PnL subscription. The updates stop. The venue has no message withdrawing the subscription itself, on a gateway as here, so the updates stopping is what the call does.
 
 ```rust
 pub fn cancel_pnl(&self, req_id: i64)
@@ -1061,7 +1061,7 @@ pub fn req_completed_orders(&self, api_only: bool, wrapper: &mut impl Wrapper)
 
 #### `req_auto_open_orders`
 
-Automatically bind future orders to this client. Bind orders entered elsewhere to this client. Nothing goes to the venue; this is answered locally, setting a property of its own and refusing it for any client but the one those orders bind to. What that property gates does not arise here — this session is told about every order on the account, whether it placed them or not — and this surface names no client, so there is nothing to refuse and nothing left to do. `Wrapper::order_bound` is never fired here, and not because of this call: it follows asking for the open orders, not asking to bind them. The reference architecture partitions an account's orders by the client that placed them, and on being asked for the open ones it claims those that belong to no client for client nought — a control message to the venue, whose answer is what that callback carries. There is no such partition here: every session is told about every order on the account, so there is nothing to claim, and claiming it would change who owns an order at the venue to no end. The permanent id the callback pairs with arrives on the order's status and on its fills. `b_auto_bind` is taken and not applied. Whether it asks to bind or to stop binding, the answer is the same: this session hears about every order on the account either way.
+Automatically bind future orders to this client. What binding asks for is the default here: this session is told about every order on the account, whoever entered it. Nothing goes to the venue. On a gateway, client 0's flag turns binding on or off; here every session is already told about every order, so `b_auto_bind` changes nothing. This surface names no client, so there is no other client to refuse. `Wrapper::order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
 
 ```rust
 pub fn req_auto_open_orders(&self, _b_auto_bind: bool)
@@ -1272,7 +1272,7 @@ pub fn cancel_mkt_depth(&self, req_id: i64) -> Result<(), Refusal>
 
 #### `req_real_time_bars`
 
-Subscribe to real-time 5-second bars. `bar_size` is taken and not applied. The venue's real-time bar is five seconds and there is no field asking for another; the reference client takes the number and sends none either.
+Subscribe to real-time 5-second bars. `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.
 
 ```rust
 pub fn req_real_time_bars( &self, req_id: i64, contract: &Contract, _bar_size: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), Refusal>
@@ -2342,7 +2342,7 @@ pub fn cancel_calculate_option_price(&self, req_id: i64)
 
 #### `query_display_groups`
 
-Query display groups. Not yet implemented. The display groups on offer. Answered on `display_group_list`. A display group is a way for several callers on one session to agree on a contract. Nothing about one crosses this wire, so they are kept here and served to callers from here.
+Query display groups. The display groups on offer. Answered on `display_group_list`. A display group is a way for several callers on one session to agree on a contract. Nothing about one crosses this wire, so they are kept here and served to callers from here.
 
 ```rust
 pub fn query_display_groups(&self, req_id: i64)
@@ -2431,7 +2431,7 @@ pub fn req_family_codes(&self, wrapper: &mut impl Wrapper)
 
 #### `set_server_log_level`
 
-Set server log level. Taken and not applied. The session holds no log level of its own and this protocol carries no message asking the venue to change one, so what a caller states here is written to this client's log and nothing else. This client's own logging is set where the process sets it, through `IBKR_DX_LOG_LEVEL` or `RUST_LOG`.
+Set server log level. 1 to 5 set this client's logger to error, warn, info, debug and trace. A gateway applies the level to its own log; this client, which serves the caller in its place, applies it to the logger it installed. Nothing goes to the venue, which has no message for it. Where the program installed a logger of its own, that logger's level is the program's, and the call says so on the error callback rather than reporting a level it did not set. A level outside 1 to 5 is refused the same way.
 
 ```rust
 pub fn set_server_log_level(&self, log_level: i32)
@@ -3251,7 +3251,7 @@ Every venue's chain has been stated.
 
 #### `delta_neutral_validation`
 
-The contract the venue paired with a delta-neutral order.  The venue states no such pairing on this connection — nothing it sends carries one, under any name — so nothing here fires this. A delta-neutral order is sent and answered like any other; what the reference client reports back on this callback has no message behind it here.
+The contract the venue paired with a delta-neutral order.  A gateway sends it. No message this client receives carries the pairing it reports, under any name, so nothing here fires it. A delta-neutral order is sent and answered like any other.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3264,7 +3264,7 @@ The contract the venue paired with a delta-neutral order.  The venue states no s
 
 #### `reroute_mkt_data_req`
 
-The contract a market-data request should be asked for under instead.  The reference client answers a request on a contract the venue reroutes — a contract for difference standing for a share — with the contract and venue to ask again under. This connection does not reroute: asked to, it says so and serves nothing, so a request that cannot be served is refused in the venue's own words instead.
+The contract a market-data request should be asked for under instead.  A gateway sends it when a request is to be asked for under another contract and venue — a contract for difference standing for a share. Nothing this connection receives has been seen to state one, so nothing here fires it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3304,7 +3304,7 @@ The same, for a request for the book rather than the quote.
 
 #### `verify_message_api`
 
-A step in the handshake a third-party program makes with a terminal before that terminal will carry its requests.  There is no terminal between this client and the venue, so there is no handshake to make and nothing here fires these four.
+A step in the TWS API's verification handshake.  Declared by the TWS API and never fired on a gateway, so these four fire here as they do there: never.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3347,7 +3347,7 @@ Whether that one was accepted.
 
 #### `win_error`
 
-What the reference client reports when its own socket layer fails on Windows.  This client has no such layer: trouble on a connection reaches a caller on the error callback, with the reason the transport gave.
+Declared by the TWS API as `winError`.  No message on the wire carries it, and the TWS API's Python client declares it and never raises it, so it fires here as it does there: never. Here, trouble on a connection reaches a caller on the error callback, with the reason the transport gave.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

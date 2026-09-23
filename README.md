@@ -13,12 +13,12 @@
   <a href="https://github.com/userFRM/ibkr-dx/actions"><img src="https://github.com/userFRM/ibkr-dx/actions/workflows/tests.yml/badge.svg" alt="Build"></a>
   <img src="https://img.shields.io/badge/rust-1.89+-orange.svg" alt="Rust version">
   <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python version">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/userFRM/ibkr-dx/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
   <a href="https://userfrm.github.io/ibkr-dx/"><img src="https://img.shields.io/badge/docs-book-green.svg" alt="Docs"></a>
 </p>
 
 > [!TIP]
-> **Want ib_async's easier API?** [ib_async-dx](https://github.com/userFRM/ib_async-dx) runs it on this engine — the drop-in successor for ib_async.
+> For ib_async, use [ib_async-dx](https://github.com/userFRM/ib_async-dx), which runs it on this engine.
 
 ## Contents
 
@@ -41,10 +41,15 @@ the market-data, trading, historical and security-definition connections, and
 exposes the same API a program would otherwise reach through IB Gateway — with
 no gateway process, JVM, or local socket in between.
 
-The API is source-compatible with the TWS API (`EClient` / `EWrapper`), and the
-same `EClient` answers what the gateway never forwarded — see
-[Beyond the documented API](#beyond-the-documented-api). Migrating an existing
-program changes the connect call:
+The API has the TWS API's shape: `EClient` for requests, and `EWrapper` (in
+Rust, `Wrapper`) for what comes back. Every call and callback on the canonical
+list of the TWS API's requests and callbacks is present on both surfaces — the
+[Capabilities](#capabilities) table counts them from the source — and the same
+`EClient` answers what the gateway never forwarded; see
+[Beyond the documented API](#beyond-the-documented-api).
+
+Moving an existing Python program across changes its imports (`ibapi` becomes
+`ibkr_dx`) and its connect call:
 
 ```diff
 - client.connect("127.0.0.1", 4001, clientId=1)     # requires a running gateway
@@ -52,9 +57,10 @@ program changes the connect call:
 ```
 
 > [!TIP]
-> Everything else in an existing program stays as it is — the same calls, the
-> same callbacks, the same order objects. What changes is the line above and
-> the removal of whatever started the gateway.
+> The calls, callbacks and order objects keep their names and shapes. Where an
+> answer differs from a gateway's, [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html)
+> names the case, and what a gateway answers the same way is under
+> [Venue behaviour](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html).
 
 ## Why this exists
 
@@ -73,7 +79,7 @@ That arrangement costs you four things:
    depends on is wedged, and the two do not agree about it.
 3. **A ceiling.** The heap is finite and bulk historical data is what finds the
    edge of it.
-4. **A narrower view than the terminal's.** The gateway receives far more from
+4. **A narrower view than the venue gives.** The gateway receives far more from
    the venue than it forwards. Whatever has no message in the documented API
    simply never reaches you.
 
@@ -85,33 +91,40 @@ the gateway kept to itself is reachable too.
 ### What this removes
 
 * **The gateway process** — nothing to install, launch, log into, or restart
-* **The JVM** — no heap to size, no crash on bulk data
+* **The JVM** — no Java runtime to install, and no heap to size
 * **The localhost socket** — ticks are delivered in-process
 * **The window** — runs headless, in a container, over ssh
 
 ### Requirements
 
 * An Interactive Brokers account, paper or live
-* Rust 1.89+ for the Rust client
+* Rust 1.89+, which both install routes build with
 * Python 3.11+ for the bindings
 
 No IB software is required. The `ibapi` package is not needed either.
 
 > [!IMPORTANT]
 > A live login enters the venue's second-factor approval, which waits on a
-> device. Paper logins do not. One session per login: opening a second takes
-> the first away, and the venue says which host took it.
+> device. Paper logins do not. Each program opens its own session, and a login
+> holds one session at a time: a second program on the same login takes the
+> first one's session, and the venue names the host that took it. Give each
+> program that runs at the same time a login of its own.
 
 ## Installation
+
+Both routes build from the repository.
 
 ### Python
 
 ```bash
-uv venv .venv --python 3.13
-source .venv/bin/activate          # .venv\Scripts\activate on Windows
-pip install maturin
-maturin develop --features python
+pip install "git+https://github.com/userFRM/ibkr-dx"
 ```
+
+The package imports as `ibkr_dx`. pip compiles the extension, which needs a
+Rust toolchain at 1.89 or newer and, on Linux, the OpenSSL headers and
+`pkg-config` (`libssl-dev` on Debian and Ubuntu, `openssl-devel` on Fedora and
+RHEL). It builds for CPython 3.11 to 3.14 and the free-threaded 3.14t; the
+free-threaded 3.13t is not supported.
 
 ### Rust
 
@@ -120,10 +133,26 @@ maturin develop --features python
 ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx" }
 ```
 
-> [!NOTE]
-> Wheels are built for Linux, macOS and Windows; the workflow builds and tests
-> on all three. Rust 1.89+ and Python 3.11+ are the floors, and the Python
-> bindings are a compiled extension rather than a pure-Python package.
+The Rust client needs no feature turned on. Rust 1.89 is the minimum supported
+version (`rust-version`), and on Linux the build needs the OpenSSL headers and
+`pkg-config` as above.
+
+### From the source
+
+For working on the client itself:
+
+```bash
+git clone https://github.com/userFRM/ibkr-dx
+cd ibkr-dx
+uv venv .venv
+source .venv/bin/activate          # .venv\Scripts\activate on Windows
+uv pip install maturin
+maturin develop
+```
+
+`pyproject.toml` names the features the extension is built with, so
+`maturin develop` needs none. A Rust program can depend on the checkout with
+`ibkr-dx = { path = "../ibkr-dx" }`.
 
 ## Quick start
 
@@ -156,6 +185,13 @@ time.sleep(5)
 client.cancel_mkt_data(1)
 client.disconnect()
 ```
+
+Callbacks arrive on the thread that runs `client.run()`, or on the one that
+calls `client.poll()`. The three that
+`connect()` announces — `connect_ack`, `managed_accounts` and `next_valid_id` —
+are fired on the calling thread before it returns. In Rust, `process_msgs`
+delivers callbacks on the thread that calls it, and a call that takes the
+wrapper as an argument answers on it before returning.
 
 In Rust:
 
@@ -190,9 +226,10 @@ println!("{} bars, preview {}", bars.len(), preview.status);
 
 client.req_mkt_data(1, &spy, "", false, false)?;
 std::thread::sleep(std::time::Duration::from_secs(2));
-if let Some(instrument) = client.instrument_of(spy.con_id) {
-    let quote = client.shared_state().market.quote(instrument);
-    println!("bid {} ask {}", quote.bid, quote.ask);
+if let Some(quote) = client.quote(1) {
+    // Prices are held as integers scaled by `PRICE_SCALE`.
+    let scale = ibkr_dx::types::PRICE_SCALE as f64;
+    println!("bid {:.2} ask {:.2}", quote.bid as f64 / scale, quote.ask as f64 / scale);
 }
 
 client.disconnect();
@@ -230,9 +267,8 @@ client.company_data(265598, 705)
 ```
 
 > [!TIP]
-> The float is the example worth giving. It is not derived from anything — the
-> venue states it outright on a series the documented API never named, and it
-> matched a terminal's own figure to the share.
+> The float is the example worth giving: the venue states it outright, to the
+> share, on a series the documented API never named.
 
 ### Where a contract's volatility stands against its own past
 
@@ -274,7 +310,7 @@ client.stated_figures(1, 407)    # four margin figures for a future
 > share, the price itself. That is the kind of check every reader here is held
 > to — a figure is only claimed once the wire agrees with it.
 
-### The option model the terminal sees
+### The option model the venue states
 
 `tick_option_computation` carries what the documented API names. The venue states
 more on the same record, and it is all here: **rho**, **fugit**, the exercise
@@ -300,14 +336,21 @@ for s in client.scanned_strategies(1):
 The same fields in Rust:
 
 ```rust
+let aapl = client.qualify_contract(&Contract {
+    symbol: "AAPL".into(),
+    sec_type: "STK".into(),
+    exchange: "SMART".into(),
+    currency: "USD".into(),
+    ..Default::default()
+})?;
 let scan = ibkr_dx::types::SpreadScan {
-    version: 6, request: 0, under_con_id: 265598,
+    version: 6, under_con_id: aapl.con_id,
     account: "DU1234567".into(), min_delta: Some(0.25),
     ..Default::default()
 };
 client.req_spread_scan(1, &aapl, &scan)?;
 for s in client.scanned_strategies(1) {
-    (s.legs, s.figures, s.break_evens);
+    println!("{:?} {:?} {:?}", s.legs, s.figures, s.break_evens);
 }
 ```
 
@@ -326,41 +369,34 @@ The full list, with what each returns, is in
 
 > [!TIP]
 > The calls under [Beyond the canonical list](#beyond-the-canonical-list) are
-> the point of this client, not a shortfall in it. The venue states all of it on
-> an ordinary session and the documented API never gave it a message, so a
-> program had no way to ask — a contract's float, where its volatility stands
-> against its own year, what margin it takes, five years of its price with the
-> date of each point. They are reached here the way every other call is.
->
-> The one thing to know is that the door only opens one way: **a program can
-> move to this client without changing a line, but a program that then calls one
-> of these cannot move back to a gateway**, because a gateway has no message to
-> carry it. Nothing else about it is different — the extras are named under
-> [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) so that the
-> trade is visible before it is made.
+> the point of this client. The venue states all of it on an ordinary session
+> and the documented API never gave it a message, so a program had no way to
+> ask — a contract's float, where its volatility stands against its own year,
+> what margin it takes, five years of its price with the date of each point.
+> They are reached here the way every other call is.
 
 <!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->
 
 ## Capabilities
 
-One row per capability, one column per client — every one of the 78 calls and 90 callbacks the documented API names, read from each client rather than recalled.
+One row per capability, one column per client — every one of the 80 calls and 90 callbacks on the canonical list of the TWS API's requests and callbacks, read from each client rather than recalled.
 
-| Client | Calls carried | Callbacks carried | |
+| Client | Calls | Callbacks | |
 | --- | ---: | ---: | --- |
-| TWS API | 78 / 78 | 90 / 90 | nothing missing |
-| ibapi | 73 / 78 | 85 / 90 | 5 absent, 5 callbacks absent |
-| ib_async | 77 / 78 | 78 / 90 | 1 absent, 12 callbacks absent |
-| **ibkr-dx Rust** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
-| **ibkr-dx Python** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
+| TWS API | 80 / 80 | 90 / 90 | nothing missing |
+| ibapi | 73 / 80 | 85 / 90 | 7 absent, 5 callbacks absent |
+| ib_async | 79 / 80 | 78 / 90 | 1 absent, 12 callbacks absent |
+| **ibkr-dx Rust** | **80 / 80** | **87 / 90** | 3 callbacks declared, not fired |
+| **ibkr-dx Python** | **80 / 80** | **87 / 90** | 3 callbacks declared, not fired |
 
-**Nothing on that list is absent here.** 9 exist and never fire, because the venue states nothing on this connection for them to carry: there is no terminal between this client and the venue to make a verification handshake with, no socket layer of the reference client's own to report an error from, this connection does not reroute a request to another contract, and neither an exchange-for-physical quote nor a delta-neutral pairing is stated on it — a share, a fund and two futures were read together and the venue stated fifteen kinds of tick, none of them those. Each says so where it is declared, so a program that implements one still compiles and runs. Everything else is carried.
+**Every call and callback on that list is present on both surfaces.** 3 callbacks are declared and not fired: nothing this connection receives has been seen to state a reroute to another contract, or a delta-neutral pairing. Each says so where it is declared, so a program that implements one still compiles and runs. 6 more are declared by the TWS API and never fire on a gateway — the four steps of the verification handshake, the exchange-for-physical quote, and `win_error`, which no message on the wire carries — so they fire here exactly as often as there: never.
 
-**And 81 more beyond that list.** The connection a terminal opens carries more than the documented calls describe — what the venue permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and a client that speaks that connection can answer them. Most have no call in the documented API at all; a few are one a reference client happens to name too, and the table below marks which is which, under *Beyond the canonical list*.
+**And 82 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
 <details>
-<summary><b>The whole table — every call, every callback, and what the gateway connection carries beyond them</b></summary>
+<summary><b>The whole table — every call, every callback, and the calls beyond them</b></summary>
 
 
 One row per capability, one column per client. This client exists to be
@@ -368,25 +404,31 @@ put where a gateway was, so the question is not what it can do but
 whether anything you already use is missing — which is a question about
 the columns, not about the rows.
 
-**Every row is something the gateway connection carries.** Most of them
-the documented API names too, and those are the rows a port has to
-match. The last table is the rest: what that connection carries and the
-documented API never named — the terminal reads it, so it is on the
-wire, and a client that speaks the wire can answer it.
+The first two tables are the canonical list of the TWS API's calls and
+callbacks, which are the rows a port has to match. The last is what this
+client answers beyond them.
+
+Presence and behaviour are marked apart. A reference client's mark says a
+method exists, read by importing the package and listing its methods;
+it says nothing about what the method does. This client's mark says what
+the call does, and the evidence column says how that was established.
 
 | Mark | Meaning |
 | :---: | --- |
-| ● | Carried: the call exists and does what it says |
-| ◐ | Taken and not applied: the call exists and reports why it cannot be served, rather than failing to exist |
-| · | Absent: no such call |
+| ● | Present. For ibkr-dx, also served: a call does what it names; a callback is fired whenever what it reports arrives |
+| ◐ | Present and not served: a call reports why on the error callback; a callback is declared and not fired here, although a gateway sends it |
+| · | Absent |
 
 Each column is read from the client it names, on the machine that
 generated this page:
 
-- **Gateway wire** — the connection a terminal opens. Every row is something it carries: either the documented API names it, or this client was written after reading it off that connection.
-- **TWS API** — the documented surface, as this repository generates it from source. Where this column is empty and the one beside it is not, the connection carries something the documented API never named.
+- **TWS API** — the canonical list this repository keeps of the TWS API's requests and callbacks, in `scripts/gen_api_docs.py`. Beyond that list, a call is marked here where the TWS API's own client, or ib_async's transport, has a method by that name; a helper of ib_async's facade is not.
 - **ibapi** — IBKR's own Python client, version `9.81.1-1`, imported and enumerated. This is the copy published to PyPI; the version IBKR distributes directly is numbered 10.x and names calls this one predates, so a gap in this column is a gap in the copy that was read and not necessarily in the client you have.
 - **ib_async** — version `2.1.0`, imported and enumerated across both the transport and the facade, because it carries some calls on one and some on the other.
+- **ibkr-dx Rust** and **ibkr-dx Python** — this client's two surfaces, from the coverage matrix `scripts/gen_api_docs.py` generates from the source. A mark here says what the call does, not only that it exists.
+- **Evidence** — how this client's status for a call was established: named by a suite that opens a session, named only by the offline suites, or not named by a test.
+- **Fires on a gateway** — whether the callback fires at all for a program on a gateway. The TWS API declares six that never do.
+- **Answered from** — beyond the canonical list, whether a call asks the venue or reads what it stated, or answers from this client itself: its own state, a measurement it takes, or a helper.
 
 A client that is not installed is left out of the table rather than
 filled in from memory. A mark here is a thing that was read.
@@ -395,298 +437,299 @@ filled in from memory. A mark here is a thing that was read.
 
 What a program asks the venue for.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
+| Category | Call | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python | Evidence |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Connection | `connect` | ● | ● | ● | ● | ● | ● |
-|  | `disconnect` | ● | ● | ● | ● | ● | ● |
-|  | `is_connected` | ● | ● | ● | ● | ● | ● |
-|  | `set_server_log_level` | ● | ● | ● | ● | ● | ● |
-|  | `req_current_time` | ● | ● | ● | ● | ● | ● |
-|  | `req_current_time_in_millis` | ● | ● | · | · | ● | ● |
-| Market Data | `req_mkt_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_mkt_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_market_data_type` | ● | ● | ● | ● | ● | ● |
-|  | `req_tick_by_tick_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_tick_by_tick_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_mkt_depth` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_mkt_depth` | ● | ● | ● | ● | ● | ● |
-|  | `req_mkt_depth_exchanges` | ● | ● | ● | ● | ● | ● |
-|  | `req_smart_components` | ● | ● | ● | ● | ● | ● |
-|  | `req_real_time_bars` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_real_time_bars` | ● | ● | ● | ● | ● | ● |
-| Historical Data | `req_historical_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_historical_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_head_time_stamp` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_head_time_stamp` | ● | ● | ● | ● | ● | ● |
-|  | `req_historical_ticks` | ● | ● | ● | ● | ● | ● |
-|  | `req_histogram_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_histogram_data` | ● | ● | ● | ● | ● | ● |
-|  | `req_historical_schedule` | ● | ● | · | ● | ● | ● |
-| Orders | `place_order` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_order` | ● | ● | ● | ● | ● | ● |
-|  | `req_open_orders` | ● | ● | ● | ● | ● | ● |
-|  | `req_all_open_orders` | ● | ● | ● | ● | ● | ● |
-|  | `req_auto_open_orders` | ● | ● | ● | ● | ● | ● |
-|  | `req_ids` | ● | ● | ● | ● | ● | ● |
-|  | `req_global_cancel` | ● | ● | ● | ● | ● | ● |
-|  | `req_completed_orders` | ● | ● | ● | ● | ● | ● |
-| Executions | `req_executions` | ● | ● | ● | ● | ● | ● |
-| Account | `req_account_updates` | ● | ● | ● | ● | ● | ● |
-|  | `req_account_summary` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_account_summary` | ● | ● | ● | ● | ● | ● |
-|  | `req_positions` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_positions` | ● | ● | ● | ● | ● | ● |
-|  | `req_pnl` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_pnl` | ● | ● | ● | ● | ● | ● |
-|  | `req_pnl_single` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_pnl_single` | ● | ● | ● | ● | ● | ● |
-|  | `req_managed_accts` | ● | ● | ● | ● | ● | ● |
-|  | `req_account_updates_multi` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_account_updates_multi` | ● | ● | ● | ● | ● | ● |
-|  | `req_positions_multi` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_positions_multi` | ● | ● | ● | ● | ● | ● |
-| Contract | `req_contract_details` | ● | ● | ● | ● | ● | ● |
-|  | `req_matching_symbols` | ● | ● | ● | ● | ● | ● |
-|  | `req_market_rule` | ● | ● | ● | ● | ● | ● |
-| Scanner | `req_scanner_parameters` | ● | ● | ● | ● | ● | ● |
-|  | `req_scanner_subscription` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_scanner_subscription` | ● | ● | ● | ● | ● | ● |
-| News | `req_news_providers` | ● | ● | ● | ● | ● | ● |
-|  | `req_news_article` | ● | ● | ● | ● | ● | ● |
-|  | `req_historical_news` | ● | ● | ● | ● | ● | ● |
-|  | `req_news_bulletins` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_news_bulletins` | ● | ● | ● | ● | ● | ● |
-| Fundamental | `req_fundamental_data` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_fundamental_data` | ● | ● | ● | ● | ● | ● |
-| Options | `calculate_implied_volatility` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_calculate_implied_volatility` | ● | ● | ● | ● | ● | ● |
-|  | `calculate_option_price` | ● | ● | ● | ● | ● | ● |
-|  | `cancel_calculate_option_price` | ● | ● | ● | ● | ● | ● |
-|  | `exercise_options` | ● | ● | ● | ● | ● | ● |
-|  | `req_sec_def_opt_params` | ● | ● | ● | ● | ● | ● |
-| Reference | `req_soft_dollar_tiers` | ● | ● | ● | ● | ● | ● |
-|  | `req_family_codes` | ● | ● | ● | ● | ● | ● |
-|  | `req_user_info` | ● | ● | · | ● | ● | ● |
-| Financial Advisor | `request_fa` | ● | ● | ● | ● | ● | ● |
-|  | `replace_fa` | ● | ● | ● | ● | ● | ● |
-| Display Groups | `query_display_groups` | ● | ● | ● | ● | ● | ● |
-|  | `subscribe_to_group_events` | ● | ● | ● | ● | ● | ● |
-|  | `unsubscribe_from_group_events` | ● | ● | ● | ● | ● | ● |
-|  | `update_display_group` | ● | ● | ● | ● | ● | ● |
-| WSH | `req_wsh_meta_data` | ● | ● | · | ● | ● | ● |
-|  | `req_wsh_event_data` | ● | ● | · | ● | ● | ● |
+| Connection | `connect` | ● | ● | ● | ● | ● | Live session |
+|  | `disconnect` | ● | ● | ● | ● | ● | Live session |
+|  | `is_connected` | ● | ● | ● | ● | ● | Live session |
+|  | `set_server_log_level` | ● | ● | ● | ● | ● | Live session |
+|  | `req_current_time` | ● | ● | ● | ● | ● | Live session |
+|  | `req_current_time_in_millis` | ● | · | · | ● | ● | Live session |
+| Market Data | `req_mkt_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_mkt_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_market_data_type` | ● | ● | ● | ● | ● | Live session |
+|  | `req_tick_by_tick_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_tick_by_tick_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_mkt_depth` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_mkt_depth` | ● | ● | ● | ● | ● | Live session |
+|  | `req_mkt_depth_exchanges` | ● | ● | ● | ● | ● | Live session |
+|  | `req_smart_components` | ● | ● | ● | ● | ● | Live session |
+|  | `req_real_time_bars` | ● | ● | ● | ● | ● | Offline suites |
+|  | `cancel_real_time_bars` | ● | ● | ● | ● | ● | Live session |
+| Historical Data | `req_historical_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_historical_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_head_time_stamp` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_head_time_stamp` | ● | ● | ● | ● | ● | Live session |
+|  | `req_historical_ticks` | ● | ● | ● | ● | ● | Live session |
+|  | `req_histogram_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_histogram_data` | ● | ● | ● | ● | ● | Live session |
+|  | `req_historical_schedule` | ● | · | ● | ● | ● | Live session |
+| Orders | `place_order` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_order` | ● | ● | ● | ● | ● | Live session |
+|  | `req_open_orders` | ● | ● | ● | ● | ● | Live session |
+|  | `req_all_open_orders` | ● | ● | ● | ● | ● | Live session |
+|  | `req_auto_open_orders` | ● | ● | ● | ● | ● | Live session |
+|  | `req_ids` | ● | ● | ● | ● | ● | Live session |
+|  | `req_global_cancel` | ● | ● | ● | ● | ● | Live session |
+|  | `req_completed_orders` | ● | ● | ● | ● | ● | Live session |
+| Executions | `req_executions` | ● | ● | ● | ● | ● | Live session |
+| Account | `req_account_updates` | ● | ● | ● | ● | ● | Live session |
+|  | `req_account_summary` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_account_summary` | ● | ● | ● | ● | ● | Live session |
+|  | `req_positions` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_positions` | ● | ● | ● | ● | ● | Live session |
+|  | `req_pnl` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_pnl` | ● | ● | ● | ● | ● | Live session |
+|  | `req_pnl_single` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_pnl_single` | ● | ● | ● | ● | ● | Live session |
+|  | `req_managed_accts` | ● | ● | ● | ● | ● | Live session |
+|  | `req_account_updates_multi` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_account_updates_multi` | ● | ● | ● | ● | ● | Live session |
+|  | `req_positions_multi` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_positions_multi` | ● | ● | ● | ● | ● | Live session |
+| Contract | `req_contract_details` | ● | ● | ● | ● | ● | Live session |
+|  | `req_matching_symbols` | ● | ● | ● | ● | ● | Live session |
+|  | `req_market_rule` | ● | ● | ● | ● | ● | Live session |
+| Scanner | `req_scanner_parameters` | ● | ● | ● | ● | ● | Live session |
+|  | `req_scanner_subscription` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_scanner_subscription` | ● | ● | ● | ● | ● | Live session |
+| News | `req_news_providers` | ● | ● | ● | ● | ● | Live session |
+|  | `req_news_article` | ● | ● | ● | ● | ● | Live session |
+|  | `req_historical_news` | ● | ● | ● | ● | ● | Live session |
+|  | `req_news_bulletins` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_news_bulletins` | ● | ● | ● | ● | ● | Live session |
+| Fundamental | `req_fundamental_data` | ● | ● | ● | ● | ● | Live session |
+|  | `cancel_fundamental_data` | ● | ● | ● | ● | ● | Live session |
+| Options | `calculate_implied_volatility` | ● | ● | ● | ● | ● | Offline suites |
+|  | `cancel_calculate_implied_volatility` | ● | ● | ● | ● | ● | Offline suites |
+|  | `calculate_option_price` | ● | ● | ● | ● | ● | Offline suites |
+|  | `cancel_calculate_option_price` | ● | ● | ● | ● | ● | Offline suites |
+|  | `exercise_options` | ● | ● | ● | ● | ● | Offline suites |
+|  | `req_sec_def_opt_params` | ● | ● | ● | ● | ● | Live session |
+| Reference | `req_soft_dollar_tiers` | ● | ● | ● | ● | ● | Live session |
+|  | `req_family_codes` | ● | ● | ● | ● | ● | Live session |
+|  | `req_user_info` | ● | · | ● | ● | ● | Live session |
+| Financial Advisor | `request_fa` | ● | ● | ● | ● | ● | Offline suites |
+|  | `replace_fa` | ● | ● | ● | ● | ● | Offline suites |
+| Display Groups | `query_display_groups` | ● | ● | ● | ● | ● | Live session |
+|  | `subscribe_to_group_events` | ● | ● | ● | ● | ● | Live session |
+|  | `unsubscribe_from_group_events` | ● | ● | ● | ● | ● | Live session |
+|  | `update_display_group` | ● | ● | ● | ● | ● | Live session |
+| WSH | `req_wsh_meta_data` | ● | · | ● | ● | ● | Offline suites |
+|  | `cancel_wsh_meta_data` | ● | · | ● | ● | ● | Offline suites |
+|  | `req_wsh_event_data` | ● | · | ● | ● | ● | Offline suites |
+|  | `cancel_wsh_event_data` | ● | · | ● | ● | ● | Offline suites |
 
 ## Callbacks
 
 What the venue says back. `ib_async` delivers these as events as well as methods, so a mark here says the method exists on its wrapper, not that the information is unavailable by another route.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
+| Category | Call | TWS API | Fires on a gateway | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Connection | `connect_ack` | ● | ● | ● | ● | ● | ● |
-|  | `connection_closed` | ● | ● | ● | ● | ● | ● |
-|  | `next_valid_id` | ● | ● | ● | ● | ● | ● |
-|  | `managed_accounts` | ● | ● | ● | ● | ● | ● |
-|  | `error` | ● | ● | ● | ● | ● | ● |
-|  | `current_time` | ● | ● | ● | ● | ● | ● |
-|  | `current_time_in_millis` | ● | ● | · | · | ● | ● |
-| Market Data | `tick_price` | ● | ● | ● | · | ● | ● |
-|  | `tick_size` | ● | ● | ● | ● | ● | ● |
-|  | `tick_string` | ● | ● | ● | ● | ● | ● |
-|  | `tick_generic` | ● | ● | ● | ● | ● | ● |
-|  | `tick_snapshot_end` | ● | ● | ● | ● | ● | ● |
-|  | `market_data_type` | ● | ● | ● | ● | ● | ● |
-|  | `tick_req_params` | ● | ● | ● | ● | ● | ● |
-| Orders | `order_status` | ● | ● | ● | ● | ● | ● |
-|  | `open_order` | ● | ● | ● | ● | ● | ● |
-|  | `open_order_end` | ● | ● | ● | ● | ● | ● |
-|  | `order_bound` | ● | ● | ● | ● | ● | ● |
-| Executions | `exec_details` | ● | ● | ● | ● | ● | ● |
-|  | `exec_details_end` | ● | ● | ● | ● | ● | ● |
-|  | `commission_and_fees_report` | ● | ● | ● | ● | ● | ● |
-| Account | `update_account_value` | ● | ● | ● | ● | ● | ● |
-|  | `update_portfolio` | ● | ● | ● | ● | ● | ● |
-|  | `update_account_time` | ● | ● | ● | ● | ● | ● |
-|  | `account_download_end` | ● | ● | ● | ● | ● | ● |
-|  | `account_summary` | ● | ● | ● | ● | ● | ● |
-|  | `account_summary_end` | ● | ● | ● | ● | ● | ● |
-|  | `position` | ● | ● | ● | ● | ● | ● |
-|  | `position_end` | ● | ● | ● | ● | ● | ● |
-|  | `pnl` | ● | ● | ● | ● | ● | ● |
-|  | `pnl_single` | ● | ● | ● | ● | ● | ● |
-|  | `position_multi` | ● | ● | ● | ● | ● | ● |
-|  | `position_multi_end` | ● | ● | ● | ● | ● | ● |
-|  | `account_update_multi` | ● | ● | ● | ● | ● | ● |
-|  | `account_update_multi_end` | ● | ● | ● | ● | ● | ● |
-| Contract | `contract_details` | ● | ● | ● | ● | ● | ● |
-|  | `contract_details_end` | ● | ● | ● | ● | ● | ● |
-|  | `bond_contract_details` | ● | ● | ● | ● | ● | ● |
-|  | `symbol_samples` | ● | ● | ● | ● | ● | ● |
-| Historical Data | `historical_data` | ● | ● | ● | ● | ● | ● |
-|  | `historical_data_end` | ● | ● | ● | ● | ● | ● |
-|  | `historical_data_update` | ● | ● | ● | ● | ● | ● |
-|  | `head_timestamp` | ● | ● | ● | ● | ● | ● |
-|  | `historical_ticks` | ● | ● | ● | ● | ● | ● |
-|  | `historical_ticks_bid_ask` | ● | ● | ● | ● | ● | ● |
-|  | `historical_ticks_last` | ● | ● | ● | ● | ● | ● |
-|  | `histogram_data` | ● | ● | ● | ● | ● | ● |
-|  | `historical_schedule` | ● | ● | · | ● | ● | ● |
-| Market Depth | `update_mkt_depth` | ● | ● | ● | ● | ● | ● |
-|  | `update_mkt_depth_l2` | ● | ● | ● | ● | ● | ● |
-|  | `mkt_depth_exchanges` | ● | ● | ● | ● | ● | ● |
-| Tick-by-Tick | `tick_by_tick_all_last` | ● | ● | ● | ● | ● | ● |
-|  | `tick_by_tick_bid_ask` | ● | ● | ● | ● | ● | ● |
-|  | `tick_by_tick_mid_point` | ● | ● | ● | ● | ● | ● |
-| Scanner | `scanner_data` | ● | ● | ● | ● | ● | ● |
-|  | `scanner_data_end` | ● | ● | ● | ● | ● | ● |
-|  | `scanner_parameters` | ● | ● | ● | ● | ● | ● |
-| News | `news_providers` | ● | ● | ● | ● | ● | ● |
-|  | `news_article` | ● | ● | ● | ● | ● | ● |
-|  | `historical_news` | ● | ● | ● | ● | ● | ● |
-|  | `historical_news_end` | ● | ● | ● | ● | ● | ● |
-|  | `tick_news` | ● | ● | ● | ● | ● | ● |
-|  | `update_news_bulletin` | ● | ● | ● | ● | ● | ● |
-| Real-Time Bars | `real_time_bar` | ● | ● | ● | ● | ● | ● |
-| Fundamental | `fundamental_data` | ● | ● | ● | ● | ● | ● |
-| Market Rules | `market_rule` | ● | ● | ● | ● | ● | ● |
-| Completed Orders | `completed_order` | ● | ● | ● | ● | ● | ● |
-|  | `completed_orders_end` | ● | ● | ● | ● | ● | ● |
-| Options | `tick_option_computation` | ● | ● | ● | ● | ● | ● |
-|  | `security_definition_option_parameter` | ● | ● | ● | ● | ● | ● |
-|  | `security_definition_option_parameter_end` | ● | ● | ● | ● | ● | ● |
-| Reference | `smart_components` | ● | ● | ● | ● | ● | ● |
-|  | `soft_dollar_tiers` | ● | ● | ● | ● | ● | ● |
-|  | `family_codes` | ● | ● | ● | ● | ● | ● |
-|  | `user_info` | ● | ● | · | ● | ● | ● |
-| FA | `receive_fa` | ● | ● | ● | ● | ● | ● |
-|  | `replace_fa_end` | ● | ● | ● | · | ● | ● |
-| Display Groups | `display_group_list` | ● | ● | ● | · | ● | ● |
-|  | `display_group_updated` | ● | ● | ● | · | ● | ● |
-| Other | `delta_neutral_validation` | ● | ● | ● | ● | ◐ | ◐ |
-| WSH | `wsh_meta_data` | ● | ● | · | ● | ● | ● |
-|  | `wsh_event_data` | ● | ● | · | ● | ● | ● |
-| Market Data | `reroute_mkt_data_req` | ● | ● | ● | · | ◐ | ◐ |
-|  | `reroute_mkt_depth_req` | ● | ● | ● | · | ◐ | ◐ |
-|  | `tick_efp` | ● | ● | ● | ● | ◐ | ◐ |
-| Connection | `verify_message_api` | ● | ● | ● | · | ◐ | ◐ |
-|  | `verify_completed` | ● | ● | ● | · | ◐ | ◐ |
-|  | `verify_and_auth_message_api` | ● | ● | ● | · | ◐ | ◐ |
-|  | `verify_and_auth_completed` | ● | ● | ● | · | ◐ | ◐ |
-|  | `win_error` | ● | ● | ● | · | ◐ | ◐ |
+| Connection | `connect_ack` | ● | yes | ● | ● | ● | ● |
+|  | `connection_closed` | ● | yes | ● | ● | ● | ● |
+|  | `next_valid_id` | ● | yes | ● | ● | ● | ● |
+|  | `managed_accounts` | ● | yes | ● | ● | ● | ● |
+|  | `error` | ● | yes | ● | ● | ● | ● |
+|  | `current_time` | ● | yes | ● | ● | ● | ● |
+|  | `current_time_in_millis` | ● | yes | · | · | ● | ● |
+| Market Data | `tick_price` | ● | yes | ● | · | ● | ● |
+|  | `tick_size` | ● | yes | ● | ● | ● | ● |
+|  | `tick_string` | ● | yes | ● | ● | ● | ● |
+|  | `tick_generic` | ● | yes | ● | ● | ● | ● |
+|  | `tick_snapshot_end` | ● | yes | ● | ● | ● | ● |
+|  | `market_data_type` | ● | yes | ● | ● | ● | ● |
+|  | `tick_req_params` | ● | yes | ● | ● | ● | ● |
+| Orders | `order_status` | ● | yes | ● | ● | ● | ● |
+|  | `open_order` | ● | yes | ● | ● | ● | ● |
+|  | `open_order_end` | ● | yes | ● | ● | ● | ● |
+|  | `order_bound` | ● | yes | ● | ● | ● | ● |
+| Executions | `exec_details` | ● | yes | ● | ● | ● | ● |
+|  | `exec_details_end` | ● | yes | ● | ● | ● | ● |
+|  | `commission_and_fees_report` | ● | yes | ● | ● | ● | ● |
+| Account | `update_account_value` | ● | yes | ● | ● | ● | ● |
+|  | `update_portfolio` | ● | yes | ● | ● | ● | ● |
+|  | `update_account_time` | ● | yes | ● | ● | ● | ● |
+|  | `account_download_end` | ● | yes | ● | ● | ● | ● |
+|  | `account_summary` | ● | yes | ● | ● | ● | ● |
+|  | `account_summary_end` | ● | yes | ● | ● | ● | ● |
+|  | `position` | ● | yes | ● | ● | ● | ● |
+|  | `position_end` | ● | yes | ● | ● | ● | ● |
+|  | `pnl` | ● | yes | ● | ● | ● | ● |
+|  | `pnl_single` | ● | yes | ● | ● | ● | ● |
+|  | `position_multi` | ● | yes | ● | ● | ● | ● |
+|  | `position_multi_end` | ● | yes | ● | ● | ● | ● |
+|  | `account_update_multi` | ● | yes | ● | ● | ● | ● |
+|  | `account_update_multi_end` | ● | yes | ● | ● | ● | ● |
+| Contract | `contract_details` | ● | yes | ● | ● | ● | ● |
+|  | `contract_details_end` | ● | yes | ● | ● | ● | ● |
+|  | `bond_contract_details` | ● | yes | ● | ● | ● | ● |
+|  | `symbol_samples` | ● | yes | ● | ● | ● | ● |
+| Historical Data | `historical_data` | ● | yes | ● | ● | ● | ● |
+|  | `historical_data_end` | ● | yes | ● | ● | ● | ● |
+|  | `historical_data_update` | ● | yes | ● | ● | ● | ● |
+|  | `head_timestamp` | ● | yes | ● | ● | ● | ● |
+|  | `historical_ticks` | ● | yes | ● | ● | ● | ● |
+|  | `historical_ticks_bid_ask` | ● | yes | ● | ● | ● | ● |
+|  | `historical_ticks_last` | ● | yes | ● | ● | ● | ● |
+|  | `histogram_data` | ● | yes | ● | ● | ● | ● |
+|  | `historical_schedule` | ● | yes | · | ● | ● | ● |
+| Market Depth | `update_mkt_depth` | ● | yes | ● | ● | ● | ● |
+|  | `update_mkt_depth_l2` | ● | yes | ● | ● | ● | ● |
+|  | `mkt_depth_exchanges` | ● | yes | ● | ● | ● | ● |
+| Tick-by-Tick | `tick_by_tick_all_last` | ● | yes | ● | ● | ● | ● |
+|  | `tick_by_tick_bid_ask` | ● | yes | ● | ● | ● | ● |
+|  | `tick_by_tick_mid_point` | ● | yes | ● | ● | ● | ● |
+| Scanner | `scanner_data` | ● | yes | ● | ● | ● | ● |
+|  | `scanner_data_end` | ● | yes | ● | ● | ● | ● |
+|  | `scanner_parameters` | ● | yes | ● | ● | ● | ● |
+| News | `news_providers` | ● | yes | ● | ● | ● | ● |
+|  | `news_article` | ● | yes | ● | ● | ● | ● |
+|  | `historical_news` | ● | yes | ● | ● | ● | ● |
+|  | `historical_news_end` | ● | yes | ● | ● | ● | ● |
+|  | `tick_news` | ● | yes | ● | ● | ● | ● |
+|  | `update_news_bulletin` | ● | yes | ● | ● | ● | ● |
+| Real-Time Bars | `real_time_bar` | ● | yes | ● | ● | ● | ● |
+| Fundamental | `fundamental_data` | ● | yes | ● | ● | ● | ● |
+| Market Rules | `market_rule` | ● | yes | ● | ● | ● | ● |
+| Completed Orders | `completed_order` | ● | yes | ● | ● | ● | ● |
+|  | `completed_orders_end` | ● | yes | ● | ● | ● | ● |
+| Options | `tick_option_computation` | ● | yes | ● | ● | ● | ● |
+|  | `security_definition_option_parameter` | ● | yes | ● | ● | ● | ● |
+|  | `security_definition_option_parameter_end` | ● | yes | ● | ● | ● | ● |
+| Reference | `smart_components` | ● | yes | ● | ● | ● | ● |
+|  | `soft_dollar_tiers` | ● | yes | ● | ● | ● | ● |
+|  | `family_codes` | ● | yes | ● | ● | ● | ● |
+|  | `user_info` | ● | yes | · | ● | ● | ● |
+| FA | `receive_fa` | ● | yes | ● | ● | ● | ● |
+|  | `replace_fa_end` | ● | yes | ● | · | ● | ● |
+| Display Groups | `display_group_list` | ● | yes | ● | · | ● | ● |
+|  | `display_group_updated` | ● | yes | ● | · | ● | ● |
+| Other | `delta_neutral_validation` | ● | yes | ● | ● | ◐ | ◐ |
+| WSH | `wsh_meta_data` | ● | yes | · | ● | ● | ● |
+|  | `wsh_event_data` | ● | yes | · | ● | ● | ● |
+| Market Data | `reroute_mkt_data_req` | ● | yes | ● | · | ◐ | ◐ |
+|  | `reroute_mkt_depth_req` | ● | yes | ● | · | ◐ | ◐ |
+|  | `tick_efp` | ● | no | ● | ● | ● | ● |
+| Connection | `verify_message_api` | ● | no | ● | · | ● | ● |
+|  | `verify_completed` | ● | no | ● | · | ● | ● |
+|  | `verify_and_auth_message_api` | ● | no | ● | · | ● | ● |
+|  | `verify_and_auth_completed` | ● | no | ● | · | ● | ● |
+|  | `win_error` | ● | no | ● | · | ● | ● |
 
 ## Beyond the canonical list
 
-The terminal's own connection carries more than the documented
-surface names, and this client speaks that connection — so some of
-what it answers has no call in the API at all. These fall into three
-kinds, and the table does not try to sort them: things the venue
-states that no documented call asks for (what it permits this
-account, which algorithms it offers, the order defaults it holds,
-what it says about an issuer, which session holds the account); the
-same question answered rather than delivered on a callback; and this
-client's own instrumentation, which is about the client and not the
-venue.
+What this client answers that the canonical list does not name.
+Three kinds, told apart by the *Answered from* column and by the
+reference columns: what the venue states that no documented call
+asks for (what it permits this account, which algorithms it offers,
+the order defaults it holds, what it says about an issuer, which
+session holds the account); a question answered in one call rather
+than delivered on a callback; and this client's own state, helpers
+and instrumentation, which are about the client and not the venue.
 
-A mark against a reference client here means it happens to name the
-same thing, not that the documented API does.
+A mark against a reference client here means it names the same
+thing; a mark under TWS API means the TWS API's own client, or
+ib_async's transport, has a method by that name.
 
-| Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
+| Call | Answered from | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `account` | ● | · | · | · | ● | · |
-| `accountSnapshot` | ● | · | · | · | · | ● |
-| `adjustments` | ● | · | · | · | ● | · |
-| `adjustmentsFor` | ● | · | · | · | ● | ● |
-| `algorithms` | ● | · | · | · | ● | · |
-| `algorithmsFor` | ● | · | · | · | ● | ● |
-| `await_order` | ● | · | · | · | ● | · |
-| `calendar_events` | ● | · | · | · | ● | · |
-| `calendar_schema` | ● | · | · | · | ● | · |
-| `cancelAdjustments` | ● | · | · | · | ● | ● |
-| `cancel_historical_news` | ● | · | · | · | ● | · |
-| `cancelOrderByPermId` | ● | · | · | · | ● | ● |
-| `cancelWshEventData` | ● | ● | · | ● | ● | ● |
-| `cancelWshMetaData` | ● | ● | · | ● | ● | ● |
-| `ccpSessionId` | ● | · | · | · | ● | ● |
-| `checkConnected` | ● | · | · | · | · | ● |
-| `closingOptionModel` | ● | · | · | · | ● | ● |
-| `closingOptionModelByInstrument` | ● | · | · | · | ● | ● |
-| `companyData` | ● | · | · | · | ● | ● |
-| `companyDataSeries` | ● | · | · | · | ● | ● |
-| `competingSession` | ● | · | · | · | ● | ● |
-| `connect_with_events` | ● | · | · | · | ● | · |
-| `contractFigures` | ● | · | · | · | ● | ● |
-| `contractFiguresByInstrument` | ● | · | · | · | ● | ● |
-| `corporateActions` | ● | · | · | · | ● | ● |
-| `enabledFeatures` | ● | · | · | · | ● | ● |
-| `eventsLost` | ● | · | · | · | ● | ● |
-| `getAccountId` | ● | · | · | · | · | ● |
-| `instrument_of` | ● | · | · | · | ● | · |
-| `keep_record` | ● | · | · | · | ● | · |
-| `last_rtt` | ● | · | · | · | ● | · |
-| `lastRttMs` | ● | · | · | · | · | ● |
-| `matchingSymbols` | ● | · | · | · | ● | ● |
-| `miscUrl` | ● | · | · | · | ● | ● |
-| `newsHeadlines` | ● | · | · | · | ● | ● |
-| `nextOrderId` | ● | · | · | · | ● | ● |
-| `nextSharedId` | ● | · | · | · | ● | ● |
-| `numberedFigures` | ● | · | · | · | ● | ● |
-| `numberedFiguresSeries` | ● | · | · | · | ● | ● |
-| `option_chain` | ● | · | · | · | ● | · |
-| `optionChains` | ● | · | · | · | · | ● |
-| `optionModel` | ● | · | · | · | ● | ● |
-| `optionModelByInstrument` | ● | · | · | · | ● | ● |
-| `orderPermissions` | ● | · | · | · | ● | ● |
-| `orderPresets` | ● | · | · | · | ● | ● |
-| `pairedFigures` | ● | · | · | · | ● | ● |
-| `pairedFiguresSeries` | ● | · | · | · | ● | ● |
-| `parse_algo_params` | ● | · | · | · | ● | · |
-| `permittedOrderTypes` | ● | · | · | · | ● | ● |
-| `positions` | ● | ● | · | ● | ● | · |
-| `positionsElsewhere` | ● | · | · | · | ● | ● |
-| `qualifyContract` | ● | · | · | · | ● | ● |
-| `qualifyContracts` | ● | ● | · | ● | ● | ● |
-| `quote` | ● | · | · | · | ● | · |
-| `quoteByInstrument` | ● | · | · | · | ● | ● |
-| `reqAdjustments` | ● | · | · | · | ● | ● |
-| `reqMktDataEx` | ● | · | · | · | ● | ● |
-| `reqPing` | ● | · | · | · | ● | ● |
-| `reqSpreadScan` | ● | · | · | · | ● | ● |
-| `scan` | ● | · | · | · | ● | · |
-| `scannedStrategies` | ● | · | · | · | ● | ● |
-| `schedule` | ● | ● | · | ● | ● | · |
-| `serverVersion` | ● | ● | ● | ● | · | ● |
-| `session` | ● | · | · | · | ● | · |
-| `session_over` | ● | · | · | · | ● | · |
-| `session_token_bytes` | ● | · | · | · | ● | · |
-| `setConnectOptions` | ● | ● | · | ● | · | ◐ |
-| `setNewsProviders` | ● | · | · | · | ● | ● |
-| `shared_state` | ● | · | · | · | ● | · |
-| `shortSaleRestricted` | ● | · | · | · | ● | ● |
-| `shortSaleRestrictedByInstrument` | ● | · | · | · | ● | ● |
-| `startApi` | ● | ● | ● | ● | · | ● |
-| `statedFigures` | ● | · | · | · | ● | ● |
-| `statedFiguresSeries` | ● | · | · | · | ● | ● |
-| `statedRows` | ● | · | · | · | ● | ● |
-| `tradingSchedule` | ● | · | · | · | · | ● |
-| `twsConnectionTime` | ● | ● | ● | · | · | ● |
-| `unread_wire` | ● | · | · | · | ● | · |
-| `valuesElsewhere` | ● | · | · | · | ● | ● |
-| `waitForData` | ● | · | · | · | ● | ● |
-| `what_if_order` | ● | ● | · | ● | ● | · |
+| `account` | venue | · | · | · | ● | · |
+| `accountSnapshot` | venue | · | · | · | · | ● |
+| `adjustments` | venue | · | · | · | ● | · |
+| `adjustmentsFor` | venue | · | · | · | ● | ● |
+| `algorithms` | venue | · | · | · | ● | ● |
+| `algorithmsFor` | venue | · | · | · | ● | ● |
+| `await_order` | venue | · | · | · | ● | · |
+| `calendar_events` | venue | · | · | · | ● | · |
+| `calendar_schema` | venue | · | · | · | ● | · |
+| `cancelAdjustments` | venue | · | · | · | ● | ● |
+| `cancel_historical_news` | venue | · | · | · | ● | · |
+| `cancelOrderByPermId` | venue | · | · | · | ● | ● |
+| `ccpSessionId` | venue | · | · | · | ● | ● |
+| `checkConnected` | this client | · | · | · | · | ● |
+| `closingOptionModel` | venue | · | · | · | ● | ● |
+| `closingOptionModelByInstrument` | venue | · | · | · | ● | ● |
+| `companyData` | venue | · | · | · | ● | ● |
+| `companyDataSeries` | venue | · | · | · | ● | ● |
+| `competingSession` | venue | · | · | · | ● | ● |
+| `connect_with_events` | this client | · | · | · | ● | · |
+| `contractFigures` | venue | · | · | · | ● | ● |
+| `contractFiguresByInstrument` | venue | · | · | · | ● | ● |
+| `corporateActions` | venue | · | · | · | ● | ● |
+| `enabledFeatures` | venue | · | · | · | ● | ● |
+| `eventsLost` | this client | · | · | · | ● | ● |
+| `getAccountId` | venue | · | · | · | · | ● |
+| `instrument_of` | this client | · | · | · | ● | · |
+| `keep_record` | this client | · | · | · | ● | · |
+| `last_rtt` | this client | · | · | · | ● | · |
+| `lastRttMs` | this client | · | · | · | · | ● |
+| `matchingSymbols` | venue | · | · | · | ● | ● |
+| `miscUrl` | venue | · | · | · | ● | ● |
+| `newsHeadlines` | venue | · | · | · | ● | ● |
+| `nextOrderId` | this client | · | · | · | ● | ● |
+| `nextSharedId` | this client | · | · | · | ● | ● |
+| `numberedFigures` | venue | · | · | · | ● | ● |
+| `numberedFiguresSeries` | venue | · | · | · | ● | ● |
+| `option_chain` | venue | · | · | · | ● | · |
+| `optionChains` | venue | · | · | · | · | ● |
+| `optionModel` | venue | · | · | · | ● | ● |
+| `optionModelByInstrument` | venue | · | · | · | ● | ● |
+| `orderPermissions` | venue | · | · | · | ● | ● |
+| `orderPresets` | venue | · | · | · | ● | ● |
+| `pairedFigures` | venue | · | · | · | ● | ● |
+| `pairedFiguresSeries` | venue | · | · | · | ● | ● |
+| `parse_algo_params` | this client | · | · | · | ● | · |
+| `permittedOrderTypes` | venue | · | · | · | ● | ● |
+| `poll` | this client | · | · | · | · | ● |
+| `positions` | venue | · | · | ● | ● | · |
+| `positionsElsewhere` | venue | · | · | · | ● | ● |
+| `qualifyContract` | venue | · | · | · | ● | ● |
+| `qualifyContracts` | venue | · | · | ● | ● | ● |
+| `quote` | venue | · | · | · | ● | ● |
+| `quoteByInstrument` | venue | · | · | · | ● | ● |
+| `reqAdjustments` | venue | · | · | · | ● | ● |
+| `reqMktDataEx` | venue | · | · | · | ● | ● |
+| `reqPing` | venue | · | · | · | ● | ● |
+| `reqSpreadScan` | venue | · | · | · | ● | ● |
+| `reset` | this client | ● | ● | ● | · | ● |
+| `run` | this client | ● | ● | ● | · | ● |
+| `scan` | venue | · | · | · | ● | · |
+| `scannedStrategies` | venue | · | · | · | ● | ● |
+| `schedule` | venue | · | · | ● | ● | · |
+| `serverVersion` | this client | ● | ● | ● | · | ● |
+| `session` | this client | · | · | · | ● | · |
+| `session_over` | this client | · | · | · | ● | · |
+| `session_token_bytes` | this client | · | · | · | ● | · |
+| `setConnectOptions` | this client | ● | · | ● | · | ◐ |
+| `setNewsProviders` | venue | · | · | · | ● | ● |
+| `shared_state` | this client | · | · | · | ● | · |
+| `shortSaleRestricted` | venue | · | · | · | ● | ● |
+| `shortSaleRestrictedByInstrument` | venue | · | · | · | ● | ● |
+| `startApi` | this client | ● | ● | ● | · | ● |
+| `statedFigures` | venue | · | · | · | ● | ● |
+| `statedFiguresSeries` | venue | · | · | · | ● | ● |
+| `statedRows` | venue | · | · | · | ● | ● |
+| `tradingSchedule` | venue | · | · | · | · | ● |
+| `twsConnectionTime` | venue | ● | ● | · | · | ● |
+| `unread_wire` | this client | · | · | · | ● | · |
+| `valuesElsewhere` | venue | · | · | · | ● | ● |
+| `waitForData` | this client | · | · | · | ● | ● |
+| `what_if_order` | venue | · | · | ● | ● | · |
 
 ## Calls, counted
 
-| Client | Carried | Taken, not applied | Absent |
+| Client | Present ● | Present, not served ◐ | Absent · |
 | --- | ---: | ---: | ---: |
-| Gateway wire | 78 | 0 | 0 |
-| TWS API | 78 | 0 | 0 |
-| ibapi | 73 | 0 | 5 |
-| ib_async | 77 | 0 | 1 |
-| ibkr-dx Rust | 78 | 0 | 0 |
-| ibkr-dx Python | 78 | 0 | 0 |
+| TWS API | 80 | 0 | 0 |
+| ibapi | 73 | 0 | 7 |
+| ib_async | 79 | 0 | 1 |
+| ibkr-dx Rust | 80 | 0 | 0 |
+| ibkr-dx Python | 80 | 0 | 0 |
 
 </details>
 
-The same table stands on its own in [docs/capabilities.md](docs/capabilities.md), and what each claim rests on is in [docs/evidence.md](docs/evidence.md).
+The same table stands on its own in [docs/capabilities.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md), and what each claim rests on is in [docs/evidence.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/evidence.md).
 
 <!-- capabilities:end -->
 
@@ -700,10 +743,9 @@ list, so nobody has to discover it by finding an empty result.
 > `726` and `733` — the price-distribution weights, the volatility curve, the
 > historical ratios, the two screening dashboards, and the option model as of
 > the close. Each subscribes cleanly: the venue acknowledges it, assigns it a
-> tag, and then states nothing, which is how it answers a series an account is
-> not entitled to. Measured the same on a paper and a live login for one
-> account, minutes apart. The readers are written and tested; they fill in the
-> moment the data flows. The same is true of the spread scan.
+> tag, and then states nothing. Measured the same on a paper and a live login
+> for one account, minutes apart. The readers are written and tested; they fill
+> in the moment the data flows. The same is true of the spread scan.
 
 > [!NOTE]
 > **Some readers have not met their instrument.** The series for bonds,
@@ -717,24 +759,29 @@ list, so nobody has to discover it by finding an empty result.
 > that series. The subscription list in account management is what separates
 > them.
 
-Four things the venue declares and this client deliberately does not read:
+And two things this client does not read or fire:
 
 | | Why |
 | --- | --- |
-| Three series | Their own readers never touch the payload — one logs that it cannot be served and returns. |
-| The dividend series | This client already asks what a contract pays out and is answered with named fields. Reading the same thing again as letter-tagged lines would be worse than what a caller already has. |
-| Four numbers | Second numbers for series already read under their first. |
-| Nine callbacks | Declared so a program written against the reference client still compiles, and never fired because the venue states nothing for them — no terminal to make a verification handshake with, no socket layer of the reference client's own, no reroute on this connection, and neither an exchange-for-physical quote nor a delta-neutral pairing. |
+| Three series | Declared by the venue and not read here. What arrives on one of them, tick 230, is kept as unread rather than dropped. |
+| Three callbacks | Declared so a program written against the TWS API still compiles, and not fired: nothing this connection receives has been seen to state a reroute or a delta-neutral pairing. |
 
 ## Running an existing program
 
 A program written against the TWS API keeps its calls, its callbacks and its
-order objects — the Python [Quick start](#quick-start) is one. In Python, both
-naming conventions resolve on every type and method: `reqMktData` and
-`req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`.
+order objects; its imports and its connect call change — the Python
+[Quick start](#quick-start) is one. In Python, both naming conventions resolve
+on every type and method: `reqMktData` and `req_mkt_data`, `secType` and
+`sec_type`, `conId` and `con_id`, and the TWS API's module layout resolves
+under `ibkr_dx` (`ibkr_dx.client`, `ibkr_dx.wrapper`, `ibkr_dx.contract`, …).
 
-A program written against [ib_async](https://github.com/ib-api-reloaded/ib_async)
-runs on this engine through [ib_async-dx](https://github.com/userFRM/ib_async-dx).
+Where this client answers differently from a gateway,
+[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) says so, case
+by case.
+
+For [ib_async](https://github.com/ib-api-reloaded/ib_async), use
+[ib_async-dx](https://github.com/userFRM/ib_async-dx), which runs it on this
+engine.
 
 ## How it works
 
@@ -750,7 +797,7 @@ connections a session runs on and keeps them:
 
 Each is authenticated at logon, kept alive, and rebuilt on its own if it drops —
 a subscription the venue was serving is asked for again, under the same request
-the caller made, so a caller does not see the seam.
+the caller made.
 
 > [!NOTE]
 > Reconnection is per connection, not per session. A market-data connection that
@@ -762,20 +809,29 @@ state of every contract it watches in a lock-free table and hands you a snapshot
 when you ask. Callers who want events get them too — the point is that reading a
 quote does not mean draining a queue first.
 
-**Nothing is derived.** Every figure a caller reads was stated by the venue. A
-figure the venue holds nothing for comes back as the largest number its field
-carries — the venue's own way of saying so — rather than as a zero that reads
-like a price.
+**The figures are the venue's.** A price, size, greek or series figure a caller
+reads is the one the venue stated, and a figure the venue holds nothing for
+comes back as the largest number its field carries — the venue's own way of
+saying so — rather than as a zero that reads like a price. Where this client
+works something out itself, the call that does it says so: the P&L figures,
+worked out from the venue's figures against the session's prices; the bars
+that continue a `keepUpToDate` request, formed from the venue's five-second
+bars; a book kept at the size asked for; and the answer to a price or a
+volatility the caller supplies, solved against the venue's published model.
 
 ### Second factor and sessions
 
 > [!IMPORTANT]
 > A live login enters the venue's second-factor approval and waits on a device.
-> Paper logins do not. **One session per login**: opening a second takes the
-> first away, and the venue names the host that took it.
+> Paper logins do not. **One program per login**: each program opens its own
+> session, and a login holds one session at a time, so a second program on the
+> same login takes the first one's session, and the venue names the host that
+> took it.
 
-A session can be resumed rather than re-authenticated, which is what makes a
-restart cheap. See
+Within a running program, a dropped connection is rebuilt on the session
+already open, with no second factor. A restarted program logs in again, second
+factor included. Offering the saved session (`EClientConfig::resume`, or
+`session_file`) has not spared a login. See
 [Login](https://userfrm.github.io/ibkr-dx/recipes/python/login.html).
 
 ## Configuration
@@ -792,11 +848,12 @@ Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 ## Documentation
 
 * [The book](https://userfrm.github.io/ibkr-dx/) — guides, recipes and the generated API reference
-* [Capabilities](docs/capabilities.md) — one row per capability, one column per client
-* [Evidence](docs/evidence.md) — what each claim rests on, and the session that produced it
-* [Notebooks](notebooks/) — the seven ib_async subjects, in the TWS API shape
-* [Examples](examples/) — 42 runnable single-file programs, 27 in Rust and 15 in Python
+* [Capabilities](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md) — one row per capability, one column per client
+* [Evidence](https://github.com/userFRM/ibkr-dx/blob/main/docs/evidence.md) — what each claim rests on, and the session that produced it
+* [Notebooks](https://github.com/userFRM/ibkr-dx/tree/main/notebooks) — seven walkthroughs of `EClient` and `EWrapper`: connecting and the account, bars, contract details, depth, orders, scanners and ticks
+* [Examples](https://github.com/userFRM/ibkr-dx/tree/main/examples) — 42 runnable single-file programs, 27 in Rust and 15 in Python
 * [Beyond the API](https://userfrm.github.io/ibkr-dx/reference/beyond-the-api.html) — what the session states that no documented call asks for
+* [Venue behaviour](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html) — what a program meets here that is the venue's answer or the TWS API's definition
 * [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) — what this client will not do, and why
 
 ## Questions
@@ -809,19 +866,21 @@ needed either — this client provides that surface itself.
 </details>
 
 <details>
-<summary><b>Will my existing program work unchanged?</b></summary>
+<summary><b>What changes in an existing program?</b></summary>
 
-The connect call changes; nothing else has to. The same calls, the same
-callbacks, the same order objects. See
-[Running an existing program](#running-an-existing-program).
+The imports and the connect call. The calls, the callbacks and the order
+objects keep their names and shapes. Where an answer differs from a gateway's,
+[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) names the
+case. See [Running an existing program](#running-an-existing-program).
 </details>
 
 <details>
-<summary><b>Can I run this and a gateway at the same time?</b></summary>
+<summary><b>Can I run two programs, or this and a gateway, at the same time?</b></summary>
 
-Not on the same login. One session per login — opening a second takes the first
-away, and the venue names the host that took it. Use a second login if you need
-both at once.
+On two logins, yes. On one, no: each program opens its own session, and a login
+holds one session at a time, so the second takes the first one's session, and
+the venue names the host that took it. The same holds for a gateway on that
+login.
 </details>
 
 <details>
@@ -829,18 +888,20 @@ both at once.
 
 Probably not. An empty result means one of two things and this client cannot
 tell them apart: the venue holds nothing for that contract, or the account is
-not entitled to that series. The venue answers a series an account cannot see
-with silence rather than a refusal, so there is no error to read. The
-subscription list in account management is what separates them. See
+not entitled to that series. Such a subscription is acknowledged and then
+nothing is stated, with no error to read. The subscription list in account
+management is what separates them. See
 [What is not covered](#what-is-not-covered).
 </details>
 
 <details>
 <summary><b>Is paper different from live?</b></summary>
 
-Not in what arrives. The same wire, the same API, the same entitlements — the
-money is what differs. A live login additionally enters the second-factor
-approval, which paper does not.
+Both run on this engine, with the same calls and the same protocol; a live
+login also enters the second-factor approval, which paper does not. What each
+answers depends on that account's subscriptions and permissions. The
+verification here is on a paper account, with one order round trip on a funded
+account — see [Evidence](https://github.com/userFRM/ibkr-dx/blob/main/docs/evidence.md).
 </details>
 
 <details>
@@ -860,21 +921,14 @@ zero, because zero is a real price and a real greek.
 </details>
 
 <details>
-<summary><b>Can I go back to a gateway after using the extra calls?</b></summary>
-
-Moving to this client changes nothing but the connect call. Moving back does, if
-your program has come to use a call the documented API never named — a gateway
-has no message to carry it. The extras are listed under
-[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) so the trade is
-visible before it is made.
-</details>
-
-<details>
 <summary><b>Rust or Python — is one behind the other?</b></summary>
 
-Neither. The same request produces the same call on both, checked against live
-responses, and the capability table is generated by reading each surface rather
-than from memory. Where the two differ the count is zero.
+Not on the canonical list of the TWS API's calls and callbacks. Every one is on
+both, and the generated matrix counts the ones on which the two differ: zero. `scripts/conformance.py --compare` holds ten server responses to the same
+answer on both. Beyond that list, each language spells some calls its own way
+and a few are on one side only; the
+[Beyond the canonical list](#beyond-the-canonical-list) table has a column for
+each.
 </details>
 
 ## Testing
@@ -884,14 +938,14 @@ Claims here rest on tests, and the tests are counted rather than described:
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
 | Rust, unit and integration | 2,691 | No |
-| Python | 844 | No |
+| Python | 846 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |
 
 Every published count is checked against what is actually there, so a number in
 this file cannot drift from the suite that produced it. What each claim rests on
-is in [Evidence](docs/evidence.md).
+is in [Evidence](https://github.com/userFRM/ibkr-dx/blob/main/docs/evidence.md).
 
 Readers of the venue's own records are held to a harder standard than passing:
 a test that would pass against a broken reader is not a test. Each is checked by
@@ -931,7 +985,7 @@ repository's security advisories rather than in a public issue.
 
 ## License
 
-[AGPL-3.0](LICENSE)
+[AGPL-3.0](https://github.com/userFRM/ibkr-dx/blob/main/LICENSE)
 
 ## Credits
 
@@ -961,17 +1015,7 @@ of any kind.
 
 ### Legal Considerations
 
-- **No warranty.** ibkr-dx is provided "as is", without warranty of any kind. See [LICENSE](LICENSE) for full terms.
+- **No warranty.** ibkr-dx is provided "as is", without warranty of any kind. See [LICENSE](https://github.com/userFRM/ibkr-dx/blob/main/LICENSE) for full terms.
 - **Use at your own risk.** Users are solely responsible for ensuring their use of ibkr-dx complies with Interactive Brokers' Terms of Service, Customer Agreement, and any applicable laws or regulations. Using ibkr-dx may carry risks including but not limited to account restriction or termination by IB.
-- **Not financial software.** ibkr-dx is an experimental research project. It is not intended as a replacement for officially supported IB software in production trading environments. The authors accept no liability for financial losses, missed trades, account issues, or any other damages arising from the use of this software.
+- **Orders are real.** ibkr-dx places, modifies and cancels orders on the account it logs into, and is at an early version. It is not intended as a replacement for officially supported IB software in production trading environments. The authors accept no liability for financial losses, missed trades, account issues, or any other damages arising from the use of this software.
 - **Protocol stability.** ibkr-dx relies on an undocumented protocol that IB may change at any time without notice. There is no guarantee of continued functionality.
-
-### EU Interoperability
-
-For users and contributors in the European Union: Article 6 of the EU Software
-Directive (2009/24/EC) permits reverse engineering for the purpose of achieving
-interoperability with independently created software, provided that specific
-conditions are met. ibkr-dx was developed with this legal framework in mind,
-enabling interoperability with IB's trading infrastructure on platforms where
-the official Java-based Gateway cannot run (headless Linux, containers,
-embedded systems).

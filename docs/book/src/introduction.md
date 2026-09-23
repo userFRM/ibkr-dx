@@ -16,7 +16,7 @@
 
 </div>
 
-> **Want ib_async's easier API?** [ib_async-dx](https://github.com/userFRM/ib_async-dx) runs it on this engine — the drop-in successor for ib_async.
+> For ib_async, use [ib_async-dx](https://github.com/userFRM/ib_async-dx), which runs it on this engine.
 
 ## One line changes
 
@@ -43,11 +43,11 @@ at.
 </div>
 <div class="dx-card">
 <p class="dx-card-title">The JVM</p>
-<p>No heap to size, and no garbage collector pausing the thread your ticks arrive on.</p>
+<p>No Java runtime to install, and no heap to size.</p>
 </div>
 <div class="dx-card">
 <p class="dx-card-title">The localhost socket</p>
-<p>Ticks are delivered in-process, to the thread that asked for them.</p>
+<p>Callbacks are delivered in-process, on the thread that runs the dispatch: <code>run()</code> or <code>poll()</code> in Python, <code>process_msgs</code> in Rust.</p>
 </div>
 <div class="dx-card">
 <p class="dx-card-title">The window</p>
@@ -60,11 +60,11 @@ at.
 <div class="dx-cards">
 <div class="dx-card">
 <p class="dx-card-title">The shape you already have</p>
-<p><code>EClient</code> / <code>EWrapper</code>, with the same method names and the same callbacks, in Rust and in Python.</p>
+<p><code>EClient</code> and <code>EWrapper</code> in Python, <code>EClient</code> and <code>Wrapper</code> in Rust, with the TWS API's method names and callbacks.</p>
 </div>
 <div class="dx-card">
 <p class="dx-card-title">One engine, two languages</p>
-<p>The Python module is the Rust core through <a href="https://pyo3.rs">PyO3</a>, not a second implementation. A gate on every commit fails if either surface grows a call or a callback the other lacks.</p>
+<p>The Python module is the Rust core through <a href="https://pyo3.rs">PyO3</a>, not a second implementation. A gate on every commit fails if the two surfaces stop agreeing on a call or a callback the TWS API documents.</p>
 </div>
 <div class="dx-card">
 <p class="dx-card-title">Nothing in between</p>
@@ -76,7 +76,7 @@ at.
 </div>
 <div class="dx-card">
 <p class="dx-card-title">Honest about its limits</p>
-<p>A call the protocol cannot carry says why, instead of returning as though it acted. The <a href="./reference/limits.html">limits</a> are written down, over a coverage matrix regenerated from the source on every commit.</p>
+<p>A call the protocol cannot carry says why, instead of returning as though it acted. The <a href="./reference/limits.html">limits</a> are written down, over a coverage matrix regenerated from the source on every commit, and what a gateway answers the same way is on <a href="./reference/venue-behaviour.html">venue behaviour</a>.</p>
 </div>
 </div>
 
@@ -98,5 +98,5 @@ from reading the code. The matrix is in
 [capabilities.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md),
 its counts are recomputed on every commit, and the build fails if one moves.
 
-There is no published package yet. Both install routes build from the
-repository: see [Getting started](./getting-started.md).
+Both install routes build from the repository: see
+[Getting started](./getting-started.md).

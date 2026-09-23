@@ -1,6 +1,5 @@
-//! Gateway-local methods that read init data from shared state.
-//! Data is populated during connection by Gateway::populate_init_data.
-//! Methods that are not yet supported log a warning.
+//! Methods answered from what the session was told at logon, and the calls a
+//! gateway answers itself rather than asking the venue.
 
 use crate::api::wrapper::Wrapper;
 use crate::error_codes::{LOG_LEVEL_INVALID, Refusal};
@@ -322,7 +321,7 @@ impl EClient {
 
     // ── Display Groups ──
 
-    /// Query display groups. Not yet implemented.
+    /// Query display groups. Matches `queryDisplayGroups` in C++.
     /// The display groups on offer. Answered on `display_group_list`.
     ///
     /// A display group is a way for several callers on one session to agree on
@@ -378,11 +377,15 @@ impl EClient {
 
     /// Set server log level. Matches `setServerLogLevel` in C++.
     ///
-    /// Taken and not applied. The session holds no log level of its own and this
-    /// protocol carries no message asking the venue to change one, so what a
-    /// caller states here is written to this client's log and nothing else.
-    /// This client's own logging is set where the process sets it, through
-    /// `IBKR_DX_LOG_LEVEL` or `RUST_LOG`.
+    /// 1 to 5 set this client's logger to error, warn, info, debug and trace. A
+    /// gateway applies the level to its own log; this client, which serves the
+    /// caller in its place, applies it to the logger it installed. Nothing goes
+    /// to the venue, which has no message for it.
+    ///
+    /// Where the program installed a logger of its own, that logger's level is
+    /// the program's, and the call says so on the error callback rather than
+    /// reporting a level it did not set. A level outside 1 to 5 is refused the
+    /// same way.
     pub fn set_server_log_level(&self, log_level: i32) {
         let level = match log_level {
             1 => "error",

@@ -475,9 +475,8 @@ pub fn bar_epoch_as_asked(secs: i64, format_date: i32, zone: &str) -> String {
 
 /// The range a bar request named, as stated once its bars have all arrived.
 ///
-/// Not read off the reply. The reply carries a range of its own and the
-/// counterpart reads that one only for ticks; for bars it states what the
-/// request asked. So this is the caller's end — or the moment of asking, where
+/// Not read off the reply. The reply carries a range of its own, which a
+/// gateway reports only for ticks; for bars it states what the request asked. So this is the caller's end — or the moment of asking, where
 /// it named none — and that end less the duration, counted on a calendar
 /// rather than in seconds, so a day back across a clock change is the same
 /// time of day and not twenty-four hours.

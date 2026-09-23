@@ -84,9 +84,9 @@ impl ReportType {
     ///
     /// Three, and these three: the reference client names exactly these and
     /// asks for them under exactly these words. Two others used to be offered
-    /// here — a summary and the full statements — under names that appear
-    /// nowhere in the vendor build at all, so what went out for them was a
-    /// word the venue has never been asked for. The two the reference client
+    /// here — a summary and the full statements — under names the reference
+    /// client never uses, so what went out for them was a word the venue has
+    /// never been asked for. The two the reference client
     /// does offer were refused instead.
     pub fn report_type_str(&self) -> &'static str {
         match self {
@@ -246,9 +246,9 @@ mod tests {
     }
 
     /// The three the venue states, under the words it states them by. Two
-    /// others used to be offered under words that appear nowhere in the
-    /// vendor build, so a caller asking for either sent the venue something
-    /// it has never been asked for.
+    /// others used to be offered under words the reference client never uses,
+    /// so a caller asking for either sent the venue something it has never
+    /// been asked for.
     #[test]
     fn report_type_mapping() {
         for (kind, asked_by, on_the_wire) in [
