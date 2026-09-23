@@ -3,6 +3,6 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "ibx"
+name = "ibkr_dx"
 version = "0.7.1"
 source = { editable = "." }

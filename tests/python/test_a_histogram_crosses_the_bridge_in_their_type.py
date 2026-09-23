@@ -9,8 +9,8 @@ an object naming a field their wrapper does not read, and every histogram raised
 inside their callback.
 """
 
-import ibx
-from ibx.ib_async import _LoopBound
+import ibkr_dx
+from ibkr_dx.ib_async import _LoopBound
 
 
 class Caught:
@@ -22,7 +22,7 @@ class Caught:
 
 
 def _bucket(price, size):
-    b = ibx.HistogramData()
+    b = ibkr_dx.HistogramData()
     b.price = price
     b.size = size
     return b

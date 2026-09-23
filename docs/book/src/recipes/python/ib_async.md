@@ -9,9 +9,9 @@ Nothing of `ib_async` is copied or modified. Install it as usual, and attach.
 
 ```python
 from ib_async import IB, Stock
-import ibx.ib_async
+import ibkr_dx.ib_async
 
-ib = ibx.ib_async.attach(IB(), username="your_user", password="your_pass")
+ib = ibkr_dx.ib_async.attach(IB(), username="your_user", password="your_pass")
 ib.connect()                      # names no host: there is no gateway
 
 spy = Stock("SPY", "SMART", "USD")
@@ -32,7 +32,7 @@ underneath, and no gateway process.
 One line, and it is not the connect call:
 
 ```diff
-+ ib = ibx.ib_async.attach(ib, username="...", password="...")
++ ib = ibkr_dx.ib_async.attach(ib, username="...", password="...")
 - ib.connect("127.0.0.1", 4001, clientId=1)     # requires a running gateway
 + ib.connect()                                  # no external process
 ```

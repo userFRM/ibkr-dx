@@ -11,7 +11,7 @@ Given four, a handler written that way bound `errorTime` to the code and
 reconnecting never fired.
 """
 
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class Records(EWrapper):

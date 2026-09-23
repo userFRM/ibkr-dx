@@ -19,8 +19,8 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-use ibx::auth::session::{self, CodeProvider, IbKeyChallenge, SecondFactor};
-use ibx::gateway::{Gateway, GatewayConfig};
+use ibkr_dx::auth::session::{self, CodeProvider, IbKeyChallenge, SecondFactor};
+use ibkr_dx::gateway::{Gateway, GatewayConfig};
 use zeroize::Zeroizing;
 
 /// Minimal `.env` loader (KEY=VALUE per line, `#` comments, no quoting tricks).
@@ -77,7 +77,7 @@ fn read_code_from_stdin(challenge: IbKeyChallenge) -> io::Result<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     load_dotenv();
 
     let username = env::var("IB_LIVE_USERNAME")
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("== Connecting LIVE ({host}). Waiting for the second-factor challenge...");
     let t0 = Instant::now();
-    let ibx::gateway::Session { gateway: gw, market_data: _farm, trading: _ccp, historical: _hmds, .. } = Gateway::connect(&config)?;
+    let ibkr_dx::gateway::Session { gateway: gw, market_data: _farm, trading: _ccp, historical: _hmds, .. } = Gateway::connect(&config)?;
     let elapsed = t0.elapsed().as_secs_f64();
     println!();
     println!("PASS — second-factor login succeeded in {:.1}s (account_id={})",

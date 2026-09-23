@@ -19,11 +19,11 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python"))
 
-import ibx  # noqa: E402
+import ibkr_dx  # noqa: E402
 
 
 def main() -> int:
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.connect(
         username=os.environ["IB_USERNAME"],
         password=os.environ["IB_PASSWORD"],
@@ -32,10 +32,10 @@ def main() -> int:
     said: list[tuple[int, str]] = []
     ib.wrapper.error = lambda r, when, code, m, a="": said.append((code, m[:70]))
 
-    stock = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+    stock = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
     spy = ib.reqContractDetails(stock)[0].contract
     fx = ib.reqContractDetails(
-        ibx.Contract(symbol="EUR", secType="CASH", exchange="IDEALPRO", currency="USD")
+        ibkr_dx.Contract(symbol="EUR", secType="CASH", exchange="IDEALPRO", currency="USD")
     )[0].contract
 
     def ask(what, call, shape=len):
@@ -62,7 +62,7 @@ def main() -> int:
     print("\nmarket data")
     ask("bars", lambda: ib.reqHistoricalData(stock, "", "2 D", "1 hour", "TRADES", True))
     ask("bars, unqualified", lambda: ib.reqHistoricalData(
-        ibx.Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD"),
+        ibkr_dx.Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD"),
         "", "1 D", "1 hour", "TRADES", True))
     ask("tickers", lambda: ib.reqTickers(spy, timeout=8), lambda t: f"bid {t[0].bid}")
     ask("currency tickers", lambda: ib.reqTickers(fx, timeout=8), lambda t: f"bid {t[0].bid}")
@@ -105,9 +105,9 @@ def main() -> int:
     ask("completed orders", lambda: ib.reqCompletedOrders(False) or ib.trades())
 
     print("\norders the venue prices and does not place")
-    preview = ibx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.0)
+    preview = ibkr_dx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.0)
     ask("a share", lambda: ib.whatIfOrder(spy, preview), lambda s: f"{s.status} {s.commissionAndFees}")
-    ask("a currency pair", lambda: ib.whatIfOrder(fx, ibx.Order(
+    ask("a currency pair", lambda: ib.whatIfOrder(fx, ibkr_dx.Order(
         action="BUY", orderType="LMT", totalQuantity=20000, lmtPrice=0.5)),
         lambda s: f"{s.status} {s.commissionAndFees}")
 

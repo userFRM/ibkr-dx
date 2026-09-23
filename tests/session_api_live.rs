@@ -19,8 +19,8 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{Contract, EClientConfig};
-use ibx::api::session::Client;
+use ibkr_dx::api::client::{Contract, EClientConfig};
+use ibkr_dx::api::session::Client;
 
 /// The session, or nothing where this checkout has no credentials.
 fn a_session() -> Option<Client> {

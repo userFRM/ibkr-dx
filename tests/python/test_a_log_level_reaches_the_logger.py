@@ -6,11 +6,11 @@ serving its caller, so the level a caller states is this one's own — and sayin
 it was applied while it was not is the failure this guards.
 """
 
-import ibx
+import ibkr_dx
 
 
 def test_a_level_this_client_does_not_hold_is_refused_rather_than_claimed():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     # Not a level. Refused on its own terms, whoever holds the logger.
     c.set_server_log_level(9)
 
@@ -21,6 +21,6 @@ def test_a_level_this_client_does_not_hold_is_refused_rather_than_claimed():
 
 
 def test_every_level_the_reference_names_is_accepted():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     for level in (1, 2, 3, 4, 5):
         c.set_server_log_level(level)

@@ -62,12 +62,12 @@ jobs:
 
       - name: The suites that need no session
         env:
-          IBX_REGISTRATION_TIMEOUT_MS: "20"
+          IBKR_DX_REGISTRATION_TIMEOUT_MS: "20"
         run: |
           cargo test --test control_plane --test depth_wire_test \
             --test error_edge_concurrency --test hot_loop_lifecycle \
             --test malformed_input --test protocol_vectors --test scenarios
-          IBX_ALLOW_SKIP_NO_CREDS=1 cargo test --test ib_paper_compat
+          IBKR_DX_ALLOW_SKIP_NO_CREDS=1 cargo test --test ib_paper_compat
 
       - name: The published surface still resolves
         run: cargo test --test public_surface
@@ -155,8 +155,8 @@ jobs:
           python -m venv /tmp/check
           BIN=/tmp/check/bin
           [ -d "$BIN" ] || BIN=/tmp/check/Scripts
-          "$BIN/pip" install --find-links dist --no-index ibx
-          "$BIN/python" -c "import ibx; print(ibx.__name__, 'imports')"
+          "$BIN/pip" install --find-links dist --no-index ibkr_dx
+          "$BIN/python" -c "import ibkr_dx; print(ibkr_dx.__name__, 'imports')"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -9,11 +9,11 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::Contract;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::Contract;
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let username = std::env::var("IB_USERNAME").unwrap_or_default();
     if username.trim().is_empty() {
         eprintln!("IB_USERNAME/IB_PASSWORD unset. This reads from real servers.");
@@ -36,13 +36,13 @@ fn main() {
     // An option, so that resolving it states what it is written on — which is
     // the contract whose schedule the model wants.
     let option = Contract {
-        symbol: std::env::var("IBX_SYMBOL").unwrap_or_else(|_| "SPY".to_string()),
+        symbol: std::env::var("IBKR_DX_SYMBOL").unwrap_or_else(|_| "SPY".to_string()),
         sec_type: "OPT".to_string(),
         exchange: "SMART".to_string(),
         currency: "USD".to_string(),
-        last_trade_date_or_contract_month: std::env::var("IBX_EXPIRY")
+        last_trade_date_or_contract_month: std::env::var("IBKR_DX_EXPIRY")
             .unwrap_or_else(|_| "20260918".to_string()),
-        strike: std::env::var("IBX_STRIKE")
+        strike: std::env::var("IBKR_DX_STRIKE")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(775.0),

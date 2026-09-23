@@ -1,4 +1,4 @@
-//! ibx#240 — verify an adjustable stop keeps its parent link, OCA group and
+//! ibkr_dx#240 — verify an adjustable stop keeps its parent link, OCA group and
 //! tif when used as a bracket child. Paper account only.
 //!
 //! Places a parent BUY LMT far below the market (never fills), an adjustable
@@ -15,8 +15,8 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{Contract, EClient, EClientConfig, Order};
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{Contract, EClient, EClientConfig, Order};
+use ibkr_dx::api::wrapper::Wrapper;
 
 #[derive(Default)]
 struct State {
@@ -163,5 +163,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n== RESULT: {}", if pass { "PASS" } else { "FAIL" });
     client.disconnect();
-    if pass { Ok(()) } else { Err("ibx#240 live check failed".into()) }
+    if pass { Ok(()) } else { Err("ibkr_dx#240 live check failed".into()) }
 }

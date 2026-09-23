@@ -5,11 +5,11 @@ of the new connection restates one of them. Gated on whether anything had been
 heard, the snapshot handed back all nineteen fields with most of them from
 before the drop -- the buying power a caller sizes an order on among them.
 """
-import ibx
+import ibkr_dx
 
 
 def test_the_snapshot_waits_for_the_download():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     c._test_connect("T")
     c._test_set_account(100000.0, 200000.0, 0.0, 0.0, 0.0)
     assert c.accountSnapshot() is None, "figures the download has not finished stating are not the account"

@@ -9,9 +9,9 @@ runs unchanged, from the copy of `ib_async` already installed.
 No part of `ib_async` is copied or modified: install it as usual, and attach.
 
     from ib_async import IB, Stock
-    import ibx.ib_async
+    import ibkr_dx.ib_async
 
-    ib = ibx.ib_async.attach(IB(), username="…", password="…")
+    ib = ibkr_dx.ib_async.attach(IB(), username="…", password="…")
     ib.connect()                      # names no host: there is no gateway
 
     spy = Stock("SPY", "SMART", "USD")
@@ -31,7 +31,7 @@ import time
 
 from eventkit import Event
 
-import ibx as _ibx
+import ibkr_dx as _ibkr_dx
 from ._ib import _refuse_options
 
 
@@ -44,7 +44,7 @@ from ._ib import _refuse_options
 WIDEST_REQUEST_ID = 0xC000_0000 - 1
 
 
-class IbxClient:
+class IbkrDxClient:
     """What `ib_async.IB` talks to, answered by this engine.
 
     Holds the same attributes and events `ib_async.Client` does, because `IB`
@@ -75,7 +75,7 @@ class IbxClient:
         self.clientId = -1
         self.optCapab = ""
         self.connectOptions = b""
-        self.connState = IbxClient.DISCONNECTED
+        self.connState = IbkrDxClient.DISCONNECTED
         self._reqIdSeq = 1
         self._accounts: list[str] = []
         self._loop = None
@@ -87,7 +87,7 @@ class IbxClient:
         # client already resolves a callback under the reference client's
         # spelling, which is the spelling ib_async's wrapper uses.
         self._callbacks = _LoopBound(wrapper)
-        self._client = _ibx.EClient(self._callbacks)
+        self._client = _ibkr_dx.EClient(self._callbacks)
 
         # Where this session is kept between runs. The venue answers a request
         # that names a session it still holds with a challenge rather than a
@@ -115,7 +115,7 @@ class IbxClient:
         readonly = self._readonly if readonly is None else bool(readonly)
         self.host, self.port, self.clientId = host, int(port), int(clientId)
         self._callbacks._client_id = self.clientId
-        self.connState = IbxClient.CONNECTING
+        self.connState = IbkrDxClient.CONNECTING
         self._loop = asyncio.get_running_loop()
         self.wrapper.__dict__.setdefault("clientId", self.clientId)
 
@@ -132,7 +132,7 @@ class IbxClient:
                 session_file=self._session_file,
             ),
         )
-        self.connState = IbxClient.CONNECTED
+        self.connState = IbkrDxClient.CONNECTED
 
         # What the handshake tells ib_async before it considers the API
         # ready. Asked for rather than composed: the client answers this with
@@ -175,7 +175,7 @@ class IbxClient:
         waiting and raises on their global error event, which is right for a
         socket that dropped and wrong for a caller who asked to stop.
         """
-        self.connState = IbxClient.DISCONNECTED
+        self.connState = IbkrDxClient.DISCONNECTED
         self._stop.set()
         self._client.disconnect()
         self.apiEnd.emit()
@@ -225,7 +225,7 @@ class IbxClient:
         loss waited on an answer that was not coming.
         """
         return (
-            self.connState == IbxClient.CONNECTED
+            self.connState == IbkrDxClient.CONNECTED
             and self._client.is_connected()
         )
 
@@ -374,7 +374,7 @@ def _is_named_tuple(t):
 
     Their historical ticks are `NamedTuple`s rather than dataclasses, so a
     conversion that only knows dataclasses hands those straight through — and
-    a caller reading `tick.priceBid` off an ibx record finds a field spelled
+    a caller reading `tick.priceBid` off an ibkr_dx record finds a field spelled
     the other way.
     """
     return isinstance(t, type) and issubclass(t, tuple) and hasattr(t, "_fields")
@@ -397,7 +397,7 @@ def _their_type(name):
 
 
 def _field_of(value, name):
-    """One field of an ibx record, under whichever name it goes by.
+    """One field of an ibkr_dx record, under whichever name it goes by.
 
     A moment is handed over as their own, because their records declare it as
     a datetime and a number read as one is an instant in 1970.
@@ -422,13 +422,13 @@ def _field_of(value, name):
 
 
 def _as_theirs(value):
-    """An ibx object, rebuilt as the same-named `ib_async` type.
+    """An ibkr_dx object, rebuilt as the same-named `ib_async` type.
 
     Both sides carry the reference client's own field names, so the conversion
     is driven by the `ib_async` dataclass rather than written out per type or
     per callback: a field only `ib_async` declares keeps its default, and
     neither side needs editing when the other gains one. Anything with no
-    counterpart there — a number, a string, an ibx-only type — is handed over
+    counterpart there — a number, a string, an ibkr-dx-only type — is handed over
     as it is.
     """
     import dataclasses
@@ -467,7 +467,7 @@ def _as_theirs(value):
 class _LoopBound:
     """ib_async's wrapper, reached under the names this engine calls.
 
-    A callback carries an ibx object; the `ib_async` wrapper expects its own.
+    A callback carries an ibkr_dx object; the `ib_async` wrapper expects its own.
     Every argument is rebuilt on the way through, by its own type name, so a
     callback nobody thought to list is carried too.
     """
@@ -643,7 +643,7 @@ def _as_ours(value):
         # A tag and its value is a record they spell as a tuple. Read as a
         # sequence it becomes two loose strings, which is not what either side
         # means by one; read as a record it is the pair this engine holds.
-        rebuilt = getattr(_ibx, type(value).__name__, None)
+        rebuilt = getattr(_ibkr_dx, type(value).__name__, None)
         return value if rebuilt is None else rebuilt(*value)
 
     if not dataclasses.is_dataclass(value):
@@ -655,7 +655,7 @@ def _as_ours(value):
         (
             found
             for kind in type(value).__mro__
-            if (found := getattr(_ibx, kind.__name__, None)) is not None
+            if (found := getattr(_ibkr_dx, kind.__name__, None)) is not None
         ),
         None,
     )
@@ -713,7 +713,7 @@ def attach(ib, username="", password="", paper=True, session_file=None,
     `IB_PASSWORD` are used.
 
     The session is kept between runs, under this account's own file in
-    ``~/.ibx``. A venue answers a request that names a session it still holds
+    ``~/.ibkr_dx``. A venue answers a request that names a session it still holds
     with a challenge rather than a whole handshake, so a program that starts
     often is one login rather than one per start, and needs a person to approve
     far fewer of them. Name another path to move it, or pass ``False`` to keep
@@ -725,10 +725,10 @@ def attach(ib, username="", password="", paper=True, session_file=None,
     if session_file is None:
         who = username or os.environ.get("IB_USERNAME", "")
         kind = "paper" if paper else "live"
-        session_file = str(pathlib.Path.home() / ".ibx" / f"session-{who}-{kind}")
+        session_file = str(pathlib.Path.home() / ".ibkr_dx" / f"session-{who}-{kind}")
     elif session_file is False:
         session_file = None
-    ib.client = IbxClient(ib.wrapper, username, password, paper, session_file,
+    ib.client = IbkrDxClient(ib.wrapper, username, password, paper, session_file,
                           client_id, readonly)
     ib.wrapper.client = ib.client
 

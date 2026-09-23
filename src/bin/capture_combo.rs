@@ -10,9 +10,9 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::{ComboLeg, Contract, Order};
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::{ComboLeg, Contract, Order};
+use ibkr_dx::api::wrapper::Wrapper;
 
 #[derive(Default)]
 struct Heard {
@@ -23,7 +23,7 @@ struct Heard {
 impl Wrapper for Heard {
     fn open_order(
         &mut self, id: i64, _c: &Contract, _o: &Order,
-        state: &ibx::api::types::OrderState,
+        state: &ibkr_dx::api::types::OrderState,
     ) {
         self.priced.push((
             id,
@@ -53,7 +53,7 @@ fn option(strike: f64) -> Contract {
 }
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     if std::env::var("IB_USERNAME").unwrap_or_default().trim().is_empty() {
         eprintln!("IB_USERNAME/IB_PASSWORD unset. This reads from real servers.");
         std::process::exit(2);

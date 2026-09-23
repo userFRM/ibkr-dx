@@ -1,7 +1,7 @@
 """What the session holds, kept current while it runs."""
 
-import ibx
-from ibx._state import LiveState
+import ibkr_dx
+from ibkr_dx._state import LiveState
 
 
 class FakeContract:
@@ -99,7 +99,7 @@ def test_a_reader_gets_a_snapshot_not_the_live_list():
 
 
 def test_the_facade_exposes_the_live_state():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.wrapper.position("DU1", FakeContract(756733), 100.0, 400.5)
     assert ib.positions()[0].position == 100.0
     assert ib.openTrades() == []
@@ -110,7 +110,7 @@ def test_a_halt_the_venue_states_reaches_the_quote():
     routed a generic tick to either. A halted contract went on showing the
     prices standing when it stopped, with nothing to say they were stale."""
     s = LiveState()
-    s.tickGeneric(1, ibx.TickTypeEnum.HALTED, 1.0)
+    s.tickGeneric(1, ibkr_dx.TickTypeEnum.HALTED, 1.0)
     assert s.ticker_for(1).halted == 1.0
 
 

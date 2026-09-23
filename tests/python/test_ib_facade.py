@@ -2,11 +2,11 @@
 
 import pytest
 
-import ibx
+import ibkr_dx
 
 
 def spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.symbol = "SPY"
     c.secType = "STK"
     c.exchange = "SMART"
@@ -15,7 +15,7 @@ def spy():
 
 
 def connected_ib():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.client._test_connect("DU0000000")
     return ib
 
@@ -23,7 +23,7 @@ def connected_ib():
 def test_the_reference_client_surface_is_still_exported():
     """The facade is an addition. A program using the other surface is untouched."""
     for name in ("EClient", "EWrapper", "Contract", "Order", "ContractDetails"):
-        assert hasattr(ibx, name)
+        assert hasattr(ibkr_dx, name)
 
 
 def test_qualifying_fills_the_contract_in_place():
@@ -60,13 +60,13 @@ def test_a_name_nobody_carries_is_refused_by_name():
     """A gap is loud rather than silent: the refusal names what was asked for
     and where it was looked for, instead of the bare error a missing attribute
     would raise."""
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     with pytest.raises(AttributeError):
         ib.somethingNobodyImplemented()
 
 
 def test_a_name_that_is_no_method_is_still_refused():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     with pytest.raises(AttributeError):
         ib.thisIsNotAMethod
 
@@ -74,7 +74,7 @@ def test_a_name_that_is_no_method_is_still_refused():
 def test_a_read_only_session_refuses_to_change_a_position():
     """The reference client carries the same control. A research program wants
     the guarantee at the client rather than in its own discipline."""
-    class Errors(ibx.EWrapper):
+    class Errors(ibkr_dx.EWrapper):
         def __init__(self):
             super().__init__()
             self.seen = []
@@ -83,10 +83,10 @@ def test_a_read_only_session_refuses_to_change_a_position():
             self.seen.append((req_id, code, msg))
 
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("DU0000000", readonly=True)
 
-    order = ibx.Order()
+    order = ibkr_dx.Order()
     order.action = "BUY"
     order.orderType = "MKT"
     order.totalQuantity = 1
@@ -112,9 +112,9 @@ def test_a_session_that_is_not_read_only_does_not_refuse():
     A test-connected client has no venue behind it, so the order fails further
     down. What matters here is that it fails somewhere other than the guard.
     """
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     c._test_connect("DU0000000")
-    order = ibx.Order()
+    order = ibkr_dx.Order()
     order.action = "BUY"
     order.orderType = "MKT"
     order.totalQuantity = 1
@@ -128,7 +128,7 @@ def test_placing_an_order_hands_back_a_record_that_moves():
     """The record is returned before the venue has answered, and its status
     moves under the caller. That is what makes it worth holding."""
     ib = connected_ib()
-    order = ibx.Order()
+    order = ibkr_dx.Order()
     order.orderId = 7
     order.action = "BUY"
     order.orderType = "MKT"
@@ -153,7 +153,7 @@ def test_placing_an_order_hands_back_a_record_that_moves():
 def test_every_carried_method_is_actually_callable():
     """A name that resolves but is not a method would pass the honesty test
     while failing the caller."""
-    from ibx._ib import IB
+    from ibkr_dx._ib import IB
 
     for name in dir(IB):
         if name.startswith("_"):
@@ -185,10 +185,10 @@ def test_a_bracket_links_its_children_to_the_parent():
 
 
 def test_one_cancels_all_links_every_order_in_the_set():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     orders = []
     for _ in range(3):
-        o = ibx.Order()
+        o = ibkr_dx.Order()
         o.action = "BUY"
         orders.append(o)
     ib.oneCancelsAll(orders, "grp-1", 1)
@@ -205,7 +205,7 @@ def test_a_what_if_leaves_the_order_as_the_caller_wrote_it():
     behaviour.
     """
     ib = connected_ib()
-    order = ibx.Order()
+    order = ibkr_dx.Order()
     order.orderId = 11
     order.action = "BUY"
     order.orderType = "MKT"
@@ -223,7 +223,7 @@ def test_a_what_if_leaves_no_order_behind():
     answered on the order callbacks, so it left a record that read as an order
     working at the venue that nobody had sent."""
     ib = connected_ib()
-    order = ibx.Order()
+    order = ibkr_dx.Order()
     order.orderId = 12
     order.action = "BUY"
     order.orderType = "MKT"
@@ -358,7 +358,7 @@ def test_completed_orders_come_back_from_the_venue_not_from_the_trades():
     The venue answers on the session's second look, so what is measured is
     that the wait notices rather than how a loaded machine schedules.
     """
-    from ibx._state import LiveState
+    from ibkr_dx._state import LiveState
 
     class Answers(LiveState):
         def completed_orders_finished(self):
@@ -368,7 +368,7 @@ def test_completed_orders_come_back_from_the_venue_not_from_the_trades():
                 return False
             return True
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.wrapper = Answers()
     ib.client._test_connect("DU0000000")
     ib.placeOrder(spy(), _market_order())          # an ordinary trade, not a completed one
@@ -377,7 +377,7 @@ def test_completed_orders_come_back_from_the_venue_not_from_the_trades():
 
 
 def _market_order():
-    o = ibx.Order()
+    o = ibkr_dx.Order()
     o.orderId, o.action, o.orderType, o.totalQuantity = 21, "BUY", "MKT", 1
     return o
 

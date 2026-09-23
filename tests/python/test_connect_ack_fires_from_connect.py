@@ -10,11 +10,11 @@ import threading
 import time
 
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("IBX_LIVE_TEST"),
-    reason="Set IBX_LIVE_TEST=1 to run live gateway tests",
+    not os.environ.get("IBKR_DX_LIVE_TEST"),
+    reason="Set IBKR_DX_LIVE_TEST=1 to run live gateway tests",
 )
 
 

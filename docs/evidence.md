@@ -95,9 +95,9 @@ Every figure above is measured on each commit, and the build fails if one moves.
 | Surface | Status | Verification |
 | --- | :---: | --- |
 | `EClient` / `EWrapper` (TWS API shape) | ✅ Supported | `tests/ib_paper_compat`, `tests/python/test_compat_tier1..3.py` |
-| `ib_async`, unmodified | ✅ Supported | Their `IB` on this engine through `ibx.ib_async.attach` — their events, async variants and types, with no gateway. All 67 transport calls their library makes are carried and gated, and their own suite runs against it; see the note below. `tests/python/test_ib_async_transport.py`, `tests/ib_async_upstream/conftest.py` |
-| `ibx.IB` (ib_async shape) | ✅ Supported | 90/90 methods present; `tests/python/test_ib_facade.py`, `scripts/sdk_sweep.py` |
-| `ibx::api::Client` (Rust) | ✅ Supported | 80/80 callable; 5 return an error saying why: two name a handshake with a local process there is none of, one withdraws a contract lookup that does not stream and so has nothing to withdraw, and two ask for a running profit, whose figures arrive on a callback as they change — which is not something a call that answers once can hand back. Counted over the request surface the gate reads, which is the binding's — the two carry the same calls, and the row beside this one is what states that they do |
+| `ib_async`, unmodified | ✅ Supported | Their `IB` on this engine through `ibkr_dx.ib_async.attach` — their events, async variants and types, with no gateway. All 67 transport calls their library makes are carried and gated, and their own suite runs against it; see the note below. `tests/python/test_ib_async_transport.py`, `tests/ib_async_upstream/conftest.py` |
+| `ibkr_dx.IB` (ib_async shape) | ✅ Supported | 90/90 methods present; `tests/python/test_ib_facade.py`, `scripts/sdk_sweep.py` |
+| `ibkr_dx::api::Client` (Rust) | ✅ Supported | 80/80 callable; 5 return an error saying why: two name a handshake with a local process there is none of, one withdraws a contract lookup that does not stream and so has nothing to withdraw, and two ask for a running profit, whose figures arrive on a callback as they change — which is not something a call that answers once can hand back. Counted over the request surface the gate reads, which is the binding's — the two carry the same calls, and the row beside this one is what states that they do |
 | Gateway settings | ✅ Supported | 14 settings carried, 10 recorded as having no counterpart, both lists the same on either client; `tests/python/test_gateway_settings.py`, `tests/python/test_settings_parity.py`; session opened under a stated build and time zone |
 | Rust/Python equivalence | ✅ Supported | 4 static gates (settings, order fields, surface, error behaviour) plus `scripts/conformance.py --compare`, which compares 10 server responses across both clients |
 
@@ -335,4 +335,4 @@ client: announced build, time zone, execution-report scope, and others — 14 in
 total, readable at runtime. Ten gateway settings have no counterpart and report
 why (no window geometry, no local listening socket, no JVM heap, and no message
 pacing: nothing here paces outgoing messages, which the gateway ships with off).
-Rust: `EClientConfig.gateway`. Python: `ibx.configure()`.
+Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.

@@ -6,7 +6,7 @@ different order, the fields landed on the wrong attributes.
 Run: pytest tests/python/test_conditions_take_the_reference_positional_order.py -v
 """
 
-from ibx import (
+from ibkr_dx import (
     ExecutionCondition, MarginCondition, PercentChangeCondition,
     PriceCondition, TimeCondition, VolumeCondition,
 )

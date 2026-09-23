@@ -1,14 +1,14 @@
 //! Multi-asset-class order test phases (forex, futures, options).
 
 use super::common::*;
-use ibx::control::contracts;
-use ibx::protocol::fix;
+use ibkr_dx::control::contracts;
+use ibkr_dx::protocol::fix;
 
 pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     phase!("--- Phase 98: Forex Order Lifecycle (EUR.USD) ---");
 
     // First, look up EUR.USD contract
-    let now = ibx::protocol::datetime::chrono_free_timestamp();
+    let now = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let mut ccp = conns.ccp;
     ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "c"),
@@ -60,7 +60,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(fx_con_id as i64);
     hot_loop.context_mut().set_symbol(inst, "EUR".to_string());
@@ -70,7 +70,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst, "CASH", "IDEALPRO");
 
     let oid = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: inst, side: Side::Buy, qty: 20000 * ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 50_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: inst, side: Side::Buy, qty: 20000 * ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 50_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -114,7 +114,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
     phase!("--- Phase 99: Futures Order (MES) ---");
 
     // Look up MES (Micro E-mini S&P 500)
-    let now = ibx::protocol::datetime::chrono_free_timestamp();
+    let now = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let mut ccp = conns.ccp;
     ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "c"),
@@ -169,7 +169,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(fut_def.con_id as i64);
     hot_loop.context_mut().set_symbol(inst, "MES".to_string());
@@ -194,7 +194,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
 
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
-        order_id: oid, instrument: inst, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE,
+        order_id: oid, instrument: inst, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE,
         kind: OrderKind::Limit { price: 100 * PRICE_SCALE },
         tif: b'1', attrs: OrderAttrs { outside_rth: true, ..OrderAttrs::default() },
     })).unwrap();
@@ -241,7 +241,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     phase!("--- Phase 100: Options Contract Details + Order (SPY options) ---");
 
     // Look up SPY options
-    let now = ibx::protocol::datetime::chrono_free_timestamp();
+    let now = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let mut ccp = conns.ccp;
     ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "c"),
@@ -309,7 +309,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(opt_con_id as i64);
     hot_loop.context_mut().set_symbol(inst, "SPY".to_string());
@@ -327,7 +327,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
 
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
-        order_id: oid, instrument: inst, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE,
+        order_id: oid, instrument: inst, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE,
         kind: OrderKind::Limit { price: 1_000_000 },
         tif: b'1', attrs: OrderAttrs { outside_rth: true, ..OrderAttrs::default() },
     })).unwrap();
@@ -377,7 +377,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     // Register SPY
@@ -393,11 +393,11 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
     let oid2 = oid1 + 1;
     let oid3 = oid1 + 2;
 
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid1, instrument: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid2, instrument: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid3, instrument: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid1, instrument: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid2, instrument: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid3, instrument: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -475,7 +475,7 @@ pub(super) fn phase_global_venues(conns: Conns) -> Conns {
 
     let Conns { farm, mut ccp, hmds, account_id } = conns;
 
-    let now = ibx::protocol::datetime::chrono_free_timestamp();
+    let now = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     for (i, (symbol, currency, _)) in VENUES.iter().enumerate() {
         let req_id = format!("GV{i}");
         ccp.send_fix(&[
@@ -598,7 +598,7 @@ pub(super) fn phase_global_venues(conns: Conns) -> Conns {
 pub(super) fn phase_non_usd_order(conns: Conns) -> Conns {
     phase!("--- Non-dollar order (VOD, London, sterling) ---");
 
-    let now = ibx::protocol::datetime::chrono_free_timestamp();
+    let now = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let mut ccp = conns.ccp;
     ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "c"),
@@ -643,7 +643,7 @@ pub(super) fn phase_non_usd_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(def.con_id as i64);
     hot_loop.context_mut().set_symbol(inst, "VOD".to_string());
@@ -654,15 +654,15 @@ pub(super) fn phase_non_usd_order(conns: Conns) -> Conns {
     // contract. This is the identity the client surface builds for itself.
     hot_loop.context_mut().set_order_identity(
         inst,
-        &ibx::types::model::contract_identity("", 0.0, "", "", &def.currency),
+        &ibkr_dx::types::model::contract_identity("", 0.0, "", "", &def.currency),
     );
 
     // A tenth of a pound, against a share that trades near three quarters of
     // one. Nothing this order does can fill.
-    let limit = ibx::types::PRICE_SCALE / 10;
+    let limit = ibkr_dx::types::PRICE_SCALE / 10;
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
-        order_id: oid, instrument: inst, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE,
+        order_id: oid, instrument: inst, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE,
         kind: OrderKind::Limit { price: limit }, tif: b'1',
         attrs: OrderAttrs { outside_rth: true, ..Default::default() },
     })).unwrap();
@@ -724,7 +724,7 @@ pub(super) fn phase_crypto_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(479624278);
     hot_loop.context_mut().set_symbol(inst, "BTC".to_string());
@@ -742,8 +742,8 @@ pub(super) fn phase_crypto_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
         order_id: oid, instrument: inst, con_id: 0, side: Side::Buy,
-        qty: ibx::types::QTY_SCALE / 1000,
-        kind: OrderKind::Limit { price: 10_000 * ibx::types::PRICE_SCALE },
+        qty: ibkr_dx::types::QTY_SCALE / 1000,
+        kind: OrderKind::Limit { price: 10_000 * ibkr_dx::types::PRICE_SCALE },
         tif: b'3', attrs: OrderAttrs::default(),
     })).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -812,7 +812,7 @@ pub(super) fn phase_crypto_minutes_tif(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(479624278);
     hot_loop.context_mut().set_symbol(inst, "BTC".to_string());
@@ -821,8 +821,8 @@ pub(super) fn phase_crypto_minutes_tif(conns: Conns) -> Conns {
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
         order_id: oid, instrument: inst, con_id: 0, side: Side::Buy,
-        qty: ibx::types::QTY_SCALE / 1000,
-        kind: OrderKind::Limit { price: 10_000 * ibx::types::PRICE_SCALE },
+        qty: ibkr_dx::types::QTY_SCALE / 1000,
+        kind: OrderKind::Limit { price: 10_000 * ibkr_dx::types::PRICE_SCALE },
         tif: b'p', attrs: OrderAttrs::default(),
     })).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -886,20 +886,20 @@ pub(super) fn phase_crypto_fill(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(479624278);
     hot_loop.context_mut().set_symbol(inst, "BTC".to_string());
     hot_loop.context_mut().set_routing(inst, "CRYPTO", "PAXOS");
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 479624278, symbol: "BTC".into(), exchange: "PAXOS".into(), sec_type: "CRYPTO".into(), currency: "USD".into(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 479624278, symbol: "BTC".into(), exchange: "PAXOS".into(), sec_type: "CRYPTO".into(), currency: "USD".into(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // A thousandth of a coin, which at the price this trades at is a few tens
     // of dollars of paper money.
-    const SIZE: i64 = ibx::types::QTY_SCALE / 1000;
+    const SIZE: i64 = ibkr_dx::types::QTY_SCALE / 1000;
     let buy = next_order_id();
     let mut sell: Option<u64> = None;
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -922,7 +922,7 @@ pub(super) fn phase_crypto_fill(conns: Conns) -> Conns {
                     // its increment is. Priced off the grid the venue answers
                     // "Invalid Price" — an immediate-or-cancel order fills at
                     // the offer regardless, so paying through it costs nothing.
-                    let price = (ask / ibx::types::PRICE_SCALE + 100) * ibx::types::PRICE_SCALE;
+                    let price = (ask / ibkr_dx::types::PRICE_SCALE + 100) * ibkr_dx::types::PRICE_SCALE;
                     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
                         order_id: buy, instrument: inst, con_id: 0, side: Side::Buy, qty: SIZE,
                         kind: OrderKind::Limit { price },
@@ -932,8 +932,8 @@ pub(super) fn phase_crypto_fill(conns: Conns) -> Conns {
                 }
             }
             Ok(Event::Fill(fill)) => {
-                let qty = fill.qty as f64 / ibx::types::QTY_SCALE as f64;
-                let price = fill.price as f64 / ibx::types::PRICE_SCALE as f64;
+                let qty = fill.qty as f64 / ibkr_dx::types::QTY_SCALE as f64;
+                let price = fill.price as f64 / ibkr_dx::types::PRICE_SCALE as f64;
                 if fill.side == Side::Buy && bought.is_none() {
                     println!("  bought {qty} at {price}");
                     bought = Some((qty, fill.qty));
@@ -941,7 +941,7 @@ pub(super) fn phase_crypto_fill(conns: Conns) -> Conns {
                     let bid = shared.market.quote(inst).bid;
                     let oid = next_order_id();
                     sell = Some(oid);
-                    let price = (bid / ibx::types::PRICE_SCALE - 100) * ibx::types::PRICE_SCALE;
+                    let price = (bid / ibkr_dx::types::PRICE_SCALE - 100) * ibkr_dx::types::PRICE_SCALE;
                     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
                         order_id: oid, instrument: inst, con_id: 0, side: Side::Sell, qty: fill.qty,
                         kind: OrderKind::Limit { price },

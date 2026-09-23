@@ -9,7 +9,7 @@ built to avoid.
 81 callbacks, the count the reference table publishes.
 """
 
-from ibx import EWrapper
+from ibkr_dx import EWrapper
 
 CALLBACKS = [
     "connect_ack", "connection_closed", "next_valid_id", "managed_accounts",

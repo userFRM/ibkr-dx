@@ -7,7 +7,7 @@ here, so a program reading it off every fill raised AttributeError.
 Run: pytest tests/python/test_a_fill_states_no_exercise_type.py -v
 """
 
-from ibx import Contract, EClient, EWrapper, Execution, OptionExerciseType, Order
+from ibkr_dx import Contract, EClient, EWrapper, Execution, OptionExerciseType, Order
 
 
 class Recorder(EWrapper):

@@ -7,14 +7,14 @@ page, so a layout that answers none of those lines means no such program ever
 reached its first statement, whatever else was exported.
 
 Under these names, porting is the one rename a person would guess at — `ibapi`
-becomes `ibx` — and the vendor's own sample files import unchanged after it.
-Nothing here is a second implementation: each module is a view of what `ibx`
-already publishes, and `ibx.client.EClient is ibx.EClient`.
+becomes `ibkr_dx` — and the vendor's own sample files import unchanged after it.
+Nothing here is a second implementation: each module is a view of what `ibkr_dx`
+already publishes, and `ibkr_dx.client.EClient is ibkr_dx.EClient`.
 """
 
 import importlib
 
-import ibx
+import ibkr_dx
 
 # (module, the names a sample imports from it)
 LAYOUT = [
@@ -48,34 +48,34 @@ def test_each_module_the_reference_client_publishes_is_importable():
     missing = []
     for name, held in LAYOUT:
         try:
-            module = importlib.import_module(f"ibx.{name}")
+            module = importlib.import_module(f"ibkr_dx.{name}")
         except ImportError as why:
-            missing.append(f"ibx.{name}: {why}")
+            missing.append(f"ibkr_dx.{name}: {why}")
             continue
         for one in held:
             if not hasattr(module, one):
-                missing.append(f"ibx.{name}.{one}")
+                missing.append(f"ibkr_dx.{name}.{one}")
     assert not missing, "\n".join(missing)
 
 
 def test_a_module_is_a_view_and_not_a_second_implementation():
     # `from ibapi.client import EClient` and `from ibapi import EClient` name
     # one class there, and they have to name one here.
-    from ibx.client import EClient
-    from ibx.contract import Contract
-    from ibx.execution import ExecutionFilter
+    from ibkr_dx.client import EClient
+    from ibkr_dx.contract import Contract
+    from ibkr_dx.execution import ExecutionFilter
 
-    assert EClient is ibx.EClient
-    assert Contract is ibx.Contract
-    assert ExecutionFilter is ibx.ExecutionFilter
+    assert EClient is ibkr_dx.EClient
+    assert Contract is ibkr_dx.Contract
+    assert ExecutionFilter is ibkr_dx.ExecutionFilter
 
 
 def test_the_module_is_reachable_as_an_attribute_too():
     # A program writes both spellings: `from ibapi import wrapper` then
     # `wrapper.EWrapper`, and `from ibapi.wrapper import EWrapper`.
-    from ibx import order_condition, wrapper
+    from ibkr_dx import order_condition, wrapper
 
-    assert wrapper.EWrapper is ibx.EWrapper
+    assert wrapper.EWrapper is ibkr_dx.EWrapper
     assert order_condition.OrderCondition.Price == 1
 
 
@@ -84,15 +84,15 @@ def test_a_star_import_from_one_of_them_brings_something():
     # import and leave the program with nothing.
     for name, _ in LAYOUT:
 
-        module = importlib.import_module(f"ibx.{name}")
-        assert getattr(module, "__all__", None), f"ibx.{name} publishes nothing"
+        module = importlib.import_module(f"ibkr_dx.{name}")
+        assert getattr(module, "__all__", None), f"ibkr_dx.{name} publishes nothing"
 
 def test_a_module_holds_what_the_reference_puts_in_it():
     # Split the wrong way round once: the attrib classes were in `ticktype`,
     # which there holds `TickType` and `TickTypeEnum` and nothing else, and the
     # reference's own wrapper imports `TickType` from it. What is stated about
     # a tick lives in `common`, which is where its decoder reads them from.
-    from ibx import common, ticktype
+    from ibkr_dx import common, ticktype
 
     assert ticktype.TickType is int
     assert not hasattr(ticktype, "TickAttrib"), "that class lives in common"
@@ -103,7 +103,7 @@ def test_a_module_holds_what_the_reference_puts_in_it():
 def test_a_condition_is_made_the_way_that_client_makes_one():
     # Its samples build every conditional order this way, so the six classes
     # being importable is not enough on its own.
-    from ibx import order_condition
+    from ibkr_dx import order_condition
 
     made = order_condition.Create(order_condition.OrderCondition.Price)
     assert type(made).__name__ == "PriceCondition"
@@ -124,10 +124,10 @@ def test_a_condition_is_made_the_way_that_client_makes_one():
 def test_the_layout_says_so_when_it_names_something_absent():
     # Filtered to what the package happens to have, a module came out short and
     # the import that wanted the missing name failed at the caller instead.
-    import ibx._layout as layout
+    import ibkr_dx._layout as layout
 
     try:
-        layout.install({"EClient": ibx.EClient})
+        layout.install({"EClient": ibkr_dx.EClient})
     except AttributeError as why:
         assert "does not publish" in str(why)
         return
@@ -136,9 +136,9 @@ def test_the_layout_says_so_when_it_names_something_absent():
 
 def test_a_star_import_brings_names_and_not_modules():
     brought = {}
-    exec("from ibx import *", brought)
+    exec("from ibkr_dx import *", brought)
     assert "EClient" in brought and "IB" in brought
-    for shadowed in ("order", "contract", "client", "wrapper", "common", "inspect", "ibx"):
+    for shadowed in ("order", "contract", "client", "wrapper", "common", "inspect", "ibkr_dx"):
         assert shadowed not in brought, f"{shadowed} would shadow the caller's own"
 
 def test_a_star_import_of_common_brings_what_that_module_imports():
@@ -149,7 +149,7 @@ def test_a_star_import_of_common_brings_what_that_module_imports():
     # middle of a class body. Which is where this was found: driving that
     # sample.
     brought = {}
-    exec("from ibx.common import *", brought)
+    exec("from ibkr_dx.common import *", brought)
     for named in ("Object", "floatMaxString", "intMaxString", "decimalMaxString"):
         assert named in brought, named
 

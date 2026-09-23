@@ -11,7 +11,7 @@ Every column is read from the client it names — not recalled, not asserted:
               IBKR's own Python client's surface
   ibapi       that client, imported and enumerated
   ib_async    the widely used asynchronous client, imported and enumerated
-  ibx         this client, from the coverage matrix the build already checks
+  IBKR-DX         this client, from the coverage matrix the build already checks
 
 A column can only be written for a client that is installed. One that is not
 is left out of the table entirely rather than filled with guesses, and the page
@@ -50,9 +50,9 @@ README_SHUT = "<!-- capabilities:end -->"
 #: page reproducible on exactly one machine: the check that compares a
 #: generated file against the committed one then failed everywhere else, and
 #: the columns for both reference clients silently vanished from the answer.
-#: `IBX_REFERENCE_CLIENTS` names such a directory where there is one.
+#: `IBKR_DX_REFERENCE_CLIENTS` names such a directory where there is one.
 EXTRA_PATHS = [
-    pathlib.Path(p) for p in os.environ.get("IBX_REFERENCE_CLIENTS", "").split(os.pathsep) if p
+    pathlib.Path(p) for p in os.environ.get("IBKR_DX_REFERENCE_CLIENTS", "").split(os.pathsep) if p
 ] + [ROOT / "vendor"]
 
 #: What a mark means. Three states, because two would lie: a call that exists
@@ -308,8 +308,8 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
     backs_by = {n: (s, t, a) for n, s, t, a in counted(backs, back_columns)}
     # One line per client, and this client's two surfaces last, because they
     # are the answer and the rest is what the answer is measured against.
-    ours = [n for n in calls_by if n.startswith("ibx")]
-    theirs = [n for n in calls_by if not n.startswith("ibx") and n != "Gateway wire"]
+    ours = [n for n in calls_by if n.startswith("IBKR-DX")]
+    theirs = [n for n in calls_by if not n.startswith("IBKR-DX") and n != "Gateway wire"]
 
     def row(name):
         served, taken, absent = calls_by.get(name, (0, 0, 0))
@@ -328,7 +328,7 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         if b_absent:
             missing.append(f"{b_absent} callbacks absent")
         note = ", ".join(missing) or "nothing missing"
-        mine = name.startswith("ibx")
+        mine = name.startswith("IBKR-DX")
         cells = [f"**{name}**" if mine else name,
                  f"**{of_calls}**" if mine else of_calls,
                  f"**{of_backs}**" if mine else of_backs,
@@ -463,8 +463,8 @@ def main() -> int:
         )
     columns.insert(1, ("TWS API", lambda r: SERVED if r.get("documented", True) else ABSENT))
     columns += [
-        ("ibx Rust", lambda r: ours(r["rust"])),
-        ("ibx Python", lambda r: ours(r["python"])),
+        ("IBKR-DX Rust", lambda r: ours(r["rust"])),
+        ("IBKR-DX Python", lambda r: ours(r["python"])),
     ]
 
     back_columns = [("Gateway wire", lambda r: SERVED)]
@@ -474,8 +474,8 @@ def main() -> int:
         back_columns.append(("ib_async", lambda r: mark(known(r, async_backs))))
     back_columns.insert(1, ("TWS API", lambda r: SERVED))
     back_columns += [
-        ("ibx Rust", lambda r: ours(r["rust"])),
-        ("ibx Python", lambda r: ours(r["python"])),
+        ("IBKR-DX Rust", lambda r: ours(r["rust"])),
+        ("IBKR-DX Python", lambda r: ours(r["python"])),
     ]
 
     out = [
@@ -526,7 +526,7 @@ def main() -> int:
     # marking both surfaces carried invented a Rust column, and calls that
     # exist only in the binding were published as Rust's too.
     beyond: list[str] = []
-    ours_extra, _ = surface_of("ibx", "EClient")
+    ours_extra, _ = surface_of("ibkr_dx", "EClient")
     rust_extra = surface_from_reference("rust-reference.md")
     if ours_extra is not None:
         # Both tables above, not only the calls. The Rust surface is read off

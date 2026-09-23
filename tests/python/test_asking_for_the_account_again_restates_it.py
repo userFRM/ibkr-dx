@@ -4,10 +4,10 @@ The reference client answers a second reqAccountUpdates(True) with every figure
 and accountDownloadEnd again. Here the second ask was answered with nothing at
 all, and a caller blocking on the end waited for ever.
 """
-import ibx
+import ibkr_dx
 
 
-class Account(ibx.EWrapper):
+class Account(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.values = 0
@@ -25,7 +25,7 @@ class Account(ibx.EWrapper):
 
 def test_asking_again_restates_every_figure_and_the_end():
     w = Account()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c.reqAccountUpdates(True, "")
     c._test_set_account(100000.0, 200000.0, 0.0, 0.0, 0.0)

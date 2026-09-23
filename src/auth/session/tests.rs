@@ -209,7 +209,7 @@ fn hw_info_format() {
     assert_eq!(parts[0].len(), 8); // 4-byte hex
 }
 
-// The machine_id is persistent (read from the hwid file / IBX_HWID env,
+// The machine_id is persistent (read from the hwid file / IBKR_DX_HWID env,
 // created once — see read_or_create_hwid), so repeated calls
 // must return the SAME id. This test previously asserted the pre-#132
 // behavior (random id per call) and failed once a hwid file existed.

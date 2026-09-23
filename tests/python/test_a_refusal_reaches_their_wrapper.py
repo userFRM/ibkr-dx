@@ -13,7 +13,7 @@ import inspect
 
 import ib_async.wrapper
 
-from ibx.ib_async import _LoopBound
+from ibkr_dx.ib_async import _LoopBound
 
 
 def test_their_wrapper_still_declares_four_arguments():

@@ -15,7 +15,7 @@ spellings are the sample's too, which is why each says it is not a test.
 import threading
 
 from conftest import NotConnectedProbe
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class TestClient(EClient):

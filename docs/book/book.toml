@@ -1,15 +1,15 @@
 [book]
-title = "IBX"
+title = "IBKR-DX"
 description = "Direct IB connection engine — Rust + Python."
-authors = ["IBX contributors"]
+authors = ["IBKR-DX contributors"]
 language = "en"
 src = "src"
 
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/userFRM/ibx"
-edit-url-template = "https://github.com/userFRM/ibx/edit/main/docs/book/{path}"
+git-repository-url = "https://github.com/userFRM/ibkr-dx"
+edit-url-template = "https://github.com/userFRM/ibkr-dx/edit/main/docs/book/{path}"
 no-section-label = true
 additional-css = ["theme/custom.css"]
 

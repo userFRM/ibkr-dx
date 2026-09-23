@@ -12,13 +12,13 @@ import os
 import sys
 import time
 import threading
-from ibx import EWrapper, EClient, Contract
+from ibkr_dx import EWrapper, EClient, Contract
 
 MSFT_CON_ID = 272093
 
 
 class ScannerSubscription:
-    """Plain object matching the attribute interface IBX reads via getattr."""
+    """Plain object matching the attribute interface IBKR-DX reads via getattr."""
     def __init__(self):
         self.instrument = "STK"
         self.locationCode = "STK.US.MAJOR"

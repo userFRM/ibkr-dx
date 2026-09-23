@@ -1,8 +1,8 @@
-# API Coverage Matrix (v0.7.1)
+# API Coverage Matrix (v0.1.0)
 
 *Auto-generated from source — do not edit.*
 
-Canonical IB API methods vs ibx implementation status.
+Canonical IB API methods vs IBKR-DX implementation status.
 
 - **Y** = Implemented
 - **STUB** = Accepts call but not wired to server (logs warning or no-op)

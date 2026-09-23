@@ -9,9 +9,9 @@
 use std::env;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use ibx::api::client::{EClient, EClientConfig, Contract, Order};
-use ibx::api::types::*;
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{EClient, EClientConfig, Contract, Order};
+use ibkr_dx::api::types::*;
+use ibkr_dx::api::wrapper::Wrapper;
 
 // ── GT file loader ──
 
@@ -159,7 +159,7 @@ struct ContractDescSnapshot {
     currency: String,
 }
 
-fn snap_contract(c: &ibx::api::types::Contract) -> ContractSnapshot {
+fn snap_contract(c: &ibkr_dx::api::types::Contract) -> ContractSnapshot {
     ContractSnapshot {
         con_id: c.con_id,
         symbol: c.symbol.clone(),
@@ -222,7 +222,7 @@ impl Wrapper for RecWrapper {
     ) {
         self.push(Cb::OrderStatus { order_id, status: status.into(), filled, remaining, why_held: why_held.into() });
     }
-    fn open_order(&mut self, order_id: i64, contract: &ibx::api::types::Contract, order: &ibx::api::types::Order, state: &OrderState) {
+    fn open_order(&mut self, order_id: i64, contract: &ibkr_dx::api::types::Contract, order: &ibkr_dx::api::types::Order, state: &OrderState) {
         self.push(Cb::OpenOrder {
             order_id,
             contract: snap_contract(contract),
@@ -245,7 +245,7 @@ impl Wrapper for RecWrapper {
         });
     }
     fn open_order_end(&mut self) { self.push(Cb::OpenOrderEnd); }
-    fn completed_order(&mut self, contract: &ibx::api::types::Contract, order: &ibx::api::types::Order, state: &OrderState) {
+    fn completed_order(&mut self, contract: &ibkr_dx::api::types::Contract, order: &ibkr_dx::api::types::Order, state: &OrderState) {
         self.push(Cb::CompletedOrder {
             contract: snap_contract(contract),
             order: OrderSnapshot {
@@ -267,7 +267,7 @@ impl Wrapper for RecWrapper {
         });
     }
     fn completed_orders_end(&mut self) { self.push(Cb::CompletedOrdersEnd); }
-    fn exec_details(&mut self, req_id: i64, contract: &ibx::api::types::Contract, execution: &Execution) {
+    fn exec_details(&mut self, req_id: i64, contract: &ibkr_dx::api::types::Contract, execution: &Execution) {
         self.push(Cb::ExecDetails {
             req_id,
             contract: snap_contract(contract),
@@ -286,7 +286,7 @@ impl Wrapper for RecWrapper {
         });
     }
     fn exec_details_end(&mut self, req_id: i64) { self.push(Cb::ExecDetailsEnd { req_id }); }
-    fn position(&mut self, account: &str, contract: &ibx::api::types::Contract, pos: f64, avg_cost: f64) {
+    fn position(&mut self, account: &str, contract: &ibkr_dx::api::types::Contract, pos: f64, avg_cost: f64) {
         self.push(Cb::Position {
             account: account.into(),
             contract: snap_contract(contract),
@@ -322,7 +322,7 @@ impl Wrapper for RecWrapper {
     fn histogram_data(&mut self, req_id: i64, items: &[(f64, i64)]) {
         self.push(Cb::HistogramData { req_id, count: items.len() });
     }
-    fn historical_ticks(&mut self, req_id: i64, _: &ibx::types::HistoricalTickData, done: bool) {
+    fn historical_ticks(&mut self, req_id: i64, _: &ibkr_dx::types::HistoricalTickData, done: bool) {
         self.push(Cb::HistoricalTicks { req_id, done });
     }
     fn scanner_parameters(&mut self, _: &str) {
@@ -364,19 +364,19 @@ impl Wrapper for RecWrapper {
     fn market_rule(&mut self, id: i64, increments: &[PriceIncrement]) {
         self.push(Cb::MarketRule { id, count: increments.len() });
     }
-    fn smart_components(&mut self, req_id: i64, components: &[ibx::types::SmartComponent]) {
+    fn smart_components(&mut self, req_id: i64, components: &[ibkr_dx::types::SmartComponent]) {
         self.push(Cb::SmartComponents { req_id, count: components.len() });
     }
-    fn news_providers(&mut self, providers: &[ibx::types::NewsProvider]) {
+    fn news_providers(&mut self, providers: &[ibkr_dx::types::NewsProvider]) {
         self.push(Cb::NewsProviders { count: providers.len() });
     }
     fn current_time(&mut self, time: i64) {
         self.push(Cb::CurrentTime { time });
     }
-    fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[ibx::types::SoftDollarTier]) {
+    fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[ibkr_dx::types::SoftDollarTier]) {
         self.push(Cb::SoftDollarTiers { req_id, count: tiers.len() });
     }
-    fn family_codes(&mut self, codes: &[ibx::types::FamilyCode]) {
+    fn family_codes(&mut self, codes: &[ibkr_dx::types::FamilyCode]) {
         self.push(Cb::FamilyCodes { count: codes.len() });
     }
     fn user_info(&mut self, req_id: i64, white_branding_id: &str) {
@@ -452,7 +452,7 @@ fn assert_field_i64(name: &str, actual: i64, gt_key: &str, gt: &serde_json::Valu
 
 #[test]
 fn api_gt_suite() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let config = match get_config() {
         Some(c) => c,
         None => { println!("Skipping: IB credentials not set"); return; }
@@ -1483,7 +1483,7 @@ fn api_gt_suite() {
 /// comparison suite needs are present.
 #[test]
 fn reference_and_account_calls_live() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let Some(config) = get_config() else {
         println!("Skipping: IB credentials not set");
         return;
@@ -1503,11 +1503,11 @@ fn reference_and_account_calls_live() {
         values_multi_end: Vec<i64>,
     }
     struct W(Arc<Mutex<Heard>>);
-    impl ibx::api::wrapper::Wrapper for W {
+    impl ibkr_dx::api::wrapper::Wrapper for W {
         fn managed_accounts(&mut self, accounts: &str) {
             self.0.lock().unwrap().accounts.push(accounts.to_string());
         }
-        fn mkt_depth_exchanges(&mut self, d: &[ibx::types::DepthMktDataDescription]) {
+        fn mkt_depth_exchanges(&mut self, d: &[ibkr_dx::types::DepthMktDataDescription]) {
             self.0.lock().unwrap().depth_venues += d.len();
         }
         fn position_multi(
@@ -1595,7 +1595,7 @@ fn reference_and_account_calls_live() {
 /// having arrived unread for as long as this client has existed.
 #[test]
 fn the_venue_sends_nothing_this_client_does_not_read() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let Some(config) = get_config() else {
         println!("Skipping: IB credentials not set");
         return;

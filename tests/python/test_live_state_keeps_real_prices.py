@@ -6,13 +6,13 @@ future in a month people paid to be rid of it, a tick index that lives on both
 sides of zero. Dropped as absences, those instruments never had a quote at all.
 """
 
-import ibx
-from ibx._state import LiveState
+import ibkr_dx
+from ibkr_dx._state import LiveState
 
 
 def _quote(price):
     state = LiveState()
-    state.tickPrice(1, ibx.TickTypeEnum.BID, price)
+    state.tickPrice(1, ibkr_dx.TickTypeEnum.BID, price)
     return state.ticker_for(1).bid
 
 

@@ -2,7 +2,7 @@
 
 ib_async is layered: `IB`, `Wrapper`, `Ticker` and `Trade` are transport
 agnostic, and only `Client`/`Connection` know there is a socket to a gateway.
-`ibx.ib_async.attach` replaces that layer, so their library runs unmodified.
+`ibkr_dx.ib_async.attach` replaces that layer, so their library runs unmodified.
 Their suite is the strongest available statement of whether it does.
 
 Their tests are not vendored. Point the run at a checkout of theirs:
@@ -23,12 +23,12 @@ import os
 import ib_async as ibi
 import pytest_asyncio
 
-import ibx.ib_async
+import ibkr_dx.ib_async
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def ib():
-    ib = ibx.ib_async.attach(
+    ib = ibkr_dx.ib_async.attach(
         ibi.IB(),
         username=os.environ["IB_USERNAME"],
         password=os.environ["IB_PASSWORD"],

@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use ibx::bridge::SharedState;
-use ibx::engine::hot_loop::HotLoop;
-use ibx::types::*;
+use ibkr_dx::bridge::SharedState;
+use ibkr_dx::engine::hot_loop::HotLoop;
+use ibkr_dx::types::*;
 
 #[test]
 fn full_lifecycle() {

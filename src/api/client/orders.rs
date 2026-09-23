@@ -576,7 +576,7 @@ impl EClient {
     /// callbacks and surfaced in account tools. Useful for cancelling an order
     /// placed in a prior session, where the local `order_id` is not retained.
     ///
-    /// the CCP cancel frame is orderId-only, so ibx looks up
+    /// the CCP cancel frame is orderId-only, so ibkr_dx looks up
     /// the local `order_id` from `permId` in the open-order cache (populated by
     /// `place_order` callbacks or by the CCP session-recovery push hydrated in
     /// `handle_exec_report`). Fails if `perm_id` is not currently tracked.

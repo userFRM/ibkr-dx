@@ -11,8 +11,8 @@
 //! a fill and a quote are things you look at:
 //!
 //! ```no_run
-//! # use ibx::{Client, Config};
-//! # use ibx::types::model::{Contract, Order};
+//! # use ibkr_dx::{Client, Config};
+//! # use ibkr_dx::types::model::{Contract, Order};
 //! # use std::time::Duration;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::connect(&Config {
@@ -172,7 +172,7 @@ impl Client {
         let (client, state, stop) =
             (Arc::clone(&self.client), Arc::clone(&self.state), Arc::clone(&self.stop));
         let handle = thread::Builder::new()
-            .name("ibx-reader".to_string())
+            .name("ibkr-dx-reader".to_string())
             .spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     {

@@ -20,9 +20,9 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{Contract, EClient, EClientConfig, Order};
-use ibx::api::types::OrderState;
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{Contract, EClient, EClientConfig, Order};
+use ibkr_dx::api::types::OrderState;
+use ibkr_dx::api::wrapper::Wrapper;
 
 const STATE_FILE: &str = ".tmp/premarket_orders.json";
 const SPY_CON_ID: i64 = 756733;

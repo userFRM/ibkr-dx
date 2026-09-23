@@ -1,6 +1,6 @@
 use std::env;
 
-use ibx::api::{EClient, EClientConfig, Wrapper, Contract, TickAttrib};
+use ibkr_dx::api::{EClient, EClientConfig, Wrapper, Contract, TickAttrib};
 
 struct QuotePrinter;
 
@@ -32,8 +32,8 @@ impl Wrapper for QuotePrinter {
 }
 
 fn main() {
-    let _log = ibx::logging::init(&ibx::logging::LogConfig::from_env());
-    println!("ibx v{}", env!("CARGO_PKG_VERSION"));
+    let _log = ibkr_dx::logging::init(&ibkr_dx::logging::LogConfig::from_env());
+    println!("ibkr_dx v{}", env!("CARGO_PKG_VERSION"));
 
     let username = env::var("IB_USERNAME").unwrap_or_else(|_| {
         eprintln!("Set IB_USERNAME and IB_PASSWORD environment variables");
@@ -48,7 +48,7 @@ fn main() {
     // venue answers by naming which server this account is on, so this is a
     // starting point rather than a destination.
     let host = env::var("IB_HOST")
-        .unwrap_or_else(|_| ibx::config::CCP_HOSTS[0].to_string());
+        .unwrap_or_else(|_| ibkr_dx::config::CCP_HOSTS[0].to_string());
 
     let client = EClient::connect(&EClientConfig {
         username,

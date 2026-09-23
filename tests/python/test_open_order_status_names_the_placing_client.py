@@ -9,7 +9,7 @@ order under its own.
 Run: pytest tests/python/test_open_order_status_names_the_placing_client.py -v
 """
 
-from ibx import EWrapper, EClient
+from ibkr_dx import EWrapper, EClient
 
 PLACED_UNDER = 3
 ASKING_UNDER = 7

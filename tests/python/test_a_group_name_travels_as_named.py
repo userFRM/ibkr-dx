@@ -7,7 +7,7 @@ name travels as named, whatever it reads as.
 Run: pytest tests/python/test_a_group_name_travels_as_named.py -v
 """
 
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 
 def spy():

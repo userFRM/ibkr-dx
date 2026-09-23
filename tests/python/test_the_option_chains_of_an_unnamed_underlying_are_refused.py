@@ -7,10 +7,10 @@ surface refuses at once, with the reason.
 
 import pytest
 
-import ibx
+import ibkr_dx
 
 
 def test_the_option_chains_of_an_unnamed_underlying_are_refused():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     with pytest.raises(RuntimeError, match="qualify it first"):
         c.option_chains("SPY", "", "STK", 0)

@@ -18,7 +18,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from .ibx import EWrapper
+from .ibkr_dx import EWrapper
 
 
 @dataclass
@@ -568,7 +568,7 @@ class LiveState(EWrapper):
         self._apply(reqId, tickType, value)
 
     def tickString(self, reqId, tickType, value):
-        from .ibx import TickTypeEnum as T
+        from .ibkr_dx import TickTypeEnum as T
 
         if tickType in (T.LAST_TIMESTAMP, T.DELAYED_LAST_TIMESTAMP):
             with self._lock:
@@ -712,7 +712,7 @@ class Ticker:
 #: Taken from the enum this client publishes rather than written out again, so
 #: the two cannot drift apart.
 def _tick_fields():
-    from .ibx import TickTypeEnum as T
+    from .ibkr_dx import TickTypeEnum as T
 
     return {
         T.BID: ("bid", "prevBid"),

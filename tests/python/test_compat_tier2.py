@@ -17,7 +17,7 @@ Tests cover:
 import time
 import pytest
 from conftest import NotConnectedProbe
-from ibx import EClient, EWrapper, Contract
+from ibkr_dx import EClient, EWrapper, Contract
 
 
 # ── Helper fixtures ──

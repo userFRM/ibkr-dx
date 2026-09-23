@@ -11,7 +11,7 @@ import os
 import time
 import threading
 import pytest
-from ibx import EWrapper, EClient, Contract, Order, TagValue
+from ibkr_dx import EWrapper, EClient, Contract, Order, TagValue
 from conftest import wait_for
 
 

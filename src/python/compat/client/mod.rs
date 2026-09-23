@@ -460,7 +460,7 @@ impl EClient {
         ib_key_token_sub_type: Option<String>,
         code_provider: Option<Py<PyAny>>,
         readonly: bool,
-        // What this session runs under, by the names `ibx.configure` uses.
+        // What this session runs under, by the names `ibkr_dx.configure` uses.
         // Stated here it belongs to this session; stated there it is the
         // process's, and is what a session that states nothing falls back to.
         settings: Option<std::collections::HashMap<String, String>>,

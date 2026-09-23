@@ -8,8 +8,8 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{Contract, EClient, EClientConfig, Order};
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{Contract, EClient, EClientConfig, Order};
+use ibkr_dx::api::wrapper::Wrapper;
 
 #[derive(Default, Clone, Debug)]
 struct State {
@@ -114,7 +114,7 @@ fn run_one(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
 
     let username = env::var("IB_USERNAME")?;
     let password = env::var("IB_PASSWORD")?;
@@ -171,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lmt_price: 1.0,
         tif: "DAY".into(),
         algo_strategy: "Adaptive".into(),
-        algo_params: vec![ibx::api::types::TagValue {
+        algo_params: vec![ibkr_dx::api::types::TagValue {
             tag: "adaptivePriority".into(),
             value: "Normal".into(),
         }],

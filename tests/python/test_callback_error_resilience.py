@@ -12,7 +12,7 @@ and a fresh session on the same process works.
 """
 
 import pytest
-from ibx import EWrapper, EClient
+from ibkr_dx import EWrapper, EClient
 
 
 class RaisingTickPriceWrapper(EWrapper):

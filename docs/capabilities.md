@@ -34,7 +34,7 @@ filled in from memory. A mark here is a thing that was read.
 
 What a program asks the venue for.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect` | ● | ● | ● | ● | ● | ● |
 |  | `disconnect` | ● | ● | ● | ● | ● | ● |
@@ -119,7 +119,7 @@ What a program asks the venue for.
 
 What the venue says back. `ib_async` delivers these as events as well as methods, so a mark here says the method exists on its wrapper, not that the information is unavailable by another route.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect_ack` | ● | ● | ● | ● | ● | ● |
 |  | `connection_closed` | ● | ● | ● | ● | ● | ● |
@@ -228,7 +228,7 @@ venue.
 A mark against a reference client here means it happens to name the
 same thing, not that the documented API does.
 
-| Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
+| Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `account` | ● | · | · | · | ● | · |
 | `accountSnapshot` | ● | · | · | · | · | ● |
@@ -316,6 +316,6 @@ same thing, not that the documented API does.
 | TWS API | 78 | 0 | 0 |
 | ibapi | 73 | 0 | 5 |
 | ib_async | 77 | 0 | 1 |
-| ibx Rust | 78 | 0 | 0 |
-| ibx Python | 78 | 0 | 0 |
+| IBKR-DX Rust | 78 | 0 | 0 |
+| IBKR-DX Python | 78 | 0 | 0 |
 

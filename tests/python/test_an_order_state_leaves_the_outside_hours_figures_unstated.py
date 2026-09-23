@@ -9,7 +9,7 @@ case; these do now too.
 Run: pytest tests/python/test_an_order_state_leaves_the_outside_hours_figures_unstated.py -v
 """
 
-from ibx import UNSET_DOUBLE, Contract, EClient, EWrapper, Order, OrderState
+from ibkr_dx import UNSET_DOUBLE, Contract, EClient, EWrapper, Order, OrderState
 
 FIGURES = [
     "initMarginBeforeOutsideRTH", "maintMarginBeforeOutsideRTH", "equityWithLoanBeforeOutsideRTH",

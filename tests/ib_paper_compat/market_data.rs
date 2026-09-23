@@ -1,8 +1,8 @@
 //! Market data subscription test phases.
 
 use super::common::*;
-use ibx::control::contracts;
-use ibx::protocol::fix;
+use ibkr_dx::control::contracts;
+use ibkr_dx::protocol::fix;
 
 pub(super) fn phase_market_data(conns: Conns) -> Conns {
     phase!("--- Phase 2: Market Data Ticks (AAPL) ---");
@@ -12,7 +12,7 @@ pub(super) fn phase_market_data(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -79,7 +79,7 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -172,7 +172,7 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -258,7 +258,7 @@ pub(super) fn phase_market_depth(conns: Conns) -> Conns {
     let (event_tx, _event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -355,7 +355,7 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -381,7 +381,7 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
     }
 
     control_tx
-        .send(ControlCommand::UnsubscribeNews { subject: ibx::types::NewsSubject::Slot(0) })
+        .send(ControlCommand::UnsubscribeNews { subject: ibkr_dx::types::NewsSubject::Slot(0) })
         .unwrap();
     let drained_news = shared.market.drain_tick_news();
 
@@ -406,7 +406,7 @@ pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -483,7 +483,7 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -580,7 +580,7 @@ pub(super) fn phase_fallback_market_data(conns: Conns) -> Conns {
     phase!("--- Phase 107: Fallback Market Data Ticks ({symbol} on {exchange} — session-independent) ---");
 
     // Look up the contract first
-    let now = ibx::protocol::datetime::chrono_free_timestamp();
+    let now = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let mut ccp = conns.ccp;
     ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "c"),
@@ -641,7 +641,7 @@ pub(super) fn phase_fallback_market_data(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         ccp,
@@ -733,7 +733,7 @@ pub(super) fn phase_fallback_streaming_validation(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -849,7 +849,7 @@ pub(super) fn phase_fallback_resubscribe(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -888,7 +888,7 @@ pub(super) fn phase_fallback_resubscribe(conns: Conns) -> Conns {
     let (event_tx2, event_rx2) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop2, control_tx2) = HotLoop::with_connections(
         shared2.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx2, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx2, Default::default())),
         conns1.account_id.clone(),
         conns1.farm,
         conns1.ccp,
@@ -931,7 +931,7 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -1047,7 +1047,7 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -1144,7 +1144,7 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,
@@ -1255,7 +1255,7 @@ pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(),
         conns.farm,
         conns.ccp,

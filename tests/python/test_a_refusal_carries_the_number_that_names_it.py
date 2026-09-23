@@ -6,10 +6,10 @@ unset stop price, an unpermitted security type or a combination with no legs
 took the same branch it takes for a typo in a field name.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -19,7 +19,7 @@ class Errors(ibx.EWrapper):
 
 
 def spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = 756733
     c.symbol = "SPY"
     c.secType = "STK"
@@ -29,7 +29,7 @@ def spy():
 
 
 def order(order_type):
-    o = ibx.Order()
+    o = ibkr_dx.Order()
     o.action = "BUY"
     o.totalQuantity = 1
     o.orderType = order_type
@@ -40,7 +40,7 @@ def order(order_type):
 
 def test_a_stop_with_no_trigger_price_is_refused_under_403():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_con_id(756733, 0)
 
@@ -54,7 +54,7 @@ def test_a_stop_with_no_trigger_price_is_refused_under_403():
 
 def test_a_combination_with_no_legs_is_refused_under_314():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     bag = spy()
     bag.secType = "BAG"
@@ -68,7 +68,7 @@ def test_a_combination_with_no_legs_is_refused_under_314():
 
 def test_a_log_level_that_is_not_one_is_refused_under_319():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
 
     c.setServerLogLevel(9)

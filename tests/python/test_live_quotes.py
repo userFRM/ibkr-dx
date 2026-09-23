@@ -1,9 +1,9 @@
 """A quote does not arrive as a quote. It arrives as the ticks that make it."""
 
-import ibx
-from ibx._state import LiveState
+import ibkr_dx
+from ibkr_dx._state import LiveState
 
-T = ibx.TickTypeEnum
+T = ibkr_dx.TickTypeEnum
 
 
 def test_a_quote_is_assembled_from_the_ticks_that_make_it():

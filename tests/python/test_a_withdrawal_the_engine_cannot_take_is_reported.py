@@ -11,10 +11,10 @@ The window is narrow in a real session and the inconsistency is not: the same
 failure had two answers depending on which method you called.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -25,7 +25,7 @@ class Errors(ibx.EWrapper):
 
 def _session(setup=None):
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     # Whatever the withdrawal under test needs to be holding, opened while
     # there is still an engine to open it with.
@@ -50,7 +50,7 @@ def test_a_withdrawal_reports_rather_than_raises():
 def test_every_withdrawal_answers_the_same_way():
     """One method per command that used to raise."""
     def _a_book(c):
-        book = ibx.Contract()
+        book = ibkr_dx.Contract()
         book.conId = 756733
         book.symbol = "SPY"
         book.secType = "STK"
@@ -83,7 +83,7 @@ def test_a_slot_taken_for_a_request_that_never_went_goes_back():
     venue never heard: the caller's retry under it was refused as a duplicate
     of that one, and only a rebuilt session freed it.
     """
-    book = ibx.Contract()
+    book = ibkr_dx.Contract()
     book.conId = 756733
     book.symbol = "SPY"
     book.secType = "STK"
@@ -122,11 +122,11 @@ def test_no_book_is_taken_on_a_feed_that_is_over():
     with nothing to say looks like, so nothing told the two apart.
     """
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_say_the_feed_is_over("the venue would not take the connection back")
 
-    book = ibx.Contract()
+    book = ibkr_dx.Contract()
     book.conId = 756733
     book.symbol = "SPY"
     book.secType = "STK"

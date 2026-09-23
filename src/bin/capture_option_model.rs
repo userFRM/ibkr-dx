@@ -16,13 +16,13 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::Contract;
-use ibx::control::dividends;
-use ibx::control::option_model::{greeks, recover_yield, OptionTerms, VenueModel};
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::Contract;
+use ibkr_dx::control::dividends;
+use ibkr_dx::control::option_model::{greeks, recover_yield, OptionTerms, VenueModel};
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let username = std::env::var("IB_USERNAME").unwrap_or_default();
     if username.trim().is_empty() {
         eprintln!("IB_USERNAME/IB_PASSWORD unset. This reads from real servers.");
@@ -42,9 +42,9 @@ fn main() {
     };
     println!("session open");
 
-    let symbol = std::env::var("IBX_SYMBOL").unwrap_or_else(|_| "SPY".to_string());
-    let expiry = std::env::var("IBX_EXPIRY").unwrap_or_else(|_| "20261218".to_string());
-    let strikes: Vec<f64> = std::env::var("IBX_STRIKES")
+    let symbol = std::env::var("IBKR_DX_SYMBOL").unwrap_or_else(|_| "SPY".to_string());
+    let expiry = std::env::var("IBKR_DX_EXPIRY").unwrap_or_else(|_| "20261218".to_string());
+    let strikes: Vec<f64> = std::env::var("IBKR_DX_STRIKES")
         .unwrap_or_else(|_| "640,660,680,700,720,740".to_string())
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
@@ -137,7 +137,7 @@ fn main() {
         let with_yield = recover_yield(terms, bare, &[])
             .map(|yield_rate| VenueModel { yield_rate, ..bare })
             .and_then(|m| greeks(terms, m, &[], model.implied_vol, model.und_price));
-        let expires_on = ibx::protocol::datetime::day_number(
+        let expires_on = ibkr_dx::protocol::datetime::day_number(
             &contract.last_trade_date_or_contract_month,
         );
         let over = schedule
@@ -160,7 +160,7 @@ fn main() {
             ("vega", model.vega),
             ("theta", model.theta),
         ] {
-            let pick = |g: &Option<ibx::control::option_model::Greeks>| {
+            let pick = |g: &Option<ibkr_dx::control::option_model::Greeks>| {
                 g.map(|g| match name {
                     "price" => g.price,
                     "delta" => g.delta,

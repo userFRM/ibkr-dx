@@ -9,7 +9,7 @@ and leaves the first running at the venue.
 
 import threading
 
-from ibx import IB
+from ibkr_dx import IB
 
 
 def test_no_two_callers_are_handed_the_same_request_id():

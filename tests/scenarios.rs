@@ -1,18 +1,18 @@
-//! Multi-step scenario tests for ibx.
+//! Multi-step scenario tests for ibkr_dx.
 //!
 //! Each test exercises a realistic workflow spanning multiple API calls
 //! And verifying the full sequence of state transitions and callbacks.
 
 use std::sync::Arc;
 
-use ibx::api::client::{EClient, Contract, Order, TagValue};
-use ibx::api::wrapper::tests::RecordingWrapper;
-use ibx::bridge::SharedState;
-use ibx::control::historical::{HistoricalResponse, HistoricalBar, HeadTimestampResponse};
-use ibx::control::contracts::{ContractDefinition, SecurityType};
-use ibx::engine::hot_loop::HotLoop;
-use ibx::types::ContractRef;
-use ibx::types::*;
+use ibkr_dx::api::client::{EClient, Contract, Order, TagValue};
+use ibkr_dx::api::wrapper::tests::RecordingWrapper;
+use ibkr_dx::bridge::SharedState;
+use ibkr_dx::control::historical::{HistoricalResponse, HistoricalBar, HeadTimestampResponse};
+use ibkr_dx::control::contracts::{ContractDefinition, SecurityType};
+use ibkr_dx::engine::hot_loop::HotLoop;
+use ibkr_dx::types::ContractRef;
+use ibkr_dx::types::*;
 
 /// Helper: build an EClient backed by SharedState + channel.
 fn test_client() -> (EClient, std::sync::mpsc::Receiver<ControlCommand>, Arc<SharedState>) {
@@ -362,7 +362,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
     // subscription stays up at the far end, which is the leak rather than the
     // withdrawal.
     assert!(
-        rx.try_iter().any(|c| matches!(c, ibx::types::ControlCommand::Unsubscribe { .. })),
+        rx.try_iter().any(|c| matches!(c, ibkr_dx::types::ControlCommand::Unsubscribe { .. })),
         "the withdrawal never reached the engine",
     );
 

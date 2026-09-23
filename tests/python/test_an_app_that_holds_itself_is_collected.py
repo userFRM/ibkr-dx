@@ -13,7 +13,7 @@ import gc
 import weakref
 
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 HAVE_GC = 1 << 14   # Py_TPFLAGS_HAVE_GC
 

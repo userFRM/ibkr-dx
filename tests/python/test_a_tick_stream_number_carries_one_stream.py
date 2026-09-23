@@ -11,10 +11,10 @@ A withdrawal naming a stream this client does not hold is answered too: said
 nothing, it reads exactly like one that worked.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -24,7 +24,7 @@ class Errors(ibx.EWrapper):
 
 
 def contract(con_id, symbol):
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = con_id
     c.symbol = symbol
     c.secType = "STK"
@@ -35,7 +35,7 @@ def contract(con_id, symbol):
 
 def test_a_second_stream_under_a_live_number_is_refused():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_tbt(5, 3)
 
@@ -48,7 +48,7 @@ def test_a_second_stream_under_a_live_number_is_refused():
 
 def test_withdrawing_a_stream_that_is_not_held_says_so():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
 
     c.cancelTickByTickData(999)

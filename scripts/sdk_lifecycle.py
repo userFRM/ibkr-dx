@@ -19,11 +19,11 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python"))
 
-import ibx  # noqa: E402
+import ibkr_dx  # noqa: E402
 
 
 def main() -> int:
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.connect(
         username=os.environ["IB_USERNAME"],
         password=os.environ["IB_PASSWORD"],
@@ -35,7 +35,7 @@ def main() -> int:
     )
 
     spy = ib.reqContractDetails(
-        ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+        ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
     )[0].contract
 
     def settle(seconds=3.0):
@@ -43,7 +43,7 @@ def main() -> int:
         heard, said[:] = list(said), []
         return heard
 
-    order = ibx.Order(action="BUY", orderType="LMT", totalQuantity=10, lmtPrice=100.0)
+    order = ibkr_dx.Order(action="BUY", orderType="LMT", totalQuantity=10, lmtPrice=100.0)
     trade = ib.placeOrder(spy, order)
     try:
         return _through(ib, spy, order, trade, settle)

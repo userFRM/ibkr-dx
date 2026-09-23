@@ -18,8 +18,8 @@ import os
 import sys
 import time
 
-import ibx
-from ibx import Contract, Order
+import ibkr_dx
+from ibkr_dx import Contract, Order
 
 #: The front month of the smaller S&P future, which trades nearly around the
 #: clock. Rolled by hand: a contract that has expired is refused by name, which
@@ -28,22 +28,22 @@ from ibx import Contract, Order
 #: A share can be named instead, which is worth doing during a session or in the
 #: hours either side of one — the order path is the same and the venues are not:
 #:
-#:     IBX_RT_SYMBOL=SPY IBX_RT_SEC_TYPE=STK IBX_RT_EXCHANGE=SMART \
-#:     IBX_RT_PRICE=400 IBX_RT_OUTSIDE_RTH=1 python scripts/order_round_trip.py
-SYMBOL = os.environ.get("IBX_RT_SYMBOL", "MES")
-SEC_TYPE = os.environ.get("IBX_RT_SEC_TYPE", "FUT")
-EXCHANGE = os.environ.get("IBX_RT_EXCHANGE", "CME")
-EXPIRY = os.environ.get("IBX_RT_EXPIRY", "202612")
+#:     IBKR_DX_RT_SYMBOL=SPY IBKR_DX_RT_SEC_TYPE=STK IBKR_DX_RT_EXCHANGE=SMART \
+#:     IBKR_DX_RT_PRICE=400 IBKR_DX_RT_OUTSIDE_RTH=1 python scripts/order_round_trip.py
+SYMBOL = os.environ.get("IBKR_DX_RT_SYMBOL", "MES")
+SEC_TYPE = os.environ.get("IBKR_DX_RT_SEC_TYPE", "FUT")
+EXCHANGE = os.environ.get("IBKR_DX_RT_EXCHANGE", "CME")
+EXPIRY = os.environ.get("IBKR_DX_RT_EXPIRY", "202612")
 
 #: Far enough under the market that it cannot trade whatever the market is
 #: doing, and on the contract's own increment. Stated rather than read off a
 #: quote: this check is about the order path, and asking for a quote makes it
 #: need an entitlement it does not otherwise use.
-RESTS_AT = float(os.environ.get("IBX_RT_PRICE", "6000"))
+RESTS_AT = float(os.environ.get("IBKR_DX_RT_PRICE", "6000"))
 
 #: Whether the order may work outside the regular session. A share resting
 #: before the bell needs this said; a future does not have the distinction.
-OUTSIDE_RTH = os.environ.get("IBX_RT_OUTSIDE_RTH", "") not in ("", "0")
+OUTSIDE_RTH = os.environ.get("IBKR_DX_RT_OUTSIDE_RTH", "") not in ("", "0")
 
 #: How long the venue is given to answer each step.
 ANSWER = 20
@@ -69,7 +69,7 @@ def main() -> int:
         print("IB_USERNAME/IB_PASSWORD unset. This places an order on the paper account.")
         return 2
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.connect(
         os.environ.get("IB_HOST", "cdc1.ibllc.com"), 0, clientId=1,
         username=username, password=password, paper=True,

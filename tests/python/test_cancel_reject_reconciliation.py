@@ -2,7 +2,7 @@
 
 Regression: when the venue rejects a cancel for an order it had previously
 listed in the post-connect mass-status burst (CxlRejReason=1, "No such
-order"), IBX must:
+order"), IBKR-DX must:
 
   - parse OrigClOrdID (tag 41) correctly despite the venue's "C" prefix
     and ".0/.1/.2" modify-chain suffix,
@@ -22,7 +22,7 @@ import threading
 import time
 
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 # This one cancels orders it did not place. The reject it is written to catch
@@ -34,11 +34,11 @@ pytestmark = pytest.mark.skipif(
     not (
         os.environ.get("IB_USERNAME")
         and os.environ.get("IB_PASSWORD")
-        and os.environ.get("IBX_MAY_CANCEL_EXISTING_ORDERS")
+        and os.environ.get("IBKR_DX_MAY_CANCEL_EXISTING_ORDERS")
     ),
     reason=(
         "cancels pre-existing orders on the account; set "
-        "IBX_MAY_CANCEL_EXISTING_ORDERS=1 to allow it"
+        "IBKR_DX_MAY_CANCEL_EXISTING_ORDERS=1 to allow it"
     ),
 )
 

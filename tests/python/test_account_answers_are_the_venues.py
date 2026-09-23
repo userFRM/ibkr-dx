@@ -6,10 +6,10 @@ claim about the account rather than a fact about it. Both decide something: an
 advisor account is not an individual's, and a euro balance is not a dollar one.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Recording(ibx.EWrapper):
+class Recording(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.multi = []
@@ -34,7 +34,7 @@ class Recording(ibx.EWrapper):
 
 def _connected():
     w = Recording()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("DU1")
     return w, c
 

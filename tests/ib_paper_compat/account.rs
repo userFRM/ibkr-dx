@@ -1,9 +1,9 @@
 //! Account data, PnL, summary, and position tracking test phases.
 
 use super::common::*;
-use ibx::api::types as api;
-use ibx::api::wrapper::Wrapper;
-use ibx::protocol::fix;
+use ibkr_dx::api::types as api;
+use ibkr_dx::api::wrapper::Wrapper;
+use ibkr_dx::protocol::fix;
 
 pub(super) fn phase_account_data(conns: Conns) -> Conns {
     phase!("--- Phase 4: Account Data Reception ---");
@@ -11,7 +11,7 @@ pub(super) fn phase_account_data(conns: Conns) -> Conns {
     let account_id = conns.account_id;
 
     let mut ccp = conns.ccp;
-    let ts = ibx::protocol::datetime::chrono_free_timestamp();
+    let ts = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let _ = ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "U"),
         (fix::TAG_SENDING_TIME, &ts),
@@ -23,10 +23,10 @@ pub(super) fn phase_account_data(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -68,7 +68,7 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     // Register SPY instrument so on_start order submission works
@@ -80,7 +80,7 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -139,10 +139,10 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -170,14 +170,14 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
                 if phase == 0 && tick_count >= 5 {
                     held_before = Some(shared.portfolio.position(instrument));
                     let buy_oid = next_order_id();
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: buy_oid, instrument, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: buy_oid, instrument, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 1;
                 }
             }
             Ok(Event::Fill(fill)) => {
                 if phase == 1 && fill.side == Side::Buy {
                     let sell_order_id = next_order_id();
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: sell_order_id, instrument: fill.instrument, side: Side::Sell, qty: ibx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: sell_order_id, instrument: fill.instrument, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 2;
                 } else if phase == 2 && fill.side == Side::Sell {
                     sell_filled = true;
@@ -190,7 +190,7 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
             }
             Ok(Event::PositionUpdate { instrument, con_id, position, avg_cost }) => {
                 println!("  PositionUpdate: inst={} conId={} pos={} avgCost={:.4}",
-                    instrument, con_id, position, avg_cost as f64 / ibx::types::PRICE_SCALE as f64);
+                    instrument, con_id, position, avg_cost as f64 / ibkr_dx::types::PRICE_SCALE as f64);
                 got_position_update = true;
             }
             Ok(Event::OrderUpdate(update))
@@ -243,11 +243,11 @@ pub(super) fn phase_account_summary(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -314,7 +314,7 @@ pub(super) fn phase_completed_orders(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -325,7 +325,7 @@ pub(super) fn phase_completed_orders(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -418,7 +418,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -429,10 +429,10 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     // Fetch secdef first to populate contract cache with exchange/localSymbol/tradingClass
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9999, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9999, filters: Default::default() }).unwrap();
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -616,7 +616,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -627,10 +627,10 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     // Fetch secdef to populate contract cache
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9998, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9998, filters: Default::default() }).unwrap();
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -736,7 +736,7 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -849,7 +849,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -860,10 +860,10 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     // Fetch secdef to populate contract cache
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9997, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9997, filters: Default::default() }).unwrap();
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -873,7 +873,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Fill(f)) if f.order_id == order_id => {
-                println!("  Fill received: qty={} price={:.2}", ibx::types::qty_to_f64(f.qty), f.price as f64 / PRICE_SCALE as f64);
+                println!("  Fill received: qty={} price={:.2}", ibkr_dx::types::qty_to_f64(f.qty), f.price as f64 / PRICE_SCALE as f64);
                 filled = true;
                 break;
             }
@@ -904,7 +904,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
         };
         let exec = api::Execution {
             side: side_str.into(),
-            shares: ibx::types::qty_to_f64(fill.qty),
+            shares: ibkr_dx::types::qty_to_f64(fill.qty),
             price: price_f,
             order_id: fill.order_id as i64,
             ..Default::default()
@@ -917,7 +917,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
 
     // Sell back to flatten
     let sell_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: sell_id, instrument: inst_id, side: Side::Sell, qty: ibx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: sell_id, instrument: inst_id, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
@@ -969,7 +969,7 @@ pub(super) fn phase_pnl_subscription(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -981,7 +981,7 @@ pub(super) fn phase_pnl_subscription(conns: Conns) -> Conns {
 
     // Submit a far-from-market order to trigger account updates
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -1052,7 +1052,7 @@ pub(super) fn phase_pnl_subscribe_command(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, _event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
@@ -1105,11 +1105,11 @@ pub(super) fn phase_news_bulletins(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);

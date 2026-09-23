@@ -10,7 +10,7 @@ Run with: pytest tests/python/test_stop_orders_require_aux_price.py -v --timeout
 """
 import os, threading, time
 import pytest
-from ibx import EClient, EWrapper, Contract, Order
+from ibkr_dx import EClient, EWrapper, Contract, Order
 from conftest import wait_for
 
 

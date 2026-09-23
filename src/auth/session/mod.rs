@@ -113,10 +113,10 @@ pub fn get_session_id() -> String {
 /// account has not used before is not answered, and nothing says why, so a
 /// path that does not persist reads as a login that has stopped working.
 ///
-/// Override with the `IBX_HWID_PATH` env var to point elsewhere (containers,
+/// Override with the `IBKR_DX_HWID_PATH` env var to point elsewhere (containers,
 /// CI, sharing one cookie across multiple machines, etc.).
 fn hwid_path() -> std::path::PathBuf {
-    if let Some(p) = std::env::var_os("IBX_HWID_PATH") {
+    if let Some(p) = std::env::var_os("IBKR_DX_HWID_PATH") {
         return std::path::PathBuf::from(p);
     }
     let home = std::env::var_os("USERPROFILE")
@@ -132,11 +132,11 @@ fn hwid_path() -> std::path::PathBuf {
 
 /// Read the existing 8-hex machine_id, or generate+persist a fresh one.
 ///
-/// `IBX_HWID` env var, if set to a hex string, short-circuits the file lookup
+/// `IBKR_DX_HWID` env var, if set to a hex string, short-circuits the file lookup
 /// and is used verbatim (left-padded to 8 chars). Useful for one-shot scripts
 /// or when injecting an already-enrolled cookie via secrets management.
 fn read_or_create_hwid() -> String {
-    if let Ok(v) = std::env::var("IBX_HWID") {
+    if let Ok(v) = std::env::var("IBKR_DX_HWID") {
         let v = v.trim();
         if !v.is_empty() && v.chars().all(|c| c.is_ascii_hexdigit()) {
             return format!("{v:0>8}");
@@ -1638,7 +1638,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                     // AUTH_FINISH carries no token — body is
                     // just `["", "PASSED"]`. The SOFT token used for downstream
                     // farm logons (tag 8483) is the SRP-derived K_soft, which
-                    // ibx already computes correctly via `srp_compute_k`
+                    // ibkr_dx already computes correctly via `srp_compute_k`
                     // (= SHA1(strip_leading_zeros(S))). No extraction needed.
                     if approval_url.is_empty() && session_id.is_empty() {
                         return Ok(IbKeyOutcome::Skipped { unread: None });

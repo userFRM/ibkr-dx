@@ -1,16 +1,16 @@
-<div class="ibx-hero">
+<div class="ibkr-dx-hero">
 
-<img class="ibx-logo" src="./banner.png" alt="IBX" />
+<img class="ibkr-dx-logo" src="./banner.png" alt="IBKR-DX" />
 
-# IBX
+# IBKR-DX
 
-<p class="ibx-tagline">An Interactive Brokers client that speaks the venue's protocol itself. Nothing to install alongside it, no process to keep alive. One engine, reachable from Rust and from Python.</p>
+<p class="ibkr-dx-tagline">An Interactive Brokers client that speaks the venue's protocol itself. Nothing to install alongside it, no process to keep alive. One engine, reachable from Rust and from Python.</p>
 
-<p class="ibx-cta">
+<p class="ibkr-dx-cta">
   <a class="primary" href="./getting-started.html">Get started</a>
   <a class="secondary" href="./recipes/python/login.html">Recipes</a>
   <a class="secondary" href="./reference/limits.html">What it does not do</a>
-  <a class="secondary" href="https://github.com/userFRM/ibx">GitHub</a>
+  <a class="secondary" href="https://github.com/userFRM/ibkr-dx">GitHub</a>
 </p>
 
 </div>
@@ -18,7 +18,7 @@
 ## What it replaces
 
 A program written against the TWS API talks to IB Gateway or Trader Workstation
-over a socket on localhost, and that process talks to the venue. IBX is the
+over a socket on localhost, and that process talks to the venue. IBKR-DX is the
 second half of that arrangement. It logs in, holds the trading, market-data,
 historical and security-definition connections open, and gives your program the
 same calls and the same callbacks.
@@ -40,20 +40,20 @@ What goes with the gateway:
 * **The localhost socket.** Ticks are delivered in-process.
 * **The window.** It runs headless, in a container, over ssh.
 
-<div class="ibx-features">
+<div class="ibkr-dx-features">
 
-<div class="ibx-feature">
+<div class="ibkr-dx-feature">
 
 ### The shape your program already has
 
 `EClient` / `EWrapper`, with the same method names and the same callbacks. In
-Python there is also `ibx.IB`, shaped like the widely used asynchronous wrapper,
-and `ibx.ib_async.attach`, which points an unmodified
+Python there is also `ibkr_dx.IB`, shaped like the widely used asynchronous wrapper,
+and `ibkr_dx.ib_async.attach`, which points an unmodified
 [ib_async](https://github.com/ib-api-reloaded/ib_async) program at this engine.
 
 </div>
 
-<div class="ibx-feature">
+<div class="ibkr-dx-feature">
 
 ### One engine, two languages
 
@@ -63,7 +63,7 @@ fails if either surface grows a call or a callback the other does not have.
 
 </div>
 
-<div class="ibx-feature">
+<div class="ibkr-dx-feature">
 
 ### Nothing between you and the venue
 
@@ -74,7 +74,7 @@ it and nothing else.
 
 </div>
 
-<div class="ibx-feature">
+<div class="ibkr-dx-feature">
 
 ### It says what it cannot do
 
@@ -106,7 +106,7 @@ from the source on every commit.
 Under active development. Every capability claim in this repository is
 assigned from a named artifact — a test, a script, or a
 recorded server response — never from reading the code. The matrix is in
-[capabilities.md](https://github.com/userFRM/ibx/blob/main/docs/capabilities.md),
+[capabilities.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md),
 and the counts in it are recomputed on every commit; the build fails if one
 moves.
 

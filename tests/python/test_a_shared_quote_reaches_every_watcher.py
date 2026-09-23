@@ -6,10 +6,10 @@ one of them only, so a second caller had every tick except the one that says
 whether the print it is holding happened now or hours ago.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Ticks(ibx.EWrapper):
+class Ticks(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.strings = []
@@ -23,7 +23,7 @@ class Ticks(ibx.EWrapper):
 
 def test_the_last_trade_time_reaches_the_followers_too():
     w = Ticks()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_instrument(1, 7)
     c._test_follow_instrument(2, 7)
@@ -31,11 +31,11 @@ def test_the_last_trade_time_reaches_the_followers_too():
     c._test_dispatch_once()
 
     stamped = {req_id for req_id, kind, _ in w.strings
-               if kind == ibx.TickTypeEnum.LAST_TIMESTAMP}
+               if kind == ibkr_dx.TickTypeEnum.LAST_TIMESTAMP}
     assert stamped == {1, 2}, f"the follower was not told when it traded: {w.strings}"
 
 
-class Everything(ibx.EWrapper):
+class Everything(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.greeks = []
@@ -57,7 +57,7 @@ def test_the_venue_s_option_model_reaches_the_followers_too():
     the owner alone, a second caller on the same option had every tick but its
     Greeks and nothing said they were missing."""
     w = Everything()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_instrument(1, 7)
     c._test_follow_instrument(2, 7)
@@ -68,7 +68,7 @@ def test_the_venue_s_option_model_reaches_the_followers_too():
 
 def test_news_about_a_contract_reaches_the_followers_too():
     w = Everything()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_instrument(1, 7)
     c._test_follow_instrument(2, 7)

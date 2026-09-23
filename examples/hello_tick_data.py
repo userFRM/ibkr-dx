@@ -8,7 +8,7 @@ import os
 import threading
 import time
 
-from ibx import EClient, EWrapper, Contract
+from ibkr_dx import EClient, EWrapper, Contract
 
 
 class TickWrapper(EWrapper):

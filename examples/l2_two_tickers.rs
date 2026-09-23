@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig, Contract};
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{EClient, EClientConfig, Contract};
+use ibkr_dx::api::wrapper::Wrapper;
 
 // ── Book entry ──
 

@@ -338,8 +338,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "ibx"
-version = "0.7.1"
+name = "ibkr-dx"
+version = "0.1.0"
 dependencies = [
  "aes",
  "base64",

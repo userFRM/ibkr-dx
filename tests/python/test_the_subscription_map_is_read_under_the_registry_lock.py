@@ -9,7 +9,7 @@ thread — which is neither the thread that changed anything nor a failure the
 caller can do anything about.
 """
 
-import ibx
+import ibkr_dx
 
 
 class FakeContract:
@@ -18,7 +18,7 @@ class FakeContract:
 
 
 def test_the_subscription_map_is_read_under_the_registry_lock():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     held = []
 
     class Watched(dict):

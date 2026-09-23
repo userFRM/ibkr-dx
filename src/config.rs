@@ -8,7 +8,7 @@
 /// Client version identifiers.
 ///
 /// These are what the client states about itself at logon, and the vendor
-/// moves its own every few weeks. `IBX_BUILD` and `IBX_VERSION` override them
+/// moves its own every few weeks. `IBKR_DX_BUILD` and `IBKR_DX_VERSION` override them
 /// so a session can be pointed at a newer pair without waiting for a release —
 /// which is the difference between a stale constant costing a restart and it
 /// costing an outage, on the day the server stops accepting this one.
@@ -21,11 +21,11 @@ pub const IB_ENCODED: &str = "17.0.10.0.101/W/en_US/G";
 /// The build this client announces. Overridable for a session that must
 /// match a particular one.
 pub fn ib_build() -> String {
-    std::env::var("IBX_BUILD").unwrap_or_else(|_| IB_BUILD.to_string())
+    std::env::var("IBKR_DX_BUILD").unwrap_or_else(|_| IB_BUILD.to_string())
 }
 /// The version it announces.
 pub fn ib_version() -> String {
-    std::env::var("IBX_VERSION").unwrap_or_else(|_| IB_VERSION.to_string())
+    std::env::var("IBKR_DX_VERSION").unwrap_or_else(|_| IB_VERSION.to_string())
 }
 
 /// The doors this client knocks on, in the order it tries them.

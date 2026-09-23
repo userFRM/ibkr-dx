@@ -7,10 +7,10 @@ of the reference's gates whose feature is carried, and a caller comparing
 against a gate is told the truth about everything below it or refused by name.
 """
 
-import ibx
+import ibkr_dx
 
 
-class _Recorder(ibx.EWrapper):
+class _Recorder(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.errors = []
@@ -24,7 +24,7 @@ class _Recorder(ibx.EWrapper):
 
 
 def test_the_level_is_the_newest_gate_carried_and_none_before_a_session():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     assert c.serverVersion() is None
     c._test_connect()
     # MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2 in the reference's table. The
@@ -36,15 +36,15 @@ def test_the_level_is_the_newest_gate_carried_and_none_before_a_session():
 
 def test_a_window_in_days_or_dates_is_refused_not_dropped():
     w = _Recorder()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect()
 
-    stated = ibx.ExecutionFilter()
+    stated = ibkr_dx.ExecutionFilter()
     stated.lastNDays = 3
     c.reqExecutions(1, stated)
     assert [e for e in w.errors if e[0] == 1 and e[1] == 321 and "lastNDays" in e[2]], w.errors
 
-    dated = ibx.ExecutionFilter()
+    dated = ibkr_dx.ExecutionFilter()
     dated.specificDates = ["20260901"]
     c.reqExecutions(2, dated)
     assert [e for e in w.errors if e[0] == 2 and e[1] == 321], w.errors
@@ -52,10 +52,10 @@ def test_a_window_in_days_or_dates_is_refused_not_dropped():
 
 def test_the_reference_defaults_pass_through():
     w = _Recorder()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect()
     # UNSET_INTEGER and None, which is what a filter that states no window carries.
-    c.reqExecutions(3, ibx.ExecutionFilter())
+    c.reqExecutions(3, ibkr_dx.ExecutionFilter())
     c._test_dispatch_once()
     assert not w.errors, w.errors
     assert 3 in w.ended

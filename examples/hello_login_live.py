@@ -11,7 +11,7 @@ Usage:
 import os
 import threading
 
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class LoginWrapper(EWrapper):

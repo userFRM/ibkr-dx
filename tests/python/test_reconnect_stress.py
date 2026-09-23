@@ -9,7 +9,7 @@ Run: pytest tests/python/test_reconnect_stress.py -v --timeout=120
 
 import os, threading, time
 import pytest
-from ibx import EClient, EWrapper, Contract, Order
+from ibkr_dx import EClient, EWrapper, Contract, Order
 from conftest import wait_for
 
 pytestmark = pytest.mark.skipif(

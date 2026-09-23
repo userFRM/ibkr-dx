@@ -10,17 +10,17 @@ in the Rust tests.
 
 import pytest
 
-import ibx
+import ibkr_dx
 
 
 def test_option_chains_need_the_underlying_type():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     with pytest.raises(TypeError):
         c.req_sec_def_opt_params(3, "SPY")
 
 
 def test_a_condition_states_no_exchange_the_caller_did_not():
-    for cond in (ibx.PriceCondition(con_id=1, price=1.0),
-                 ibx.VolumeCondition(con_id=1, volume=1),
-                 ibx.PercentChangeCondition(con_id=1, change_percent=1.0)):
+    for cond in (ibkr_dx.PriceCondition(con_id=1, price=1.0),
+                 ibkr_dx.VolumeCondition(con_id=1, volume=1),
+                 ibkr_dx.PercentChangeCondition(con_id=1, change_percent=1.0)):
         assert cond.exchange == "", f"{type(cond).__name__} invented {cond.exchange!r}"

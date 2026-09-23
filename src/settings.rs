@@ -66,12 +66,12 @@ pub struct GatewaySettings {
     pub port: Option<u16>,
     /// How long it waited to be admitted, in milliseconds.
     pub registration_timeout_ms: Option<u64>,
-    /// How much it wrote down. Logging reads this from `IBX_LOG_LEVEL`.
+    /// How much it wrote down. Logging reads this from `IBKR_DX_LOG_LEVEL`.
     pub log_level: Option<String>,
-    /// Where it wrote it. Logging reads this from `IBX_LOG_DIR`.
+    /// Where it wrote it. Logging reads this from `IBKR_DX_LOG_DIR`.
     pub log_dir: Option<String>,
     /// How many records it buffered before dropping them. Logging reads this
-    /// from `IBX_LOG_QUEUE`, and reads it as a count: a boolean here could
+    /// from `IBKR_DX_LOG_QUEUE`, and reads it as a count: a boolean here could
     /// state nothing the reader understood, so every value fell to the
     /// default.
     pub log_queue: Option<usize>,
@@ -219,19 +219,19 @@ impl GatewaySettings {
             Some(value)
         }
         SessionSettings {
-            timezone: stated(self.timezone.as_ref(), "IBX_TZ")
+            timezone: stated(self.timezone.as_ref(), "IBKR_DX_TZ")
                 .unwrap_or_else(|| "UTC".to_string()),
-            locale: stated(self.locale.as_ref(), "IBX_LOCALE")
+            locale: stated(self.locale.as_ref(), "IBKR_DX_LOCALE")
                 .unwrap_or_else(|| crate::config::IB_LOCALE.to_string()),
-            build: stated(self.build.as_ref(), "IBX_BUILD")
+            build: stated(self.build.as_ref(), "IBKR_DX_BUILD")
                 .unwrap_or_else(|| crate::config::IB_BUILD.to_string()),
-            version: stated(self.version.as_ref(), "IBX_VERSION")
+            version: stated(self.version.as_ref(), "IBKR_DX_VERSION")
                 .unwrap_or_else(|| crate::config::IB_VERSION.to_string()),
             // The whole string, or the locale set into it, or neither. Tag
             // 6266 carries `{jdkVer}/{platform}/{locale}/{dist}` and the venue
             // refuses a locale that is not a canonical one.
-            encoded: stated(self.encoded.as_ref(), "IBX_ENCODED").unwrap_or_else(|| {
-                match stated(self.locale.as_ref(), "IBX_LOCALE") {
+            encoded: stated(self.encoded.as_ref(), "IBKR_DX_ENCODED").unwrap_or_else(|| {
+                match stated(self.locale.as_ref(), "IBKR_DX_LOCALE") {
                     // The identity this client announces, with the locale
                     // segment replaced. Composing it a second time here makes a
                     // session that states a locale announce a stale runtime and
@@ -249,18 +249,18 @@ impl GatewaySettings {
                     None => crate::config::IB_ENCODED.to_string(),
                 }
             }),
-            hardware_id: stated(self.hardware_id.as_ref(), "IBX_HWID"),
-            mac_address: stated(self.mac_address.as_ref(), "IBX_MAC"),
-            lan_ip: stated(self.lan_ip.as_ref(), "IBX_IP"),
-            market_data_host: stated(self.market_data_host.as_ref(), "IBX_FARM_HOST"),
+            hardware_id: stated(self.hardware_id.as_ref(), "IBKR_DX_HWID"),
+            mac_address: stated(self.mac_address.as_ref(), "IBKR_DX_MAC"),
+            lan_ip: stated(self.lan_ip.as_ref(), "IBKR_DX_IP"),
+            market_data_host: stated(self.market_data_host.as_ref(), "IBKR_DX_FARM_HOST"),
             port: self
                 .port
-                .or_else(|| std::env::var("IBX_MISC_PORT").ok().and_then(|v| v.parse().ok()))
+                .or_else(|| std::env::var("IBKR_DX_MISC_PORT").ok().and_then(|v| v.parse().ok()))
                 .unwrap_or(crate::config::MISC_PORT),
             registration_timeout: self
                 .registration_timeout_ms
                 .or_else(|| {
-                    std::env::var("IBX_REGISTRATION_TIMEOUT_MS").ok().and_then(|v| v.parse().ok())
+                    std::env::var("IBKR_DX_REGISTRATION_TIMEOUT_MS").ok().and_then(|v| v.parse().ok())
                 })
                 .map_or(std::time::Duration::from_secs(5), std::time::Duration::from_millis),
             execution_reports: self.execution_reports.unwrap_or_else(|| {
@@ -269,7 +269,7 @@ impl GatewaySettings {
                 // the default and the session asked the venue for every
                 // execution it still holds, which is the opposite of what was
                 // stated and a heavier request on every session that opens.
-                match std::env::var("IBX_EXECUTION_REPORTS") {
+                match std::env::var("IBKR_DX_EXECUTION_REPORTS") {
                     Ok(stated) if stated.eq_ignore_ascii_case("today") => {
                         ExecutionReportScope::Today
                     }
@@ -277,7 +277,7 @@ impl GatewaySettings {
                         if !stated.is_empty() && !stated.eq_ignore_ascii_case("all") =>
                     {
                         log::warn!(
-                            "IBX_EXECUTION_REPORTS names neither today nor all: {stated}. \
+                            "IBKR_DX_EXECUTION_REPORTS names neither today nor all: {stated}. \
                              This session asks for every execution the venue holds",
                         );
                         ExecutionReportScope::All
@@ -288,12 +288,12 @@ impl GatewaySettings {
             island_for_nasdaq: self.island_for_nasdaq.unwrap_or_else(|| {
                 // As above: `False` turned the setting on, because only the
                 // lowercase spelling counted as off.
-                !std::env::var("IBX_ISLAND_FOR_NASDAQ").is_ok_and(|stated| {
+                !std::env::var("IBKR_DX_ISLAND_FOR_NASDAQ").is_ok_and(|stated| {
                     ["0", "false", "no"].iter().any(|off| stated.eq_ignore_ascii_case(off))
                 })
             }),
             reconnect_on_socket_err: self.reconnect_on_socket_err.unwrap_or_else(|| {
-                !std::env::var("IBX_RECONNECT_ON_SOCKET_ERR").is_ok_and(|stated| {
+                !std::env::var("IBKR_DX_RECONNECT_ON_SOCKET_ERR").is_ok_and(|stated| {
                     ["0", "false", "no"].iter().any(|off| stated.eq_ignore_ascii_case(off))
                 })
             }),
@@ -373,7 +373,7 @@ mod tests {
     /// default. A program configured the old way keeps working.
     #[test]
     fn the_environment_is_what_a_caller_states_nothing_over() {
-        unsafe { std::env::set_var("IBX_LOCALE", "fr_FR") };
+        unsafe { std::env::set_var("IBKR_DX_LOCALE", "fr_FR") };
         let from_environment = GatewaySettings::default().resolve();
         assert_eq!(from_environment.locale, "fr_FR");
         // The identity this client announces with its locale set into it, read
@@ -391,7 +391,7 @@ mod tests {
         }
         .resolve();
         assert_eq!(stated.locale, "ja_JP", "the caller's own wins");
-        unsafe { std::env::remove_var("IBX_LOCALE") };
+        unsafe { std::env::remove_var("IBKR_DX_LOCALE") };
 
         let neither = GatewaySettings::default().resolve();
         assert_eq!(neither.timezone, "UTC");
@@ -406,29 +406,29 @@ mod tests {
         // because these are the process's own variables and a second test
         // setting them races this one reading them.
         for spelling in ["today", "Today", "TODAY"] {
-            unsafe { std::env::set_var("IBX_EXECUTION_REPORTS", spelling) };
+            unsafe { std::env::set_var("IBKR_DX_EXECUTION_REPORTS", spelling) };
             assert_eq!(
                 GatewaySettings::default().resolve().execution_reports,
                 ExecutionReportScope::Today,
                 "{spelling} asked for every execution the venue holds",
             );
         }
-        unsafe { std::env::set_var("IBX_EXECUTION_REPORTS", "yesterday") };
+        unsafe { std::env::set_var("IBKR_DX_EXECUTION_REPORTS", "yesterday") };
         assert_eq!(
             GatewaySettings::default().resolve().execution_reports,
             ExecutionReportScope::All,
             "a value naming neither keeps the default",
         );
-        unsafe { std::env::remove_var("IBX_EXECUTION_REPORTS") };
+        unsafe { std::env::remove_var("IBKR_DX_EXECUTION_REPORTS") };
 
         for spelling in ["false", "False", "NO", "0"] {
-            unsafe { std::env::set_var("IBX_ISLAND_FOR_NASDAQ", spelling) };
+            unsafe { std::env::set_var("IBKR_DX_ISLAND_FOR_NASDAQ", spelling) };
             assert!(
                 !GatewaySettings::default().resolve().island_for_nasdaq,
                 "{spelling} left the older spelling on",
             );
         }
-        unsafe { std::env::remove_var("IBX_ISLAND_FOR_NASDAQ") };
+        unsafe { std::env::remove_var("IBKR_DX_ISLAND_FOR_NASDAQ") };
     }
 
     /// A setting is one field on the wire, and a value that would end that

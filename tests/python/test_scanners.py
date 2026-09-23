@@ -8,7 +8,7 @@ Run: pytest tests/python/test_scanners.py -v -s
 
 import os, threading, time
 import pytest
-from ibx import EWrapper, EClient
+from ibkr_dx import EWrapper, EClient
 
 
 pytestmark = pytest.mark.skipif(

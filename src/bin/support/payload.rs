@@ -5,8 +5,8 @@
 //! written once and read by both.
 
 
-use ibx::protocol::tick_decoder::{self, RawTick};
-use ibx::types::Quote;
+use ibkr_dx::protocol::tick_decoder::{self, RawTick};
+use ibkr_dx::types::Quote;
 
 /// One tick as the payload builder states it: price, size, time and a flag.
 pub type TickTuple = (u64, u64, u64, bool);
@@ -83,10 +83,10 @@ pub fn apply_tick(q: &mut Quote, tick: &RawTick, min_tick_scaled: i64) {
         tick_decoder::O_LOW_PRICE => q.low = tick.magnitude * min_tick_scaled,
         tick_decoder::O_OPEN_PRICE => q.open = tick.magnitude * min_tick_scaled,
         tick_decoder::O_CLOSE_PRICE => q.close = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_BID_SIZE => q.bid_size = ibx::types::qty_from_wire(tick.magnitude),
-        tick_decoder::O_ASK_SIZE => q.ask_size = ibx::types::qty_from_wire(tick.magnitude),
-        tick_decoder::O_LAST_SIZE => q.last_size = ibx::types::qty_from_wire(tick.magnitude),
-        tick_decoder::O_VOLUME => q.volume = ibx::types::qty_from_wire(tick.magnitude),
+        tick_decoder::O_BID_SIZE => q.bid_size = ibkr_dx::types::qty_from_wire(tick.magnitude),
+        tick_decoder::O_ASK_SIZE => q.ask_size = ibkr_dx::types::qty_from_wire(tick.magnitude),
+        tick_decoder::O_LAST_SIZE => q.last_size = ibkr_dx::types::qty_from_wire(tick.magnitude),
+        tick_decoder::O_VOLUME => q.volume = ibkr_dx::types::qty_from_wire(tick.magnitude),
         tick_decoder::O_TS_BASE if tick.magnitude > 1_000_000_000 => {
             q.timestamp_ns = (tick.magnitude as u64).saturating_mul(1_000_000_000);
         }

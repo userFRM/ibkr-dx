@@ -8,7 +8,7 @@ stated at all.
 """
 
 import pytest
-from ibx import (
+from ibkr_dx import (
     ExecutionCondition,
     MarginCondition,
     PercentChangeCondition,

@@ -6,7 +6,7 @@
 //!
 //! Reads only. It places nothing.
 //!
-//!     IB_USERNAME=… IB_PASSWORD=… IBX_CAPTURE_WIRE=1 cargo run --features dev-tools --bin capture_ticks
+//!     IB_USERNAME=… IB_PASSWORD=… IBKR_DX_CAPTURE_WIRE=1 cargo run --features dev-tools --bin capture_ticks
 
 #[path = "support/window.rs"]
 mod window;
@@ -14,13 +14,13 @@ use window::live_window_is_open;
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::Contract;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::Contract;
 
 /// Contracts that trade outside the American session, so this can be run
 /// before the New York open. Both are entitled on this account.
 fn subjects() -> Vec<(&'static str, &'static str, Contract)> {
-    if std::env::var("IBX_CRYPTO_ONLY").is_ok() {
+    if std::env::var("IBKR_DX_CRYPTO_ONLY").is_ok() {
         return vec![("a crypto, quotes", "BidAsk", Contract {
             symbol: "BTC".to_string(),
             sec_type: "CRYPTO".to_string(),
@@ -29,7 +29,7 @@ fn subjects() -> Vec<(&'static str, &'static str, Contract)> {
             ..Default::default()
         })];
     }
-    if let Ok(kind) = std::env::var("IBX_LAST_PROBE") {
+    if let Ok(kind) = std::env::var("IBKR_DX_LAST_PROBE") {
         let kind: &'static str = if kind == "Last" { "Last" } else { "AllLast" };
         return vec![(kind, kind, Contract {
             symbol: "MES".to_string(), sec_type: "FUT".to_string(),
@@ -38,7 +38,7 @@ fn subjects() -> Vec<(&'static str, &'static str, Contract)> {
             ..Default::default()
         })];
     }
-    if std::env::var("IBX_TRADES_ONLY").is_ok() {
+    if std::env::var("IBKR_DX_TRADES_ONLY").is_ok() {
         return vec![("a busy listing", "AllLast", Contract {
             symbol: "SPY".to_string(),
             sec_type: "STK".to_string(),
@@ -88,7 +88,7 @@ fn subjects() -> Vec<(&'static str, &'static str, Contract)> {
 const DUMP_LIMIT: usize = 200;
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
 
     // This binary logs in with the paper credentials, which nothing else is
     // using. Only a run against the live account has to wait for a window.
@@ -103,7 +103,7 @@ fn main() {
     }
     // Safety: set before anything reads it, and this binary is single-threaded
     // until the engine starts.
-    unsafe { std::env::set_var("IBX_CAPTURE_WIRE", "1") };
+    unsafe { std::env::set_var("IBKR_DX_CAPTURE_WIRE", "1") };
 
     let username = std::env::var("IB_USERNAME").unwrap_or_default();
     let password = std::env::var("IB_PASSWORD").unwrap_or_default();
@@ -201,9 +201,9 @@ fn main() {
             println!(
                 "        bid {:.5} x {:.0}   ask {:.5} x {:.0}",
                 q.bid as f64 / 1e8,
-                q.bid_size as f64 / ibx::types::QTY_SCALE as f64,
+                q.bid_size as f64 / ibkr_dx::types::QTY_SCALE as f64,
                 q.ask as f64 / 1e8,
-                q.ask_size as f64 / ibx::types::QTY_SCALE as f64
+                q.ask_size as f64 / ibkr_dx::types::QTY_SCALE as f64
             );
         }
         println!(
@@ -216,7 +216,7 @@ fn main() {
             println!(
                 "        traded {:.2} x {:.4} on {:<6} past_limit={} unreported={}",
                 t.price as f64 / 1e8,
-                t.size as f64 / ibx::types::QTY_SCALE as f64,
+                t.size as f64 / ibkr_dx::types::QTY_SCALE as f64,
                 t.exchange,
                 t.past_limit,
                 t.unreported,

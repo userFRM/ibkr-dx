@@ -7,9 +7,9 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::Contract;
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::Contract;
+use ibkr_dx::api::wrapper::Wrapper;
 
 /// Collects what the calendar answers, so a run says which of the three
 /// happened: an answer, a refusal, or nothing at all.
@@ -33,7 +33,7 @@ impl Wrapper for Heard {
 }
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let username = std::env::var("IB_USERNAME").unwrap_or_default();
     let password = std::env::var("IB_PASSWORD").unwrap_or_default();
     if username.trim().is_empty() || password.trim().is_empty() {
@@ -73,7 +73,7 @@ fn main() {
     };
     if let Ok(resolved) = client.qualify_contract(&apple) {
         println!("  events asked for first, conId={}", resolved.con_id);
-        let query = ibx::types::CalendarQuery {
+        let query = ibkr_dx::types::CalendarQuery {
             con_id: Some(resolved.con_id),
             total_limit: Some(20),
             ..Default::default()
@@ -107,7 +107,7 @@ fn main() {
     match client.qualify_contract(&apple) {
         Ok(resolved) => {
             println!("  asking for events on conId={}", resolved.con_id);
-            let query = ibx::types::CalendarQuery {
+            let query = ibkr_dx::types::CalendarQuery {
                 con_id: Some(resolved.con_id),
                 total_limit: Some(20),
                 ..Default::default()

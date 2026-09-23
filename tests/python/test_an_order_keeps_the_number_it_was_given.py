@@ -7,11 +7,11 @@ and their own cancel named nothing. A negative id on a cancel was read as
 unsigned and went out as a number above nine quintillion.
 """
 
-import ibx
+import ibkr_dx
 
 
 def _client():
-    class W(ibx.EWrapper):
+    class W(ibkr_dx.EWrapper):
         def __init__(self):
             super().__init__()
             self.errors = []
@@ -20,20 +20,20 @@ def _client():
             self.errors.append((reqId, code, msg))
 
     w = W()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("DU0000000")
     return w, c
 
 
 def _spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.symbol, c.secType, c.exchange, c.currency = "SPY", "STK", "SMART", "USD"
     c.conId = 756733
     return c
 
 
 def _market_order():
-    o = ibx.Order()
+    o = ibkr_dx.Order()
     o.action, o.orderType, o.totalQuantity = "BUY", "MKT", 1.0
     return o
 
@@ -62,7 +62,7 @@ def test_a_contract_id_below_zero_does_not_wrap():
     """Read as unsigned it named a contract above four billion, and the
     request went out asking about it."""
     _, c = _client()
-    bad = ibx.Contract()
+    bad = ibkr_dx.Contract()
     bad.conId = -1
     for call in (
         lambda: c.req_fundamental_data(1, bad, "ReportsFinSummary"),

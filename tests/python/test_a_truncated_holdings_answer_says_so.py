@@ -12,7 +12,7 @@ language they wrote in.
 Run: pytest tests/python/test_a_truncated_holdings_answer_says_so.py -v
 """
 
-from ibx import EWrapper, EClient
+from ibkr_dx import EWrapper, EClient
 
 
 class Recorder(EWrapper):

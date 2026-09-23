@@ -11,12 +11,12 @@ import time
 
 import pytest
 
-import ibx
-from ibx._state import LiveState
+import ibkr_dx
+from ibkr_dx._state import LiveState
 
 
 def _session():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.client._test_connect("DU1")
     return ib
 
@@ -39,7 +39,7 @@ def test_waiting_for_an_update_ends_when_one_arrives():
             self._looks += 1
             return self._looks // 2
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.wrapper = Speaks()
     assert ib.waitOnUpdate(timeout=5) is True
 
@@ -82,7 +82,7 @@ def test_a_scan_waits_for_every_row():
             self._name_one_more(req_id)
             return super().scanner_finished(req_id)
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.wrapper = Paced()
     ib.client._test_connect("DU1")
 
@@ -122,7 +122,7 @@ def test_a_summary_is_the_answer_to_the_summary_request():
                 self.accountSummaryEnd(req_id)
             return super().account_summary_finished(req_id)
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.wrapper = Answers()
     ib.client._test_connect("DU1")
     # The running account feed, which is a different set and must not be the
@@ -136,7 +136,7 @@ def test_a_summary_is_the_answer_to_the_summary_request():
 
 def test_a_series_that_keeps_updating_is_refused_rather_than_faked():
     ib = _session()
-    contract = ibx.Contract()
+    contract = ibkr_dx.Contract()
     contract.symbol = "SPY"
     contract.conId = 756733
     with pytest.raises(NotImplementedError, match="keepUpToDate"):
@@ -147,8 +147,8 @@ def test_a_series_that_keeps_updating_is_refused_rather_than_faked():
 
 def test_two_accounts_holding_one_instrument_are_two_holdings():
     """Keyed by the contract alone, an advisor saw whichever arrived last."""
-    state = ibx.IB().wrapper
-    contract = ibx.Contract()
+    state = ibkr_dx.IB().wrapper
+    contract = ibkr_dx.Contract()
     contract.conId = 756733
     state.updatePortfolio(contract, 100.0, 1.0, 100.0, 1.0, 0.0, 0.0, "DU1")
     state.updatePortfolio(contract, 200.0, 1.0, 200.0, 1.0, 0.0, 0.0, "DU2")
@@ -161,7 +161,7 @@ def test_a_fill_replayed_names_the_client_that_placed_it():
     filtered by client matched nothing and the replay reported both as zero."""
     seen = []
 
-    class Fills(ibx.EWrapper):
+    class Fills(ibkr_dx.EWrapper):
         def execDetails(self, reqId, contract, execution):
             seen.append(execution)
 
@@ -175,7 +175,7 @@ def test_a_fill_replayed_names_the_client_that_placed_it():
             self.clientId = 3
 
     w = Fills()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("DU1")
     c._test_set_client_id(3)
     c._test_track_order(7, 1, "SPY", "BUY", 5.0, 10.0, 0)

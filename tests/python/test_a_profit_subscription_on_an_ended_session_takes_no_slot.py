@@ -5,10 +5,10 @@ there is: the next request under another number was refused as a duplicate of
 one that never went.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -19,7 +19,7 @@ class Errors(ibx.EWrapper):
 
 def test_a_profit_subscription_on_an_ended_session_takes_no_slot():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_end_session()
     c.reqPnL(9, "", "")

@@ -5,8 +5,8 @@ have, or spells an argument the way an older version spelled it, costs the
 reader more than a missing page would: they assume their setup is wrong.
 
 This does not run the snippets — they need a broker session. It parses each
-one, then checks the names: every `ibx.Thing` the module actually exports, and
-every method called on a client built from `ibx.IB()` or `ibx.EClient(...)`.
+one, then checks the names: every `ibkr_dx.Thing` the module actually exports, and
+every method called on a client built from `ibkr_dx.IB()` or `ibkr_dx.EClient(...)`.
 That is where the rot shows up first, because those are what a release renames.
 
 Exits non-zero on its own findings.
@@ -18,7 +18,7 @@ import pathlib
 import re
 import sys
 
-import ibx
+import ibkr_dx
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # The generated reference pages carry signatures rather than programs, so they
@@ -47,7 +47,7 @@ def resolved(block: str, page: pathlib.Path) -> str | None:
     return target.read_text()
 
 # What a client is built from, and what to check its methods against.
-BUILDERS = {"IB": ibx.IB, "EClient": ibx.EClient, "Client": getattr(ibx, "Client", ibx.IB)}
+BUILDERS = {"IB": ibkr_dx.IB, "EClient": ibkr_dx.EClient, "Client": getattr(ibkr_dx, "Client", ibkr_dx.IB)}
 
 problems: list[str] = []
 checked = 0
@@ -99,14 +99,14 @@ for page in PAGES:
             if not isinstance(node, ast.Attribute):
                 continue
             base = node.value
-            if isinstance(base, ast.Name) and base.id == "ibx":
-                if hasattr(ibx, node.attr):
+            if isinstance(base, ast.Name) and base.id == "ibkr_dx":
+                if hasattr(ibkr_dx, node.attr):
                     continue
                 # A submodule is not an attribute until something imports it.
                 try:
-                    importlib.import_module(f"ibx.{node.attr}")
+                    importlib.import_module(f"ibkr_dx.{node.attr}")
                 except ImportError:
-                    problems.append(f"{where}: `ibx.{node.attr}` is not in the library")
+                    problems.append(f"{where}: `ibkr_dx.{node.attr}` is not in the library")
             elif isinstance(base, ast.Name) and base.id in clients:
                 owner = clients[base.id]
                 if not hasattr(owner, node.attr):

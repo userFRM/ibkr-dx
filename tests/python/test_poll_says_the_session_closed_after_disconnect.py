@@ -5,10 +5,10 @@ asyncio program waiting on `connectionClosed` to know it may exit waited for
 ever. A client that never connected is told nothing.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Closed(ibx.EWrapper):
+class Closed(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.closed = 0
@@ -19,7 +19,7 @@ class Closed(ibx.EWrapper):
 
 def test_poll_says_the_session_closed_after_disconnect():
     w = Closed()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c.disconnect()
     c.poll()
@@ -29,7 +29,7 @@ def test_poll_says_the_session_closed_after_disconnect():
 
 def test_a_client_that_never_connected_is_not_told_a_session_closed():
     w = Closed()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c.disconnect()
     c.poll()
     assert w.closed == 0

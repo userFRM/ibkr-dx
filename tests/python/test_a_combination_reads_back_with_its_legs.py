@@ -17,7 +17,7 @@ was placed. The engine reads no leg off a report, so a combination the venue
 replays from another session comes back with none.
 """
 
-from ibx import ComboLeg, Contract, EClient, EWrapper, Order
+from ibkr_dx import ComboLeg, Contract, EClient, EWrapper, Order
 
 COMBO_CON_ID = 28812380
 COMBO_INSTRUMENT = 1

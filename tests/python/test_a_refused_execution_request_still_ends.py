@@ -7,7 +7,7 @@ request on this surface reports its refusal and still ends.
 Run: pytest tests/python/test_a_refused_execution_request_still_ends.py -v
 """
 
-from ibx import EWrapper, EClient
+from ibkr_dx import EWrapper, EClient
 
 
 class Recorder(EWrapper):

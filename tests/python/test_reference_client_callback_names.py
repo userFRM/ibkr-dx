@@ -7,7 +7,7 @@ on the do-nothing default this base class supplies: those callbacks never run,
 and nothing says so. Silence is the whole of the fault.
 """
 import threading
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 def _watchdog(seconds=5.0):
@@ -127,7 +127,7 @@ def test_a_callback_payload_answers_to_the_reference_clients_field_names():
     these classes they were absent, so the object arrived carrying everything
     and answered nothing.
     """
-    import ibx
+    import ibkr_dx
 
     published_execution_fields = [
         "orderId", "clientId", "execId", "time", "acctNumber", "exchange",
@@ -135,11 +135,11 @@ def test_a_callback_payload_answers_to_the_reference_clients_field_names():
         "avgPrice", "orderRef", "evRule", "evMultiplier", "modelCode",
         "lastLiquidity", "pendingPriceRevision", "submitter",
     ]
-    e = ibx.Execution()
+    e = ibkr_dx.Execution()
     for f in published_execution_fields:
         assert hasattr(e, f), f"an execution does not answer to {f}"
 
-    d = ibx.ContractDetails()
+    d = ibkr_dx.ContractDetails()
     for f in ("marketName", "minTick", "longName", "priceMagnifier", "contractMonth",
               "industry", "category", "subcategory", "bondType", "couponType",
               "nextOptionDate", "fundName", "fundFamily", "fundManagementFee",
@@ -149,9 +149,9 @@ def test_a_callback_payload_answers_to_the_reference_clients_field_names():
 
 
 def test_a_payload_still_refuses_a_name_that_is_no_field():
-    import ibx
+    import ibkr_dx
     try:
-        ibx.Execution().thisIsNotAField
+        ibkr_dx.Execution().thisIsNotAField
     except AttributeError:
         return
     raise AssertionError("a name that names no field was answered")
@@ -159,9 +159,9 @@ def test_a_payload_still_refuses_a_name_that_is_no_field():
 
 def test_a_field_the_reference_client_spells_differently_still_resolves():
     """Three fields carry the same value under a different word there."""
-    import ibx
+    import ibkr_dx
 
-    d = ibx.ContractDetails()
+    d = ibkr_dx.ContractDetails()
     for f in ("putable", "notes", "fundSubsequentMinimumPurchase"):
         assert hasattr(d, f), f"contract details do not answer to {f}"
     # And the spelling this crate uses keeps working.

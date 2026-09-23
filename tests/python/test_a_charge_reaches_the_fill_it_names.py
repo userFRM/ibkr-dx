@@ -9,10 +9,10 @@ unknown for ever -- and a caller that files fills first and costs second
 dropped it.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Sequence(ibx.EWrapper):
+class Sequence(ibkr_dx.EWrapper):
     """Records the order the two callbacks arrive in, and writes mid-pass."""
 
     def __init__(self):
@@ -38,7 +38,7 @@ class Sequence(ibx.EWrapper):
 
 def test_the_charge_written_mid_pass_arrives_after_its_fill():
     w = Sequence()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     w.client = c
     c._test_connect("T")
     c._test_push_fill(0, 77, "BUY", 150.0, 10, 0)

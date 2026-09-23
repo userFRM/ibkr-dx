@@ -1,7 +1,7 @@
 //! Contract detail lookup test phases.
 
 use super::common::*;
-use ibx::control::contracts;
+use ibkr_dx::control::contracts;
 
 pub(super) fn phase_contract_details(conns: Conns) -> Conns {
     phase!("--- Phase 12: Contract Details Lookup (SPY, conId=756733) ---");
@@ -11,17 +11,17 @@ pub(super) fn phase_contract_details(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
     // Step 2: Send ControlCommand through the channel
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1200, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1200, filters: Default::default() }).unwrap();
     // The same contract asked for by name. A definition asked for by id and one
     // asked for by name are answered from the same record, so any field that
     // arrives for one and not the other is this client's reading of the reply
     // rather than the venue withholding it.
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 0, symbol: "SPY".to_string(), sec_type: "STK".to_string(), exchange: "SMART".to_string(), currency: "USD".to_string(), ..Default::default() }, req_id: 1201, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "SPY".to_string(), sec_type: "STK".to_string(), exchange: "SMART".to_string(), currency: "USD".to_string(), ..Default::default() }, req_id: 1201, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // Step 3: Wait for real server response via Event channel
@@ -93,12 +93,12 @@ pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
     // Send by symbol (con_id=0 triggers symbol-based lookup)
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, req_id: 7800, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, req_id: 7800, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut contract: Option<contracts::ContractDefinition> = None;
@@ -141,11 +141,11 @@ pub(super) fn phase_trading_hours(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 265598, symbol: String::new(), sec_type: String::new(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8000, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: String::new(), sec_type: String::new(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8000, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut details: Option<contracts::ContractDefinition> = None;
@@ -242,11 +242,11 @@ pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(),
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8400, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8400, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut contract: Option<contracts::ContractDefinition> = None;
@@ -279,7 +279,7 @@ pub(super) fn phase_matching_symbols_channel(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, _event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     control_tx.send(ControlCommand::FetchMatchingSymbols {
@@ -324,10 +324,10 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // A request in flight when the transport drops is answered by nobody. The
@@ -355,7 +355,7 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
             Ok(Event::Disconnected) if !reasked => {
                 reasked = true;
                 std::thread::sleep(Duration::from_secs(3));
-                let _ = control_tx.send(ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, filters: Default::default() });
+                let _ = control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, filters: Default::default() });
             }
             _ => {}
         }

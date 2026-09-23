@@ -5,7 +5,7 @@ the Python filter object, so executions the caller had explicitly filtered
 out — another client's fills, or ones before the requested cutoff — were
 replayed anyway.
 """
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class _Filter:

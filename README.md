@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/book/src/banner.png" alt="IBX" width="100%">
+  <img src="docs/book/src/banner.png" alt="IBKR-DX" width="100%">
 </p>
 
 <p align="center">
@@ -7,11 +7,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/userFRM/ibx/actions"><img src="https://github.com/userFRM/ibx/actions/workflows/tests.yml/badge.svg" alt="Build"></a>
+  <a href="https://github.com/userFRM/ibkr-dx/actions"><img src="https://github.com/userFRM/ibkr-dx/actions/workflows/tests.yml/badge.svg" alt="Build"></a>
   <img src="https://img.shields.io/badge/rust-1.89+-orange.svg" alt="Rust version">
   <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python version">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
-  <a href="https://userfrm.github.io/ibx/"><img src="https://img.shields.io/badge/docs-book-green.svg" alt="Docs"></a>
+  <a href="https://userfrm.github.io/ibkr-dx/"><img src="https://img.shields.io/badge/docs-book-green.svg" alt="Docs"></a>
 </p>
 
 ## Contents
@@ -26,11 +26,11 @@
 
 **The honest parts** — [What is not covered](#what-is-not-covered) · [Questions](#questions) · [Testing](#testing)
 
-**Working on it** — [Contributing](#contributing) · [Security](#security) · [License](#license)
+**Working on it** — [Contributing](#contributing) · [Security](#security) · [License](#license) · [Credits](#credits)
 
 ## Introduction
 
-IBX implements the IBKR client protocol directly. It authenticates, maintains
+IBKR-DX implements the IBKR client protocol directly. It authenticates, maintains
 the market-data, trading, historical and security-definition connections, and
 exposes the same API a program would otherwise reach through IB Gateway — with
 no gateway process, JVM, or local socket in between.
@@ -110,7 +110,7 @@ maturin develop --features python
 
 ```toml
 [dependencies]
-ibx = { git = "https://github.com/userFRM/ibx" }
+ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx" }
 ```
 
 > [!NOTE]
@@ -121,17 +121,17 @@ ibx = { git = "https://github.com/userFRM/ibx" }
 ## Quick start
 
 ```python
-import ibx
+import ibkr_dx
 
-ib = ibx.IB()
+ib = ibkr_dx.IB()
 ib.connect(username="your_user", password="your_pass", paper=True)
 
-spy = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+spy = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
 
 (ticker,) = ib.reqTickers(spy)
 print(ticker.bid, ticker.ask)
 
-order = ibx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.00)
+order = ibkr_dx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.00)
 trade = ib.placeOrder(spy, order)
 ib.sleep(2)
 print(trade.orderStatus.status)
@@ -146,8 +146,8 @@ rather than a contract id is resolved before transmission.
 In Rust:
 
 ```rust
-use ibx::types::model::{Contract, Order};
-use ibx::{Client, Config};
+use ibkr_dx::types::model::{Contract, Order};
+use ibkr_dx::{Client, Config};
 
 let client = Client::connect(&Config {
     username: "your_user".into(),
@@ -220,7 +220,7 @@ so the `async` feature moves each question onto a thread that may wait. What
 does not wait — reading what the session holds — is not awaited:
 
 ```toml
-ibx = { git = "https://github.com/userFRM/ibx", features = ["async"] }
+ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx", features = ["async"] }
 ```
 
 ```rust
@@ -324,7 +324,7 @@ client.closing_option_model(1)      # the same, worked out as the contract close
 ### Asking the venue to find a trade
 
 ```python
-scan = ibx.SpreadScan(version=6, request=0, under_con_id=265598,
+scan = ibkr_dx.SpreadScan(version=6, request=0, under_con_id=265598,
                       account="DU1234567", min_delta=0.25)
 client.req_spread_scan(1, aapl, scan)
 for s in client.scanned_strategies(1):
@@ -342,7 +342,7 @@ client.req_ping(); client.last_rtt_ms()
 ```
 
 The full list, with what each returns, is in
-[Beyond the API](https://userfrm.github.io/ibx/reference/beyond-the-api.html).
+[Beyond the API](https://userfrm.github.io/ibkr-dx/reference/beyond-the-api.html).
 
 <!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->
 
@@ -355,8 +355,8 @@ One row per capability, one column per client — every one of the 78 calls and 
 | TWS API | 78 / 78 | 90 / 90 | nothing missing |
 | ibapi | 73 / 78 | 85 / 90 | 5 absent, 5 callbacks absent |
 | ib_async | 77 / 78 | 78 / 90 | 1 absent, 12 callbacks absent |
-| **ibx Rust** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
-| **ibx Python** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
+| **IBKR-DX Rust** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
+| **IBKR-DX Python** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
 
 **Nothing on that list is absent here.** 9 exist and never fire, because the venue states nothing on this connection for them to carry: there is no terminal between this client and the venue to make a verification handshake with, no socket layer of the reference client's own to report an error from, this connection does not reroute a request to another contract, and neither an exchange-for-physical quote nor a delta-neutral pairing is stated on it — a share, a fund and two futures were read together and the venue stated fifteen kinds of tick, none of them those. Each says so where it is declared, so a program that implements one still compiles and runs. Everything else is carried.
 
@@ -400,7 +400,7 @@ filled in from memory. A mark here is a thing that was read.
 
 What a program asks the venue for.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect` | ● | ● | ● | ● | ● | ● |
 |  | `disconnect` | ● | ● | ● | ● | ● | ● |
@@ -485,7 +485,7 @@ What a program asks the venue for.
 
 What the venue says back. `ib_async` delivers these as events as well as methods, so a mark here says the method exists on its wrapper, not that the information is unavailable by another route.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect_ack` | ● | ● | ● | ● | ● | ● |
 |  | `connection_closed` | ● | ● | ● | ● | ● | ● |
@@ -594,7 +594,7 @@ venue.
 A mark against a reference client here means it happens to name the
 same thing, not that the documented API does.
 
-| Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
+| Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `account` | ● | · | · | · | ● | · |
 | `accountSnapshot` | ● | · | · | · | · | ● |
@@ -682,8 +682,8 @@ same thing, not that the documented API does.
 | TWS API | 78 | 0 | 0 |
 | ibapi | 73 | 0 | 5 |
 | ib_async | 77 | 0 | 1 |
-| ibx Rust | 78 | 0 | 0 |
-| ibx Python | 78 | 0 | 0 |
+| IBKR-DX Rust | 78 | 0 | 0 |
+| IBKR-DX Python | 78 | 0 | 0 |
 
 </details>
 
@@ -738,9 +738,9 @@ install it as usual, and attach:
 
 ```python
 from ib_async import IB, Stock
-import ibx.ib_async
+import ibkr_dx.ib_async
 
-ib = ibx.ib_async.attach(IB(), username="your_user", password="your_pass")
+ib = ibkr_dx.ib_async.attach(IB(), username="your_user", password="your_pass")
 ib.connect()                      # names no host: there is no gateway
 
 spy = Stock("SPY", "SMART", "USD")
@@ -760,7 +760,7 @@ underneath, and no gateway process.
 
 ```python
 import threading
-from ibx import EWrapper, EClient, Contract
+from ibkr_dx import EWrapper, EClient, Contract
 
 class App(EWrapper):
     def __init__(self):
@@ -786,7 +786,7 @@ client.req_mkt_data(1, aapl, "", False)
 
 Both naming conventions resolve on every type and method: `reqMktData` and
 `req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`. Both surfaces
-drive one client and one engine — `ibx.IB` is a facade over `EClient`, they
+drive one client and one engine — `ibkr_dx.IB` is a facade over `EClient`, they
 share a session, and either may be used.
 
 ## How it works
@@ -829,7 +829,7 @@ like a price.
 
 A session can be resumed rather than re-authenticated, which is what makes a
 restart cheap. See
-[Login](https://userfrm.github.io/ibx/recipes/python/login.html).
+[Login](https://userfrm.github.io/ibkr-dx/recipes/python/login.html).
 
 ## Configuration
 
@@ -839,7 +839,7 @@ readable at runtime. Ten gateway settings have no counterpart and report why (no
 window geometry, no local listening socket, no JVM heap, and no message pacing:
 nothing here paces outgoing messages, which the gateway ships with off).
 
-Rust: `EClientConfig.gateway`. Python: `ibx.configure()`.
+Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 
 > [!TIP]
 > The calls under *Beyond the canonical list* are the point of this client, not
@@ -853,18 +853,18 @@ Rust: `EClientConfig.gateway`. Python: `ibx.configure()`.
 > move to this client without changing a line, but a program that then calls one
 > of these cannot move back to a gateway**, because a gateway has no message to
 > carry it. Nothing else about it is different — the extras are named under
-> [Limits](https://userfrm.github.io/ibx/reference/limits.html) so that the
+> [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) so that the
 > trade is visible before it is made.
 
 ## Documentation
 
-* [The book](https://userfrm.github.io/ibx/) — guides, recipes and the generated API reference
+* [The book](https://userfrm.github.io/ibkr-dx/) — guides, recipes and the generated API reference
 * [Capabilities](docs/capabilities.md) — one row per capability, one column per client
 * [Evidence](docs/evidence.md) — what each claim rests on, and the session that produced it
 * [Notebooks](notebooks/) — the seven ib_async subjects, in the TWS API shape and in [ib_async's own](notebooks/ib_async_nogateway/)
 * [Examples](examples/) — 45 runnable single-file programs, 29 in Rust and 15 in Python
-* [Beyond the API](https://userfrm.github.io/ibx/reference/beyond-the-api.html) — what the session states that no documented call asks for
-* [Limits](https://userfrm.github.io/ibx/reference/limits.html) — what this client will not do, and why
+* [Beyond the API](https://userfrm.github.io/ibkr-dx/reference/beyond-the-api.html) — what the session states that no documented call asks for
+* [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) — what this client will not do, and why
 
 ## Questions
 
@@ -932,7 +932,7 @@ zero, because zero is a real price and a real greek.
 Moving to this client changes nothing but the connect call. Moving back does, if
 your program has come to use a call the documented API never named — a gateway
 has no message to carry it. The extras are listed under
-[Limits](https://userfrm.github.io/ibx/reference/limits.html) so the trade is
+[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) so the trade is
 visible before it is made.
 </details>
 
@@ -1000,13 +1000,25 @@ repository's security advisories rather than in a public issue.
 
 [AGPL-3.0](LICENSE)
 
+## Credits
+
+IBKR-DX began as a fork of [ibx](https://github.com/deepentropy/ibx) by
+DeepEntropy and Odyssée, at its v0.7.1 release
+([deepentropy/ibx@9367845](https://github.com/deepentropy/ibx/commit/9367845), 25 July 2026),
+under the same AGPL-3.0 licence. That history is the first commit here, and its
+full log is in the original repository. Everything after it was written for
+IBKR-DX, from 28 July 2026 on. Thank you to both of them for the foundation.
+
+- ibx: Copyright (C) 2026 DeepEntropy and Odyssée
+- IBKR-DX: Copyright (C) 2026 userFRM
+
 ## Disclaimer
 
 Interactive Brokers®, IBKR®, Trader Workstation®, and IB Gateway® are
 registered trademarks of Interactive Brokers Group, Inc. This project is **not
 affiliated with, endorsed by, or supported by Interactive Brokers**.
 
-IBX is an independent, open-source project provided "as is", without warranty
+IBKR-DX is an independent, open-source project provided "as is", without warranty
 of any kind.
 
 > [!CAUTION]
@@ -1016,17 +1028,17 @@ of any kind.
 
 ### Legal Considerations
 
-- **No warranty.** IBX is provided "as is", without warranty of any kind. See [LICENSE](LICENSE) for full terms.
-- **Use at your own risk.** Users are solely responsible for ensuring their use of IBX complies with Interactive Brokers' Terms of Service, Customer Agreement, and any applicable laws or regulations. Using IBX may carry risks including but not limited to account restriction or termination by IB.
-- **Not financial software.** IBX is an experimental research project. It is not intended as a replacement for officially supported IB software in production trading environments. The authors accept no liability for financial losses, missed trades, account issues, or any other damages arising from the use of this software.
-- **Protocol stability.** IBX relies on an undocumented protocol that IB may change at any time without notice. There is no guarantee of continued functionality.
+- **No warranty.** IBKR-DX is provided "as is", without warranty of any kind. See [LICENSE](LICENSE) for full terms.
+- **Use at your own risk.** Users are solely responsible for ensuring their use of IBKR-DX complies with Interactive Brokers' Terms of Service, Customer Agreement, and any applicable laws or regulations. Using IBKR-DX may carry risks including but not limited to account restriction or termination by IB.
+- **Not financial software.** IBKR-DX is an experimental research project. It is not intended as a replacement for officially supported IB software in production trading environments. The authors accept no liability for financial losses, missed trades, account issues, or any other damages arising from the use of this software.
+- **Protocol stability.** IBKR-DX relies on an undocumented protocol that IB may change at any time without notice. There is no guarantee of continued functionality.
 
 ### EU Interoperability
 
 For users and contributors in the European Union: Article 6 of the EU Software
 Directive (2009/24/EC) permits reverse engineering for the purpose of achieving
 interoperability with independently created software, provided that specific
-conditions are met. IBX was developed with this legal framework in mind,
+conditions are met. IBKR-DX was developed with this legal framework in mind,
 enabling interoperability with IB's trading infrastructure on platforms where
 the official Java-based Gateway cannot run (headless Linux, containers,
 embedded systems).

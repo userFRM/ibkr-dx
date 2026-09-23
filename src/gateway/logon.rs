@@ -699,8 +699,8 @@ pub fn token_short_hash(session_token: &BigUint) -> String {
 /// Tag 6266 (`encoded`) carries `{jdkVer}/{platform}/{locale}/{dist}`.
 /// The auth server requires the `{locale}` segment to be a canonical Java
 /// `Locale.toString()` value — `en_US`, `fr`, `ja_JP`, etc. Bare `en` is
-/// rejected as `invalid twsInfo`. Override via `IBX_LOCALE` (locale only)
-/// or `IBX_ENCODED` (full string).
+/// rejected as `invalid twsInfo`. Override via `IBKR_DX_LOCALE` (locale only)
+/// or `IBKR_DX_ENCODED` (full string).
 ///
 /// Tag 8361 = `"(rolling)"` is load-bearing: it marks the client as a
 /// rolling-release build. Without it the logon is rejected with "The TWS
@@ -710,7 +710,7 @@ pub fn token_short_hash(session_token: &BigUint) -> String {
 ///
 /// Tag 6947 carries the JVM default timezone (e.g. `Europe/Paris`,
 /// `America/New_York`). The auth server doesn't validate it — `UTC` is
-/// the safe default — but `IBX_TZ` overrides for users who want to mirror
+/// the safe default — but `IBKR_DX_TZ` overrides for users who want to mirror
 /// their locale or comply with regional logging requirements. The session
 /// states its own, settled when it opened.
 pub fn build_ccp_logon(
@@ -1002,7 +1002,7 @@ pub fn farm_logon_exchange(
                 // connect request that opened the connection already carried
                 // the session's own token, so a farm answering `35=A` to it has
                 // accepted a credential rather than skipped one. Refusing here
-                // took working sessions down (ibx#42).
+                // took working sessions down (ibkr_dx#42).
                 // Logon ACK — sign_iv is the current write_iv (mutated by encrypt)
                 let sign_iv = channel
                     .write_iv()

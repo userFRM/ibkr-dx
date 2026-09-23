@@ -20,16 +20,16 @@ sys.path.insert(0, str(ROOT / "python"))
 
 
 def answers() -> dict[str, str]:
-    import ibx
+    import ibkr_dx
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.connect(
         username=os.environ["IB_USERNAME"],
         password=os.environ["IB_PASSWORD"],
         paper=True,
     )
     try:
-        asked = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+        asked = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
         details = ib.reqContractDetails(asked)
         spy = details[0].contract
         out = {
@@ -48,7 +48,7 @@ def answers() -> dict[str, str]:
 
         out["symbol_matches"] = str(len(ib.reqMatchingSymbols("APP")))
 
-        order = ibx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.0)
+        order = ibkr_dx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.0)
         state = ib.whatIfOrder(spy, order)
         out["preview_status"] = state.status
         out["preview_commission"] = str(state.commissionAndFees)

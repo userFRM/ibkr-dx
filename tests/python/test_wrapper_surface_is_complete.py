@@ -4,7 +4,7 @@ The list is written out rather than derived, so it cannot shrink to match what
 happens to be implemented. It is that wrapper's public synchronous surface.
 """
 
-from ibx._ib import IB
+from ibkr_dx._ib import IB
 
 WRAPPER_METHODS = [
     "connect", "disconnect", "isConnected", "waitOnUpdate", "loopUntil",
@@ -54,7 +54,7 @@ def test_none_of_them_is_a_placeholder_that_only_raises():
     import inspect
     import textwrap
 
-    from ibx._ib import IB
+    from ibkr_dx._ib import IB
 
     def placeholder(name):
         held = getattr(IB, name, None)

@@ -4,10 +4,10 @@ One pass announced orderStatus under the placing client and filed the same print
 under client zero, so a caller replaying its own fills by client id got none of
 them.
 """
-import ibx
+import ibkr_dx
 
 
-class Filed(ibx.EWrapper):
+class Filed(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.clients = []
@@ -21,7 +21,7 @@ class Filed(ibx.EWrapper):
 
 def test_a_report_naming_no_client_files_the_fill_under_the_placing_client():
     w = Filed()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_set_client_id(5)
     c._test_track_order(86, 0, "SPY", "BUY", 1, 100.0)

@@ -5,7 +5,7 @@ the reference client holds it — held as a string, `report.yieldRedemptionDate 
 Run: pytest tests/python/test_a_commission_report_yield_date_is_an_int.py -v
 """
 
-from ibx import CommissionAndFeesReport
+from ibkr_dx import CommissionAndFeesReport
 
 
 def test_the_yield_redemption_date_is_an_int_defaulting_to_zero():

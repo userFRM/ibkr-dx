@@ -5,7 +5,7 @@
 """
 import os, threading, time
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class RecordingWrapper(EWrapper):

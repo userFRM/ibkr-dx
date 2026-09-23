@@ -10,7 +10,7 @@ Run: pytest tests/python/test_a_condition_names_its_kind.py -v
 """
 
 import pytest
-from ibx import (
+from ibkr_dx import (
     ExecutionCondition,
     MarginCondition,
     PercentChangeCondition,

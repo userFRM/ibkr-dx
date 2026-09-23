@@ -15,10 +15,10 @@
 //! The corruption is generated rather than recorded: a fixed sequence, so a
 //! Failure is reproducible from the test name and nothing else.
 
-use ibx::control::contracts;
-use ibx::control::fundamental;
-use ibx::control::{historical, news};
-use ibx::protocol::{fix, fixcomp, ns, tbt_stream, tick_decoder, trading_status, xyz};
+use ibkr_dx::control::contracts;
+use ibkr_dx::control::fundamental;
+use ibkr_dx::control::{historical, news};
+use ibkr_dx::protocol::{fix, fixcomp, ns, tbt_stream, tick_decoder, trading_status, xyz};
 
 /// A byte sequence that is not a frame, from a stated seed. The same seed
 /// always produces the same bytes, so a failure reproduces.

@@ -5,8 +5,8 @@
 //!
 //!     IB_USERNAME=… IB_PASSWORD=… cargo run --example readme_rust
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::{Contract, Order};
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::{Contract, Order};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = EClient::connect(&EClientConfig {

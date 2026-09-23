@@ -8,7 +8,7 @@ the other way round would be one that does nothing.
 import re
 import pathlib
 
-import ibx
+import ibkr_dx
 
 
 def _rust_settings() -> set[str]:
@@ -28,7 +28,7 @@ def _rust_unavailable() -> dict[str, str]:
 
 
 def test_both_clients_carry_the_same_settings():
-    assert _rust_settings() == set(ibx.settings()), (
+    assert _rust_settings() == set(ibkr_dx.settings()), (
         "a setting exists on one client and not the other"
     )
 
@@ -41,7 +41,7 @@ def test_both_clients_name_the_same_settings_as_unavailable():
     about them was told nothing rather than why. What a caller cannot have is
     as much a part of the surface as what they can.
     """
-    assert set(_rust_unavailable()) == set(ibx.UNAVAILABLE), (
+    assert set(_rust_unavailable()) == set(ibkr_dx.UNAVAILABLE), (
         "a setting is recorded as having no counterpart on one client and not the other"
     )
 
@@ -55,21 +55,21 @@ def test_both_clients_give_the_same_reason_for_a_setting_with_no_counterpart():
     outgoing messages while a reconnect's replay was paced, and both clients
     said it.
     """
-    assert _rust_unavailable() == dict(ibx.UNAVAILABLE), (
+    assert _rust_unavailable() == dict(ibkr_dx.UNAVAILABLE), (
         "the two clients give different reasons for the same setting"
     )
 
 
 def test_every_setting_is_readable_after_being_set():
-    ibx.configure(timezone="America/New_York")
-    assert ibx.settings()["timezone"] == "America/New_York"
-    ibx.configure(timezone=None)
-    assert ibx.settings()["timezone"] is None
+    ibkr_dx.configure(timezone="America/New_York")
+    assert ibkr_dx.settings()["timezone"] == "America/New_York"
+    ibkr_dx.configure(timezone=None)
+    assert ibkr_dx.settings()["timezone"] is None
 
 
 def test_a_misspelled_setting_is_refused():
     try:
-        ibx.configure(timezon="UTC")
+        ibkr_dx.configure(timezon="UTC")
     except ValueError as refused:
         assert "timezon" in str(refused)
     else:
@@ -84,7 +84,7 @@ def test_a_session_states_its_own_settings():
     decides the time zone, the build, and where the market-data connection
     goes for both.
     """
-    client = ibx.EClient(ibx.EWrapper())
+    client = ibkr_dx.EClient(ibkr_dx.EWrapper())
     # Refused before anything is sent, so a misspelling cannot open a session
     # configured differently from the way it was written.
     try:
@@ -95,4 +95,4 @@ def test_a_session_states_its_own_settings():
         raise AssertionError("a setting that is not a setting was accepted")
 
     # And the process is not touched by a session stating one.
-    assert ibx.settings()["timezone"] is None
+    assert ibkr_dx.settings()["timezone"] is None

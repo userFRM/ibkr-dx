@@ -10,10 +10,10 @@ that had come back, with its subscriptions re-established and nothing to say so.
 import threading
 import time
 
-import ibx
+import ibkr_dx
 
 
-class Notices(ibx.EWrapper):
+class Notices(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.codes = []
@@ -37,7 +37,7 @@ def _within(seconds, condition):
 
 def _connected():
     w = Notices()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     return w, c
 

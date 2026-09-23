@@ -10,7 +10,7 @@ one order interleaved and each went out under the other's terms.
 Run: pytest tests/python/test_a_replace_carries_the_callers_statement.py -v
 """
 
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 REPLAYED = 4242
 SPY_CON_ID = 756733

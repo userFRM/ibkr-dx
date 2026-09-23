@@ -6,11 +6,11 @@ is the multiplier that turns a price into a market capitalisation, and what the
 contract opened at a year ago. Both were read past to step the cursor.
 """
 
-import ibx
+import ibkr_dx
 
 
 def _client():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     c._test_connect("T")
     return c
 

@@ -10,10 +10,10 @@ triple ran in this client's own order, so a program reading it positionally took
 the reference date for the opening time.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Records(ibx.EWrapper):
+class Records(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.smart = None
@@ -36,7 +36,7 @@ class Records(ibx.EWrapper):
 
 def _client():
     w = Records()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     return w, c
 

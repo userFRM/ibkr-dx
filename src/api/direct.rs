@@ -845,7 +845,7 @@ impl Client {
     /// holds no log level of its own and this protocol carries no message
     /// asking the venue to change one, so what a caller states here is written
     /// to this client's log and nothing else. This client's own logging is set
-    /// where the process sets it, through `IBX_LOG_LEVEL` or `RUST_LOG`.
+    /// where the process sets it, through `IBKR_DX_LOG_LEVEL` or `RUST_LOG`.
     ///
     /// It wrote that variable here, which set nothing — the filter is built
     /// when the logger is installed and does not read it again — and wrote it

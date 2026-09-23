@@ -1,14 +1,14 @@
-/* ── IBX docs custom polish ─────────────────────────────────────────────── */
+/* ── IBKR-DX docs custom polish ─────────────────────────────────────────────── */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-    --ibx-accent: #f59e0b;
-    --ibx-accent-strong: #fbbf24;
-    --ibx-accent-soft: rgba(245, 158, 11, 0.12);
-    --ibx-accent-faint: rgba(245, 158, 11, 0.06);
-    --ibx-border: rgba(127, 127, 127, 0.18);
-    --ibx-border-strong: rgba(127, 127, 127, 0.28);
+    --ibkr-dx-accent: #f59e0b;
+    --ibkr-dx-accent-strong: #fbbf24;
+    --ibkr-dx-accent-soft: rgba(245, 158, 11, 0.12);
+    --ibkr-dx-accent-faint: rgba(245, 158, 11, 0.06);
+    --ibkr-dx-border: rgba(127, 127, 127, 0.18);
+    --ibkr-dx-border-strong: rgba(127, 127, 127, 0.28);
 }
 
 /* ── Typography ─────────────────────────────────────────────────────────── */
@@ -40,7 +40,7 @@ html, body, .content, .menu-title, .sidebar {
     margin-top: 3rem;
     margin-bottom: 1rem;
     padding-bottom: 0.45rem;
-    border-bottom: 1px solid var(--ibx-border);
+    border-bottom: 1px solid var(--ibkr-dx-border);
 }
 
 .content h3 {
@@ -61,13 +61,13 @@ html, body, .content, .menu-title, .sidebar {
 }
 
 .content a, .content a:visited {
-    color: var(--ibx-accent);
+    color: var(--ibkr-dx-accent);
     text-decoration: none;
     border-bottom: 1px solid transparent;
     transition: border-color 120ms ease;
 }
 .content a:hover {
-    border-bottom-color: var(--ibx-accent);
+    border-bottom-color: var(--ibkr-dx-accent);
 }
 
 /* ── Code ───────────────────────────────────────────────────────────────── */
@@ -78,7 +78,7 @@ code, pre, .hljs {
 }
 
 pre {
-    border: 1px solid var(--ibx-border);
+    border: 1px solid var(--ibkr-dx-border);
     border-radius: 10px;
     padding: 1rem 1.25rem !important;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
@@ -91,8 +91,8 @@ pre > code.hljs {
 }
 
 :not(pre) > code {
-    background: var(--ibx-accent-soft);
-    border: 1px solid var(--ibx-accent-faint);
+    background: var(--ibkr-dx-accent-soft);
+    border: 1px solid var(--ibkr-dx-accent-faint);
     border-radius: 5px;
     padding: 1px 6px;
     font-size: 0.88em;
@@ -110,7 +110,7 @@ pre > code.hljs {
 
 .sidebar {
     font-size: 14px;
-    border-right: 1px solid var(--ibx-border);
+    border-right: 1px solid var(--ibkr-dx-border);
 }
 
 .sidebar .sidebar-scrollbox {
@@ -130,13 +130,13 @@ pre > code.hljs {
 }
 
 .chapter li.chapter-item a:hover {
-    background: var(--ibx-accent-faint);
-    color: var(--ibx-accent) !important;
+    background: var(--ibkr-dx-accent-faint);
+    color: var(--ibkr-dx-accent) !important;
 }
 
 .chapter li.chapter-item a.active {
-    background: var(--ibx-accent-soft);
-    color: var(--ibx-accent) !important;
+    background: var(--ibkr-dx-accent-soft);
+    color: var(--ibkr-dx-accent) !important;
     font-weight: 600;
 }
 
@@ -152,7 +152,7 @@ pre > code.hljs {
 /* ── Top menu bar ───────────────────────────────────────────────────────── */
 
 #menu-bar {
-    border-bottom: 1px solid var(--ibx-border);
+    border-bottom: 1px solid var(--ibkr-dx-border);
 }
 
 .menu-title {
@@ -166,7 +166,7 @@ pre > code.hljs {
 .content table {
     border-collapse: collapse;
     margin: 1.25rem 0;
-    border: 1px solid var(--ibx-border);
+    border: 1px solid var(--ibkr-dx-border);
     border-radius: 6px;
     overflow: hidden;
     font-size: 14.5px;
@@ -175,16 +175,16 @@ pre > code.hljs {
 .content table th,
 .content table td {
     border: none;
-    border-bottom: 1px solid var(--ibx-border);
+    border-bottom: 1px solid var(--ibkr-dx-border);
     padding: 9px 14px;
     text-align: left;
 }
 
 .content table th {
-    background: var(--ibx-accent-faint);
+    background: var(--ibkr-dx-accent-faint);
     font-weight: 600;
-    color: var(--ibx-accent);
-    border-bottom: 1px solid var(--ibx-border-strong);
+    color: var(--ibkr-dx-accent);
+    border-bottom: 1px solid var(--ibkr-dx-border-strong);
 }
 
 .content table tr:last-child td {
@@ -194,8 +194,8 @@ pre > code.hljs {
 /* ── Blockquotes ────────────────────────────────────────────────────────── */
 
 .content blockquote {
-    border-left: 3px solid var(--ibx-accent);
-    background: var(--ibx-accent-faint);
+    border-left: 3px solid var(--ibkr-dx-accent);
+    background: var(--ibkr-dx-accent-faint);
     padding: 0.6rem 1.1rem;
     border-radius: 0 6px 6px 0;
     margin: 1.25rem 0;
@@ -207,39 +207,39 @@ pre > code.hljs {
 
 /* ── Hero (landing page) ────────────────────────────────────────────────── */
 
-.ibx-hero {
+.ibkr-dx-hero {
     text-align: center;
     padding: 3rem 1rem 1.5rem;
     margin: -1rem 0 2.5rem;
-    border-bottom: 1px solid var(--ibx-border);
+    border-bottom: 1px solid var(--ibkr-dx-border);
 }
 
-.ibx-hero .ibx-logo {
+.ibkr-dx-hero .ibkr-dx-logo {
     display: block;
     width: 100%;
     max-width: 560px;
     height: auto;
     margin: 0 auto 1.75rem;
     border-radius: 12px;
-    border: 1px solid var(--ibx-border);
+    border: 1px solid var(--ibkr-dx-border);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
 }
 
-.ibx-hero h1 {
+.ibkr-dx-hero h1 {
     font-size: 3.4rem !important;
     font-weight: 800 !important;
     letter-spacing: -0.035em !important;
     line-height: 1.05 !important;
     margin: 0 0 0.6rem !important;
     border: 0 !important;
-    background: linear-gradient(135deg, var(--ibx-accent) 0%, var(--ibx-accent-strong) 100%);
+    background: linear-gradient(135deg, var(--ibkr-dx-accent) 0%, var(--ibkr-dx-accent-strong) 100%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
     display: inline-block;
 }
 
-.ibx-hero .ibx-tagline {
+.ibkr-dx-hero .ibkr-dx-tagline {
     font-size: 1.25rem;
     opacity: 0.78;
     margin: 0 auto 2rem;
@@ -247,14 +247,14 @@ pre > code.hljs {
     line-height: 1.5;
 }
 
-.ibx-hero .ibx-cta {
+.ibkr-dx-hero .ibkr-dx-cta {
     display: inline-flex;
     gap: 12px;
     flex-wrap: wrap;
     justify-content: center;
 }
 
-.ibx-hero .ibx-cta a {
+.ibkr-dx-hero .ibkr-dx-cta a {
     display: inline-block;
     padding: 11px 22px;
     border-radius: 8px;
@@ -265,54 +265,54 @@ pre > code.hljs {
     transition: transform 100ms ease, background 160ms ease, border-color 160ms ease;
 }
 
-.ibx-hero .ibx-cta a.primary {
-    background: var(--ibx-accent);
+.ibkr-dx-hero .ibkr-dx-cta a.primary {
+    background: var(--ibkr-dx-accent);
     color: #0f1320 !important;
 }
-.ibx-hero .ibx-cta a.primary:hover {
-    background: var(--ibx-accent-strong);
+.ibkr-dx-hero .ibkr-dx-cta a.primary:hover {
+    background: var(--ibkr-dx-accent-strong);
     transform: translateY(-1px);
 }
 
-.ibx-hero .ibx-cta a.secondary {
-    background: var(--ibx-accent-faint);
-    color: var(--ibx-accent) !important;
-    border: 1px solid var(--ibx-accent-soft) !important;
+.ibkr-dx-hero .ibkr-dx-cta a.secondary {
+    background: var(--ibkr-dx-accent-faint);
+    color: var(--ibkr-dx-accent) !important;
+    border: 1px solid var(--ibkr-dx-accent-soft) !important;
 }
-.ibx-hero .ibx-cta a.secondary:hover {
-    background: var(--ibx-accent-soft);
+.ibkr-dx-hero .ibkr-dx-cta a.secondary:hover {
+    background: var(--ibkr-dx-accent-soft);
     transform: translateY(-1px);
 }
 
 /* ── Feature grid (landing page) ────────────────────────────────────────── */
 
-.ibx-features {
+.ibkr-dx-features {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 16px;
     margin: 2rem 0 2.5rem;
 }
 
-.ibx-feature {
-    background: var(--ibx-accent-faint);
-    border: 1px solid var(--ibx-border);
+.ibkr-dx-feature {
+    background: var(--ibkr-dx-accent-faint);
+    border: 1px solid var(--ibkr-dx-border);
     border-radius: 10px;
     padding: 1.3rem 1.4rem;
     transition: border-color 160ms ease, transform 160ms ease;
 }
-.ibx-feature:hover {
-    border-color: var(--ibx-accent-soft);
+.ibkr-dx-feature:hover {
+    border-color: var(--ibkr-dx-accent-soft);
     transform: translateY(-2px);
 }
 
-.ibx-feature h3 {
+.ibkr-dx-feature h3 {
     margin: 0 0 0.4rem !important;
     font-size: 1rem !important;
     font-weight: 700;
-    color: var(--ibx-accent);
+    color: var(--ibkr-dx-accent);
 }
 
-.ibx-feature p {
+.ibkr-dx-feature p {
     margin: 0 !important;
     font-size: 14px;
     opacity: 0.82;
@@ -321,7 +321,7 @@ pre > code.hljs {
 
 /* ── Light-theme fallback ───────────────────────────────────────────────── */
 
-.light .ibx-hero .ibx-cta a.primary,
-.rust .ibx-hero .ibx-cta a.primary {
+.light .ibkr-dx-hero .ibkr-dx-cta a.primary,
+.rust .ibkr-dx-hero .ibkr-dx-cta a.primary {
     color: #fff !important;
 }

@@ -3,10 +3,10 @@
 //! Tests cross-module interactions: contracts ↔ FIX protocol, historical ↔ FIX protocol,
 //! Account parsing, and full workflows that span multiple control plane components.
 
-use ibx::control::contracts::*;
-use ibx::control::historical::*;
-use ibx::protocol::fix;
-use ibx::protocol::fixcomp;
+use ibkr_dx::control::contracts::*;
+use ibkr_dx::control::historical::*;
+use ibkr_dx::protocol::fix;
+use ibkr_dx::protocol::fixcomp;
 
 // ============================================================
 // Contract definition: FIX roundtrip (build request → parse response)

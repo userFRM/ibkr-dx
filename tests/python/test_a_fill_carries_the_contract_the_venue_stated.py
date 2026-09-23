@@ -6,10 +6,10 @@ positions by contract id matched nothing on this surface and everything on
 the other, and the reference client names the id on every fill.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Fills(ibx.EWrapper):
+class Fills(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.contracts = []
@@ -23,7 +23,7 @@ class Fills(ibx.EWrapper):
 
 def test_a_fill_carries_the_contract_the_venue_stated():
     w = Fills()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_track_order(86, 0, "SPY", "BUY", 1, 100.0)
     c._test_push_venue_order(86, "SPY", "BUY", 1, 100.0, con_id=756733)

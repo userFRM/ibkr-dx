@@ -14,8 +14,8 @@ methods that send a question and hand the answer back. It is a facade over
 
 import inspect
 
-from .ibx import *  # noqa: F401,F403
-from .ibx import __doc__ as _ext_doc  # noqa: F401
+from .ibkr_dx import *  # noqa: F401,F403
+from .ibkr_dx import __doc__ as _ext_doc  # noqa: F401
 
 from ._ib import Client  # noqa: F401
 
@@ -234,15 +234,15 @@ del _surface
 # The reference client's own module names, laid over what this package
 # publishes, so its import lines resolve under the one rename a person would
 # guess at. Bound as attributes as well as registered, because a program writes
-# both `from ibx import wrapper` and `from ibx.wrapper import EWrapper`.
+# both `from ibkr_dx import wrapper` and `from ibkr_dx.wrapper import EWrapper`.
 from . import _layout as _layout_module  # noqa: E402
 
 globals().update(_layout_module.install(dict(globals())))
 del _layout_module
 
-# What `from ibx import *` brings. The extension module is bound on this
+# What `from ibkr_dx import *` brings. The extension module is bound on this
 # package by the star-import above, so `dir()` names it too: left in, the star
-# import rebinds the caller's own `ibx` to that submodule and `ibx.IB` stops
+# import rebinds the caller's own `ibkr_dx` to that submodule and `ibkr_dx.IB` stops
 # existing. The layout's modules go the same way — `from ibapi import *` brings
 # none of them there, and a script that had its own `order` or `contract` would
 # lose it to ours. So: no modules, and nothing this file merely imported to do
@@ -252,6 +252,6 @@ import types as _types
 __all__ = [
     n for n, held in sorted(globals().items())
     if not n.startswith("_")
-    and n != "ibx"
+    and n != "ibkr_dx"
     and not isinstance(held, _types.ModuleType)
 ]

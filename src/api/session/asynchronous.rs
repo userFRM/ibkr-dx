@@ -7,8 +7,8 @@
 //! a copy, and making it a future would be ceremony over a memory read.
 //!
 //! ```no_run
-//! # use ibx::{AsyncClient, Config};
-//! # use ibx::types::model::{Contract, Order};
+//! # use ibkr_dx::{AsyncClient, Config};
+//! # use ibkr_dx::types::model::{Contract, Order};
 //! # use std::time::Duration;
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -130,7 +130,7 @@ impl AsyncClient {
     /// the client can do is reachable through here, on a thread that may wait:
     ///
     /// ```no_run
-    /// # use ibx::AsyncClient;
+    /// # use ibkr_dx::AsyncClient;
     /// # async fn f(client: AsyncClient) -> Result<(), Box<dyn std::error::Error>> {
     /// client.off_reactor(|c| c.req_scanner_parameters()).await??;
     /// # Ok(())

@@ -4,8 +4,8 @@
 //! events to a [`Wrapper`](crate::api::wrapper::Wrapper) via `process_msgs()`.
 //!
 //! ```no_run
-//! use ibx::api::{EClient, EClientConfig, Wrapper, Contract, Order};
-//! use ibx::api::types::TickAttrib;
+//! use ibkr_dx::api::{EClient, EClientConfig, Wrapper, Contract, Order};
+//! use ibkr_dx::api::types::TickAttrib;
 //!
 //! struct MyWrapper;
 //! impl Wrapper for MyWrapper {
@@ -881,7 +881,7 @@ impl EClient {
 
     /// Frames this session kept exactly as the venue sent them, by connection.
     ///
-    /// Empty unless `IBX_CAPTURE_WIRE` is set. A reading checked only against
+    /// Empty unless `IBKR_DX_CAPTURE_WIRE` is set. A reading checked only against
     /// frames this client made up says nothing about the ones that arrive.
     pub fn unread_wire(&self) -> Vec<(&'static str, String)> {
         self.shared.market.unread_wire()

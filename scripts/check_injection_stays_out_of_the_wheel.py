@@ -4,7 +4,7 @@
 document attribute and never reaches the interpreter, and a leading underscore
 hides nothing from `getattr`. So a method that pushes a fill, an account value
 or a connected state into a client with no venue behind it is, once compiled
-in, part of the published surface — `ibx.EClient(w)._test_connect("DU1")` and
+in, part of the published surface — `ibkr_dx.EClient(w)._test_connect("DU1")` and
 the caller has a session that never spoke to anyone.
 
 They are kept behind the `test-helpers` feature, which the suites ask for and

@@ -16,7 +16,7 @@ import threading
 import time
 
 from ._state import BracketOrder, HistoricalNews, HistoricalSchedule, LiveState, TradingSession
-from .ibx import Contract, EClient
+from .ibkr_dx import Contract, EClient
 
 
 def _refuse_options(named: str, given) -> None:
@@ -152,7 +152,7 @@ class Client:
         have sent it.
 
         ``settings`` is what this session runs under, by the names
-        :func:`ibx.configure` uses — ``{"timezone": "Europe/Zurich"}``. Stated
+        :func:`ibkr_dx.configure` uses — ``{"timezone": "Europe/Zurich"}``. Stated
         here they belong to this session; stated through ``configure`` they
         belong to the process, and are what a session that states none falls
         back to.
@@ -213,7 +213,7 @@ class Client:
                 # one; nothing here tries to reconnect behind the caller's back.
                 return
 
-        self._pump = threading.Thread(target=pump, name="ibx-pump", daemon=True)
+        self._pump = threading.Thread(target=pump, name="ibkr-dx-pump", daemon=True)
         self._pump.start()
 
     def _pumping(self) -> bool:
@@ -609,7 +609,7 @@ class Client:
         an order in the same family transmits. The parent id is what links them
         once they go.
         """
-        from .ibx import Order
+        from .ibkr_dx import Order
 
         reverse = "SELL" if action.upper() == "BUY" else "BUY"
         parent = Order()

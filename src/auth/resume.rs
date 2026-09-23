@@ -116,7 +116,8 @@ fn seal_key(password: &str, salt: &[u8]) -> [u8; 16] {
     };
 
     // PBKDF2's first block: the salt and the round counter, then each result
-    // folded back into the next and every one of them combined.
+    // folded back into the next and every one of them combined. The label is
+    // the project's old name and stays: every saved session is keyed by it.
     let mut block = Vec::with_capacity(salt.len() + 12);
     block.extend_from_slice(b"ibx-session");
     block.extend_from_slice(salt);
@@ -219,7 +220,7 @@ mod tests {
 
     #[test]
     fn a_session_survives_the_round_trip() {
-        let dir = std::env::temp_dir().join(format!("ibx-resume-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ibkr-dx-resume-{}", std::process::id()));
         let path = dir.join("session");
         let s = sample();
         save(&path, "hunter2", &s).unwrap();
@@ -231,7 +232,7 @@ mod tests {
     /// The file is worth nothing without the credential it protects.
     #[test]
     fn a_session_does_not_open_with_the_wrong_password() {
-        let dir = std::env::temp_dir().join(format!("ibx-resume-pw-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ibkr-dx-resume-pw-{}", std::process::id()));
         let path = dir.join("session");
         save(&path, "right", &sample()).unwrap();
         assert_eq!(load(&path, "someone", "wrong", true), None);
@@ -243,7 +244,7 @@ mod tests {
     /// best and cross accounts at worst.
     #[test]
     fn a_session_is_refused_for_a_different_account() {
-        let dir = std::env::temp_dir().join(format!("ibx-resume-acct-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ibkr-dx-resume-acct-{}", std::process::id()));
         let path = dir.join("session");
         save(&path, "pw", &sample()).unwrap();
         assert_eq!(load(&path, "someone-else", "pw", true), None, "another user");
@@ -256,7 +257,7 @@ mod tests {
     /// to handle: the answer is always to log in again.
     #[test]
     fn a_damaged_file_is_no_session_rather_than_a_failure() {
-        let dir = std::env::temp_dir().join(format!("ibx-resume-bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ibkr-dx-resume-bad-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session");
         fs::write(&path, b"not a session at all").unwrap();
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn a_stored_session_is_readable_only_by_its_owner() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("ibx-resume-perm-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ibkr-dx-resume-perm-{}", std::process::id()));
         let path = dir.join("session");
         save(&path, "pw", &sample()).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -283,7 +284,7 @@ mod tests {
     #[test]
     fn concurrent_session_saves_keep_their_own_records() {
         let dir = std::env::temp_dir().join(format!(
-            "ibx-resume-concurrent-{}-{:x}", std::process::id(), rand::random::<u64>(),
+            "ibkr-dx-resume-concurrent-{}-{:x}", std::process::id(), rand::random::<u64>(),
         ));
         let paper_path = dir.join("session.paper");
         let live_path = dir.join("session.live");
@@ -328,7 +329,7 @@ mod tests {
     #[test]
     fn a_private_write_never_replaces_an_existing_file() {
         let dir = std::env::temp_dir().join(format!(
-            "ibx-resume-exclusive-{}-{:x}", std::process::id(), rand::random::<u64>(),
+            "ibkr-dx-resume-exclusive-{}-{:x}", std::process::id(), rand::random::<u64>(),
         ));
         let path = dir.join("session");
         save(&path, "pw", &sample()).unwrap();

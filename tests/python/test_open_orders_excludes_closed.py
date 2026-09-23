@@ -11,7 +11,7 @@ import os
 import time
 import pytest
 import threading
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 
 pytestmark = pytest.mark.skipif(

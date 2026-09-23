@@ -8,7 +8,7 @@ loop, then verifies via order_status that each order_id got acknowledged
 """
 import os, threading, time
 import pytest
-from ibx import EClient, EWrapper, Contract, Order
+from ibkr_dx import EClient, EWrapper, Contract, Order
 
 SPY  = (756733,  "SPY")
 AAPL = (265598,  "AAPL")

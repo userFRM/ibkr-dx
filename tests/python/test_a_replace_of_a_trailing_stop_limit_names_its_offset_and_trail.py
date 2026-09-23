@@ -8,7 +8,7 @@ went on working the order as it was placed.
 Run: pytest tests/python/test_a_replace_of_a_trailing_stop_limit_names_its_offset_and_trail.py -v
 """
 
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 SPY_CON_ID = 756733
 

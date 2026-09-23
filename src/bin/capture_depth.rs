@@ -11,8 +11,8 @@
 
 use std::time::Duration;
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::Contract;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::Contract;
 
 fn spy(exchange: &str) -> Contract {
     Contract {
@@ -25,8 +25,8 @@ fn spy(exchange: &str) -> Contract {
 }
 
 fn main() {
-    unsafe { std::env::set_var("IBX_CAPTURE_WIRE", "1") };
-    let _ = ibx::logging::try_init_from_env("error");
+    unsafe { std::env::set_var("IBKR_DX_CAPTURE_WIRE", "1") };
+    let _ = ibkr_dx::logging::try_init_from_env("error");
 
     let config = EClientConfig {
         username: std::env::var("IB_USERNAME").expect("IB_USERNAME"),

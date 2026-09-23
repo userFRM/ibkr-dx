@@ -1,16 +1,16 @@
 [package]
-name = "ibx"
-version = "0.7.1"
+name = "ibkr-dx"
+version = "0.1.0"
 edition = "2024"
 # The oldest compiler this builds on. Enforced here so it is checked
 # rather than claimed: the sources use let-chains and fixed-size slice
 # chunking, both of which arrived after the edition did, and the order id
 # counter takes a lock the kernel releases on its own.
 rust-version = "1.89"
-description = "Direct connection engine for Interactive Brokers. No Java gateway required."
+description = "Talk directly to IBKR: a client for Interactive Brokers with full TWS API compatibility. No gateway required."
 license = "AGPL-3.0-only"
-repository = "https://github.com/userFRM/ibx"
-keywords = ["interactive-brokers", "trading", "fix", "market-data", "brokerage"]
+repository = "https://github.com/userFRM/ibkr-dx"
+keywords = ["interactive-brokers", "ibkr", "tws-api", "trading", "market-data"]
 categories = ["api-bindings", "finance", "network-programming"]
 # Every binary is named below, because the tools under `src/bin` are for
 # developing this library rather than for using it, and a caller who installs
@@ -26,11 +26,11 @@ exclude = [
     "notebooks/",
     "scripts/",
     "tests/",
-    "python/ibx/*.so",
+    "python/ibkr_dx/*.so",
 ]
 
 [lib]
-name = "ibx"
+name = "ibkr_dx"
 crate-type = ["lib", "cdylib"]
 
 [features]
@@ -54,7 +54,7 @@ async = ["dep:tokio"]
 # Split out so a test binary can link libpython. `extension-module` tells PyO3
 # not to link it, which is right for the wheel and wrong for `cargo test`: the
 # harness then fails at link time on every Python symbol, and no Rust-side test
-# under this feature has ever run (ibx#381). The wheel build asks for both.
+# under this feature has ever run (ibkr_dx#381). The wheel build asks for both.
 extension-module = ["pyo3/extension-module"]
 
 [[example]]

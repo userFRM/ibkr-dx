@@ -13,10 +13,10 @@ filed, which is the worse of the two — and the client this one stands in for
 withdraws it: it states all three on every cancel it sends.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Heard(ibx.EWrapper):
+class Heard(ibkr_dx.EWrapper):
     def __init__(self):
         self.refusals = []
 
@@ -28,7 +28,7 @@ class Heard(ibx.EWrapper):
 
 def _client():
     heard = Heard()
-    client = ibx.EClient(heard)
+    client = ibkr_dx.EClient(heard)
     client._test_connect("DU0000000")
     # A withdrawal names an order this client is working, or it is answered
     # rather than sent. What is under test here is the annotation the
@@ -51,7 +51,7 @@ def _withdrew(client):
 
 def test_a_withdrawal_that_states_nothing_goes_through():
     client, heard = _client()
-    client.cancelOrder(1, ibx.OrderCancel())
+    client.cancelOrder(1, ibkr_dx.OrderCancel())
     assert _withdrew(client), "the order comes back"
     assert not [t for t in _said(client, heard) if "withdrawal states" in t]
 
@@ -68,7 +68,7 @@ def test_the_object_is_taken_where_a_bare_time_was_taken_before():
 
 def test_a_time_the_wire_cannot_carry_is_said_and_the_order_still_comes_back():
     client, heard = _client()
-    withdrawal = ibx.OrderCancel()
+    withdrawal = ibkr_dx.OrderCancel()
     withdrawal.manualOrderCancelTime = "20260902-14:30:00"
     client.cancelOrder(1, withdrawal)
 
@@ -80,7 +80,7 @@ def test_a_time_the_wire_cannot_carry_is_said_and_the_order_still_comes_back():
 
 def test_an_operator_the_wire_cannot_carry_is_said():
     client, heard = _client()
-    withdrawal = ibx.OrderCancel()
+    withdrawal = ibkr_dx.OrderCancel()
     withdrawal.extOperator = "someone"
     client.cancelOrder(1, withdrawal)
     assert _withdrew(client)
@@ -90,12 +90,12 @@ def test_an_operator_the_wire_cannot_carry_is_said():
 def test_who_entered_it_is_said_and_the_unset_value_is_not():
     client, heard = _client()
     # The number an integer nobody set carries is not a statement.
-    left_alone = ibx.OrderCancel()
-    assert left_alone.manualOrderIndicator == ibx.UNSET_INTEGER
+    left_alone = ibkr_dx.OrderCancel()
+    assert left_alone.manualOrderIndicator == ibkr_dx.UNSET_INTEGER
     client.cancelOrder(1, left_alone)
     assert not [t for t in _said(client, heard) if "withdrawal states" in t]
 
-    stated = ibx.OrderCancel()
+    stated = ibkr_dx.OrderCancel()
     stated.manualOrderIndicator = 1
     client.cancelOrder(2, stated)
     assert len(_withdrew(client)) == 2, "both orders come back"
@@ -104,7 +104,7 @@ def test_who_entered_it_is_said_and_the_unset_value_is_not():
 
 def test_the_global_withdrawal_says_the_same_and_still_withdraws():
     client, heard = _client()
-    withdrawal = ibx.OrderCancel()
+    withdrawal = ibkr_dx.OrderCancel()
     withdrawal.manualOrderCancelTime = "20260902-14:30:00"
     client.reqGlobalCancel(withdrawal)
     assert [t for t in _said(client, heard) if "withdrawal states" in t]

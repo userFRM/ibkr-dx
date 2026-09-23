@@ -7,7 +7,7 @@ Compatibility tests (marked @pytest.mark.live) require IB paper trading gateway.
 import os
 import pytest
 from conftest import NotConnectedProbe
-from ibx import EWrapper, EClient, TickAttrib, TickTypeEnum
+from ibkr_dx import EWrapper, EClient, TickAttrib, TickTypeEnum
 
 
 # ── EWrapper connection callback signatures ──
@@ -158,6 +158,6 @@ def test_all_connection_callbacks_sequence():
 # ── Compatibility tests requiring live gateway ──
 
 live = pytest.mark.skipif(
-    not os.environ.get("IBX_LIVE_TEST"),
-    reason="Set IBX_LIVE_TEST=1 to run live gateway tests"
+    not os.environ.get("IBKR_DX_LIVE_TEST"),
+    reason="Set IBKR_DX_LIVE_TEST=1 to run live gateway tests"
 )

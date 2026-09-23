@@ -10,7 +10,7 @@ raises one.
 """
 
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class RaisesOnTheFirstPosition(EWrapper):

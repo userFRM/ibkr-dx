@@ -382,7 +382,7 @@ impl EClient {
     /// protocol carries no message asking the venue to change one, so what a
     /// caller states here is written to this client's log and nothing else.
     /// This client's own logging is set where the process sets it, through
-    /// `IBX_LOG_LEVEL` or `RUST_LOG`.
+    /// `IBKR_DX_LOG_LEVEL` or `RUST_LOG`.
     pub fn set_server_log_level(&self, log_level: i32) {
         let level = match log_level {
             1 => "error",

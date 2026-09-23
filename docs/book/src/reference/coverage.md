@@ -17,7 +17,7 @@ Three things to read it with:
   that the call was exercised in the way you intend to use it.
 * **Coverage is not correctness.** A call that reaches the venue can still be
   the wrong call for what you are doing. The behaviour notes are in
-  [capabilities.md](https://github.com/userFRM/ibx/blob/main/docs/capabilities.md).
+  [capabilities.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md).
 
 For which messages this client speaks, rather than which method names it
 carries, see [Wire Coverage](./wire-coverage.md) — taken from the dispatch

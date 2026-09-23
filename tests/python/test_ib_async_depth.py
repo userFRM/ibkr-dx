@@ -15,11 +15,11 @@ ib_async = pytest.importorskip("ib_async")
 
 from ib_async import IB, Stock  # noqa: E402
 
-import ibx.ib_async  # noqa: E402
+import ibkr_dx.ib_async  # noqa: E402
 
 
 def _attached():
-    ib = ibx.ib_async.attach(IB(), username="u", password="p")
+    ib = ibkr_dx.ib_async.attach(IB(), username="u", password="p")
     ib.client._client._test_connect("DU000000", False)
     return ib
 
@@ -76,16 +76,16 @@ def test_a_commission_report_reaches_them_as_their_own_type():
 
     from ib_async.objects import CommissionReport
 
-    import ibx
+    import ibkr_dx
 
-    ours = ibx.CommissionAndFeesReport()
+    ours = ibkr_dx.CommissionAndFeesReport()
     ours.execId = "0000e1a7.68a1b2c3.01.01"
     ours.commission = 1.25
     ours.currency = "USD"
     ours.realizedPNL = -2.0
     ours.yield_ = 0.5
 
-    theirs = ibx.ib_async._as_theirs(ours)
+    theirs = ibkr_dx.ib_async._as_theirs(ours)
 
     assert isinstance(theirs, CommissionReport), "handed over as their own record"
     assert dataclasses.is_dataclass(theirs), "which their code requires it to be"
@@ -104,9 +104,9 @@ def test_a_seeded_order_id_is_the_next_one_their_client_issues():
     counter exists to prevent.
     """
     pytest.importorskip("ib_async")
-    import ibx.ib_async
+    import ibkr_dx.ib_async
 
-    client = ibx.ib_async.IbxClient.__new__(ibx.ib_async.IbxClient)
+    client = ibkr_dx.ib_async.IbkrDxClient.__new__(ibkr_dx.ib_async.IbkrDxClient)
     client._reqIdSeq = 1
 
     client.updateReqId(1_700_000_000)
@@ -128,13 +128,13 @@ def test_a_historical_tick_is_handed_over_as_their_own_record():
     pytest.importorskip("ib_async")
     from ib_async.objects import HistoricalTickBidAsk, HistoricalTickLast
 
-    import ibx
-    import ibx.ib_async
+    import ibkr_dx
+    import ibkr_dx.ib_async
 
-    quote = ibx.HistoricalTickBidAsk(
+    quote = ibkr_dx.HistoricalTickBidAsk(
         time=1_786_795_200, price_bid=1.5, price_ask=1.6, size_bid=10.0, size_ask=20.0,
     )
-    theirs = ibx.ib_async._as_theirs(quote)
+    theirs = ibkr_dx.ib_async._as_theirs(quote)
     assert isinstance(theirs, HistoricalTickBidAsk), "their own record"
     assert theirs.priceBid == 1.5
     assert theirs.priceAsk == 1.6
@@ -142,10 +142,10 @@ def test_a_historical_tick_is_handed_over_as_their_own_record():
     assert theirs.time.year == 2026, "and a moment, not a number"
     assert theirs.time.tzinfo is not None, "aware, which their frame conversion needs"
 
-    trade = ibx.HistoricalTickLast(
+    trade = ibkr_dx.HistoricalTickLast(
         time=1_786_795_200, price=2.5, size=3.0, exchange="ARCA",
     )
-    theirs = ibx.ib_async._as_theirs(trade)
+    theirs = ibkr_dx.ib_async._as_theirs(trade)
     assert isinstance(theirs, HistoricalTickLast)
     assert theirs.price == 2.5
     assert theirs.exchange == "ARCA"

@@ -159,7 +159,7 @@ def steps(suites):
         # workflow overrides it: without it every call with no engine to answer
         # waits the full timeout, which is minutes across these.
         (["cargo", "test", *sum([["--test", s] for s in suites], [])],
-         {"IBX_REGISTRATION_TIMEOUT_MS": "20"}),
+         {"IBKR_DX_REGISTRATION_TIMEOUT_MS": "20"}),
         # The workflow builds the documentation and fails on a warning. Run
         # locally only as clippy was: a broken doc link is invisible to every
         # step above it, and three of them reached main because this line was
@@ -181,7 +181,7 @@ def steps(suites):
         # A manifest here read a file that moved and could not pass at all,
         # and no other step in this list builds the target.
         (["cargo", "test", "--test", "ib_paper_compat"],
-         {"IBX_ALLOW_SKIP_NO_CREDS": "1"}),
+         {"IBKR_DX_ALLOW_SKIP_NO_CREDS": "1"}),
     ]
 
 

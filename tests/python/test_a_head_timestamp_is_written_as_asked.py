@@ -1,10 +1,10 @@
 """A head timestamp is written the way the caller asked, as the other surface
 writes it. Handed back as the venue wrote it, a caller asking for seconds since
 the epoch read a date string."""
-import ibx
+import ibkr_dx
 
 
-class Head(ibx.EWrapper):
+class Head(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -17,7 +17,7 @@ class Head(ibx.EWrapper):
 
 
 def spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = 756733
     c.symbol = "SPY"
     c.secType = "STK"
@@ -28,7 +28,7 @@ def spy():
 
 def test_a_head_timestamp_is_written_as_asked():
     w = Head()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_con_id(756733, 0)
     c.reqHeadTimeStamp(7, spy(), "TRADES", 1, 2)

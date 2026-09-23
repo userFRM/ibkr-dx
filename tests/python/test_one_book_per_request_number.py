@@ -7,10 +7,10 @@ contract and left the earlier one being served, and a reconnect brought back
 one book where there had been two.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -20,7 +20,7 @@ class Errors(ibx.EWrapper):
 
 
 def contract(con_id, symbol):
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = con_id
     c.symbol = symbol
     c.secType = "STK"
@@ -31,7 +31,7 @@ def contract(con_id, symbol):
 
 def test_withdrawing_a_book_that_is_not_held_says_so():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
 
     c.cancelMktDepth(7, False)
@@ -41,7 +41,7 @@ def test_withdrawing_a_book_that_is_not_held_says_so():
 
 def test_a_second_book_under_a_live_number_is_refused():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
 
     c.reqMktDepth(7, contract(756733, "SPY"), 5, False, [])

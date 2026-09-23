@@ -11,10 +11,10 @@ caller subscribed to every print — those reported away from the exchange
 included — was told each of them happened on the exchange.
 """
 
-import ibx
+import ibkr_dx
 
 
-class _Recorder(ibx.EWrapper):
+class _Recorder(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.errors = []
@@ -30,13 +30,13 @@ class _Recorder(ibx.EWrapper):
 
 def _client():
     w = _Recorder()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("DU0000000")
     return w, c
 
 
 def _spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.symbol, c.secType, c.exchange, c.currency = "SPY", "STK", "SMART", "USD"
     c.conId = 756733
     return c

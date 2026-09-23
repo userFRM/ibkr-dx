@@ -5,10 +5,10 @@ land. Delivered levels first, a pass that ran after both had arrived handed
 over the new book and then the order to empty it, and the caller emptied the
 book it had just filled.
 """
-import ibx
+import ibkr_dx
 
 
-class Sequence(ibx.EWrapper):
+class Sequence(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -22,7 +22,7 @@ class Sequence(ibx.EWrapper):
 
 
 def spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = 756733
     c.symbol = "SPY"
     c.secType = "STK"
@@ -33,7 +33,7 @@ def spy():
 
 def test_a_book_reset_is_delivered_before_the_levels_that_follow_it():
     w = Sequence()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c.reqMktDepth(7, spy(), 5, False, [])
     c._test_push_historical_error(7, 317, "Market depth data has been RESET")

@@ -1,6 +1,6 @@
 """The reference client's modules publish their constants and enumerations here too.
 
-A program star-imports `ibx.order` and writes `order.origin = CUSTOMER`, as
+A program star-imports `ibkr_dx.order` and writes `order.origin = CUSTOMER`, as
 that client's own `Order.__init__` does; it compares a scan's row count with
 `NO_ROW_NUMBER_SPECIFIED`, a fill's exercise type with
 `OptionExerciseType.NoneItem`, a fund's class with `FundAssetType.Equity`.
@@ -10,8 +10,8 @@ the enumerations, a comparison that could never hold.
 Run: pytest tests/python/test_the_reference_modules_publish_their_constants.py -v
 """
 
-from ibx import contract, execution, news, order, scanner
-from ibx import ContractDetails, Execution, Order, ScannerSubscription
+from ibkr_dx import contract, execution, news, order, scanner
+from ibkr_dx import ContractDetails, Execution, Order, ScannerSubscription
 
 
 def test_the_order_module_publishes_the_origin_and_auction_constants():

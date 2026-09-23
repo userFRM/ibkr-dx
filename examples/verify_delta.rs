@@ -6,8 +6,8 @@
 use std::env;
 use std::time::Duration;
 
-use ibx::types::model::{Contract, Order};
-use ibx::{Client, Config};
+use ibkr_dx::types::model::{Contract, Order};
+use ibkr_dx::{Client, Config};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::connect(&Config {

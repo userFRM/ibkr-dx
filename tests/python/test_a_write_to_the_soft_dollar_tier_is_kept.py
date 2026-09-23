@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ibx import Contract, EClient, EWrapper, Order, SoftDollarTier
+from ibkr_dx import Contract, EClient, EWrapper, Order, SoftDollarTier
 
 
 class _Recorder(EWrapper):

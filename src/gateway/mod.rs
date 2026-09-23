@@ -615,7 +615,7 @@ pub fn connect_farm(
                     );
                     conn.routing = table;
                 }
-                if let Ok(dir) = std::env::var("IBX_CAPTURE_WIRE")
+                if let Ok(dir) = std::env::var("IBKR_DX_CAPTURE_WIRE")
                     && dir != "1"
                 {
                     let path = format!("{dir}/routing-{farm_id}.bin");
@@ -1881,7 +1881,7 @@ impl Gateway {
         // Tag 6266 carries `{jdkVer}/{platform}/{locale}/{dist}`. The locale
         // segment must be a canonical Java `Locale.toString()` value (e.g.
         // `en_US`, `fr`, `ja_JP`); bare `en` is rejected as `invalid twsInfo`.
-        // `IBX_LOCALE` overrides just the locale; `IBX_ENCODED` overrides
+        // `IBKR_DX_LOCALE` overrides just the locale; `IBKR_DX_ENCODED` overrides
         // the whole string for full control.
         let encoded = match resume {
             Some(r) => r.encoded.clone(),
@@ -1908,7 +1908,7 @@ impl Gateway {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "this machine answers with no hardware address, which the data farms \
-                     refuse without saying so: state one for it (IBX_MAC) and connect again",
+                     refuse without saying so: state one for it (IBKR_DX_MAC) and connect again",
                 )
             })?,
         };

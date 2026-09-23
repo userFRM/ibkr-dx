@@ -9,7 +9,7 @@ to, of which there is none here, the answer is `None` rather than a stand-in.
 
 import pytest
 from conftest import NotConnectedProbe
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 def test_the_connection_states_are_the_reference_clients():

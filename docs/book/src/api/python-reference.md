@@ -1,4 +1,4 @@
-# Python API Reference (v0.7.1)
+# Python API Reference (v0.1.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -40,7 +40,7 @@ def connect(host, port=0, client_id=0, username="", password="", paper=True, cor
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `host` | `str` | Server hostname. |
-| `port` | `int` | Port number (unused — ibx connects directly). |
+| `port` | `int` | Port number (unused — IBKR-DX connects directly). |
 | `client_id` | `int` | Client ID (unused — single-client engine). |
 | `username` | `str` | Account username. |
 | `password` | `str` | Account password. |

@@ -16,13 +16,13 @@ from the repository.
 
 ```toml
 [dependencies]
-ibx = { git = "https://github.com/userFRM/ibx" }
+ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx" }
 ```
 
 ### Python
 
 ```bash
-pip install "git+https://github.com/userFRM/ibx"
+pip install "git+https://github.com/userFRM/ibkr-dx"
 ```
 
 The build backend is [maturin](https://www.maturin.rs/), which compiles the
@@ -53,7 +53,7 @@ whatever was built last, so rebuild before running one.
 | `dev-tools` | The binaries under `src/bin` — the benchmarks, and the capture tools this repository is developed with. Most of them read credentials and open a session |
 
 ```toml
-ibx = { git = "https://github.com/userFRM/ibx", features = ["async"] }
+ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx", features = ["async"] }
 ```
 
 `AsyncClient` names the calls a session is usually asked. Everything else the
@@ -106,7 +106,7 @@ and the shape of the prompt as the venue's to state rather than as described.
 Use a paper account while you are writing something. A live account is a live
 account.
 
-Two places read the environment instead of the call. `ibx.ib_async.attach`
+Two places read the environment instead of the call. `ibkr_dx.ib_async.attach`
 falls back to `IB_USERNAME` and `IB_PASSWORD` when they are not passed, and the
 programs under `examples/` read the same two:
 
@@ -143,24 +143,24 @@ IB_USERNAME=... IB_PASSWORD=... python examples/hello_tick_data.py
 ```
 
 That example uses `EClient` / `EWrapper`, which is the shape a TWS API program
-already has. Python has a second surface over the same session, `ibx.IB`, shaped
+already has. Python has a second surface over the same session, `ibkr_dx.IB`, shaped
 like the widely used asynchronous wrapper — a call sends the question and hands
 back the answer, with no callback to register:
 
 ```python
-import ibx
+import ibkr_dx
 
-ib = ibx.IB()
+ib = ibkr_dx.IB()
 ib.connect(username="your_user", password="your_pass", paper=True)
 
-spy = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+spy = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
 (ticker,) = ib.reqTickers(spy)
 print(ticker.bid, ticker.ask)
 
 ib.disconnect()
 ```
 
-The two are one client: `ibx.IB` is a facade over `EClient`, they share a
+The two are one client: `ibkr_dx.IB` is a facade over `EClient`, they share a
 session, and either may be used. A contract does not have to be qualified
 first — a request carrying a contract rather than a contract id is resolved
 before it is sent.

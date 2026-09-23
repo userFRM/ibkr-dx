@@ -22,7 +22,7 @@ import os
 import sys
 import time
 import threading
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 SPY_CON_ID = 756733
 

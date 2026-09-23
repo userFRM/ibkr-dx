@@ -9,8 +9,8 @@
 //! - reference test vectors (checksum, XOR fold)
 //! - reference test vectors (VLQ, hibit strings, tick decoding, bar captures)
 
-use ibx::protocol::fix::{fix_checksum, xor_fold};
-use ibx::protocol::tick_decoder::{read_hibit_str, read_vlq, vlq_signed};
+use ibkr_dx::protocol::fix::{fix_checksum, xor_fold};
+use ibkr_dx::protocol::tick_decoder::{read_hibit_str, read_vlq, vlq_signed};
 
 // ============================================================
 // VLQ (Variable-Length Quantity) decoder

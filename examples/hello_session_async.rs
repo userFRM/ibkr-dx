@@ -5,8 +5,8 @@
 use std::env;
 use std::time::Duration;
 
-use ibx::types::model::{Contract, Order};
-use ibx::{AsyncClient, Config};
+use ibkr_dx::types::model::{Contract, Order};
+use ibkr_dx::{AsyncClient, Config};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -10,7 +10,7 @@ so they are there, and silent, rather than missing.
 
 import inspect
 
-import ibx
+import ibkr_dx
 
 NEVER_FIRED = [
     "delta_neutral_validation",
@@ -26,7 +26,7 @@ NEVER_FIRED = [
 
 
 def test_each_one_is_there_to_implement():
-    w = ibx.EWrapper()
+    w = ibkr_dx.EWrapper()
     for name in NEVER_FIRED:
         assert hasattr(w, name), f"{name} is not on the wrapper"
         assert callable(getattr(w, name)), name
@@ -35,7 +35,7 @@ def test_each_one_is_there_to_implement():
 def test_a_program_that_implements_one_is_not_refused():
     """Overriding one is what a ported program does; it must simply be quiet."""
 
-    class Ported(ibx.EWrapper):
+    class Ported(ibkr_dx.EWrapper):
         def __init__(self):
             super().__init__()
             self.heard = []
@@ -47,7 +47,7 @@ def test_a_program_that_implements_one_is_not_refused():
             self.heard.append((req_id, con_id, exchange))
 
     w = Ported()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     # Nothing fires them, which is the documented behaviour — not an error.
     assert w.heard == []
@@ -56,5 +56,5 @@ def test_a_program_that_implements_one_is_not_refused():
 def test_each_says_why_it_stays_silent():
     """A callback that exists and never fires has to say so, or a caller waits."""
     for name in NEVER_FIRED:
-        doc = inspect.getdoc(getattr(ibx.EWrapper, name)) or ""
+        doc = inspect.getdoc(getattr(ibkr_dx.EWrapper, name)) or ""
         assert doc.strip(), f"{name} says nothing about itself"

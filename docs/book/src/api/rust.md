@@ -5,13 +5,13 @@ sense of a second implementation — they are two surfaces on one engine.
 
 | Type | What it is |
 | --- | --- |
-| `ibx::Client` | The one to reach for in new code. A call sends the question and hands back the answer, and what the session already holds — a position, an order, a fill, a quote — is read rather than asked for |
-| `ibx::EClient` / `ibx::Wrapper` | The reference client's shape: a request under an id, and an answer later on a callback you implement. For a program being moved onto this |
-| `ibx::AsyncClient` | `Client` for a program already inside a runtime. Behind the `async` feature |
-| `ibx::Config` | What a session is opened with. The same type `EClient` takes |
-| `ibx::PlacedOrder` | An order that has been placed, and what is becoming of it |
+| `ibkr_dx::Client` | The one to reach for in new code. A call sends the question and hands back the answer, and what the session already holds — a position, an order, a fill, a quote — is read rather than asked for |
+| `ibkr_dx::EClient` / `ibkr_dx::Wrapper` | The reference client's shape: a request under an id, and an answer later on a callback you implement. For a program being moved onto this |
+| `ibkr_dx::AsyncClient` | `Client` for a program already inside a runtime. Behind the `async` feature |
+| `ibkr_dx::Config` | What a session is opened with. The same type `EClient` takes |
+| `ibkr_dx::PlacedOrder` | An order that has been placed, and what is becoming of it |
 
-`Contract` and `Order` are at `ibx::api::client::{Contract, Order}`.
+`Contract` and `Order` are at `ibkr_dx::api::client::{Contract, Order}`.
 
 ## Building the reference
 

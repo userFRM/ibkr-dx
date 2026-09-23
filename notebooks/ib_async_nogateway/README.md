@@ -8,12 +8,12 @@ gateway.
 
 `ib_async` is not copied or modified here. Install it as usual. It is layered:
 everything above `Client`/`Connection` is transport-agnostic, and only that
-layer knows there is a socket to a local process. `ibx.ib_async.attach`
+layer knows there is a socket to a local process. `ibkr_dx.ib_async.attach`
 replaces that layer, so one line differs from what the library's own notebooks
 do:
 
 ```python
-ib = ibx.ib_async.attach(IB(), username="...", password="...", paper=True)
+ib = ibkr_dx.ib_async.attach(IB(), username="...", password="...", paper=True)
 ib.connect()          # names no host: there is no gateway to name
 ```
 

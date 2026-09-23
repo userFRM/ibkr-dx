@@ -1,8 +1,8 @@
-//! PyO3 bindings for ibx. Feature-gated behind `python`.
+//! PyO3 bindings for ibkr_dx. Feature-gated behind `python`.
 //!
 //! Provides an ibapi-compatible API (callback-based):
 //! ```python
-//! from ibx import EClient, EWrapper, Contract, Order
+//! from ibkr_dx import EClient, EWrapper, Contract, Order
 //! class App(EWrapper):
 //!     def next_valid_id(self, order_id):
 //!         ..
@@ -21,7 +21,7 @@ pub mod compat;
 
 /// What a session runs under, from the names the Python client states them by.
 ///
-/// The same names `ibx.configure` uses, so a caller states a setting the same
+/// The same names `ibkr_dx.configure` uses, so a caller states a setting the same
 /// way whether it is for one session or for the process.
 pub(crate) fn settings_from(
     stated: std::collections::HashMap<String, String>,
@@ -52,8 +52,8 @@ pub(crate) fn settings_from(
             // installs the logger.
             "log_level" | "log_dir" | "log_queue" => {
                 return Err(format!(
-                    "{name} belongs to the process, not one session: importing ibx \
-                     installs the logger, so set IBX_{} in the environment before that",
+                    "{name} belongs to the process, not one session: importing ibkr_dx \
+                     installs the logger, so set IBKR_DX_{} in the environment before that",
                     name.to_uppercase(),
                 ));
             }
@@ -93,9 +93,9 @@ use pyo3::prelude::*;
 
 /// Python module definition.
 #[pymodule]
-fn ibx(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn ibkr_dx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Forward Rust `log::*` records wherever the environment asks for them.
-    // `IBX_LOG_DIR` is published to callers as a setting, so a wheel that
+    // `IBKR_DX_LOG_DIR` is published to callers as a setting, so a wheel that
     // answered it with stderr was answering something else. Both paths are
     // no-ops when a logger is already installed, which is what a module
     // initialiser wants: it runs once per interpreter, not once per process.

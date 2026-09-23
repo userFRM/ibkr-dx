@@ -12,9 +12,9 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::{Contract, Order};
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::{Contract, Order};
+use ibkr_dx::api::wrapper::Wrapper;
 
 /// One contract per market this account can reach.
 fn subjects() -> Vec<(&'static str, Contract)> {
@@ -62,12 +62,12 @@ struct Heard {
 }
 
 impl Wrapper for Heard {
-    fn historical_data(&mut self, _req: i64, _bar: &ibx::api::types::BarData) {
+    fn historical_data(&mut self, _req: i64, _bar: &ibkr_dx::api::types::BarData) {
         self.bars += 1;
     }
     fn open_order(
         &mut self, _id: i64, _c: &Contract, _o: &Order,
-        _state: &ibx::api::types::OrderState,
+        _state: &ibkr_dx::api::types::OrderState,
     ) {
         self.previews += 1;
     }
@@ -79,7 +79,7 @@ impl Wrapper for Heard {
 }
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
     let username = std::env::var("IB_USERNAME").unwrap_or_default();
     if username.trim().is_empty() {
         eprintln!("IB_USERNAME/IB_PASSWORD unset. This reads from real servers.");

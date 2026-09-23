@@ -8,8 +8,8 @@ was permanently false, the midpoint was nothing, and a call that waits for a
 quote to arrive waited out its whole deadline.
 """
 
-from ibx._state import LiveState
-from ibx.ibx import TickTypeEnum as T
+from ibkr_dx._state import LiveState
+from ibkr_dx.ibkr_dx import TickTypeEnum as T
 
 
 def test_a_delayed_quote_fills_the_same_fields_as_a_live_one():

@@ -1,7 +1,7 @@
 """Tests for ibapi-compatible class construction, fields, and subclassing."""
 
 import pytest
-from ibx import (
+from ibkr_dx import (
     Contract, Order, BarData, ContractDetails, TagValue, OrderState,
     EWrapper, EClient,
     TickAttrib, TickAttribLast, TickAttribBidAsk, TickTypeEnum,
@@ -408,7 +408,7 @@ def test_auto_binding_is_refused_only_for_a_client_that_is_not_zero():
     every order on the account either way, so the refusal is the observable
     part.
     """
-    from ibx import EClient, EWrapper
+    from ibkr_dx import EClient, EWrapper
 
     class W(EWrapper):
         def __init__(self):
@@ -442,7 +442,7 @@ def test_solving_an_option_answers_rather_than_refusing():
     against the same session gave a number in one language and an error in
     the other.
     """
-    from ibx import EClient, EWrapper, Contract
+    from ibkr_dx import EClient, EWrapper, Contract
 
     class W(EWrapper):
         def __init__(self):
@@ -491,7 +491,7 @@ def test_a_question_kept_for_a_model_does_not_outlive_its_session():
     Left behind, the next session answers it under a request id nobody there
     ever used, or waits on a model for a contract it is not watching.
     """
-    from ibx import EClient, EWrapper, Contract
+    from ibkr_dx import EClient, EWrapper, Contract
 
     class W(EWrapper):
         def __init__(self):
@@ -542,7 +542,7 @@ def test_a_calculation_asked_before_the_model_waits_for_it():
     and this one refused it, which is the same divergence as above one step
     earlier.
     """
-    from ibx import EClient, EWrapper, Contract
+    from ibkr_dx import EClient, EWrapper, Contract
 
     class W(EWrapper):
         def __init__(self):
@@ -599,7 +599,7 @@ def test_an_order_the_transport_refused_is_not_left_working():
     refuses. The record was written before the call and never taken back, so
     an order the venue never received read as one working at it.
     """
-    import ibx
+    import ibkr_dx
 
     class Refusing:
         """Answers a place the way a transport that cannot send does."""
@@ -613,11 +613,11 @@ def test_an_order_the_transport_refused_is_not_left_working():
         def place_order(self, order_id, contract, order):
             self.wrapper.error(order_id, 504, "not connected", "")
 
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.client = Refusing(ib.wrapper)
 
-    contract = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
-    order = ibx.Order(action="BUY", totalQuantity=1, orderType="MKT")
+    contract = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+    order = ibkr_dx.Order(action="BUY", totalQuantity=1, orderType="MKT")
     trade = ib.placeOrder(contract, order)
 
     assert trade is not None, "the caller still gets the object to read"
@@ -636,7 +636,7 @@ def test_a_model_the_venue_left_blank_reaches_a_wrapper_that_did_not_write_the_m
     session, on every caller that had not written the method itself. Every test
     here had written one, so nothing saw it.
     """
-    from ibx import EWrapper
+    from ibkr_dx import EWrapper
 
     EWrapper().tick_option_computation(
         1, 13, 0, None, None, None, None, None, None, None, None,

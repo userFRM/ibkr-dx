@@ -11,11 +11,11 @@ and 89 answer beside it — a contract can be freely borrowable and still
 restricted.
 """
 
-import ibx
+import ibkr_dx
 
 
 def test_a_contract_nobody_has_restricted_says_so():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     c._test_connect("T")
     c._test_map_instrument(1, 0)
     assert c.shortSaleRestricted(1) is False
@@ -23,6 +23,6 @@ def test_a_contract_nobody_has_restricted_says_so():
 
 
 def test_a_request_naming_no_subscription_is_not_a_restriction():
-    c = ibx.EClient(ibx.EWrapper())
+    c = ibkr_dx.EClient(ibkr_dx.EWrapper())
     c._test_connect("T")
     assert c.shortSaleRestricted(999) is False

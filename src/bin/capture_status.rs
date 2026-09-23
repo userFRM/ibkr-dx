@@ -10,8 +10,8 @@
 
 use std::time::{Duration, Instant};
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::types::Contract;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::Contract;
 
 /// Contracts whose venue states a status. A halt is a US-equity notion above
 /// all, so these are American listings; a status arrives whether or not one is
@@ -60,11 +60,11 @@ fn subjects() -> Vec<(&'static str, Contract)> {
 
 /// What every reader divides a quantity by.
 fn qty_scale() -> f64 {
-    ibx::types::QTY_SCALE as f64
+    ibkr_dx::types::QTY_SCALE as f64
 }
 
 fn main() {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
 
     // Paper credentials, which nothing else is using, so this runs at any hour.
     // Market data is the same feed on both accounts.
@@ -76,7 +76,7 @@ fn main() {
     }
     // Safety: set before anything reads it, and this binary is single-threaded
     // until the engine starts.
-    unsafe { std::env::set_var("IBX_CAPTURE_WIRE", "1") };
+    unsafe { std::env::set_var("IBKR_DX_CAPTURE_WIRE", "1") };
 
     let config = EClientConfig {
         username,
@@ -120,7 +120,7 @@ fn main() {
     // Long enough to span whatever is being watched for. A status changes
     // when the venue's day does, so a run that wants to see one change has to
     // still be listening when it does.
-    let seconds: u64 = std::env::var("IBX_CAPTURE_SECONDS")
+    let seconds: u64 = std::env::var("IBKR_DX_CAPTURE_SECONDS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);

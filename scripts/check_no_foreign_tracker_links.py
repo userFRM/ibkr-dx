@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-OURS = "userFRM/ibx"
+OURS = "userFRM/ibkr-dx"
 LINK = re.compile(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(?:issues|pull)/\d+")
 # The numbering a foreign tracker leaves behind once its URL is gone.
 NUMBERED = re.compile(r"^\s*(?:\"\"\"|#|//|/\*)?\s*Example #\d+\b")

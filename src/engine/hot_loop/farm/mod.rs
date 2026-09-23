@@ -2216,7 +2216,7 @@ impl FarmState {
         match msg_type {
             b"P" => self.handle_tick_data(msg, context, shared, event_tx),
             b"Q" => {
-                if std::env::var("IBX_TRACE_Q").is_ok() {
+                if std::env::var("IBKR_DX_TRACE_Q").is_ok() {
                     log::info!("35=Q body: {}", String::from_utf8_lossy(msg).replace('\x01', "|"));
                 }
                 log::info!("Farm 35=Q subscription ack received");

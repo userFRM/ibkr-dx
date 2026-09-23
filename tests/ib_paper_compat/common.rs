@@ -25,15 +25,15 @@ pub(super) fn redacted(account: &str) -> String {
 pub(super) use std::sync::Arc;
 pub(super) use std::time::{Duration, Instant};
 
-pub(super) use ibx::api::client::EClient;
-pub(super) use ibx::api::types::{Contract as ApiContract, Order as ApiOrder};
-pub(super) use ibx::api::wrapper::tests::RecordingWrapper;
-pub(super) use ibx::bridge::{Event, RichOrderInfo, SharedState};
-pub(super) use ibx::engine::hot_loop::HotLoop;
-pub(super) use ibx::gateway::{self, GatewayConfig};
-pub(super) use ibx::protocol::connection::{Connection, Frame};
-pub(super) use ibx::protocol::{fix, fixcomp};
-pub(super) use ibx::types::*;
+pub(super) use ibkr_dx::api::client::EClient;
+pub(super) use ibkr_dx::api::types::{Contract as ApiContract, Order as ApiOrder};
+pub(super) use ibkr_dx::api::wrapper::tests::RecordingWrapper;
+pub(super) use ibkr_dx::bridge::{Event, RichOrderInfo, SharedState};
+pub(super) use ibkr_dx::engine::hot_loop::HotLoop;
+pub(super) use ibkr_dx::gateway::{self, GatewayConfig};
+pub(super) use ibkr_dx::protocol::connection::{Connection, Frame};
+pub(super) use ibkr_dx::protocol::{fix, fixcomp};
+pub(super) use ibkr_dx::types::*;
 
 /// Resolve paper-account credentials from the process environment.
 ///
@@ -46,18 +46,18 @@ pub(super) use ibx::types::*;
 ///
 /// The env is not loaded from `.env` here (no loader dependency); export it
 /// first, e.g. `set -a; . ./.env; set +a`. To skip on purpose (a checkout with
-/// no credentials), set `IBX_ALLOW_SKIP_NO_CREDS=1` and the suite returns `None`
+/// no credentials), set `IBKR_DX_ALLOW_SKIP_NO_CREDS=1` and the suite returns `None`
 /// as before.
 pub(super) fn get_config() -> Option<GatewayConfig> {
     let var = |k: &str| env::var(k).ok().filter(|v| !v.trim().is_empty());
     let (username, password) = match (var("IB_USERNAME"), var("IB_PASSWORD")) {
         (Some(u), Some(p)) => (u, p),
-        _ if var("IBX_ALLOW_SKIP_NO_CREDS").as_deref() == Some("1") => return None,
+        _ if var("IBKR_DX_ALLOW_SKIP_NO_CREDS").as_deref() == Some("1") => return None,
         _ => panic!(
             "IB_USERNAME/IB_PASSWORD unset or empty — the compat suite tests \
              nothing without real-server credentials, so it fails rather than \
              passing silently. Export them first (`set -a; . ./.env; set +a`), \
-             or set IBX_ALLOW_SKIP_NO_CREDS=1 to skip deliberately."
+             or set IBKR_DX_ALLOW_SKIP_NO_CREDS=1 to skip deliberately."
         ),
     };
     let host = env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());
@@ -68,8 +68,8 @@ pub(super) fn get_config() -> Option<GatewayConfig> {
         host,
         paper: true,
         accept_invalid_certs: false,
-        ib_key_timeout_secs: ibx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
-        ib_key_token_sub_type: ibx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
+        ib_key_timeout_secs: ibkr_dx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
+        ib_key_token_sub_type: ibkr_dx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
         resume: None,
     })
@@ -191,7 +191,7 @@ pub(super) fn ccp_keepalive(ccp: &mut Connection) {
             if parsed.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some(fix::MSG_TEST_REQUEST) {
                 // Respond to TestRequest with Heartbeat containing the test ID
                 let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
-                let ts = ibx::protocol::datetime::chrono_free_timestamp();
+                let ts = ibkr_dx::protocol::datetime::chrono_free_timestamp();
                 let _ = ccp.send_fix(&[
                     (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
                     (fix::TAG_SENDING_TIME, &ts),
@@ -202,7 +202,7 @@ pub(super) fn ccp_keepalive(ccp: &mut Connection) {
     }
 
     // Send a heartbeat
-    let ts = ibx::protocol::datetime::chrono_free_timestamp();
+    let ts = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     let _ = ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
         (fix::TAG_SENDING_TIME, &ts),
@@ -219,7 +219,7 @@ pub(super) fn ccp_keepalive(ccp: &mut Connection) {
 /// holds the connection. Other messages read on the way are consumed.
 fn ccp_answers(ccp: &mut Connection) -> bool {
     let test_id = format!("reclaim-{}", next_order_id());
-    let ts = ibx::protocol::datetime::chrono_free_timestamp();
+    let ts = ibkr_dx::protocol::datetime::chrono_free_timestamp();
     if ccp
         .send_fix(&[
             (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
@@ -435,7 +435,7 @@ pub(super) fn sweep_working_orders(conns: Conns) -> Conns {
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
-        Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
+        Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())),
         account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let join = run_hot_loop(hot_loop);
@@ -1183,7 +1183,7 @@ pub(super) fn run_submit_cancel_phase(
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4096);
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared.clone(), Some(ibx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -1208,7 +1208,7 @@ pub(super) fn run_submit_cancel_phase(
     };
 
     control_tx.send(ControlCommand::Order(order_req)).unwrap();
-    control_tx.send(ControlCommand::Subscribe { contract: ibx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
+    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
         generic_ticks: Vec::new(), issued: 0,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1601,7 +1601,7 @@ mod tests {
                 super::RichOrderInfo {
                     contract: Default::default(),
                     order: Default::default(),
-                    order_state: ibx::types::model::OrderState {
+                    order_state: ibkr_dx::types::model::OrderState {
                         status: status.to_string(),
                         ..Default::default()
                     },

@@ -1,4 +1,4 @@
-//! Error path, edge case, and concurrency tests for ibx.
+//! Error path, edge case, and concurrency tests for ibkr_dx.
 //!
 //! Validates that the library handles bad inputs, boundary conditions,
 //! And concurrent access without panics or data races.
@@ -6,13 +6,13 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use ibx::api::client::{EClient, Contract, Order};
-use ibx::api::wrapper::tests::RecordingWrapper;
-use ibx::bridge::SharedState;
-use ibx::control::historical::HistoricalResponse;
-use ibx::engine::hot_loop::HotLoop;
-use ibx::protocol::fix;
-use ibx::types::*;
+use ibkr_dx::api::client::{EClient, Contract, Order};
+use ibkr_dx::api::wrapper::tests::RecordingWrapper;
+use ibkr_dx::bridge::SharedState;
+use ibkr_dx::control::historical::HistoricalResponse;
+use ibkr_dx::engine::hot_loop::HotLoop;
+use ibkr_dx::protocol::fix;
+use ibkr_dx::types::*;
 
 fn test_client() -> (EClient, std::sync::mpsc::Receiver<ControlCommand>, Arc<SharedState>) {
     let shared = Arc::new(SharedState::new());
@@ -100,7 +100,7 @@ fn place_order_with_an_unmodelled_algo_is_sent() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0,
         algo_strategy: "vwap".into(),
-        algo_params: vec![ibx::api::types::TagValue {
+        algo_params: vec![ibkr_dx::api::types::TagValue {
             tag: "maxPctVol".into(), value: "not a number".into(),
         }],
         ..Default::default()
@@ -128,9 +128,9 @@ fn place_order_zero_con_id_asks_the_venue_to_name_it() {
     // Nothing answered, which is not the same as the venue answering that it
     // has no definition. The refusal says so under its own number rather than
     // borrowing one the venue never sent.
-    assert_eq!(refused.code, ibx::api::error_codes::Refusal::NO_ANSWER);
+    assert_eq!(refused.code, ibkr_dx::api::error_codes::Refusal::NO_ANSWER);
     let asked = rx.try_iter().any(|cmd| matches!(
-        cmd, ControlCommand::FetchContractDetails { contract: ibx::types::ContractRef { ref symbol, .. }, .. } if symbol == "TEST"
+        cmd, ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { ref symbol, .. }, .. } if symbol == "TEST"
     ));
     assert!(asked, "the venue was asked to name the contract");
 }
@@ -245,7 +245,7 @@ fn fill_dedup_duplicate_exec_id_no_double_position() {
     let mut engine = HotLoop::new(shared.clone(), None, None);
     engine.context_mut().register_instrument(265598);
 
-    engine.context_mut().insert_order(ibx::types::Order {
+    engine.context_mut().insert_order(ibkr_dx::types::Order {
         order_id: 70, instrument: 0, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 100 * QTY_SCALE * QTY_SCALE, filled: 0,
         status: OrderStatus::Submitted,
@@ -272,7 +272,7 @@ fn fill_dedup_different_exec_ids_both_count() {
     let mut engine = HotLoop::new(shared.clone(), None, None);
     engine.context_mut().register_instrument(265598);
 
-    engine.context_mut().insert_order(ibx::types::Order {
+    engine.context_mut().insert_order(ibkr_dx::types::Order {
         order_id: 71, instrument: 0, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 200 * QTY_SCALE * QTY_SCALE, filled: 0,
         status: OrderStatus::Submitted,
@@ -304,7 +304,7 @@ fn fill_dedup_different_exec_ids_both_count() {
 fn every_slot_in_the_table_can_be_taken() {
     let shared = Arc::new(SharedState::new());
     let mut engine = HotLoop::new(shared.clone(), None, None);
-    for i in 0..ibx::types::MAX_INSTRUMENTS {
+    for i in 0..ibkr_dx::types::MAX_INSTRUMENTS {
         let id = engine.context_mut().register_instrument(i as i64 + 1000);
         assert_eq!(id, i as u32);
     }
@@ -315,7 +315,7 @@ fn every_slot_in_the_table_can_be_taken() {
 fn one_past_the_table_is_refused() {
     let shared = Arc::new(SharedState::new());
     let mut engine = HotLoop::new(shared.clone(), None, None);
-    for i in 0..ibx::types::MAX_INSTRUMENTS + 1 {
+    for i in 0..ibkr_dx::types::MAX_INSTRUMENTS + 1 {
         engine.context_mut().register_instrument(i as i64 + 1000);
     }
 }
@@ -414,7 +414,7 @@ fn empty_historical_data_response() {
 
 #[test]
 fn empty_scanner_results() {
-    use ibx::control::scanner::ScannerResult;
+    use ibkr_dx::control::scanner::ScannerResult;
     let (client, _rx, shared) = test_client();
     shared.reference.push_scanner_data(3, ScannerResult {
         con_ids: vec![],

@@ -18,7 +18,7 @@ use crate::protocol::datetime::days_to_ymd;
 pub struct LogConfig {
     /// Directory for log files. `None` = console only.
     pub log_dir: Option<PathBuf>,
-    /// Filter directive (e.g. `"info"`, `"ibx=debug,warn"`).
+    /// Filter directive (e.g. `"info"`, `"ibkr_dx=debug,warn"`).
     /// Falls back to `RUST_LOG` env var, then `"info"`.
     pub level: Option<String>,
     /// Non-blocking channel capacity (records before dropping). Default: 65536.
@@ -37,14 +37,14 @@ impl Default for LogConfig {
 
 impl LogConfig {
     /// Build from environment variables:
-    /// - `IBX_LOG_DIR`   — log file directory (omit for console-only)
-    /// - `IBX_LOG_LEVEL` — filter directive (falls back to `RUST_LOG`, then `info`)
-    /// - `IBX_LOG_QUEUE` — non-blocking buffer capacity (default: 65536)
+    /// - `IBKR_DX_LOG_DIR`   — log file directory (omit for console-only)
+    /// - `IBKR_DX_LOG_LEVEL` — filter directive (falls back to `RUST_LOG`, then `info`)
+    /// - `IBKR_DX_LOG_QUEUE` — non-blocking buffer capacity (default: 65536)
     pub fn from_env() -> Self {
         Self {
-            log_dir: std::env::var("IBX_LOG_DIR").ok().map(PathBuf::from),
-            level: std::env::var("IBX_LOG_LEVEL").ok(),
-            queue_capacity: std::env::var("IBX_LOG_QUEUE")
+            log_dir: std::env::var("IBKR_DX_LOG_DIR").ok().map(PathBuf::from),
+            level: std::env::var("IBKR_DX_LOG_LEVEL").ok(),
+            queue_capacity: std::env::var("IBKR_DX_LOG_QUEUE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(65_536),
@@ -202,7 +202,7 @@ pub fn try_init(config: &LogConfig) -> Option<LogGuard> {
     let (writer, guard) = match &config.log_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir).expect("failed to create log directory");
-            buffered.finish(tracing_appender::rolling::daily(dir, "ibx.log"))
+            buffered.finish(tracing_appender::rolling::daily(dir, "ibkr_dx.log"))
         }
         None => buffered.finish(std::io::stdout()),
     };

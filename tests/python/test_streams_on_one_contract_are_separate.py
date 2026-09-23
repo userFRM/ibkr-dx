@@ -7,11 +7,11 @@ id, so the venue withdrew a subscription the caller still wanted and kept
 sending the one they had asked to stop.
 """
 
-import ibx
+import ibkr_dx
 
 
 def _contract():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.symbol = "SPY"
     c.secType = "STK"
     c.exchange = "SMART"
@@ -54,7 +54,7 @@ class Cancels:
 
 
 def _session():
-    ib = ibx.IB()
+    ib = ibkr_dx.IB()
     ib.client = Cancels()
     return ib
 

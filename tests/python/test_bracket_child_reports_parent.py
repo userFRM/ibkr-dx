@@ -11,7 +11,7 @@ the gap was found.
 Run: pytest tests/python/test_bracket_child_reports_parent.py -v
 """
 
-from ibx import EWrapper, EClient
+from ibkr_dx import EWrapper, EClient
 
 PARENT_ID = 4242
 CHILD_ID = 9401

@@ -11,10 +11,10 @@ being reached at all. So the base answers with a function, which a bound form
 carries `__func__` for, and delivery passes the base's own answer over.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Traced(ibx.EWrapper):
+class Traced(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.ran = []
@@ -47,7 +47,7 @@ class Neither(Traced):
 
 
 def _delivered_to(wrapper):
-    client = ibx.EClient(wrapper)
+    client = ibkr_dx.EClient(wrapper)
     client._test_connect("T")
     client._test_map_instrument(1, 7)
     client._test_push_quote(7, bid=412.0, bid_size=100)
@@ -74,5 +74,5 @@ def test_a_subclass_that_overrode_neither_hears_nothing_and_raises_nothing():
 def test_super_reaches_the_base_from_a_reference_spelled_override():
     """And not the sibling: a version resolving on the instance would recurse."""
     wrapper = CamelOnly()
-    wrapper.tickPrice(1, 4, 100.0, ibx.TickAttrib())
+    wrapper.tickPrice(1, 4, 100.0, ibkr_dx.TickAttrib())
     assert wrapper.ran == ["tickPrice"]

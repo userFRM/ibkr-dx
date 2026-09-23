@@ -9,7 +9,7 @@ Run: pytest tests/python/test_futures_contract.py -v -s
 import datetime
 import os, threading, time
 import pytest
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),

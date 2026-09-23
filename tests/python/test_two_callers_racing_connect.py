@@ -12,7 +12,7 @@ The wheel is built free-threaded, so this is not a theoretical interleaving.
 import threading
 
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 @pytest.mark.parametrize("attempt", range(20))

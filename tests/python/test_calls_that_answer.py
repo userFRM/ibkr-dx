@@ -6,21 +6,21 @@ asking one question. These check the shape that answers directly.
 
 import pytest
 
-import ibx
+import ibkr_dx
 
 
-class Wrapper(ibx.EWrapper):
+class Wrapper(ibkr_dx.EWrapper):
     pass
 
 
 def connected():
-    c = ibx.EClient(Wrapper())
+    c = ibkr_dx.EClient(Wrapper())
     c._test_connect("DU0000000")
     return c
 
 
 def spy():
-    con = ibx.Contract()
+    con = ibkr_dx.Contract()
     con.symbol = "SPY"
     con.secType = "STK"
     con.exchange = "SMART"
@@ -90,7 +90,7 @@ def test_one_question_does_not_take_another_questions_answer():
 
 
 def test_a_question_asked_of_a_client_that_is_not_connected_says_so():
-    c = ibx.EClient(Wrapper())
+    c = ibkr_dx.EClient(Wrapper())
     with pytest.raises(RuntimeError):
         c.contract_details(spy())
 
@@ -157,11 +157,11 @@ def test_a_dispatch_loop_running_beside_an_ask_does_not_eat_its_answer():
 def test_a_dispatch_loop_still_delivers_a_callers_own_request():
     seen = []
 
-    class W(ibx.EWrapper):
+    class W(ibkr_dx.EWrapper):
         def contractDetails(self, reqId, details):
             seen.append((reqId, details.contract.conId))
 
-    c = ibx.EClient(W())
+    c = ibkr_dx.EClient(W())
     c._test_connect("DU0000000")
     c._test_push_contract_details(42, 111111, "AAPL")
     c._test_dispatch_once()

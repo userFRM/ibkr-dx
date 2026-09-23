@@ -18,8 +18,8 @@ Settings are read when a session opens, so set them before ``connect()``.
 Setting one afterwards affects the next session, not the running one.
 
 The three logging settings are read earlier still. A process has one logger and
-importing ``ibx`` installs it, so ``IBX_LOG_LEVEL``, ``IBX_LOG_DIR`` and
-``IBX_LOG_QUEUE`` are read at that moment and belong in the environment before
+importing ``ibkr_dx`` installs it, so ``IBKR_DX_LOG_LEVEL``, ``IBKR_DX_LOG_DIR`` and
+``IBKR_DX_LOG_QUEUE`` are read at that moment and belong in the environment before
 it. :func:`configure` refuses them rather than storing a value nothing will
 read.
 """
@@ -36,33 +36,33 @@ import os
 # lazily. If settings ever need to differ between two sessions in one process,
 # this becomes a per-session struct passed through connect().
 _SETTINGS: dict[str, tuple[str, str]] = {
-    "timezone": ("IBX_TZ", "the time zone announced at logon"),
-    "log_level": ("IBX_LOG_LEVEL", "verbose logging"),
-    "log_dir": ("IBX_LOG_DIR", "log directory"),
-    "log_queue": ("IBX_LOG_QUEUE", "how many records logging buffers before dropping them"),
-    "market_data_host": ("IBX_FARM_HOST", "the host every farm connection is opened on"),
-    "port": ("IBX_MISC_PORT", "the port a farm connection opens on, where the routing names none"),
+    "timezone": ("IBKR_DX_TZ", "the time zone announced at logon"),
+    "log_level": ("IBKR_DX_LOG_LEVEL", "verbose logging"),
+    "log_dir": ("IBKR_DX_LOG_DIR", "log directory"),
+    "log_queue": ("IBKR_DX_LOG_QUEUE", "how many records logging buffers before dropping them"),
+    "market_data_host": ("IBKR_DX_FARM_HOST", "the host every farm connection is opened on"),
+    "port": ("IBKR_DX_MISC_PORT", "the port a farm connection opens on, where the routing names none"),
     "registration_timeout_ms": (
-        "IBX_REGISTRATION_TIMEOUT_MS",
+        "IBKR_DX_REGISTRATION_TIMEOUT_MS",
         "how long to wait to be admitted",
     ),
-    "locale": ("IBX_LOCALE", "session locale"),
-    "build": ("IBX_BUILD", "the build announced at logon"),
-    "version": ("IBX_VERSION", "the version announced at logon"),
-    "encoded": ("IBX_ENCODED", "the longer string announced with them"),
-    "hardware_id": ("IBX_HWID", "the machine identity presented at logon"),
-    "mac_address": ("IBX_MAC", "the network card named as this machine's, where the machine's own is not the one to name"),
-    "lan_ip": ("IBX_IP", "the address on the local network named as this machine's, for the same reason"),
+    "locale": ("IBKR_DX_LOCALE", "session locale"),
+    "build": ("IBKR_DX_BUILD", "the build announced at logon"),
+    "version": ("IBKR_DX_VERSION", "the version announced at logon"),
+    "encoded": ("IBKR_DX_ENCODED", "the longer string announced with them"),
+    "hardware_id": ("IBKR_DX_HWID", "the machine identity presented at logon"),
+    "mac_address": ("IBKR_DX_MAC", "the network card named as this machine's, where the machine's own is not the one to name"),
+    "lan_ip": ("IBKR_DX_IP", "the address on the local network named as this machine's, for the same reason"),
     "execution_reports": (
-        "IBX_EXECUTION_REPORTS",
+        "IBKR_DX_EXECUTION_REPORTS",
         "which executions arrive when a session opens: 'today' or 'all'",
     ),
     "island_for_nasdaq": (
-        "IBX_ISLAND_FOR_NASDAQ",
+        "IBKR_DX_ISLAND_FOR_NASDAQ",
         "whether a US stock on Nasdaq is handed back under the older spelling",
     ),
     "reconnect_on_socket_err": (
-        "IBX_RECONNECT_ON_SOCKET_ERR",
+        "IBKR_DX_RECONNECT_ON_SOCKET_ERR",
         "whether a session recovers on its own when a connection goes away",
     ),
 }
@@ -93,7 +93,7 @@ UNAVAILABLE: dict[str, str] = {
 
 
 #: The three that belong to the process rather than to a session. A process has
-#: one logger, and importing ``ibx`` installs it, so a value set from here
+#: one logger, and importing ``ibkr_dx`` installs it, so a value set from here
 #: arrives after the only moment it could have been read. Refused rather than
 #: stored: stored, it reads back as a log level that was set and did nothing.
 _INSTALLED_AT_IMPORT = ("log_level", "log_dir", "log_queue")
@@ -105,10 +105,10 @@ def configure(**settings) -> None:
     Raising rather than ignoring: a misspelled setting that is silently dropped
     leaves a caller believing a session is configured a way it is not.
 
-        ibx.configure(timezone="America/New_York", execution_reports="today")
+        ibkr_dx.configure(timezone="America/New_York", execution_reports="today")
 
     The three logging settings are the exception, and are refused here: set
-    them in the environment before ``import ibx``, which is when the logger is
+    them in the environment before ``import ibkr_dx``, which is when the logger is
     installed.
     """
     unknown = set(settings) - set(_SETTINGS)
@@ -121,7 +121,7 @@ def configure(**settings) -> None:
     if too_late:
         raise ValueError(
             f"{', '.join(too_late)} belongs to the process, not one session: "
-            "importing ibx installs the logger, so set "
+            "importing ibkr_dx installs the logger, so set "
             f"{', '.join(_SETTINGS[name][0] for name in too_late)} in the "
             "environment before that"
         )

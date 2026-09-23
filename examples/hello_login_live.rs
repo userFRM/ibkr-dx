@@ -8,8 +8,8 @@
 
 use std::env;
 
-use ibx::api::client::{EClient, EClientConfig};
-use ibx::api::wrapper::Wrapper;
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::wrapper::Wrapper;
 
 #[derive(Default)]
 struct LoginWrapper {

@@ -10,11 +10,11 @@ raised before it read.
 Run: pytest tests/python/test_a_definition_carries_the_reference_fields.py -v
 """
 
-import ibx
-from ibx import UNSET_DOUBLE, ContractDetails, IneligibilityReason, TagValue
+import ibkr_dx
+from ibkr_dx import UNSET_DOUBLE, ContractDetails, IneligibilityReason, TagValue
 
 
-class Details(ibx.EWrapper):
+class Details(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.details = []
@@ -34,7 +34,7 @@ class Details(ibx.EWrapper):
 
 def _heard(sec_type, last_trade_date):
     w = Details()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_push_contract_details(1, 4, "T", "", sec_type, last_trade_date)
     c._test_dispatch_once()
@@ -91,7 +91,7 @@ def test_the_security_id_list_shares_so_an_append_reaches_the_field():
 
 
 def test_the_derivative_sec_types_share_so_an_append_reaches_the_field():
-    from ibx import ContractDescription
+    from ibkr_dx import ContractDescription
     cd = ContractDescription(265598, "SPY", "STK", "USD", "SMART", [])
     cd.derivativeSecTypes.append("OPT")
     cd.derivativeSecTypes.append("WAR")
@@ -115,7 +115,7 @@ def test_a_reason_reads_under_the_reference_names():
 def test_a_reason_is_importable_where_the_reference_client_keeps_it():
     """That client keeps it in a module of its own, and a program written
     against it imports the module rather than the flat name."""
-    from ibx.ineligibility_reason import IneligibilityReason as Reference
+    from ibkr_dx.ineligibility_reason import IneligibilityReason as Reference
 
     assert Reference is IneligibilityReason
 

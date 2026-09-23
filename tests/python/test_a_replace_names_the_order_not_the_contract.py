@@ -4,10 +4,10 @@ A placement under a working order's number that names another contract is
 refused under the number the venue gives that mismatch, so a caller branching
 on it withdraws and places anew rather than re-sending.
 """
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -20,7 +20,7 @@ class Errors(ibx.EWrapper):
 
 
 def stock(con_id, symbol):
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = con_id
     c.symbol = symbol
     c.secType = "STK"
@@ -30,7 +30,7 @@ def stock(con_id, symbol):
 
 
 def limit_order():
-    o = ibx.Order()
+    o = ibkr_dx.Order()
     o.action = "BUY"
     o.totalQuantity = 1
     o.orderType = "LMT"
@@ -41,7 +41,7 @@ def limit_order():
 
 def test_a_replace_naming_another_contract_is_refused_as_a_mismatch():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_con_id(756733, 0)
     c._test_map_con_id(265598, 1)

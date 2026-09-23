@@ -7,10 +7,10 @@ after a fill it takes the placement as a new order -- and a caller retrying
 what it believed had failed was given a second live order.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Errors(ibx.EWrapper):
+class Errors(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.seen = []
@@ -23,7 +23,7 @@ class Errors(ibx.EWrapper):
 
 
 def spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.conId = 756733
     c.symbol = "SPY"
     c.secType = "STK"
@@ -33,7 +33,7 @@ def spy():
 
 
 def limit_order():
-    o = ibx.Order()
+    o = ibkr_dx.Order()
     o.action = "BUY"
     o.totalQuantity = 1
     o.orderType = "LMT"
@@ -44,7 +44,7 @@ def limit_order():
 
 def test_placing_again_under_a_finished_number_is_refused():
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_con_id(756733, 0)
 
@@ -64,7 +64,7 @@ def test_a_withdrawal_of_a_finished_number_is_not_cancellable():
     """This client saw the order finish, so a withdrawal of it is refused as not
     cancellable rather than as a number nobody has heard of."""
     w = Errors()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_con_id(756733, 0)
     c.placeOrder(84, spy(), limit_order())

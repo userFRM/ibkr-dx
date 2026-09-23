@@ -14,18 +14,18 @@ import pytest
 
 ib_async = pytest.importorskip("ib_async")
 
-import ibx.ib_async  # noqa: E402
+import ibkr_dx.ib_async  # noqa: E402
 
 LIVE = bool(os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD"))
 needs_venue = pytest.mark.skipif(not LIVE, reason="IB_USERNAME/IB_PASSWORD not set")
 
 
 def test_attach_replaces_only_the_transport():
-    ib = ibx.ib_async.attach(ib_async.IB())
+    ib = ibkr_dx.ib_async.attach(ib_async.IB())
     # Their object, their wrapper, their events — this client underneath.
     assert isinstance(ib, ib_async.IB)
     assert isinstance(ib.wrapper, ib_async.wrapper.Wrapper)
-    assert ib.client.__class__ is ibx.ib_async.IbxClient
+    assert ib.client.__class__ is ibkr_dx.ib_async.IbkrDxClient
     assert not ib.isConnected()
 
 
@@ -37,7 +37,7 @@ def test_a_session_the_engine_lost_is_not_reported_as_connected():
     connected. A watchdog written the ordinary way never fired, and every
     request made afterwards waited on an answer that was not coming.
     """
-    ib = ibx.ib_async.attach(ib_async.IB())
+    ib = ibkr_dx.ib_async.attach(ib_async.IB())
     client = ib.client
     client.connState = client.CONNECTED
     assert not client.isConnected(), (
@@ -46,14 +46,14 @@ def test_a_session_the_engine_lost_is_not_reported_as_connected():
 
 
 def test_a_request_their_client_carries_and_this_one_does_not_says_so():
-    ib = ibx.ib_async.attach(ib_async.IB())
+    ib = ibkr_dx.ib_async.attach(ib_async.IB())
     with pytest.raises(NotImplementedError, match="not carried"):
         ib.client.reqSomethingNobodyCarries(1)
 
 
 @needs_venue
 def test_an_unmodified_program_runs_on_this_engine():
-    ib = ibx.ib_async.attach(ib_async.IB())
+    ib = ibkr_dx.ib_async.attach(ib_async.IB())
     ib.connect("no gateway", 0, clientId=1)
     try:
         assert ib.isConnected()
@@ -84,7 +84,7 @@ def test_an_order_lives_its_whole_life_through_their_api():
 
     A limit far under the market, so it rests and nothing trades.
     """
-    ib = ibx.ib_async.attach(ib_async.IB())
+    ib = ibkr_dx.ib_async.attach(ib_async.IB())
     ib.connect("no gateway", 0, clientId=1)
     try:
         ib.RequestTimeout = 15
@@ -133,18 +133,18 @@ def test_a_bar_is_dated_the_way_their_parser_reads_one():
     """
     from ib_async.util import parseIBDatetime
 
-    import ibx
+    import ibkr_dx
 
     seen = []
 
-    class W(ibx.EWrapper):
+    class W(ibkr_dx.EWrapper):
         def historical_data(self, req_id, bar):
             seen.append(bar.date)
 
         def error(self, *a):
             pass
 
-    c = ibx.EClient(W())
+    c = ibkr_dx.EClient(W())
     c._test_connect("T")
     c._test_push_historical_data(
         1, [("20260812-13:30:00", 1.0, 2.0, 0.5, 1.5, 100)], True, "US/Eastern"
@@ -163,9 +163,9 @@ def test_ending_a_session_is_not_a_session_that_went_away():
     caller who asked to stop, and their own client does not call it here."""
     import inspect
 
-    from ibx.ib_async import IbxClient
+    from ibkr_dx.ib_async import IbkrDxClient
 
-    ends = inspect.getsource(IbxClient.disconnect)
+    ends = inspect.getsource(IbkrDxClient.disconnect)
     assert "connectionClosed" not in ends.split('"""')[-1]
 
 
@@ -181,17 +181,17 @@ def test_every_call_their_library_makes_is_carried():
     import inspect
     import re
 
-    import ibx
+    import ibkr_dx
 
     src = inspect.getsource(ib_async.ib)
     called = sorted(set(re.findall(r"self\.client\.(\w+)\(", src)))
     assert len(called) > 50, "their transport surface should be substantial"
 
-    spelled_out = {n for n in dir(ibx.ib_async.IbxClient) if not n.startswith("_")}
+    spelled_out = {n for n in dir(ibkr_dx.ib_async.IbkrDxClient) if not n.startswith("_")}
     unrouted = [
         name for name in called
         if name not in spelled_out
-        and not hasattr(ibx.EClient, ibx.ib_async._our_name_for(name, ibx.EClient))
+        and not hasattr(ibkr_dx.EClient, ibkr_dx.ib_async._our_name_for(name, ibkr_dx.EClient))
     ]
     assert not unrouted, f"their library calls what this engine does not carry: {unrouted}"
 
@@ -204,7 +204,7 @@ def test_a_contract_named_by_id_states_nothing_else():
     only by its id, it stated that a future was a stock as well — a description
     the venue reads alongside an id it can contradict.
     """
-    by_id = ibx.ib_async._as_ours(ib_async.Contract(conId=756733))
+    by_id = ibkr_dx.ib_async._as_ours(ib_async.Contract(conId=756733))
     assert by_id.conId == 756733
     assert (by_id.secType, by_id.exchange, by_id.currency) == ("", "", ""), (
         "an id was given, so nothing was guessed beside it"
@@ -213,11 +213,11 @@ def test_a_contract_named_by_id_states_nothing_else():
     # And a description is carried as it was written. A bare symbol used to
     # arrive as a US stock on SMART in dollars, which is three terms the caller
     # never stated and the reference client never sends.
-    described = ibx.ib_async._as_ours(ib_async.Contract(symbol="AAPL"))
+    described = ibkr_dx.ib_async._as_ours(ib_async.Contract(symbol="AAPL"))
     assert (described.secType, described.exchange, described.currency) == ("", "", "")
 
     # And what the caller did state is carried whichever way it was given.
-    stock = ibx.ib_async._as_ours(ib_async.Stock("AAPL", "SMART", "USD"))
+    stock = ibkr_dx.ib_async._as_ours(ib_async.Stock("AAPL", "SMART", "USD"))
     assert (stock.symbol, stock.secType, stock.exchange) == ("AAPL", "STK", "SMART")
 
 
@@ -233,7 +233,7 @@ def test_a_combination_keeps_its_legs_across_the_bridge():
     theirs.secIdType, theirs.secId = "ISIN", "US78462F1030"
     theirs.includeExpired = True
 
-    ours = ibx.ib_async._as_ours(theirs)
+    ours = ibkr_dx.ib_async._as_ours(theirs)
     assert len(ours.comboLegs) == 1, "a combination is its legs"
     assert (ours.secIdType, ours.secId) == ("ISIN", "US78462F1030")
     assert ours.includeExpired is True
@@ -257,7 +257,7 @@ def test_what_tunes_an_algo_reaches_the_order():
     their.smartComboRoutingParams = [ib_async.TagValue("NonGuaranteed", "1")]
     their.softDollarTier = ib_async.SoftDollarTier("T", "v", "D")
 
-    ours = ibx.ib_async._as_ours(their)
+    ours = ibkr_dx.ib_async._as_ours(their)
     assert [(p.tag, p.value) for p in ours.algoParams] == [("adaptivePriority", "Normal")]
     assert [(p.tag, p.value) for p in ours.smartComboRoutingParams] == [("NonGuaranteed", "1")]
     tier = ours.softDollarTier
@@ -269,7 +269,7 @@ def test_a_field_that_cannot_be_carried_is_refused():
     their = ib_async.Order(orderId=1, action="BUY", totalQuantity=1)
     their.orderType = object()  # not a string, so nothing can carry it
     with pytest.raises(ValueError, match="cannot carry"):
-        ibx.ib_async._as_ours(their)
+        ibkr_dx.ib_async._as_ours(their)
 
 
 
@@ -283,13 +283,13 @@ def test_readonly_reaches_the_session_through_the_adapter():
     """
     import inspect
 
-    from ibx.ib_async import IbxClient, attach
+    from ibkr_dx.ib_async import IbkrDxClient, attach
 
-    sig = inspect.signature(IbxClient.connectAsync)
+    sig = inspect.signature(IbkrDxClient.connectAsync)
     assert "readonly" in sig.parameters, "the adapter takes it"
     assert "readonly" in inspect.signature(attach).parameters, "and so does attach"
-    assert "readonly" in inspect.signature(IbxClient.__init__).parameters
+    assert "readonly" in inspect.signature(IbkrDxClient.__init__).parameters
 
     # What attach set stands where the connect states none.
-    client = IbxClient(wrapper=None, readonly=True)
+    client = IbkrDxClient(wrapper=None, readonly=True)
     assert client._readonly is True

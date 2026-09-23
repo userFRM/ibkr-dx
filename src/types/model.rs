@@ -2293,7 +2293,7 @@ mod varying_a_ladder_tests {
 /// venue, a currency or a class is not the usual one, say so:
 ///
 /// ```
-/// # use ibx::types::model::Contract;
+/// # use ibkr_dx::types::model::Contract;
 /// let spy = Contract::stock("SPY");
 /// let toyota = Contract::stock("7203").on_exchange("TSEJ").in_currency("JPY");
 /// let call = Contract::call("AAPL", 150.0, "20261218");
@@ -2448,7 +2448,7 @@ impl Contract {
 /// value it returns.
 ///
 /// ```
-/// # use ibx::types::model::Order;
+/// # use ibkr_dx::types::model::Order;
 /// let buy = Order::market("BUY", 100.0);
 /// let bid = Order::limit("BUY", 100.0, 42.50);
 /// let out = Order::stop("SELL", 100.0, 41.00);

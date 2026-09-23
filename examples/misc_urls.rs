@@ -5,10 +5,10 @@
 
 use std::env;
 
-use ibx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::client::{EClient, EClientConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = ibx::logging::try_init_from_env("error");
+    let _ = ibkr_dx::logging::try_init_from_env("error");
 
     let username = env::var("IB_USERNAME")?;
     let password = env::var("IB_PASSWORD")?;

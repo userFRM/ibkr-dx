@@ -6,10 +6,10 @@ cannot parse became zero, so a caller charting the series saw a print half a
 century before the market they asked about, mixed in with the real ones.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Ticks(ibx.EWrapper):
+class Ticks(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.ticks = []
@@ -24,7 +24,7 @@ class Ticks(ibx.EWrapper):
 
 def _ticks_for(times):
     w = Ticks()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_push_historical_ticks(1, times)
     c._test_dispatch_once()

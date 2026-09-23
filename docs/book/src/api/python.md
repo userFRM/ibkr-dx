@@ -4,20 +4,20 @@ Three ways in, one session underneath.
 
 | Import | What it is |
 | --- | --- |
-| `ibx.IB` | Shaped like the widely used asynchronous wrapper: a method sends the question and hands back the answer. Also exported as `ibx.Client` — the same class either way |
-| `ibx.EClient` / `ibx.EWrapper` | The TWS API shape. A request under an id, an answer later on a callback |
-| `ibx.ib_async.attach` | Points an unmodified [ib_async](https://github.com/ib-api-reloaded/ib_async) program at this engine. Their `IB`, their events, their types |
+| `ibkr_dx.IB` | Shaped like the widely used asynchronous wrapper: a method sends the question and hands back the answer. Also exported as `ibkr_dx.Client` — the same class either way |
+| `ibkr_dx.EClient` / `ibkr_dx.EWrapper` | The TWS API shape. A request under an id, an answer later on a callback |
+| `ibkr_dx.ib_async.attach` | Points an unmodified [ib_async](https://github.com/ib-api-reloaded/ib_async) program at this engine. Their `IB`, their events, their types |
 
-`ibx.IB` is a facade over `EClient`, not a second client, so the two see the
+`ibkr_dx.IB` is a facade over `EClient`, not a second client, so the two see the
 same session and either may be used.
 
 Both naming conventions resolve on every type and method: `reqMktData` and
 `req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`.
 
-`ibx.configure()` carries what a gateway would hold in a configuration file:
+`ibkr_dx.configure()` carries what a gateway would hold in a configuration file:
 the session time zone, the build announced at logon, which executions arrive
-when a session opens, and the rest. `ibx.describe()` lists them, and
-`ibx.UNAVAILABLE` names the gateway settings that mean nothing without a local
+when a session opens, and the rest. `ibkr_dx.describe()` lists them, and
+`ibkr_dx.UNAVAILABLE` names the gateway settings that mean nothing without a local
 process — a port to listen on, the addresses allowed to reach it, how much heap
 the runtime may take — so a program being migrated finds an answer rather than
 silence.
@@ -28,7 +28,7 @@ falls back to. They are read when a session opens, so set them before
 `connect()`.
 
 Logging is the one settled earlier: a process has one logger and importing
-`ibx` installs it, so `IBX_LOG_LEVEL`, `IBX_LOG_DIR` and `IBX_LOG_QUEUE` belong
+`ibkr_dx` installs it, so `IBKR_DX_LOG_LEVEL`, `IBKR_DX_LOG_DIR` and `IBKR_DX_LOG_QUEUE` belong
 in the environment before that import. Both `configure()` and
 `connect(settings=...)` refuse them rather than storing a value nothing will
 read.

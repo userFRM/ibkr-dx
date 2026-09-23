@@ -7,10 +7,10 @@ nothing, in no currency, naming no execution -- the exact statement the
 unstated storage exists to avoid.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Costs(ibx.EWrapper):
+class Costs(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.fills = []
@@ -34,7 +34,7 @@ class Filter:
 
 def test_only_a_priced_fill_says_what_it_cost():
     w = Costs()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     c._test_map_instrument(90, 0)
     # One fill the venue priced, one it has not.

@@ -12,10 +12,10 @@ cannot drift back one method at a time.
 
 import pytest
 
-import ibx
+import ibkr_dx
 from conftest import NotConnectedProbe
 
-CT = ibx.Contract()
+CT = ibkr_dx.Contract()
 
 REQUESTS = {
     "reqMktData": (1, CT, "", False, False, []),
@@ -36,7 +36,7 @@ REQUESTS = {
     "reqHistoricalTicks": (1, CT, "", "", 10, "TRADES", 1, False, []),
     "reqHistogramData": (1, CT, False, "3 days"),
     "cancelHistogramData": (1,),
-    "placeOrder": (1, CT, ibx.Order()),
+    "placeOrder": (1, CT, ibkr_dx.Order()),
     "cancelOrder": (1, ""),
     "reqOpenOrders": (),
     "reqAllOpenOrders": (),
@@ -63,7 +63,7 @@ REQUESTS = {
     "reqMatchingSymbols": (1, "IB"),
     "reqMarketRule": (26,),
     "reqScannerParameters": (),
-    "reqScannerSubscription": (1, ibx.ScannerSubscription(), [], []),
+    "reqScannerSubscription": (1, ibkr_dx.ScannerSubscription(), [], []),
     "cancelScannerSubscription": (1,),
     "reqNewsProviders": (),
     "reqNewsArticle": (1, "BRFG", "id", []),
@@ -101,7 +101,7 @@ REQUESTS = {
 @pytest.mark.parametrize("name,args", sorted(REQUESTS.items()))
 def test_a_request_before_a_connection_is_answered_under_504(name, args):
     probe = NotConnectedProbe()
-    client = ibx.EClient(probe)
+    client = ibkr_dx.EClient(probe)
     getattr(client, name)(*args)
     assert probe.not_connected, f"{name} reported {probe.errors}"
 
@@ -109,5 +109,5 @@ def test_a_request_before_a_connection_is_answered_under_504(name, args):
 def test_the_unsubscribe_form_is_answered_too():
     # The guard sat inside `if subscribe`, so only half the call was answered.
     probe = NotConnectedProbe()
-    ibx.EClient(probe).reqAccountUpdates(False, "")
+    ibkr_dx.EClient(probe).reqAccountUpdates(False, "")
     assert probe.not_connected, probe.errors

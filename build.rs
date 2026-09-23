@@ -5,7 +5,7 @@ fn main() {
     // `extension-module` — which tells PyO3 not to link it — is only enabled
     // for the wheel. Linking is not enough on its own: the loader has to find
     // the library at run time too, and without this every such binary dies with
-    // "libpython…: cannot open shared object file" (ibx#381).
+    // "libpython…: cannot open shared object file" (ibkr_dx#381).
     #[cfg(all(feature = "python", not(feature = "extension-module")))]
     if let Some(dir) = python_lib_dir() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");

@@ -12,7 +12,7 @@ slots on a contract the call then refused, and the table does not grow.
 Run: pytest tests/python/test_a_replayed_order_is_replaced_not_placed_again.py -v
 """
 
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 REPLAYED = 4242
 SPY_CON_ID = 756733

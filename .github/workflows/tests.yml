@@ -71,7 +71,7 @@ jobs:
       # full registration timeout, which is eight minutes across this suite.
       - name: Test the suites that need no session
         env:
-          IBX_REGISTRATION_TIMEOUT_MS: "20"
+          IBKR_DX_REGISTRATION_TIMEOUT_MS: "20"
         run: |
           set +e
           timeout -k 30 1500 cargo test --test control_plane --test depth_wire_test --test error_edge_concurrency --test hot_loop_lifecycle --test malformed_input --test protocol_vectors --test scenarios > test-suites.log 2>&1

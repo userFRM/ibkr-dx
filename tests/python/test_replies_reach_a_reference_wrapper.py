@@ -8,7 +8,7 @@ supplies and the caller's own code never ran. Nothing said so, which is the
 whole of the fault.
 """
 
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class ReferenceStyle(EWrapper):

@@ -1,6 +1,6 @@
 """Multi-client session — cross-session order visibility.
 
-Since IBX does not support clientId routing (single session per connect),
+Since IBKR-DX does not support clientId routing (single session per connect),
 this test verifies cross-session order visibility using sequential sessions
 (Session A places order, Session B sees it via req_all_open_orders).
 
@@ -9,7 +9,7 @@ Run: pytest tests/python/test_multi_client_session.py -v -s
 
 import os, threading, time
 import pytest
-from ibx import EWrapper, EClient, Contract, Order
+from ibkr_dx import EWrapper, EClient, Contract, Order
 from conftest import wait_for
 
 pytestmark = pytest.mark.skipif(

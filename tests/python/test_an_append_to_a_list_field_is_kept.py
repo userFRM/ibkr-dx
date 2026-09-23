@@ -17,7 +17,7 @@ refused by name, which it cannot be if the append was lost.
 
 import math
 
-from ibx import (
+from ibkr_dx import (
     ComboLeg, Contract, EClient, EWrapper, Order, OrderComboLeg, PriceCondition,
     TagValue,
 )

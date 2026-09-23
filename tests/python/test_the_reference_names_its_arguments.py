@@ -11,57 +11,57 @@ They differ from this client's in underscores and capitals, which is settled by
 letters alone, except for three that are different words entirely.
 """
 
-import ibx
+import ibkr_dx
 
 
 def _client():
-    return ibx.EClient(ibx.EWrapper())
+    return ibkr_dx.EClient(ibkr_dx.EWrapper())
 
 
 # (method, the reference client's keyword arguments for it). Values are only
 # well-typed enough to reach the call; nothing is connected, so each request
 # reports 504 rather than going anywhere.
 CALLS = [
-    ("reqMktData", dict(reqId=1, contract=ibx.Contract(), genericTickList="",
+    ("reqMktData", dict(reqId=1, contract=ibkr_dx.Contract(), genericTickList="",
                         snapshot=False, regulatorySnapshot=False, mktDataOptions=[])),
     ("cancelMktData", dict(reqId=1)),
-    ("reqMktDepth", dict(reqId=2, contract=ibx.Contract(), numRows=5,
+    ("reqMktDepth", dict(reqId=2, contract=ibkr_dx.Contract(), numRows=5,
                          isSmartDepth=False, mktDepthOptions=[])),
-    ("reqHistoricalData", dict(reqId=3, contract=ibx.Contract(), endDateTime="",
+    ("reqHistoricalData", dict(reqId=3, contract=ibkr_dx.Contract(), endDateTime="",
                                durationStr="1 D", barSizeSetting="1 min",
                                whatToShow="TRADES", useRTH=True, formatDate=1,
                                keepUpToDate=False, chartOptions=[])),
-    ("reqRealTimeBars", dict(reqId=4, contract=ibx.Contract(), barSize=5,
+    ("reqRealTimeBars", dict(reqId=4, contract=ibkr_dx.Contract(), barSize=5,
                              whatToShow="TRADES", useRTH=True, realTimeBarsOptions=[])),
-    ("reqContractDetails", dict(reqId=5, contract=ibx.Contract())),
+    ("reqContractDetails", dict(reqId=5, contract=ibkr_dx.Contract())),
     ("reqAccountSummary", dict(reqId=6, groupName="All", tags="NetLiquidation")),
     ("reqAccountUpdates", dict(subscribe=True, acctCode="")),
     ("reqIds", dict(numIds=-1)),
-    ("reqExecutions", dict(reqId=7, execFilter=ibx.ExecutionFilter())),
-    ("reqHeadTimeStamp", dict(reqId=8, contract=ibx.Contract(), whatToShow="TRADES",
+    ("reqExecutions", dict(reqId=7, execFilter=ibkr_dx.ExecutionFilter())),
+    ("reqHeadTimeStamp", dict(reqId=8, contract=ibkr_dx.Contract(), whatToShow="TRADES",
                               useRTH=True, formatDate=1)),
-    ("reqHistogramData", dict(tickerId=9, contract=ibx.Contract(), useRTH=True,
+    ("reqHistogramData", dict(tickerId=9, contract=ibkr_dx.Contract(), useRTH=True,
                               timePeriod="1 week")),
     ("cancelHistogramData", dict(tickerId=9)),
-    ("reqTickByTickData", dict(reqId=10, contract=ibx.Contract(), tickType="Last",
+    ("reqTickByTickData", dict(reqId=10, contract=ibkr_dx.Contract(), tickType="Last",
                                numberOfTicks=0, ignoreSize=False)),
     ("reqMarketDataType", dict(marketDataType=1)),
     ("reqPnL", dict(reqId=11, account="", modelCode="")),
     ("reqPnLSingle", dict(reqId=12, account="", modelCode="", conId=756733)),
-    ("calculateImpliedVolatility", dict(reqId=13, contract=ibx.Contract(),
+    ("calculateImpliedVolatility", dict(reqId=13, contract=ibkr_dx.Contract(),
                                         optionPrice=1.0, underPrice=100.0,
                                         implVolOptions=[])),
-    ("calculateOptionPrice", dict(reqId=14, contract=ibx.Contract(), volatility=0.2,
+    ("calculateOptionPrice", dict(reqId=14, contract=ibkr_dx.Contract(), volatility=0.2,
                                   underPrice=100.0, optPrcOptions=[])),
     ("reqSecDefOptParams", dict(reqId=15, underlyingSymbol="SPY",
                                 futFopExchange="", underlyingSecType="STK",
                                 underlyingConId=756733)),
     ("reqMatchingSymbols", dict(reqId=16, pattern="SP")),
-    ("reqFundamentalData", dict(reqId=17, contract=ibx.Contract(),
+    ("reqFundamentalData", dict(reqId=17, contract=ibkr_dx.Contract(),
                                 reportType="ReportsFinSummary", fundamentalDataOptions=[])),
     ("reqNewsArticle", dict(reqId=18, providerCode="BRFG", articleId="x",
                             newsArticleOptions=[])),
-    ("reqScannerSubscription", dict(reqId=19, subscription=ibx.ScannerSubscription(),
+    ("reqScannerSubscription", dict(reqId=19, subscription=ibkr_dx.ScannerSubscription(),
                                     scannerSubscriptionOptions=[],
                                     scannerSubscriptionFilterOptions=[])),
 ]
@@ -86,10 +86,10 @@ def test_a_capitalised_acronym_is_the_same_argument():
     # `useRTH` and `use_rth` are one parameter. A rule that puts a capital
     # after each underscore makes `useRth`, which is not what a caller writes.
     client = _client()
-    client.reqHistoricalData(1, ibx.Contract(), "", "1 D", "1 min", "TRADES",
+    client.reqHistoricalData(1, ibkr_dx.Contract(), "", "1 D", "1 min", "TRADES",
                              useRTH=True, formatDate=1, keepUpToDate=False,
                              chartOptions=[])
-    client.req_historical_data(2, ibx.Contract(), "", "1 D", "1 min", "TRADES",
+    client.req_historical_data(2, ibkr_dx.Contract(), "", "1 D", "1 min", "TRADES",
                                use_rth=True, format_date=1, keep_up_to_date=False,
                                chart_options=[])
 
@@ -98,7 +98,7 @@ def test_this_clients_own_names_still_answer():
     # The translation stands in front of nothing: a keyword this client names
     # is passed through as it was written.
     client = _client()
-    client.reqMktData(req_id=1, contract=ibx.Contract(), generic_tick_list="",
+    client.reqMktData(req_id=1, contract=ibkr_dx.Contract(), generic_tick_list="",
                       snapshot=False, regulatory_snapshot=False, mkt_data_options=[])
 
 
@@ -107,7 +107,7 @@ def test_a_keyword_that_names_no_argument_is_still_refused():
     # is refused there, as it was before.
     client = _client()
     try:
-        client.reqMktData(reqId=1, contract=ibx.Contract(), nonsense=True)
+        client.reqMktData(reqId=1, contract=ibkr_dx.Contract(), nonsense=True)
     except TypeError:
         return
     raise AssertionError("a name that names no argument was accepted")
@@ -119,8 +119,8 @@ def test_the_exercise_states_what_the_reference_states():
     # person entered it, whose account it is for, or that they are a
     # professional was answered as though they had named none.
     client = _client()
-    client.exerciseOptions(1, ibx.Contract(), 1, 100, "DU1", 0,
+    client.exerciseOptions(1, ibkr_dx.Contract(), 1, 100, "DU1", 0,
                            "20260902-14:30:00", "DU2", True)
-    client.exercise_options(2, ibx.Contract(), 1, 100, "DU1", 0,
+    client.exercise_options(2, ibkr_dx.Contract(), 1, 100, "DU1", 0,
                             manual_order_time="20260902-14:30:00",
                             customer_account="DU2", professional_customer=True)

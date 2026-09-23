@@ -4244,7 +4244,7 @@ pub(crate) fn clone_for_event<T: Clone>(event_tx: &Option<EventSink>, value: &T)
 /// cannot change under a running session. Read per message, it cost a lock and
 /// an allocation on the decode path of every transport.
 pub(crate) static CAPTURE_WIRE: std::sync::LazyLock<bool> =
-    std::sync::LazyLock::new(|| std::env::var("IBX_CAPTURE_WIRE").is_ok());
+    std::sync::LazyLock::new(|| std::env::var("IBKR_DX_CAPTURE_WIRE").is_ok());
 
 const LADDER_MS: [u64; 6] = [0, 5_000, 15_000, 30_000, 50_000, 60_000];
 

@@ -179,7 +179,7 @@ fn reference_name(obj: &Bound<'_, PyAny>, name: &str, aliases: &[(&str, &str)]) 
 /// matches). The enumerations are Python classes, as they are there, so a
 /// program's `is` against a member holds.
 pub(super) fn enum_member<'py>(py: Python<'py>, class: &str, code: impl IntoPyObject<'py>) -> PyResult<Py<PyAny>> {
-    let shapes = py.import("ibx._reference_shapes")?;
+    let shapes = py.import("ibkr_dx._reference_shapes")?;
     let cls = shapes.getattr(class)?;
     Ok(shapes.getattr("member_for")?.call1((cls, code))?.unbind())
 }

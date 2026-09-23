@@ -1,4 +1,4 @@
-# Rust API Reference (v0.7.1)
+# Rust API Reference (v0.1.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -140,7 +140,7 @@ pub fn adjustments(&self, con_id: &str) -> Option<(AdjustedContract, Vec<Adjustm
 
 #### `unread_wire`
 
-Frames this session kept exactly as the venue sent them, by connection. Empty unless `IBX_CAPTURE_WIRE` is set. A reading checked only against frames this client made up says nothing about the ones that arrive.
+Frames this session kept exactly as the venue sent them, by connection. Empty unless `IBKR_DX_CAPTURE_WIRE` is set. A reading checked only against frames this client made up says nothing about the ones that arrive.
 
 ```rust
 pub fn unread_wire(&self) -> Vec<(&'static str, String)>
@@ -910,7 +910,7 @@ pub fn cancel_order(&self, order_id: i64, manual_order_cancel_time: &str) -> Res
 
 #### `cancel_order_by_perm_id`
 
-Cancel an order identified by `permId` — stable across sessions. `permId` is the broker-assigned identifier returned in `order_status` callbacks and surfaced in account tools. Useful for cancelling an order placed in a prior session, where the local `order_id` is not retained. the CCP cancel frame is orderId-only, so ibx looks up the local `order_id` from `permId` in the open-order cache (populated by `place_order` callbacks or by the CCP session-recovery push hydrated in `handle_exec_report`). Fails if `perm_id` is not currently tracked.
+Cancel an order identified by `permId` — stable across sessions. `permId` is the broker-assigned identifier returned in `order_status` callbacks and surfaced in account tools. Useful for cancelling an order placed in a prior session, where the local `order_id` is not retained. the CCP cancel frame is orderId-only, so ibkr_dx looks up the local `order_id` from `permId` in the open-order cache (populated by `place_order` callbacks or by the CCP session-recovery push hydrated in `handle_exec_report`). Fails if `perm_id` is not currently tracked.
 
 ```rust
 pub fn cancel_order_by_perm_id(&self, perm_id: i64) -> Result<(), Refusal>
@@ -2345,7 +2345,7 @@ pub fn req_family_codes(&self, wrapper: &mut impl Wrapper)
 
 #### `set_server_log_level`
 
-Set server log level. Taken and not applied. The session holds no log level of its own and this protocol carries no message asking the venue to change one, so what a caller states here is written to this client's log and nothing else. This client's own logging is set where the process sets it, through `IBX_LOG_LEVEL` or `RUST_LOG`.
+Set server log level. Taken and not applied. The session holds no log level of its own and this protocol carries no message asking the venue to change one, so what a caller states here is written to this client's log and nothing else. This client's own logging is set where the process sets it, through `IBKR_DX_LOG_LEVEL` or `RUST_LOG`.
 
 ```rust
 pub fn set_server_log_level(&self, log_level: i32)

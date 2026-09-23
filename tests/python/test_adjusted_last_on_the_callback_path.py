@@ -15,10 +15,10 @@ and it refuses the two shapes it cannot fold — a contract with no venue id, an
 a request kept up to date, which never completes into a whole series to fold.
 """
 
-import ibx
+import ibkr_dx
 
 
-class _Recorder(ibx.EWrapper):
+class _Recorder(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.errors = []
@@ -29,13 +29,13 @@ class _Recorder(ibx.EWrapper):
 
 def _client():
     w = _Recorder()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("DU0000000")
     return w, c
 
 
 def _spy():
-    c = ibx.Contract()
+    c = ibkr_dx.Contract()
     c.symbol, c.secType, c.exchange, c.currency = "SPY", "STK", "SMART", "USD"
     c.conId = 756733
     return c
@@ -57,7 +57,7 @@ def test_adjusted_last_without_the_venue_id_is_sent():
     it was given. A contract stated by description is one the venue can resolve
     itself, so the request goes and the venue answers it."""
     w, c = _client()
-    unqualified = ibx.Contract()
+    unqualified = ibkr_dx.Contract()
     unqualified.symbol, unqualified.secType = "SPY", "STK"
     unqualified.exchange, unqualified.currency = "SMART", "USD"
     c.req_historical_data(

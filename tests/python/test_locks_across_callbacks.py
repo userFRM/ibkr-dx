@@ -9,7 +9,7 @@ the GIL the frozen thread is holding.
 """
 import faulthandler
 import pytest
-from ibx import EClient, EWrapper
+from ibkr_dx import EClient, EWrapper
 
 
 class _watchdog:
@@ -205,7 +205,7 @@ def test_an_order_is_reported_under_the_client_that_placed_it():
     open-order and status callbacks land on a key nobody is holding: the
     caller's own trade never updates, and a second one appears beside it.
     """
-    from ibx import EClient, EWrapper
+    from ibkr_dx import EClient, EWrapper
 
     class W(EWrapper):
         def __init__(self):

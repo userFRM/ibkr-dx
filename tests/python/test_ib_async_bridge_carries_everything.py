@@ -9,8 +9,8 @@ cost arrived as a type their wrapper cannot read.
 
 import ib_async
 
-import ibx
-from ibx.ib_async import IbxClient, _LoopBound
+import ibkr_dx
+from ibkr_dx.ib_async import IbkrDxClient, _LoopBound
 
 
 def _combo():
@@ -43,7 +43,7 @@ class Sent:
 
 def _client():
     ib = ib_async.IB()
-    c = IbxClient(ib.wrapper)
+    c = IbkrDxClient(ib.wrapper)
     c._client = Sent()
     return c
 
@@ -86,7 +86,7 @@ def test_a_fills_cost_arrives_as_the_record_their_wrapper_reads():
             seen.append(report)
 
     bound = _LoopBound(Wrapper())
-    ours = ibx.CommissionAndFeesReport()
+    ours = ibkr_dx.CommissionAndFeesReport()
     ours.execId = "0001.1"
     ours.commissionAndFees = 1.25
     ours.currency = "USD"
@@ -102,7 +102,7 @@ def test_every_account_the_login_holds_crosses_over():
     """The default account read off the client is the first one. Used as the
     whole list, an advisor with several saw one standing for all of them."""
     ib = ib_async.IB()
-    c = IbxClient(ib.wrapper)
+    c = IbkrDxClient(ib.wrapper)
 
     class Several:
         def connect(self, **kwargs):

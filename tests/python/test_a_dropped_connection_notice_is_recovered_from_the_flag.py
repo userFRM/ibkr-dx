@@ -10,10 +10,10 @@ flag when the event is not there, in the final state the flags hold.
 callback was ever at risk.
 """
 
-import ibx
+import ibkr_dx
 
 
-class Notices(ibx.EWrapper):
+class Notices(ibkr_dx.EWrapper):
     def __init__(self):
         super().__init__()
         self.codes = []
@@ -24,7 +24,7 @@ class Notices(ibx.EWrapper):
 
 def _connected():
     w = Notices()
-    c = ibx.EClient(w)
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     return w, c
 

@@ -14,11 +14,11 @@ a number this protocol cannot carry.
 
 import ib_async
 
-from ibx.ib_async import WIDEST_REQUEST_ID, IbxClient
+from ibkr_dx.ib_async import WIDEST_REQUEST_ID, IbkrDxClient
 
 
 def _client():
-    return IbxClient(ib_async.IB().wrapper)
+    return IbkrDxClient(ib_async.IB().wrapper)
 
 
 def test_a_raise_past_what_a_request_carries_is_let_go_of():

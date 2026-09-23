@@ -13,9 +13,9 @@
 //! `--ignored --test-threads=1`: the account permits one concurrent session,
 //! and parallel tests evict each other, which presents as no reply.
 
-use ibx::api::EClient;
-use ibx::api::client::EClientConfig;
-use ibx::types::model::Contract;
+use ibkr_dx::api::EClient;
+use ibkr_dx::api::client::EClientConfig;
+use ibkr_dx::types::model::Contract;
 
 fn config() -> Option<EClientConfig> {
     let (u, p) = (std::env::var("IB_USERNAME").ok()?, std::env::var("IB_PASSWORD").ok()?);
@@ -180,7 +180,7 @@ fn a_contract_that_trades_around_the_clock_is_described_as_itself() {
 
         // Preview the order without placing it. The preview carries the order
         // type and the full contract description.
-        let order = ibx::types::model::Order::limit("BUY", 1.0, 1.0);
+        let order = ibkr_dx::types::model::Order::limit("BUY", 1.0, 1.0);
         match client.preview(c, &order) {
             Ok(state) => println!(
                 "    preview: init margin {:?} commission {:?}",
@@ -210,7 +210,7 @@ fn a_contract_that_trades_around_the_clock_is_described_as_itself() {
 /// exchange the caller did not state describes a different instrument. Whether
 /// the venue answers an id carrying nothing beside it is determined here.
 struct Quiet;
-impl ibx::api::wrapper::Wrapper for Quiet {}
+impl ibkr_dx::api::wrapper::Wrapper for Quiet {}
 
 #[test]
 #[ignore = "opens a session of its own and needs a market open; run with --ignored"]

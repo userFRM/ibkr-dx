@@ -9,7 +9,7 @@ Run: pytest tests/python/test_conditional_orders.py -v -s
 
 import os, threading, time
 import pytest
-from ibx import EWrapper, EClient, Contract, Order, PriceCondition
+from ibkr_dx import EWrapper, EClient, Contract, Order, PriceCondition
 from conftest import wait_for
 
 pytestmark = pytest.mark.skipif(

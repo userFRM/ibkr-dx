@@ -17,9 +17,9 @@ use std::time::Instant;
 
 use std::sync::mpsc::sync_channel;
 
-use ibx::bridge::{Event, SharedState};
-use ibx::engine::market_state::MarketState;
-use ibx::protocol::tick_decoder::{self};
+use ibkr_dx::bridge::{Event, SharedState};
+use ibkr_dx::engine::market_state::MarketState;
+use ibkr_dx::protocol::tick_decoder::{self};
 
 const ITERATIONS: u64 = 1_000_000;
 const WARMUP: u64 = 100_000;
@@ -90,7 +90,7 @@ fn main() {
 
     // ── 3. fix_parse (HashMap alloc) ──
     bench("fix_parse (full HashMap)", ITERATIONS, || {
-        let _ = ibx::protocol::fix::fix_parse(&fix_framed);
+        let _ = ibkr_dx::protocol::fix::fix_parse(&fix_framed);
     });
 
     // ── 4. fast_msg_type extraction, the alternative to fix_parse ──
@@ -171,7 +171,7 @@ fn main() {
     // ── 8. notify_tick overhead: set_account (Mutex) ──
     {
         let shared = Arc::new(SharedState::new());
-        let account = ibx::engine::context::Context::new();
+        let account = ibkr_dx::engine::context::Context::new();
 
         bench("set_account (Mutex lock)", ITERATIONS, || {
             shared.portfolio.set_account(account.account());

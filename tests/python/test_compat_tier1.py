@@ -9,7 +9,7 @@ req_matching_symbols, req_current_time, and new EWrapper callbacks.
 import time
 import pytest
 from conftest import NotConnectedProbe
-from ibx import (
+from ibkr_dx import (
     Contract, BarData, ContractDetails, ContractDescription,
     EWrapper, EClient, TickAttrib, TickAttribLast, TickAttribBidAsk,
 )

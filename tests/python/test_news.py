@@ -7,7 +7,7 @@ Run: pytest tests/python/test_news.py -v -s
 
 import os, threading, time
 import pytest
-from ibx import EWrapper, EClient, Contract
+from ibkr_dx import EWrapper, EClient, Contract
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),

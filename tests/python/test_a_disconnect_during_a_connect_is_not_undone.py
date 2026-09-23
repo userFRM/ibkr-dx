@@ -13,12 +13,12 @@ is that a disconnect during the window is COUNTED, and that connect reads the
 count either side of it.
 """
 
-import ibx
+import ibkr_dx
 
 
 def test_a_disconnect_is_counted_so_a_connect_can_see_it():
-    w = ibx.EWrapper()
-    c = ibx.EClient(w)
+    w = ibkr_dx.EWrapper()
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     before = c._test_disconnects()
     c.disconnect()
@@ -29,8 +29,8 @@ def test_a_disconnect_is_counted_so_a_connect_can_see_it():
 
 def test_a_disconnect_with_no_session_still_counts():
     """The window's whole point: there is nothing installed to stop yet."""
-    w = ibx.EWrapper()
-    c = ibx.EClient(w)
+    w = ibkr_dx.EWrapper()
+    c = ibkr_dx.EClient(w)
     before = c._test_disconnects()
     c.disconnect()
     assert c._test_disconnects() == before + 1, (
@@ -39,8 +39,8 @@ def test_a_disconnect_with_no_session_still_counts():
 
 
 def test_repeated_disconnects_each_count():
-    w = ibx.EWrapper()
-    c = ibx.EClient(w)
+    w = ibkr_dx.EWrapper()
+    c = ibkr_dx.EClient(w)
     c._test_connect("T")
     before = c._test_disconnects()
     c.disconnect()

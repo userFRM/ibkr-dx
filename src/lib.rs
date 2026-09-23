@@ -15,7 +15,7 @@
 //!   than delivered on callbacks
 //!
 //! ```no_run
-//! use ibx::api::client::{EClient, EClientConfig};
+//! use ibkr_dx::api::client::{EClient, EClientConfig};
 //!
 //! let client = EClient::connect(&EClientConfig {
 //!     username: "…".into(),
@@ -26,8 +26,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! In Python, the same surface is `ibx.EClient` and `ibx.EWrapper`, and an
-//! unmodified `ib_async` program runs on it through `ibx.ib_async.attach`.
+//! In Python, the same surface is `ibkr_dx.EClient` and `ibkr_dx.EWrapper`, and an
+//! unmodified `ib_async` program runs on it through `ibkr_dx.ib_async.attach`.
 //!
 //! # Everything else
 //!
