@@ -743,6 +743,24 @@ impl EClient {
         })
     }
 
+    /// The first id past everything the account has used that a request can
+    /// also carry.
+    ///
+    /// A caller that numbers its orders and its requests out of one counter
+    /// needs both at once: clear of every id an order has spent, and inside the
+    /// numbers a request can carry. An account that has been given a wider
+    /// order id than that has no such number above it, so this answers with
+    /// one past the widest the account has used that a request can carry, and
+    /// the counting goes on from there. A read, not a reservation: asked twice,
+    /// it answers the same until the venue names a wider id. After a connect it
+    /// waits, for at most three seconds in all, for the venue to name the
+    /// orders the account is working.
+    ///
+    /// Refused where even that is not a number a request can carry.
+    pub fn next_shared_id(&self) -> Result<i64, Refusal> {
+        super::next_shared_id_of(&self.shared)
+    }
+
     /// Take `n` consecutive ids in one step.
     ///
     /// A bracket occupies three consecutive ids: parent, parent+1, parent+2.

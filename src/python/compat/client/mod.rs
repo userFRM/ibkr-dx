@@ -987,6 +987,25 @@ impl EClient {
         self.tell_the_caller_it_closed(py)
     }
 
+    /// Wait for the engine to signal, for at most `timeout` seconds: True when
+    /// it signalled, False when the wait ran out.
+    ///
+    /// The engine signals at the end of each pass of its loop, and when a
+    /// connection goes or comes back. One waiter takes each signal. A thread
+    /// that wakes a loop of its own waits here and then has that loop call
+    /// `poll`: True is a reason to poll, not a promise that the poll delivers
+    /// anything. Waits with the interpreter released, so other threads run
+    /// meanwhile. Raises when there is no session.
+    #[pyo3(signature = (timeout))]
+    fn wait_for_data(&self, py: Python<'_>, timeout: f64) -> PyResult<bool> {
+        let shared = self.shared_state()?;
+        let timeout = std::time::Duration::try_from_secs_f64(timeout)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err(format!(
+                "timeout {timeout} is not a length of time",
+            )))?;
+        Ok(py.detach(move || shared.wait_for_data(timeout)))
+    }
+
     /// Get the account ID.
     fn get_account_id(&self) -> String {
         self.account()

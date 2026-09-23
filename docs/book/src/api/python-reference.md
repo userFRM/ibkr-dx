@@ -40,7 +40,7 @@ def connect(host, port=0, client_id=0, username="", password="", paper=True, cor
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `host` | `str` | Server hostname. |
-| `port` | `int` | Port number (unused — IBKR-DX connects directly). |
+| `port` | `int` | Port number (unused — ibkr-dx connects directly). |
 | `client_id` | `int` | Client ID (unused — single-client engine). |
 | `username` | `str` | Account username. |
 | `password` | `str` | Account password. |
@@ -224,6 +224,20 @@ Deliver callbacks until the session ends.  Blocks the calling thread. Everything
 ```python
 def run()
 ```
+
+---
+
+#### `wait_for_data`
+
+Wait for the engine to signal, for at most `timeout` seconds: True when it signalled, False when the wait ran out.  The engine signals at the end of each pass of its loop, and when a connection goes or comes back. One waiter takes each signal. A thread that wakes a loop of its own waits here and then has that loop call `poll`: True is a reason to poll, not a promise that the poll delivers anything. Waits with the interpreter released, so other threads run meanwhile. Raises when there is no session.
+
+```python
+def wait_for_data(timeout)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `timeout` | `float` | The longest to wait. |
 
 ---
 
@@ -670,6 +684,30 @@ def account_snapshot()
 
 ---
 
+#### `positions_elsewhere`
+
+Holdings the venue reports that this broker does not hold itself: positions held away at another broker, and rows it marks as shown but not held.  Kept apart from `req_positions`, which answers what the account itself holds. The reference client has no call for these — its own front end shows them in a separate table — so this is the only way to reach them. One dict per holding: `con_id`, `symbol`, `sec_type`, `currency`, `position`, `avg_cost`, and `held`, which is `"Away"` for a position held at another broker, `"DisplayOnly"` for a row shown but not held, and `"Aside"` for one reported apart without saying why. Empty with no session.
+
+```python
+def positions_elsewhere()
+```
+
+---
+
+#### `values_elsewhere`
+
+The account figures describing one of the sets of holdings the account does not hold itself, as name, value and the currency each is stated in. A figure stated in two currencies is two figures.  `held` names the set as `positions_elsewhere` does: `"Away"`, `"DisplayOnly"` or `"Aside"`. The venue states these the same way it states the account's own, and mixing them in would overstate what the account is worth, so they are kept where the holdings they describe are kept. Empty with no session.
+
+```python
+def values_elsewhere(held)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `held` | `str` | Which set of holdings kept elsewhere: `Away`, `DisplayOnly` or `Aside`. |
+
+---
+
 ## Orders
 
 #### `place_order`
@@ -779,7 +817,7 @@ def next_order_id()
 
 #### `next_shared_id`
 
-The first id past everything the account has used that a request can also carry.  A caller that numbers its orders and its requests out of one counter — which is how `ib_async` is written — needs both at once: clear of every id an order has spent, and inside the four billion a request is carried in. An account that has been given a wider order id than that has no such number above it, so this answers with the widest the account has used that a request can carry, and the counting goes on from there.
+The first id past everything the account has used that a request can also carry.  A caller that numbers its orders and its requests out of one counter — which is how `ib_async` is written — needs both at once: clear of every id an order has spent, and inside the numbers a request can carry. An account that has been given a wider order id than that has no such number above it, so this answers with one past the widest the account has used that a request can carry, and the counting goes on from there. After a connect it waits, for at most three seconds in all, for the venue to name the orders the account is working.  Raises RuntimeError where even that is not a number a request can carry. Answers 1 where there is no session.
 
 ```python
 def next_shared_id()
@@ -1192,6 +1230,22 @@ def paired_figures(req_id, series)
 
 ---
 
+#### `req_spread_scan`
+
+Ask the venue to scan an underlying for strategies worth putting on.  The scan goes out beside a subscription for the series the venue states its answer on, because that is how it is asked for: the series carries the answer and the scan tells the venue what to look for. Read the answer with `scanned_strategies` under the same request, and withdraw it with `cancel_mkt_data`.  The documented API has no call for this at all. What the scan states about each strategy is the venue's own, in the venue's own words, and nothing here translates them.
+
+```python
+def req_spread_scan(req_id, contract, scan)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `contract` | `Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `scan` | `SpreadScan` | What to scan the underlying for. |
+
+---
+
 #### `scanned_strategies`
 
 The strategies a spread scan stated for a request, as the venue stated them.  Each is a dict of its legs, which shape of strategy it is and how pressing, the thirteen figures the venue states about it, where it comes out even, and one figure behind those. Empty until a scan has been asked for and answered. The documented API has no call for this.
@@ -1504,6 +1558,8 @@ def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_dat
 
 #### `req_adjustments`
 
+Ask for a contract's corporate actions over a range of days.  No callback carries the answer; a refusal arrives on `error` under this id, as any request's does, and gives the request up: nothing is held for it after, and there is nothing to withdraw. The answer is held under the id until `adjustments_for` takes it or `cancel_adjustments` gives it up, so a request that is neither taken nor withdrawn holds its answer for the rest of the session. `corporate_actions` asks and waits in one call; this is the request on its own.
+
 ```python
 def req_adjustments(req_id, con_id, sec_type, exchange, start_date, end_date)
 ```
@@ -1516,6 +1572,34 @@ def req_adjustments(req_id, con_id, sec_type, exchange, start_date, end_date)
 | `exchange` | `str` | Exchange name. |
 | `start_date` | `str` |  |
 | `end_date` | `str` |  |
+
+---
+
+#### `adjustments_for`
+
+The corporate actions answering a `req_adjustments` under this id, once they have arrived: one dict per action, as `corporate_actions` states them.  Taken rather than read: the answer is handed over once and the request holds nothing after it. `None` until the answer arrives, and for a request this session is not holding one for. A contract the venue states nothing for answers with an empty list, which is an answer.
+
+```python
+def adjustments_for(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `cancel_adjustments`
+
+Give up on a `req_adjustments`: whatever it holds is let go of, and the venue is told to stop serving the query.  For a request whose answer has not come and is no longer wanted: the venue serves the query until it is withdrawn. A withdrawal naming no query this client is waiting on, one already answered included, is reported on `error` under 300.
+
+```python
+def cancel_adjustments(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
 
 ---
 

@@ -779,6 +779,54 @@ impl Drop for Registering<'_> {
     }
 }
 
+/// What a market-data request's generic tick list asks for.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct GenericTicks<'a> {
+    /// The contract's headlines, asked for under 292.
+    pub(crate) news: bool,
+    /// The providers the headlines entry named, joined the way the venue
+    /// separates them — `BRFG*DJNL` — and empty where it named none.
+    pub(crate) news_providers: String,
+    /// Every other series, by the venue's number for it, once each.
+    pub(crate) series: Vec<u32>,
+    /// Entries that are not a number the venue knows a series by.
+    pub(crate) unread: Vec<&'a str>,
+}
+
+/// Read a generic tick list, one comma-separated entry at a time.
+///
+/// The whole entry, never a number ending in one: `1292` is series 1292 and
+/// not the headlines. `292` asks for the headlines from the providers the
+/// session already names, and `292:BRFG+DJNL` from the providers named after
+/// the colon, joined by `+` as the reference client writes them. `mdoff` is
+/// passed over: it is not a series, and the quote is subscribed regardless.
+pub(crate) fn parse_generic_tick_list(list: &str) -> GenericTicks<'_> {
+    let mut read = GenericTicks::default();
+    let mut providers: Vec<&str> = Vec::new();
+    for entry in list.split(',').map(str::trim) {
+        if entry.is_empty() || entry == "mdoff" {
+            continue;
+        }
+        if let Some(named) = entry
+            .strip_prefix("292")
+            .filter(|rest| rest.is_empty() || rest.starts_with(':'))
+        {
+            read.news = true;
+            providers.extend(
+                named.trim_start_matches(':').split('+').map(str::trim).filter(|p| !p.is_empty()),
+            );
+            continue;
+        }
+        match entry.parse::<u32>() {
+            Ok(tick) if !read.series.contains(&tick) => read.series.push(tick),
+            Ok(_) => {}
+            Err(_) => read.unread.push(entry),
+        }
+    }
+    read.news_providers = providers.join("*");
+    read
+}
+
 /// Which record a registration is taking: the quotes, or the tick stream.
 const TAKING_QUOTES: u8 = 0;
 const TAKING_TICKS: u8 = 1;
@@ -2301,11 +2349,12 @@ impl ClientCore {
         if regulatory_snapshot {
             self.chargeable_snapshot_reqs.lock().unwrap().insert(req_id);
         }
-        // News subscription if generic_tick_list names 292. The whole entry,
-        // not its last three characters: "1292" is not 292, and matching on a
-        // suffix subscribes to news the caller did not ask for. The list is
-        // split on commas first, so a comma-joined entry never matches.
-        let wants_news = generic_tick_list.split(',').any(|t| t.trim() == "292");
+        // News subscription if generic_tick_list names 292, bare or with the
+        // providers to ask. The whole entry, not its last three characters:
+        // "1292" is not 292, and matching on a suffix subscribes to news the
+        // caller did not ask for.
+        let asked = parse_generic_tick_list(generic_tick_list);
+        let wants_news = asked.news;
         // And nothing else is served. Not because the protocol cannot carry
         // it: a tick is asked for as a subscription of its own, under the
         // venue's number for it in the request type, which is how the option
@@ -2324,33 +2373,25 @@ impl ClientCore {
         // An entry that is not a number is not one of the venue's series, and
         // saying so is better than sending it and having the whole request
         // refused for the sake of one bad word in the list.
-        let mut generic_ticks: Vec<u32> = Vec::new();
-        let mut unread: Vec<&str> = Vec::new();
-        for entry in generic_tick_list.split(',').map(str::trim) {
-            if entry.is_empty() || entry == "292" || entry == "mdoff" {
-                continue;
-            }
-            match entry.parse::<u32>() {
-                Ok(tick) if !generic_ticks.contains(&tick) => generic_ticks.push(tick),
-                Ok(_) => {}
-                Err(_) => unread.push(entry),
-            }
-        }
-        if !unread.is_empty() {
+        let generic_ticks = asked.series;
+        if !asked.unread.is_empty() {
             log::warn!(
                 "the generic tick list named {}, which is not a number the venue \
                  knows a series by, so nothing was asked for it",
-                unread.join(", "),
+                asked.unread.join(", "),
             );
         }
         // Asked for once per contract, whoever asks. Recorded as the decision
         // is made, so two callers racing for one contract cannot both find
         // that nobody has asked.
         if wants_news && self.first_to_ask_for_news(con_id, req_id) {
-            // What the logon said this account may read, unless a caller has
-            // named its own set. The venue separates codes with a star.
+            // The providers the entry itself named, else those a caller has
+            // named for the session, else what the logon said this account may
+            // read. The venue separates codes with a star.
             let named = self.news_providers.lock().unwrap().clone();
-            let providers = if named.is_empty() {
+            let providers = if !asked.news_providers.is_empty() {
+                asked.news_providers
+            } else if named.is_empty() {
                 shared.reference.news_providers()
                     .iter()
                     .map(|p| p.code.as_str())

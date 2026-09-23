@@ -30,7 +30,8 @@ entitlement is refused by the venue. It also ends on `tick_snapshot_end`.
 Each number in `generic_tick_list` is asked for, as a subscription of its own
 beside the prices. The number you state is the number the venue knows the series
 by, so there is nothing to translate. `"292"` additionally subscribes to news for
-that contract; an entry that is not a number is reported rather than sent.
+that contract, and `"292:BRFG+DJNL"` asks for it from the providers it names; an
+entry that is not a number is reported rather than sent.
 
 Every number the protocol will accept in that list is read here, and each
 arrives under the number the reference client publishes it under:
@@ -50,7 +51,7 @@ arrives under the number the reference client publishes it under:
 | `233` | the trade tape, on `tick_string` 48: `price;size;time;volume;vwap;single` |
 | `236` | shortability on `tick_generic` 46, and the borrowable share count on `tick_size` 89 |
 | `258` | company ratios, on `tick_string` 47 |
-| `292` | news, on `tick_news` |
+| `292` `292:BRFG+DJNL` | news, on `tick_news` |
 | `293` `294` `295` | trade count, trade rate and volume rate, on `tick_generic` 54, 55 and 56 |
 | `318` | last regular-session trade, on `tick_price` 57 |
 | `375` | the trade-report tape, on `tick_string` 77 |

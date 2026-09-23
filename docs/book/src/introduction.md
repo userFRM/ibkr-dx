@@ -1,6 +1,6 @@
 <div class="dx-hero">
 
-<h1 class="dx-title">IBKR-DX</h1>
+<h1 class="dx-title">ibkr-dx</h1>
 
 <img class="dx-banner dx-banner-light" src="./banner-light.svg" alt="ibkr-dx: direct connection engine for Interactive Brokers" />
 <img class="dx-banner dx-banner-dark" src="./banner-dark.svg" alt="ibkr-dx: direct connection engine for Interactive Brokers" />
@@ -21,7 +21,7 @@
 ## One line changes
 
 A program written against the TWS API talks to IB Gateway or Trader Workstation
-over a socket on localhost, and that process talks to the venue. IBKR-DX takes
+over a socket on localhost, and that process talks to the venue. ibkr-dx takes
 the gateway's place: it logs in, holds the trading, market-data, historical and
 security-definition connections open, and gives your program the same calls and
 the same callbacks.

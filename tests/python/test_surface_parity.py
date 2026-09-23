@@ -250,3 +250,14 @@ def test_what_the_caller_fills_is_filled_by_the_caller():
         assert re.search(rf"api_order\.{field}\s*=", at_the_call_site), (
             f"{field} is excused from the conversion and assigned nowhere"
         )
+
+
+def test_both_clients_describe_a_spread_scan_the_same_way():
+    """A field of the scan on one client and not the other is one a caller of
+    that client cannot state, and the venue fills it with its own choice."""
+    rust = _fields("src/types", "SpreadScan")
+    python = _fields("src/python/compat", "SpreadScan")
+    assert rust == python, (
+        "a spread-scan field exists on one client and not the other: "
+        f"rust only={sorted(rust - python)} python only={sorted(python - rust)}"
+    )

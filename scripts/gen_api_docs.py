@@ -95,7 +95,7 @@ PARAM_DOCS: dict[str, str] = {
     "ib_key_token_sub_type": "Fallback second-factor token sub-type (default `\"2a\"`), used only when the server states none for the session; ignored for paper.",
     "code_provider": "Callable `(factor, display_id, avth_url) -> str` returning the second-factor code. `factor` is `\"ibkey\"` (the code shown for `display_id`) or `\"authenticator\"` (the account's current code). Required for authenticator accounts, which have no push to fall back to; ignored for paper.",
     "host": "Server hostname.",
-    "port": "Port number (unused — IBKR-DX connects directly).",
+    "port": "Port number (unused — ibkr-dx connects directly).",
     "client_id": "Client ID (unused — single-client engine).",
     "username": "Account username.",
     "password": "Account password.",
@@ -240,6 +240,10 @@ PARAM_DOCS: dict[str, str] = {
     "text": "Informational text.",
     "groups": "FA group definitions.",
     "time_stamp": "Timestamp string.",
+    "timeout": "The longest to wait.",
+    "record": "The record fed everything an answering call reads, its own answer under its own number included.",
+    "scan": "What to scan the underlying for.",
+    "held": "Which set of holdings kept elsewhere: `Away`, `DisplayOnly` or `Aside`.",
 }
 
 # Rust type → Python type display
@@ -384,8 +388,17 @@ def plain_intra_doc_links(doc: str) -> str:
     clicks it lands on nothing. The name is already the link text, and this page
     lists every item, so the words alone say the same thing and go nowhere
     wrong.
+
+    The link comes in three spellings and each is taken apart: the target in
+    parentheses after the words; the words alone in brackets, which rustdoc
+    resolves as a path and Markdown prints with its brackets; and a line
+    naming the target for bracketed words, which Markdown reads only at the
+    start of a line and which this page joins onto the paragraph above it.
     """
-    return re.sub(r"\[([^\]]+)\]\((?:Self|crate|[A-Z][A-Za-z0-9_]*)(?:::[A-Za-z0-9_]+)+\)", r"\1", doc)
+    path = r"(?:Self|crate|[A-Z][A-Za-z0-9_]*)(?:::[A-Za-z0-9_]+)*"
+    doc = re.sub(rf"\s*\[`[^`\]]+`\]:\s*{path}", "", doc)
+    doc = re.sub(rf"\[([^\]]+)\]\({path}::[A-Za-z0-9_]+\)", r"\1", doc)
+    return re.sub(rf"\[(`{path}(?:\(\))?`)\](?![(\[:])", r"\1", doc)
 
 
 def parse_rust_params(args_str: str) -> list[dict]:
@@ -557,7 +570,7 @@ def parse_wrapper_trait(path: Path) -> list[dict]:
             line = line.strip()
             if line.startswith("///"):
                 doc_lines.append(line.removeprefix("///").strip())
-        doc = " ".join(doc_lines)
+        doc = plain_intra_doc_links(" ".join(doc_lines))
         params = parse_rust_params(args_str)
         results.append({"name": name, "doc": doc, "params": params, "return_type": "", "signature": ""})
     return results
@@ -1340,7 +1353,7 @@ def generate_coverage_md(ver: str) -> str:
         "",
         "*Auto-generated from source — do not edit.*",
         "",
-        "Canonical IB API methods vs IBKR-DX implementation status.",
+        "Canonical IB API methods vs ibkr-dx implementation status.",
         "",
         "- **Y** = Implemented",
         "- **STUB** = Accepts call but not wired to server (logs warning or no-op)",

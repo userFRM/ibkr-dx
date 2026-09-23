@@ -1,4 +1,4 @@
-//! Replay benchmark: measures IBKR-DX processing pipeline without network I/O.
+//! Replay benchmark: measures ibkr-dx processing pipeline without network I/O.
 //!
 //! Benchmarks the full message processing path using synthetic (or captured) data:
 //!   1. HMAC unsign (verify + un-distort)

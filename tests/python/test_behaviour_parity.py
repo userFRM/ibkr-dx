@@ -23,7 +23,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: `corporate_actions` sends its own command rather than going through the
 #: reporting request call, because taking the session and the sender apart let
 #: a reconnect put a request and its answer on two different sessions.
-_ANSWERS_BY_RAISING = {"connect", "corporate_actions"}
+#: `next_shared_id` sends nothing: it reads a number, the caller is waiting on
+#: the return, and where there is no number to give the request surface returns
+#: `Err` and the binding raises.
+_ANSWERS_BY_RAISING = {"connect", "corporate_actions", "next_shared_id"}
 
 #: Calls the request surface leaves quiet where the binding reports. Each takes
 #: a wrapper it could report on and returns after a log line. Listed as an open

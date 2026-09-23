@@ -84,6 +84,36 @@ pub fn session_over(&self) -> bool
 
 ---
 
+#### `wait_for_data`
+
+Wait for the engine to signal, for at most `timeout`: true when it signalled, false when the wait ran out. The engine signals at the end of each pass of its loop, and when a connection goes or comes back. One waiter takes each signal. A thread that reads the session only when there may be something to read waits here and then calls `process_msgs`: true is a reason to read, not a promise that the read delivers anything.
+
+```rust
+pub fn wait_for_data(&self, timeout: std::time::Duration) -> bool
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `timeout` | `std::time::Duration` | The longest to wait. |
+
+**Returns:** `bool`
+
+---
+
+#### `keep_record`
+
+Deliver to `record` everything a call that answers reads, its own answer under its own number included. A call that answers rather than delivers — `contract_details`, `historical_data` and the others that hand back what they asked for — holds the session's turn while it waits and reads the session into a collector of its own. The queues empty as they are read, so a fill, an order's status or a quote arriving during that wait is taken by the call. With a record kept here, every callback the call reads reaches the record as well, the call's own under a number from the range those calls take, which no request of the caller's carries; with none, what the call does not use is gone. Keep a record that writes into the state the program's own `process_msgs` loop writes into: what reaches it here is not delivered to that loop again, the notice that a connection went or came back included. Never hold this record's lock across `process_msgs`. A call locks the record inside the turn it already holds, so a loop that locks the record and then waits for the turn waits on a call that is waiting on it, and neither ever returns. Hand `process_msgs` a wrapper of its own that locks the shared state on each callback, as the record does: the turn first, then the state, on both sides. Replaces any record kept before.
+
+```rust
+pub fn keep_record(&self, record: Arc<Mutex<dyn Wrapper + Send>>)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `record` | `Arc<Mutex<dyn Wrapper + Send>>` | The record fed everything an answering call reads, its own answer under its own number included. |
+
+---
+
 #### `disconnect`
 
 Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the background thread to exit, and marks the client as disconnected.
@@ -150,6 +180,18 @@ pub fn unread_wire(&self) -> Vec<(&'static str, String)>
 
 ---
 
+#### `competing_session`
+
+Another session that already held this account when this one connected. `None` when this session is alone. Otherwise where the other one connected from, when it logged in — GMT, as the venue writes it: `yyyyMMdd-HH:mm:ss` — and whether this session is held to reading only because the other has the account. Worth asking before starting work: the venue permits one logon at a time and takes the account from the older session without saying which it dropped, so a second client reads as data that stops arriving.
+
+```rust
+pub fn competing_session(&self) -> Option<(String, String, bool)>
+```
+
+**Returns:** `Option<(String, String, bool)>`
+
+---
+
 #### `ccp_session_id`
 
 Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
@@ -192,7 +234,7 @@ pub fn session_token_bytes(&self) -> &[u8]
 
 #### `session`
 
-The session this connection established, for a caller that wants to resume from it later. Hand it back through [`EClientConfig::resume`] on a subsequent connect. Keep it wherever the process keeps secrets — it is a credential, and where it lives is the caller's decision, which is why nothing here writes it anywhere by default.
+The session this connection established, for a caller that wants to resume from it later. Hand it back through `EClientConfig::resume` on a subsequent connect. Keep it wherever the process keeps secrets — it is a credential, and where it lives is the caller's decision, which is why nothing here writes it anywhere by default.
 
 ```rust
 pub fn session(&self) -> &crate::auth::resume::ResumableSession
@@ -404,7 +446,7 @@ pub fn await_order( &self, order_id: i64, timeout: Duration, ) -> Result<OrderRe
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `order_id` | `i64` | Order identifier. Must be unique per session. |
-| `timeout` | `Duration` |  |
+| `timeout` | `Duration` | The longest to wait. |
 
 **Returns:** `Result<OrderReport, Refusal>`
 
@@ -670,7 +712,7 @@ pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper)
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models. Account values for one account or model, answered on `account_update_multi`. The reference client answers this request on its own callbacks, not on the ones `req_account_updates` uses, and a caller written against it implements those and hears nothing otherwise. `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The figures are the ones the venue states for the account this session opened under, and they are labelled with that account. A login holding several is answered for that one; naming another here does not fetch the other's figures, and is said in the log rather than answered with this account's under the other's name. A model names a slice of the account, and the venue states the account whole. Naming one is said the same way and the figures are labelled with no model, rather than the account's whole balance sheet reaching a caller as one model's. The request is held open. A figure that moves after the batch below is reported again under the same number, until [`EClient::cancel_account_updates_multi`] withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
+Request account updates for multiple accounts/models. Account values for one account or model, answered on `account_update_multi`. The reference client answers this request on its own callbacks, not on the ones `req_account_updates` uses, and a caller written against it implements those and hears nothing otherwise. `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The figures are the ones the venue states for the account this session opened under, and they are labelled with that account. A login holding several is answered for that one; naming another here does not fetch the other's figures, and is said in the log rather than answered with this account's under the other's name. A model names a slice of the account, and the venue states the account whole. Naming one is said the same way and the figures are labelled with no model, rather than the account's whole balance sheet reaching a caller as one model's. The request is held open. A figure that moves after the batch below is reported again under the same number, until `EClient::cancel_account_updates_multi` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
 
 ```rust
 pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code: &str, _ledger_and_nlv: bool, wrapper: &mut impl Wrapper, )
@@ -751,7 +793,7 @@ pub fn values_elsewhere(&self, held: crate::types::HeldElsewhere) -> Vec<(String
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `held` | `crate::types::HeldElsewhere` |  |
+| `held` | `crate::types::HeldElsewhere` | Which set of holdings kept elsewhere: `Away`, `DisplayOnly` or `Aside`. |
 
 **Returns:** `Vec<(String, String, String)>`
 
@@ -962,6 +1004,18 @@ pub fn next_order_id(&self) -> i64
 
 ---
 
+#### `next_shared_id`
+
+The first id past everything the account has used that a request can also carry. A caller that numbers its orders and its requests out of one counter needs both at once: clear of every id an order has spent, and inside the numbers a request can carry. An account that has been given a wider order id than that has no such number above it, so this answers with one past the widest the account has used that a request can carry, and the counting goes on from there. A read, not a reservation: asked twice, it answers the same until the venue names a wider id. After a connect it waits, for at most three seconds in all, for the venue to name the orders the account is working. Refused where even that is not a number a request can carry.
+
+```rust
+pub fn next_shared_id(&self) -> Result<i64, Refusal>
+```
+
+**Returns:** `Result<i64, Refusal>`
+
+---
+
 #### `req_open_orders`
 
 Request open orders for this client. Answers with every order working on the account, as `req_all_open_orders` does. The protocol carries no client number on an order, so this session cannot tell which orders it placed; reporting fewer would omit working orders.
@@ -1007,7 +1061,7 @@ pub fn req_completed_orders(&self, api_only: bool, wrapper: &mut impl Wrapper)
 
 #### `req_auto_open_orders`
 
-Automatically bind future orders to this client. Bind orders entered elsewhere to this client. Nothing goes to the venue; this is answered locally, setting a property of its own and refusing it for any client but the one those orders bind to. What that property gates does not arise here — this session is told about every order on the account, whether it placed them or not — and this surface names no client, so there is nothing to refuse and nothing left to do. [`Wrapper::order_bound`] is never fired here, and not because of this call: it follows asking for the open orders, not asking to bind them. The reference architecture partitions an account's orders by the client that placed them, and on being asked for the open ones it claims those that belong to no client for client nought — a control message to the venue, whose answer is what that callback carries. There is no such partition here: every session is told about every order on the account, so there is nothing to claim, and claiming it would change who owns an order at the venue to no end. The permanent id the callback pairs with arrives on the order's status and on its fills. `b_auto_bind` is taken and not applied. Whether it asks to bind or to stop binding, the answer is the same: this session hears about every order on the account either way.
+Automatically bind future orders to this client. Bind orders entered elsewhere to this client. Nothing goes to the venue; this is answered locally, setting a property of its own and refusing it for any client but the one those orders bind to. What that property gates does not arise here — this session is told about every order on the account, whether it placed them or not — and this surface names no client, so there is nothing to refuse and nothing left to do. `Wrapper::order_bound` is never fired here, and not because of this call: it follows asking for the open orders, not asking to bind them. The reference architecture partitions an account's orders by the client that placed them, and on being asked for the open ones it claims those that belong to no client for client nought — a control message to the venue, whose answer is what that callback carries. There is no such partition here: every session is told about every order on the account, so there is nothing to claim, and claiming it would change who owns an order at the venue to no end. The permanent id the callback pairs with arrives on the order's status and on its fills. `b_auto_bind` is taken and not applied. Whether it asks to bind or to stop binding, the answer is the same: this session hears about every order on the account either way.
 
 ```rust
 pub fn req_auto_open_orders(&self, _b_auto_bind: bool)
@@ -1056,7 +1110,7 @@ pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoPara
 
 #### `req_spread_scan`
 
-Ask the venue to scan an underlying for strategies worth putting on. The scan goes out beside a subscription for the series the venue states its answer on, because that is how it is asked for: the series carries the answer and the scan tells the venue what to look for. Read the answer with [`Self::scanned_strategies`] under the same request. The documented API has no call for this at all. What the scan states about each strategy is the venue's own, in the venue's own words, and nothing here translates them.
+Ask the venue to scan an underlying for strategies worth putting on. The scan goes out beside a subscription for the series the venue states its answer on, because that is how it is asked for: the series carries the answer and the scan tells the venue what to look for. Read the answer with `Self::scanned_strategies` under the same request. The documented API has no call for this at all. What the scan states about each strategy is the venue's own, in the venue's own words, and nothing here translates them.
 
 ```rust
 pub fn req_spread_scan( &self, req_id: i64, contract: &Contract, scan: &crate::types::SpreadScan, ) -> Result<(), Refusal>
@@ -1066,7 +1120,7 @@ pub fn req_spread_scan( &self, req_id: i64, contract: &Contract, scan: &crate::t
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
-| `scan` | `&crate::types::SpreadScan` |  |
+| `scan` | `&crate::types::SpreadScan` | What to scan the underlying for. |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -1090,7 +1144,7 @@ pub fn scanned_strategies(&self, req_id: i64) -> Vec<crate::types::ScannedStrate
 
 #### `req_mkt_data`
 
-Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. That is a subscription this client ends, not a request of its own: the venue's own one-shot snapshot is the chargeable one, asked for with `regulatory_snapshot` on `req_mkt_data_ex`. `generic_tick_list` goes out with the subscription, and what comes back reaches the caller on the callback the series belongs to. These are read: * `100`, `101`, `105` — option volume, open interest and the average volume, calls before puts. * `104`, `106`, `411` — volatility: the historical figure, the implied one, and the one the venue restrikes through the session. * `162`, `165` — an index's premium over its future; the extremes of the last quarter, half-year and year with the ordinary day's volume. * `220`, `221`, `232`, `619` — the mark the venue keeps, which is not a trade, under each of the numbers it is asked for by, and the slow one beside it. * `225` — the auction: what is crossing, which way, at what price, and the imbalance the venue must publish. * `233`, `375` — everything that traded, and what traded on a trade report, each stated as a trade rather than as the totals it is read from. * `236` — whether it can be borrowed, and how much of it. * `258` (or `47`) — the company ratios, as the venue writes them. * `292` — news for the contract. * `293`, `294`, `295` — how fast it is trading. * `318` — what last traded in the regular session. * `456` (or `59`) — what it pays out. * `460` — the factor a redemption changes. * `499` — what it costs to borrow. * `577`, `614`, `623` — a fund's value per share: last, the day's extremes, and the frozen one. * `586` — what a share is expected to open at, and what it did. * `588` — a future's open interest. * `595` — what has traded over the last three, five and ten minutes. * `787` — the odd lot: the two prices nobody has to deal in round lots at, their sizes, and where each is quoted. A code outside that list still goes to the venue, and a reading of it arrives and is recorded rather than delivered: the shape it is written in is the series' own, and nothing here can read one it has not been taught. `tick_generic` also fires for the halt the venue states on its own tick: tick 49, 0 while a contract is trading and 1 once it has stopped. Delayed and frozen data are requested, contrary to what this said: name the type on `req_market_data_type` and every subscription after it carries the mode, or state it per request with `req_mkt_data_ex`. The table there gives the wire shape of each.
+Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. That is a subscription this client ends, not a request of its own: the venue's own one-shot snapshot is the chargeable one, asked for with `regulatory_snapshot` on `req_mkt_data_ex`. `generic_tick_list` goes out with the subscription, and what comes back reaches the caller on the callback the series belongs to. These are read: * `100`, `101`, `105` — option volume, open interest and the average volume, calls before puts. * `104`, `106`, `411` — volatility: the historical figure, the implied one, and the one the venue restrikes through the session. * `162`, `165` — an index's premium over its future; the extremes of the last quarter, half-year and year with the ordinary day's volume. * `220`, `221`, `232`, `619` — the mark the venue keeps, which is not a trade, under each of the numbers it is asked for by, and the slow one beside it. * `225` — the auction: what is crossing, which way, at what price, and the imbalance the venue must publish. * `233`, `375` — everything that traded, and what traded on a trade report, each stated as a trade rather than as the totals it is read from. * `236` — whether it can be borrowed, and how much of it. * `258` (or `47`) — the company ratios, as the venue writes them. * `292` — news for the contract, from the providers the session names; `292:BRFG+DJNL` names the providers to ask instead. A contract's headlines are asked for once, by the first request that wants them. * `293`, `294`, `295` — how fast it is trading. * `318` — what last traded in the regular session. * `456` (or `59`) — what it pays out. * `460` — the factor a redemption changes. * `499` — what it costs to borrow. * `577`, `614`, `623` — a fund's value per share: last, the day's extremes, and the frozen one. * `586` — what a share is expected to open at, and what it did. * `588` — a future's open interest. * `595` — what has traded over the last three, five and ten minutes. * `787` — the odd lot: the two prices nobody has to deal in round lots at, their sizes, and where each is quoted. A code outside that list still goes to the venue, and a reading of it arrives and is recorded rather than delivered: the shape it is written in is the series' own, and nothing here can read one it has not been taught. `tick_generic` also fires for the halt the venue states on its own tick: tick 49, 0 while a contract is trading and 1 once it has stopped. Delayed and frozen data are requested, contrary to what this said: name the type on `req_market_data_type` and every subscription after it carries the mode, or state it per request with `req_mkt_data_ex`. The table there gives the wire shape of each.
 
 ```rust
 pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, ) -> Result<(), Refusal>
@@ -1338,7 +1392,7 @@ pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote>
 
 #### `option_model`
 
-What the venue's own model last made of an option, whole. [`Wrapper::tick_option_computation`] carries eight figures, which is what the documented callback has room for; the venue states eighteen on the same tick. The ten it has no room for — the rate greek, the expected time to exercise and the price that triggers it, the forward coefficient, two yields, the time value, the days the model counted, the rate it discounted at, and which kind of volatility it priced on — were decoded and dropped. They are on the record this returns. A figure the venue did not state is `f64::MAX`, as everywhere else on this record; zero is a real greek. `None` where the request names no subscription, or the venue has not stated a model for it yet. [`Wrapper::tick_option_computation`]: crate::api::Wrapper::tick_option_computation
+What the venue's own model last made of an option, whole. `Wrapper::tick_option_computation` carries eight figures, which is what the documented callback has room for; the venue states eighteen on the same tick. The ten it has no room for — the rate greek, the expected time to exercise and the price that triggers it, the forward coefficient, two yields, the time value, the days the model counted, the rate it discounted at, and which kind of volatility it priced on — were decoded and dropped. They are on the record this returns. A figure the venue did not state is `f64::MAX`, as everywhere else on this record; zero is a real greek. `None` where the request names no subscription, or the venue has not stated a model for it yet.
 
 ```rust
 pub fn option_model(&self, req_id: i64) -> Option<crate::types::OptionComputation>
@@ -1354,7 +1408,7 @@ pub fn option_model(&self, req_id: i64) -> Option<crate::types::OptionComputatio
 
 #### `short_sale_restricted`
 
-Whether the venue is restricting short sales in the contract a request is watching. The circuit breaker a venue puts on a contract that has fallen far enough in a day, which stops a short from resting below the bid. The venue states it on the same record as the halt, and it has no field anywhere in the documented API. Not the same question as whether the contract can be borrowed, which [`Wrapper::tick_generic`] already answers beside it: a contract can be freely borrowable and still restricted. `false` where the request names no subscription, as it is for a contract the venue has not restricted. [`Wrapper::tick_generic`]: crate::api::Wrapper::tick_generic
+Whether the venue is restricting short sales in the contract a request is watching. The circuit breaker a venue puts on a contract that has fallen far enough in a day, which stops a short from resting below the bid. The venue states it on the same record as the halt, and it has no field anywhere in the documented API. Not the same question as whether the contract can be borrowed, which `Wrapper::tick_generic` already answers beside it: a contract can be freely borrowable and still restricted. `false` where the request names no subscription, as it is for a contract the venue has not restricted.
 
 ```rust
 pub fn short_sale_restricted(&self, req_id: i64) -> bool
@@ -1568,7 +1622,7 @@ pub fn company_data_series(&self, con_id: u32) -> Vec<u32>
 
 #### `closing_option_model`
 
-What the venue's model made of an option as it closed. The same model as [`Self::option_model`] and in the same shape — every greek it states, the ones the documented API has no field for included — but worked out as the contract closed rather than as it stands. The documented API has no call for it at all. Ask for it by the venue's own number for the series in the generic tick list.
+What the venue's model made of an option as it closed. The same model as `Self::option_model` and in the same shape — every greek it states, the ones the documented API has no field for included — but worked out as the contract closed rather than as it stands. The documented API has no call for it at all. Ask for it by the venue's own number for the series in the generic tick list.
 
 ```rust
 pub fn closing_option_model(&self, req_id: i64) -> Option<crate::types::OptionComputation>
@@ -1952,7 +2006,7 @@ pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &st
 
 #### `req_adjustments`
 
-Ask for a contract's corporate actions over a range of days. The answer is filed against the contract it names rather than handed to a callback under this id, because the venue answers per contract: `EClient::adjustments` reads it once it has arrived, and `corporate_actions` asks and waits in one call. `start_date` and `end_date` are days, as `YYYYMMDD`.
+Ask for a contract's corporate actions over a range of days. No callback carries the answer; a refusal arrives on `error` under this id, as any request's does, and gives the request up: nothing is held for it after, and there is nothing to withdraw. The answer is held under the id until `adjustments_for` takes it or `cancel_adjustments` gives it up, so a request that is neither taken nor withdrawn holds its answer for the rest of the session. It is also filed against the contract it names, where `EClient::adjustments` reads the last answer about that contract whoever asked, and `corporate_actions` asks and waits in one call. `start_date` and `end_date` are days, as `YYYYMMDD`.
 
 ```rust
 pub fn req_adjustments( &self, req_id: i64, con_id: i64, sec_type: &str, exchange: &str, start_date: &str, end_date: &str, ) -> Result<(), Refusal>
@@ -1966,6 +2020,38 @@ pub fn req_adjustments( &self, req_id: i64, con_id: i64, sec_type: &str, exchang
 | `exchange` | `&str` | Exchange name. |
 | `start_date` | `&str` |  |
 | `end_date` | `&str` |  |
+
+**Returns:** `Result<(), Refusal>`
+
+---
+
+#### `adjustments_for`
+
+The corporate actions answering a `req_adjustments` under this id, once they have arrived. Taken rather than read: the answer is handed over once and the request holds nothing after it. `None` until the answer arrives, and for a request this session is not holding one for. A contract the venue states nothing for answers with an empty list, which is an answer.
+
+```rust
+pub fn adjustments_for(&self, req_id: i64) -> Option<Vec<Adjustment>>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Option<Vec<Adjustment>>`
+
+---
+
+#### `cancel_adjustments`
+
+Give up on a `req_adjustments`: whatever it holds is let go of, and the venue is told to stop serving the query. For a request whose answer has not come and is no longer wanted: the venue serves the query until it is withdrawn. A withdrawal naming no query this client is waiting on, one already answered included, is reported on `error` under 300.
+
+```rust
+pub fn cancel_adjustments(&self, req_id: i64) -> Result<(), Refusal>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -2160,7 +2246,7 @@ pub fn req_current_time_in_millis(&self, wrapper: &mut impl Wrapper)
 
 #### `request_fa`
 
-Ask the venue for a partition of the advisor's own configuration. The reference client names the partition by a number — its aliases, its groups, its allocation profiles — and the venue names it by a word, so the number is turned into the word it stands for. A number that stands for nothing is refused rather than sent as an empty partition. The venue's answer reaches [`Wrapper::receive_fa`] under the same number the partition was asked for by.
+Ask the venue for a partition of the advisor's own configuration. The reference client names the partition by a number — its aliases, its groups, its allocation profiles — and the venue names it by a word, so the number is turned into the word it stands for. A number that stands for nothing is refused rather than sent as an empty partition. The venue's answer reaches `Wrapper::receive_fa` under the same number the partition was asked for by.
 
 ```rust
 pub fn request_fa(&self, fa_data_type: i32) -> Result<(), Refusal>
@@ -2176,7 +2262,7 @@ pub fn request_fa(&self, fa_data_type: i32) -> Result<(), Refusal>
 
 #### `replace_fa`
 
-Replace a partition of the advisor's configuration with the one given. [`Wrapper::replace_fa_end`] fires with `req_id` once the venue has taken it, and a venue that refuses states why on [`Wrapper::error`] under the same number.
+Replace a partition of the advisor's configuration with the one given. `Wrapper::replace_fa_end` fires with `req_id` once the venue has taken it, and a venue that refuses states why on `Wrapper::error` under the same number.
 
 ```rust
 pub fn replace_fa(&self, req_id: i64, fa_data_type: i32, cxml: &str) -> Result<(), Refusal>
@@ -2431,7 +2517,7 @@ The venue's clock, in seconds since the epoch.
 
 #### `current_time_in_millis`
 
-The venue's clock, in milliseconds since the epoch.  The same clock [`current_time`](Self::current_time) reports, at the precision the venue stated it in. The stamp can carry a fraction of a second and this reads it where it does — but on the sessions measured here the venue stated none, so the answer lands on a whole second and is the other call's thousandfold. Read the precision off the number rather than assuming this one has more of it.
+The venue's clock, in milliseconds since the epoch.  The same clock `current_time` reports, at the precision the venue stated it in. The stamp can carry a fraction of a second and this reads it where it does — but on the sessions measured here the venue stated none, so the answer lands on a whole second and is the other call's thousandfold. Read the precision off the number rather than assuming this one has more of it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

@@ -124,12 +124,15 @@ pub struct ReferenceState {
     /// share a slot — the second answer replacing the first before the first
     /// caller had looked.
     ///
-    /// A slot exists only while somebody waits: whoever asks makes one and
-    /// gives it up with a guard that runs on every way out of the wait, so an
-    /// answer to a request nobody is waiting on is dropped rather than kept.
-    /// The guard matters more than it looks — the request can fail to go out at
-    /// all, and a slot left by a call that never waited is one nothing
-    /// reclaims.
+    /// A slot exists only while somebody waits, so an answer to a request
+    /// nobody is waiting on is dropped rather than kept. A call that asks and
+    /// waits makes one and gives it up with a guard that runs on every way out
+    /// of the wait. The guard matters more than it looks — the request can fail
+    /// to go out at all, and a slot left by a call that never waited is one
+    /// nothing reclaims. A request sent on its own makes one that
+    /// `EClient::adjustments_for` gives up with the answer and
+    /// `EClient::cancel_adjustments` gives up without it; one the venue refuses,
+    /// or that is dropped with its connection, is given up by the engine.
     adjustments_by_request: Mutex<std::collections::HashMap<u32, Option<Vec<crate::control::adjustments::Adjustment>>>>,
     /// Errors surfaced by HMDS for in-flight reference queries (req_id, code, message).
     /// Drained by the dispatcher and forwarded to `Wrapper::error`.
@@ -603,13 +606,14 @@ impl ReferenceState {
     /// Say that an answer to this request is going to be waited for.
     ///
     /// Nothing is filed for a request nobody said they would wait on. Without
-    /// that, every answer to every request leaves a slot behind: the requests
-    /// sent by the fire-and-forget call are never taken by anyone, and an
-    /// answer arriving after its asker gave up recreates the slot it had just
-    /// removed. Either grows for as long as the session lasts.
+    /// that, every answer to every request leaves a slot behind: an answer
+    /// arriving after its asker gave up recreates the slot it had just
+    /// removed, and grows the map for as long as the session lasts.
     ///
     /// Paired with [`stop_waiting_for_adjustments`](Self::stop_waiting_for_adjustments),
-    /// which every path out of a wait goes through.
+    /// which every path out of a wait goes through, and which a request sent
+    /// on its own reaches once its answer is taken, once it is withdrawn, and
+    /// once the engine gives the query up.
     pub fn expect_adjustments(&self, req_id: u32) {
         self.adjustments_by_request.lock().unwrap().insert(req_id, None);
     }

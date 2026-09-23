@@ -747,23 +747,19 @@ impl EClient {
     ///
     /// A caller that numbers its orders and its requests out of one counter —
     /// which is how `ib_async` is written — needs both at once: clear of every
-    /// id an order has spent, and inside the four billion a request is carried
-    /// in. An account that has been given a wider order id than that has no
-    /// such number above it, so this answers with the widest the account has
-    /// used that a request can carry, and the counting goes on from there.
+    /// id an order has spent, and inside the numbers a request can carry. An
+    /// account that has been given a wider order id than that has no such
+    /// number above it, so this answers with one past the widest the account
+    /// has used that a request can carry, and the counting goes on from there.
+    /// After a connect it waits, for at most three seconds in all, for the venue
+    /// to name the orders the account is working.
+    ///
+    /// Raises RuntimeError where even that is not a number a request can
+    /// carry. Answers 1 where there is no session.
     fn next_shared_id(&self, py: Python<'_>) -> PyResult<i64> {
-        self.wait_for_the_replay(py);
         let Ok(shared) = self.shared_state() else { return Ok(1) };
-        let next = shared.orders.narrow_id_watermark() + 1;
-        // One past the widest carryable id is not itself carryable, and nor is
-        // anything this client has reserved. Handing one back would number a
-        // request that is answered to nobody, so the caller is told instead.
-        crate::api::client::wire_req_id(next as i64)
-            .map(|_| next as i64)
-            .map_err(|refusal| PyRuntimeError::new_err(format!(
-                "this account has no order id left that a request can also carry: {}",
-                refusal.message,
-            )))
+        py.detach(|| crate::api::client::next_shared_id_of(&shared))
+            .map_err(|refusal| PyRuntimeError::new_err(refusal.message))
     }
 
     /// Request all open orders for this client.

@@ -1521,6 +1521,98 @@ impl OptionChain {
     }
 }
 
+/// What to scan an underlying for, as `req_spread_scan` takes it: the fields
+/// of the Rust client's `SpreadScan`, under the same names.
+///
+/// The venue takes these as one run of named fields and answers with the
+/// strategies it finds. A field left as `None` is not sent, and the venue
+/// fills what it is not given. The words are the venue's own — a date is
+/// written the way the venue writes dates, and the lists the way it writes
+/// lists — so nothing here translates them.
+#[pyclass(get_all, set_all, from_py_object)]
+#[derive(Clone, Default)]
+pub struct SpreadScan {
+    /// Which shape of the request this is: four, five or six. Six is the one
+    /// that carries a price.
+    pub version: i32,
+    /// Nought to scan for strategies, one to ask about a named one, two to ask
+    /// what the market makes of it.
+    pub request: i32,
+    /// The contract to scan, by the venue's id for it. Nought takes the id of
+    /// the contract the request names.
+    pub under_con_id: i64,
+    /// The account the scan is for.
+    pub account: String,
+    /// The window to scan over.
+    pub start_date: Option<String>,
+    /// The end of that window.
+    pub end_date: Option<String>,
+    /// How the move to scan for is expressed.
+    pub move_type: Option<String>,
+    /// The move itself.
+    pub move_by: Option<String>,
+    /// How sure of it to be.
+    pub confidence: Option<String>,
+    /// Which way the premium should run.
+    pub premium: Option<String>,
+    /// Whether a strategy may hold the underlying itself as a leg.
+    pub allow_underlying_leg: Option<bool>,
+    /// The narrowest delta to take.
+    pub min_delta: Option<f64>,
+    /// And the widest.
+    pub max_delta: Option<f64>,
+    /// The expiries to take, as the venue lists them.
+    pub allowed_expirations: Option<String>,
+    /// And the ones to leave out.
+    pub excluded_expirations: Option<String>,
+    /// The strikes to take.
+    pub allowed_strikes: Option<String>,
+    /// And the ones to leave out.
+    pub excluded_strikes: Option<String>,
+    /// Which shapes of strategy to take.
+    pub allowed_strategies: Option<String>,
+    /// One named strategy, where the request asks about that rather than
+    /// scanning.
+    pub strategy: Option<String>,
+    /// What that strategy is priced at, which the sixth shape of the request
+    /// carries.
+    pub strategy_price: Option<f64>,
+}
+
+#[pymethods]
+impl SpreadScan {
+    #[new]
+    #[pyo3(signature = (**keywords))]
+    fn new(keywords: Option<&Bound<'_, pyo3::types::PyDict>>, py: Python<'_>) -> PyResult<Py<Self>> {
+        let made = Py::new(py, Self::default())?;
+        set_from_keywords(made.bind(py).as_any(), keywords)?;
+        Ok(made)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SpreadScan({})", crate::types::SpreadScan::from(self).stated())
+    }
+}
+
+impl From<&SpreadScan> for crate::types::SpreadScan {
+    /// Every field named on both sides, so one added to either fails to build
+    /// here rather than going unsent.
+    fn from(scan: &SpreadScan) -> Self {
+        let SpreadScan {
+            version, request, under_con_id, account, start_date, end_date, move_type,
+            move_by, confidence, premium, allow_underlying_leg, min_delta, max_delta,
+            allowed_expirations, excluded_expirations, allowed_strikes, excluded_strikes,
+            allowed_strategies, strategy, strategy_price,
+        } = scan.clone();
+        Self {
+            version, request, under_con_id, account, start_date, end_date, move_type,
+            move_by, confidence, premium, allow_underlying_leg, min_delta, max_delta,
+            allowed_expirations, excluded_expirations, allowed_strikes, excluded_strikes,
+            allowed_strategies, strategy, strategy_price,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

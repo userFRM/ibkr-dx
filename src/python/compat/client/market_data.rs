@@ -5,7 +5,7 @@ use crate::error_codes::{NO_SUCH_SUBSCRIPTION, Refusal};
 
 use crate::types::*;
 use super::{wire_req_id, EClient};
-use super::super::contract::Contract;
+use super::super::contract::{Contract, SpreadScan};
 
 #[pymethods]
 impl EClient {
@@ -75,10 +75,11 @@ impl EClient {
         // and the caller may have stated a description instead. Resolved only
         // when news is what was asked for: a quote on a description is asked
         // for by description and the venue names it itself.
-        // The whole entry, not a number ending in it: 1292 is not 292. Matching on
-        // the ending qualifies the contract, which is a request to the venue and a
-        // wait on the caller's thread, while the core subscribes to no news.
-        let wants_news = generic_tick_list.split(',').any(|t| t.trim() == "292");
+        // Read the way the core reads the list, since the core is what then
+        // subscribes: `1292` is not 292, and `292:BRFG+DJNL` is. Read any other
+        // way, this names a contract the core asks no headlines for, or leaves
+        // unnamed one it does.
+        let wants_news = crate::client_core::parse_generic_tick_list(generic_tick_list).news;
         let named;
         let by_venue;
         let contract = if wants_news && contract.con_id == 0 && !contract.symbol.is_empty() {
@@ -674,6 +675,38 @@ impl EClient {
             return Ok(Vec::new());
         };
         Ok(shared.market.paired_figures(instrument, series))
+    }
+
+    /// Ask the venue to scan an underlying for strategies worth putting on.
+    ///
+    /// The scan goes out beside a subscription for the series the venue states
+    /// its answer on, because that is how it is asked for: the series carries
+    /// the answer and the scan tells the venue what to look for. Read the
+    /// answer with `scanned_strategies` under the same request, and withdraw
+    /// it with `cancel_mkt_data`.
+    ///
+    /// The documented API has no call for this at all. What the scan states
+    /// about each strategy is the venue's own, in the venue's own words, and
+    /// nothing here translates them.
+    #[pyo3(signature = (req_id, contract, scan))]
+    fn req_spread_scan(
+        &self, py: Python<'_>, req_id: i64, contract: &Contract,
+        scan: &SpreadScan,
+    ) -> PyResult<()> {
+        let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        let mut scan = crate::types::SpreadScan::from(scan);
+        let con_id = if scan.under_con_id > 0 { scan.under_con_id } else { contract.con_id };
+        if con_id <= 0 {
+            return self.report_refusal(py, req_id, Refusal::validation(
+                "a spread scan names the contract to scan by the venue's id for it",
+            ));
+        }
+        scan.under_con_id = con_id;
+        // Written where the subscription can find it before the subscription is
+        // made: the series goes out through the same path every other does, and
+        // that path reads the scan from here rather than carrying it.
+        self.shared_state()?.reference.note_spread_scan(con_id as u32, scan.stated());
+        self.req_mkt_data(py, req_id, contract, "481", false, false, Vec::new())
     }
 
     /// The strategies a spread scan stated for a request, as the venue stated

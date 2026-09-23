@@ -420,8 +420,12 @@ impl HmdsState {
         self.answered_fundamental.clear();
         self.answered_news.clear();
         stranded.extend(self.pending_histogram.drain(..).map(|(_, rid)| (rid, false)));
+        // A request of the caller's own holds a slot for its answer, and a
+        // query dropped here is one nothing will answer.
         stranded.extend(self.pending_adjustments.drain(..)
-            .filter(|(_, rid, _)| !held_ids.contains(rid)).map(|(_, rid, _)| (rid, false)));
+            .filter(|(_, rid, _)| !held_ids.contains(rid))
+            .inspect(|(_, rid, _)| shared.reference.stop_waiting_for_adjustments(*rid))
+            .map(|(_, rid, _)| (rid, false)));
         stranded.extend(self.pending_schedule.drain(..).map(|(_, rid, _)| (rid, false)));
         stranded.extend(self.pending_ticks.drain(..).map(|(_, rid, _)| (rid, false)));
         if stranded.is_empty() {
@@ -1026,6 +1030,12 @@ impl HmdsState {
                                 // caller with an end and no bars.
                                 refused_a_held_query = self.held.iter()
                                     .any(|a| a.actions_query.as_deref() == Some(asked.as_str()));
+                                // A request of the caller's own, and not a
+                                // fold's, holds a slot for its answer, which
+                                // nothing will now fill.
+                                if !refused_a_held_query {
+                                    shared.reference.stop_waiting_for_adjustments(req_id);
+                                }
                             } else if let Some(pos) = self.pending_ticks.iter().position(|(q, _, _)| states(qid, q)) {
                                 let (_, req_id, _) = self.pending_ticks.remove(pos);
                                 released_req_id = Some(req_id);
@@ -2625,7 +2635,8 @@ fn build_tbt_query(
     }
 
     /// Say that a contract's actions could not be asked for, and let go of the
-    /// series that was waiting to be folded by them.
+    /// series that was waiting to be folded by them, or of the slot a request
+    /// of the caller's own holds for its answer.
     ///
     /// The request is registered as outstanding only when it actually goes out,
     /// so one that does not is on no path that later fails it. Left held, the
@@ -2639,7 +2650,11 @@ fn build_tbt_query(
             format!("the request for this contract's corporate actions could not be sent: {why}"),
             false,
         );
-        if self.held.iter().any(|a| a.req_id == req_id) {
+        // A request of the caller's own holds a slot for its answer; a fold's
+        // holds none, and its series is ended instead.
+        if !self.held.iter().any(|a| a.req_id == req_id) {
+            shared.reference.stop_waiting_for_adjustments(req_id);
+        } else {
             self.held.retain(|a| a.req_id != req_id);
             shared.reference.push_historical_data(
                 req_id,

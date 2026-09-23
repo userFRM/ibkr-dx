@@ -298,7 +298,8 @@ pub(super) fn named_with_what_the_caller_stated(mut named: Contract, stated: &Co
 /// Delivered into that collector, the caller's wrapper never hears it and
 /// nothing says so again until a reconnect — the program goes on believing it
 /// is connected. Restored on the way out, and only where this call is what
-/// took it, so a caller that had already been told is not told twice.
+/// took it and no record the caller keeps was pumped beside the collector, so
+/// a caller that had already been told is not told twice.
 struct LeaveTheCloseNoticeForTheCaller<'a> {
     client: &'a EClient,
     told_before: bool,
@@ -315,16 +316,19 @@ impl<'a> LeaveTheCloseNoticeForTheCaller<'a> {
 
 impl Drop for LeaveTheCloseNoticeForTheCaller<'_> {
     fn drop(&mut self) {
-        if !self.told_before {
+        // Where a record of the caller's own was pumped beside the collector,
+        // that record heard whatever the collector did, the close and a loss
+        // said under 1100 included, and hearing either again on the caller's
+        // next pass is hearing it twice.
+        let heard_by_the_caller = self.client.kept.lock().map(|k| k.is_some()).unwrap_or(false);
+        if !self.told_before && !heard_by_the_caller {
             self.client.close_notified.store(false, std::sync::atomic::Ordering::Release);
         }
         // A loss said under 1100 during the wait was said to the collector.
-        // Where no record of the caller's own was pumped beside it, the flag
-        // is raised again so the caller's next pass hears it; where one was,
-        // the caller's record already holds it.
+        // Where nothing of the caller's heard it too, the flag is raised again
+        // so the caller's next pass hears it.
         let went_during = self.connected_before
             && !self.client.connected.load(std::sync::atomic::Ordering::Acquire);
-        let heard_by_the_caller = self.client.kept.lock().map(|k| k.is_some()).unwrap_or(false);
         // A restore that landed after the last pump has already set the
         // flag; re-raising the loss would clear it, and the caller would
         // read 1100 and never the 1102 the engine recovered with.

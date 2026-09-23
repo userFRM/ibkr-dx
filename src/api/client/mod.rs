@@ -1,7 +1,7 @@
 //! ibapi-compatible EClient — Rust equivalent of C++ `EClientSocket`.
 //!
 //! Connects to IB, provides ibapi-matching method signatures, and dispatches
-//! events to a [`Wrapper`](crate::api::wrapper::Wrapper) via `process_msgs()`.
+//! events to a [`Wrapper`] via `process_msgs()`.
 //!
 //! ```no_run
 //! use ibkr_dx::api::{EClient, EClientConfig, Wrapper, Contract, Order};
@@ -46,6 +46,7 @@ mod stubs;
 pub(crate) mod tests;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::api::wrapper::Wrapper;
 use crate::control::adjustments::{AdjustedContract, Adjustment};
 use crate::error_codes::Refusal;
 use std::sync::{Arc, Mutex};
@@ -445,6 +446,25 @@ pub(crate) fn wire_req_id(req_id: i64) -> Result<u32, Refusal> {
     Ok(id)
 }
 
+/// What [`EClient::next_shared_id`] answers, read off a session's state: both
+/// surfaces answer it from here.
+pub(crate) fn next_shared_id_of(shared: &SharedState) -> Result<i64, Refusal> {
+    // Read after the venue has named what the account is working, as the
+    // order ids are: the mark is raised by that naming, which lands after the
+    // connect returns.
+    shared.orders.wait_for_replay();
+    let next = shared.orders.narrow_id_watermark() + 1;
+    // One past the widest carryable id is not itself carryable, and nor is
+    // anything this client has reserved. Handing one back would number a
+    // request that is answered to nobody, so the caller is told instead.
+    wire_req_id(next as i64).map(|_| next as i64).map_err(|refusal| {
+        Refusal::validation(format!(
+            "this account has no order id left that a request can also carry: {}",
+            refusal.message,
+        ))
+    })
+}
+
 /// Check a value a caller stated before it rides the wire as one field.
 ///
 /// The byte that separates fields cannot sit inside one: carried anyway, the
@@ -555,7 +575,7 @@ impl EClient {
     /// One reader, and it is told what it drains and nothing else. For a
     /// program that wants none of it dropped, drive
     /// [`process_msgs`](EClient::process_msgs) with a
-    /// [`Wrapper`](crate::api::wrapper::Wrapper) instead: its callbacks are
+    /// [`Wrapper`] instead: its callbacks are
     /// called with the message rather than sent a copy of it, so there is no
     /// queue to fill and nothing to fall out of one.
     ///
@@ -778,6 +798,46 @@ impl EClient {
         self.shared.reference.session_over().is_some()
     }
 
+    /// Wait for the engine to signal, for at most `timeout`: true when it
+    /// signalled, false when the wait ran out.
+    ///
+    /// The engine signals at the end of each pass of its loop, and when a
+    /// connection goes or comes back. One waiter takes each signal. A thread
+    /// that reads the session only when there may be something to read waits
+    /// here and then calls [`process_msgs`](EClient::process_msgs): true is a
+    /// reason to read, not a promise that the read delivers anything.
+    pub fn wait_for_data(&self, timeout: std::time::Duration) -> bool {
+        self.shared.wait_for_data(timeout)
+    }
+
+    /// Deliver to `record` everything a call that answers reads, its own
+    /// answer under its own number included.
+    ///
+    /// A call that answers rather than delivers —
+    /// [`contract_details`](EClient::contract_details),
+    /// [`historical_data`](EClient::historical_data) and the others that hand
+    /// back what they asked for — holds the session's turn while it waits and
+    /// reads the session into a collector of its own. The queues empty as they
+    /// are read, so a fill, an order's status or a quote arriving during that
+    /// wait is taken by the call. With a record kept here, every callback the
+    /// call reads reaches the record as well, the call's own under a number
+    /// from the range those calls take, which no request of the caller's
+    /// carries; with none, what the call does not use is gone.
+    ///
+    /// Keep a record that writes into the state the program's own
+    /// [`process_msgs`](EClient::process_msgs) loop writes into: what reaches
+    /// it here is not delivered to that loop again, the notice that a
+    /// connection went or came back included. Never hold this record's lock
+    /// across `process_msgs`. A call locks the record inside the turn it
+    /// already holds, so a loop that locks the record and then waits for the
+    /// turn waits on a call that is waiting on it, and neither ever returns.
+    /// Hand `process_msgs` a wrapper of its own that locks the shared state on
+    /// each callback, as the record does: the turn first, then the state, on
+    /// both sides. Replaces any record kept before.
+    pub fn keep_record(&self, record: Arc<Mutex<dyn Wrapper + Send>>) {
+        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
+    }
+
     /// Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the
     /// background thread to exit, and marks the client as disconnected.
     pub fn disconnect(&self) {
@@ -876,6 +936,20 @@ impl EClient {
     /// frames this client made up says nothing about the ones that arrive.
     pub fn unread_wire(&self) -> Vec<(&'static str, String)> {
         self.shared.market.unread_wire()
+    }
+
+    /// Another session that already held this account when this one connected.
+    ///
+    /// `None` when this session is alone. Otherwise where the other one
+    /// connected from, when it logged in — GMT, as the venue writes it:
+    /// `yyyyMMdd-HH:mm:ss` — and whether this session is held to reading only
+    /// because the other has the account.
+    ///
+    /// Worth asking before starting work: the venue permits one logon at a time
+    /// and takes the account from the older session without saying which it
+    /// dropped, so a second client reads as data that stops arriving.
+    pub fn competing_session(&self) -> Option<(String, String, bool)> {
+        self.shared.reference.competing_session()
     }
 
     /// Session ID surfaced to webapp REST clients as `x-ccp-session-id`.

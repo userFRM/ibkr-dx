@@ -2,7 +2,7 @@
 
 *Auto-generated from source — do not edit.*
 
-Canonical IB API methods vs IBKR-DX implementation status.
+Canonical IB API methods vs ibkr-dx implementation status.
 
 - **Y** = Implemented
 - **STUB** = Accepts call but not wired to server (logs warning or no-op)

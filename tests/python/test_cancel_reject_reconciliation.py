@@ -2,7 +2,7 @@
 
 Regression: when the venue rejects a cancel for an order it had previously
 listed in the post-connect mass-status burst (CxlRejReason=1, "No such
-order"), IBKR-DX must:
+order"), ibkr-dx must:
 
   - parse OrigClOrdID (tag 41) correctly despite the venue's "C" prefix
     and ".0/.1/.2" modify-chain suffix,

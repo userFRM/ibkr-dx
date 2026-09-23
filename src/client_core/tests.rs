@@ -2203,6 +2203,37 @@ fn news_is_asked_for_from_the_providers_the_logon_named() {
     assert_eq!(asked("292").as_deref(), Some("BRFG"));
     core.set_news_providers("");
     assert_eq!(asked("292").as_deref(), Some("DJNL*BRFUPDN"));
+
+    // An entry naming its own providers asks those, whatever the session
+    // names, and joined the way the venue separates them.
+    assert_eq!(asked("mdoff,292:BRFG+DJNL").as_deref(), Some("BRFG*DJNL"));
+    core.set_news_providers("DJNL");
+    assert_eq!(asked("292:BRFUPDN").as_deref(), Some("BRFUPDN"));
+    assert_eq!(asked("292:").as_deref(), Some("DJNL"), "an entry naming none takes the session's");
+}
+
+/// A generic tick list read one whole entry at a time.
+///
+/// Only a bare `292` was read as the headlines. `292:BRFG+DJNL`, the form that
+/// names the providers to ask, was read as a series that is not a number, so
+/// the caller was warned about a word it had written correctly and no
+/// headlines were asked for.
+#[test]
+fn a_tick_list_names_its_headlines_with_or_without_their_providers() {
+    assert_eq!(
+        parse_generic_tick_list(" mdoff, 292:BRFG+DJNL ,233,1292,233,x"),
+        GenericTicks {
+            news: true,
+            news_providers: "BRFG*DJNL".into(),
+            series: vec![233, 1292],
+            unread: vec!["x"],
+        },
+    );
+    let bare = parse_generic_tick_list("292");
+    assert!(bare.news && bare.news_providers.is_empty() && bare.series.is_empty());
+    assert!(!parse_generic_tick_list("2920").news, "2920 is a series of its own");
+    assert_eq!(parse_generic_tick_list("2920").series, vec![2920]);
+    assert_eq!(parse_generic_tick_list(""), GenericTicks::default());
 }
 
 /// A mask with bits set and no letters to show for them is one the venue has

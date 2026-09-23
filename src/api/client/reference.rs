@@ -1,6 +1,7 @@
 //! Reference data: contract details, historical data, scanners, news, fundamentals.
 
 use crate::types::*;
+use crate::control::adjustments::Adjustment;
 use crate::error_codes::Refusal;
 
 use super::{wire_req_id, wire_text, Contract, EClient, TagValue};
@@ -359,11 +360,17 @@ impl EClient {
 
     /// Ask for a contract's corporate actions over a range of days.
     ///
-    /// The answer is filed against the contract it names rather than handed to
-    /// a callback under this id, because the venue answers per contract:
-    /// [`EClient::adjustments`](crate::EClient::adjustments) reads it once it
-    /// has arrived, and [`corporate_actions`](crate::EClient::corporate_actions)
-    /// asks and waits in one call.
+    /// No callback carries the answer; a refusal arrives on `error` under this
+    /// id, as any request's does, and gives the request up: nothing is held for
+    /// it after, and there is nothing to withdraw. The answer is held under the
+    /// id until [`adjustments_for`](EClient::adjustments_for) takes it or
+    /// [`cancel_adjustments`](EClient::cancel_adjustments) gives it up, so a
+    /// request that is neither taken nor withdrawn holds its answer for the
+    /// rest of the session. It is also filed against the contract it names,
+    /// where [`EClient::adjustments`](crate::EClient::adjustments) reads the
+    /// last answer about that contract whoever asked, and
+    /// [`corporate_actions`](crate::EClient::corporate_actions) asks and waits
+    /// in one call.
     ///
     /// `start_date` and `end_date` are days, as `YYYYMMDD`.
     pub fn req_adjustments(
@@ -374,7 +381,41 @@ impl EClient {
         // which is every request rather than this one: a number taken from it
         // collides on any of them.
         let numbered = wire_req_id(req_id)?;
+        // Said before the request goes out, so an answer that arrives has
+        // somewhere to be put, and given back where the request does not go
+        // out, since nothing will ever answer it.
+        self.shared.reference.expect_adjustments(numbered);
         self.ask_for_adjustments(numbered, con_id, sec_type, exchange, start_date, end_date)
+            .inspect_err(|_| self.shared.reference.stop_waiting_for_adjustments(numbered))
+    }
+
+    /// The corporate actions answering a
+    /// [`req_adjustments`](EClient::req_adjustments) under this id, once they
+    /// have arrived.
+    ///
+    /// Taken rather than read: the answer is handed over once and the request
+    /// holds nothing after it. `None` until the answer arrives, and for a
+    /// request this session is not holding one for. A contract the venue
+    /// states nothing for answers with an empty list, which is an answer.
+    pub fn adjustments_for(&self, req_id: i64) -> Option<Vec<Adjustment>> {
+        // Read as a request is numbered, so an answer an answering call is
+        // waiting on is never taken from under it.
+        let req_id = wire_req_id(req_id).ok()?;
+        self.shared.reference.take_adjustments_answering(req_id)
+            .inspect(|_| self.shared.reference.stop_waiting_for_adjustments(req_id))
+    }
+
+    /// Give up on a [`req_adjustments`](EClient::req_adjustments): whatever it
+    /// holds is let go of, and the venue is told to stop serving the query.
+    ///
+    /// For a request whose answer has not come and is no longer wanted: the
+    /// venue serves the query until it is withdrawn. A withdrawal naming no
+    /// query this client is waiting on, one already answered included, is
+    /// reported on `error` under 300.
+    pub fn cancel_adjustments(&self, req_id: i64) -> Result<(), Refusal> {
+        let req_id = wire_req_id(req_id)?;
+        self.shared.reference.stop_waiting_for_adjustments(req_id);
+        self.send(ControlCommand::CancelCorporateActions { req_id })
     }
 
     /// Send a corporate-actions request under a number already settled.

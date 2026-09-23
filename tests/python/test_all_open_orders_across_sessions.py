@@ -89,7 +89,7 @@ class Wrapper(EWrapper):
 
 
 def connect_session():
-    """Create and connect a new IBKR-DX session. Returns (wrapper, client, run_thread)."""
+    """Create and connect a new ibkr-dx session. Returns (wrapper, client, run_thread)."""
     wrapper = Wrapper()
     client = EClient(wrapper)
     client.connect(

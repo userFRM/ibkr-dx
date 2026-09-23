@@ -531,6 +531,67 @@ impl EClient {
             Ok(Some(dict.into_any().unbind()))
         })
     }
+
+    /// Holdings the venue reports that this broker does not hold itself:
+    /// positions held away at another broker, and rows it marks as shown but
+    /// not held.
+    ///
+    /// Kept apart from `req_positions`, which answers what the account itself
+    /// holds. The reference client has no call for these — its own front end
+    /// shows them in a separate table — so this is the only way to reach them.
+    /// One dict per holding: `con_id`, `symbol`, `sec_type`, `currency`,
+    /// `position`, `avg_cost`, and `held`, which is `"Away"` for a position
+    /// held at another broker, `"DisplayOnly"` for a row shown but not held,
+    /// and `"Aside"` for one reported apart without saying why. Empty with no
+    /// session.
+    fn positions_elsewhere(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        shared.portfolio.positions_elsewhere().into_iter().map(|row| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("con_id", row.con_id)?;
+            dict.set_item("symbol", row.symbol)?;
+            dict.set_item("sec_type", row.sec_type)?;
+            dict.set_item("currency", row.currency)?;
+            dict.set_item("position", row.position)?;
+            dict.set_item("avg_cost", row.avg_cost as f64 / PRICE_SCALE_F)?;
+            dict.set_item("held", held_elsewhere_name(row.held))?;
+            Ok(dict.into_any().unbind())
+        }).collect()
+    }
+
+    /// The account figures describing one of the sets of holdings the account
+    /// does not hold itself, as name, value and the currency each is stated
+    /// in. A figure stated in two currencies is two figures.
+    ///
+    /// `held` names the set as `positions_elsewhere` does: `"Away"`,
+    /// `"DisplayOnly"` or `"Aside"`. The venue states these the same way it
+    /// states the account's own, and mixing them in would overstate what the
+    /// account is worth, so they are kept where the holdings they describe are
+    /// kept. Empty with no session.
+    #[pyo3(signature = (held))]
+    fn values_elsewhere(&self, held: &str) -> PyResult<Vec<(String, String, String)>> {
+        let held = match held {
+            "Away" => HeldElsewhere::Away,
+            "DisplayOnly" => HeldElsewhere::DisplayOnly,
+            "Aside" => HeldElsewhere::Aside,
+            other => return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{other:?} names none of the holdings kept elsewhere: \"Away\", \
+                 \"DisplayOnly\" or \"Aside\"",
+            ))),
+        };
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        Ok(shared.portfolio.values_elsewhere(held))
+    }
+}
+
+/// What a caller calls one of the venue's other sets of holdings: the Rust
+/// client's own name for it, which `values_elsewhere` takes back.
+fn held_elsewhere_name(held: HeldElsewhere) -> &'static str {
+    match held {
+        HeldElsewhere::Away => "Away",
+        HeldElsewhere::DisplayOnly => "DisplayOnly",
+        HeldElsewhere::Aside => "Aside",
+    }
 }
 
 // Not a Python method: a helper the calls above share.
@@ -582,6 +643,44 @@ w = W()",
         *client.account_id.lock().unwrap() = Some("DU123".into());
         client.connected.store(true, Ordering::Release);
         (client, rx, wrapper)
+    }
+
+    /// What the venue reports holding elsewhere is read on this surface as on
+    /// the other: apart from the account's own holdings, and each set of its
+    /// figures by the name the holdings carry.
+    ///
+    /// Held by the engine and reachable only from Rust, a Python program could
+    /// not see a position held away at all.
+    #[test]
+    fn holdings_kept_elsewhere_are_read_apart_from_the_accounts_own() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, _wrapper) = wired_client(py);
+            assert!(client.positions_elsewhere(py).unwrap().is_empty(), "nothing reported yet");
+            let shared = client.shared_state().unwrap();
+            shared.portfolio.set_position_elsewhere(PositionElsewhere {
+                con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(),
+                currency: "USD".into(), position: 30.0,
+                avg_cost: (182.5 * PRICE_SCALE_F) as i64, held: HeldElsewhere::Away,
+            });
+            shared.portfolio.set_value_elsewhere(
+                HeldElsewhere::Away, "NetLiquidation".into(), "5475".into(), "USD".into(),
+            );
+
+            let held = client.positions_elsewhere(py).unwrap();
+            assert_eq!(held.len(), 1);
+            let row = held[0].bind(py);
+            assert_eq!(row.get_item("con_id").unwrap().extract::<i64>().unwrap(), 265598);
+            assert_eq!(row.get_item("avg_cost").unwrap().extract::<f64>().unwrap(), 182.5);
+            assert_eq!(row.get_item("held").unwrap().extract::<String>().unwrap(), "Away");
+
+            assert_eq!(
+                client.values_elsewhere("Away").unwrap(),
+                vec![("NetLiquidation".to_string(), "5475".to_string(), "USD".to_string())],
+            );
+            assert!(client.values_elsewhere("DisplayOnly").unwrap().is_empty(), "another set");
+            assert!(client.values_elsewhere("away").is_err(), "a name no set carries is refused");
+        });
     }
 
     /// A profit request naming an account this session did not open under is

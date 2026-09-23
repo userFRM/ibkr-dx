@@ -10862,3 +10862,316 @@ fn corporate_actions_about_an_unnumbered_contract_is_a_bad_request() {
     assert_eq!(why.code, Refusal::VALIDATION, "the number for a request that is wrong");
     assert_ne!(why.code, Refusal::NO_ANSWER, "nothing was waited for, so nothing stayed silent");
 }
+
+/// What an answering call reads and does not use reaches the record a caller
+/// keeps, as well as the call's own collector.
+///
+/// The queues empty as they are read, so a status arriving while a call waits
+/// is taken by that call. Read into its collector alone, the fill was dropped
+/// and the record the program keeps never heard its order had filled.
+#[test]
+fn a_status_arriving_during_an_answering_call_reaches_the_kept_record() {
+    let (client, rx, shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9501, &spy(), &order).expect("placed");
+    while rx.try_recv().is_ok() {}
+    let record = Arc::new(std::sync::Mutex::new(RecordingWrapper::default()));
+    client.keep_record(record.clone());
+
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 9501, instrument: 0, status: OrderStatus::Filled,
+        filled_qty: 1.0, remaining_qty: 0.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    // Over, so the call reads the session once and returns rather than
+    // waiting out its deadline for an answer nothing will send.
+    shared.reference.set_session_over("the test ended it");
+    let _ = client.corporate_actions(&spy(), "20240101", "20241231");
+
+    let heard = &record.lock().unwrap().events;
+    assert!(
+        heard.iter().any(|e| e.starts_with("order_status:9501:Filled:")),
+        "the fill was read by the call and never reached the record: {heard:?}",
+    );
+}
+
+/// A session that closes during an answering call is said once to a record the
+/// caller keeps.
+///
+/// The call reads the close into the kept record beside its collector. Unlatched
+/// on the way out as though only the collector had heard it, the caller's next
+/// pass said it again, and a program counting on one close heard two.
+#[test]
+fn a_close_heard_by_the_kept_record_during_an_answering_call_is_not_said_again() {
+    let (client, _rx, shared) = test_client();
+    let record = Arc::new(std::sync::Mutex::new(RecordingWrapper::default()));
+    client.keep_record(record.clone());
+
+    shared.reference.set_session_over("the test ended it");
+    shared.set_connection_lost();
+    let _ = client.corporate_actions(&spy(), "20240101", "20241231");
+    let mut next_pass = RecordingWrapper::default();
+    client.process_msgs(&mut next_pass);
+
+    let kept = &record.lock().unwrap().events;
+    let closes = kept.iter().chain(&next_pass.events).filter(|e| *e == "connection_closed");
+    assert_eq!(closes.count(), 1, "the close is said once: {kept:?} then {:?}", next_pass.events);
+}
+
+/// A reader beside an answering call, each handed its own wrapper writing into
+/// one state that is locked on each callback, runs to its end, and the state
+/// hears every status whichever of the two read it.
+///
+/// This is the arrangement `keep_record` asks for. The reader takes the turn
+/// and then the state; the call holds the turn and locks the kept record, and
+/// through it the state, inside that. What it shows is the delivery: a status
+/// the call reads reaches the state through the record, and one the reader
+/// reads reaches it directly.
+#[test]
+fn a_reader_beside_an_answering_call_shares_one_state_with_the_kept_record() {
+    /// A record that locks the state it writes into on each callback, as a
+    /// program keeping one state for two readers does.
+    struct Forwarder(Arc<std::sync::Mutex<Vec<String>>>);
+    impl Wrapper for Forwarder {
+        fn order_status(
+            &mut self, order_id: i64, status: &str, _: f64, _: f64,
+            _: f64, _: i64, _: i64, _: f64, _: i64, _: &str, _: f64,
+        ) {
+            self.0.lock().unwrap().push(format!("{order_id}:{status}"));
+        }
+    }
+
+    let (client, rx, shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 10.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9502, &spy(), &order).expect("placed");
+    while rx.try_recv().is_ok() {}
+    let client = Arc::new(client);
+    let state = Arc::new(std::sync::Mutex::new(Vec::new()));
+    client.keep_record(Arc::new(std::sync::Mutex::new(Forwarder(state.clone()))));
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (client, stop, mut mine) = (client.clone(), stop.clone(), Forwarder(state.clone()));
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                client.process_msgs(&mut mine);
+            }
+        })
+    };
+    let asking = {
+        let client = client.clone();
+        std::thread::spawn(move || {
+            let _ = client.corporate_actions(&spy(), "20240101", "20241231");
+        })
+    };
+    for filled in 1..=10 {
+        shared.orders.push_order_update(OrderUpdate {
+            order_id: 9502, instrument: 0,
+            status: if filled == 10 { OrderStatus::Filled } else { OrderStatus::PartiallyFilled },
+            filled_qty: filled as f64, remaining_qty: 10.0 - filled as f64,
+            avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    // Ends the call's wait, which is the last thing either thread waits on.
+    shared.reference.set_session_over("the test ended it");
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        asking.join().expect("the call ran to its end");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        reader.join().expect("the reader ran to its end");
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
+        "the reader and the answering call wedged each other",
+    );
+    let heard = state.lock().unwrap();
+    assert!(
+        heard.iter().any(|e| e == "9502:Filled"),
+        "the last status reached neither reader: {heard:?}",
+    );
+}
+
+/// A thread waiting on the engine wakes when it signals, and a wait nothing
+/// answers runs out.
+#[test]
+fn a_waiting_reader_wakes_when_the_engine_signals() {
+    use std::time::{Duration, Instant};
+    let (client, _rx, shared) = test_client();
+    assert!(!client.wait_for_data(Duration::from_millis(20)), "nothing signalled");
+
+    // A signal given before anybody waits is held for the next waiter.
+    shared.notify();
+    assert!(client.wait_for_data(Duration::ZERO), "the signal was lost");
+
+    let signal = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            shared.notify();
+        })
+    };
+    let began = Instant::now();
+    assert!(client.wait_for_data(Duration::from_secs(30)), "the signal was not seen");
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "the wait ended only when it ran out: {:?}", began.elapsed(),
+    );
+    signal.join().unwrap();
+}
+
+/// A counter seeded from the shared id numbers requests the session can carry,
+/// on an account the venue has given an order id wider than any request.
+///
+/// A program that numbers orders and requests out of one counter and seeds it
+/// past every order id has, on such an account, a counter no request can be
+/// numbered from. The shared id is the widest a request can carry, plus one.
+#[test]
+fn the_shared_id_numbers_a_request_past_an_order_id_no_request_carries() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.set_replay_done();
+    assert_eq!(client.next_shared_id(), Ok(1), "an account that has used nothing");
+
+    shared.orders.note_the_venue_named(700);
+    shared.orders.note_the_venue_named(5_000_000_000);
+    let seed = client.next_shared_id().expect("an id a request can carry");
+    assert_eq!(seed, 701, "one past the widest id a request can carry");
+    assert_eq!(client.next_shared_id(), Ok(701), "a read, not a counter");
+    assert!(client.next_order_id() > u32::MAX as i64, "orders still count past the wide one");
+    assert!(
+        client.req_fundamental_data(seed, &spy(), "ReportSnapshot").is_ok(),
+        "a request numbered from it goes out",
+    );
+
+    // Where the ids a request can carry are all spent, it says so.
+    shared.orders.note_the_venue_named(
+        u64::from(crate::bridge::ReferenceState::ASK_ID_BASE) - 1,
+    );
+    assert_eq!(
+        client.next_shared_id().map_err(|refusal| refusal.code),
+        Err(Refusal::VALIDATION),
+    );
+}
+
+/// The session that already held the account when this one connected is named
+/// on the client, as the venue named it.
+#[test]
+fn the_session_that_already_held_the_account_is_named_on_the_client() {
+    let (client, _rx, shared) = test_client();
+    assert_eq!(client.competing_session(), None, "alone");
+    let other = ("10.0.0.4".to_string(), "20260813-09:30:00".to_string(), true);
+    shared.reference.set_competing_session(Some(other.clone()));
+    assert_eq!(client.competing_session(), Some(other));
+}
+
+/// One corporate action, as the venue states a split.
+fn a_split() -> Vec<crate::control::adjustments::Adjustment> {
+    vec![crate::control::adjustments::Adjustment {
+        kind: Some(crate::control::adjustments::AdjustmentKind::Split),
+        date: "20240610".into(),
+        value: "10".into(),
+        ..Default::default()
+    }]
+}
+
+/// The contract a corporate-actions answer names.
+fn nvda() -> crate::control::adjustments::AdjustedContract {
+    crate::control::adjustments::AdjustedContract { con_id: "4815747".into(), ..Default::default() }
+}
+
+/// A corporate-actions request holds its answer until it is taken, and holds
+/// nothing once it has been.
+///
+/// Nothing was held for the request itself: its answer was filed against the
+/// contract, where the next question about the same contract replaces it, so
+/// a caller asking without waiting could not tell its answer from somebody
+/// else's.
+#[test]
+fn a_corporate_actions_request_holds_its_answer_until_it_is_taken() {
+    let (client, rx, shared) = test_client();
+    client.req_adjustments(41, 4815747, "STK", "SMART", "20240101", "20241231").expect("sent");
+    assert!(
+        matches!(rx.try_recv(), Ok(ControlCommand::FetchAdjustments { req_id: 41, .. })),
+        "the request goes out under its own number",
+    );
+    assert_eq!(client.adjustments_for(41), None, "nothing has arrived");
+
+    shared.reference.note_adjustments(nvda(), a_split(), 41);
+    assert_eq!(client.adjustments_for(41), Some(a_split()), "the answer to request 41");
+    assert_eq!(client.adjustments_for(41), None, "taken, so not there to take twice");
+
+    // And the request holds nothing after it: a second answer under the same
+    // number has nowhere to go.
+    shared.reference.note_adjustments(nvda(), a_split(), 41);
+    assert_eq!(client.adjustments_for(41), None, "the slot went with the answer");
+
+    // A number from the range the answering calls take is theirs to take.
+    let asked = crate::bridge::ReferenceState::ASK_ID_BASE + 5;
+    shared.reference.expect_adjustments(asked);
+    shared.reference.note_adjustments(nvda(), a_split(), asked);
+    assert_eq!(client.adjustments_for(i64::from(asked)), None, "an answering call's answer");
+    assert!(shared.reference.take_adjustments_answering(asked).is_some(), "left for that call");
+}
+
+/// A corporate-actions request given up on holds nothing, and the venue is told
+/// to stop serving it. So does one that never went out.
+#[test]
+fn a_corporate_actions_request_given_up_on_holds_nothing() {
+    let (client, rx, shared) = test_client();
+    client.req_adjustments(42, 4815747, "STK", "SMART", "20240101", "20241231").expect("sent");
+    let _ = rx.try_recv();
+
+    client.cancel_adjustments(42).expect("withdrawn");
+    assert!(
+        matches!(rx.try_recv(), Ok(ControlCommand::CancelCorporateActions { req_id: 42 })),
+        "the venue is told to stop",
+    );
+    shared.reference.note_adjustments(nvda(), a_split(), 42);
+    assert_eq!(client.adjustments_for(42), None, "an answer arriving after all is not kept");
+
+    drop(rx);
+    assert!(
+        client.req_adjustments(43, 4815747, "STK", "SMART", "20240101", "20241231").is_err(),
+        "no engine to send it to",
+    );
+    shared.reference.note_adjustments(nvda(), a_split(), 43);
+    assert_eq!(client.adjustments_for(43), None, "a request that never went out holds nothing");
+}
+
+/// A description asking for headlines by provider is named first, as one asking
+/// for them bare is.
+///
+/// Headlines are asked for by the venue's id for the contract, so a contract
+/// given by description is named before it is watched. Only a bare `292` was
+/// read as asking for them: `292:BRFG+DJNL`, the form that names the
+/// providers, left the description unnamed here and asked for no headlines at
+/// all.
+#[test]
+fn a_description_asking_for_headlines_by_provider_is_named_first() {
+    let (client, rx, shared) = test_client();
+    client.core.set_registration_timeout(std::time::Duration::from_millis(1));
+    let aapl = Contract {
+        symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+        currency: "USD".into(), ..Default::default()
+    };
+    let named_first = |sent: &[ControlCommand]| {
+        sent.iter().any(|c| matches!(c, ControlCommand::FetchContractDetails { .. }))
+    };
+
+    let _ = client.req_mkt_data(1, &aapl, "1292", false, false);
+    let sent: Vec<_> = rx.try_iter().collect();
+    assert!(!named_first(&sent), "1292 asks for no headlines: {sent:?}");
+
+    // Over, so the naming returns at once rather than waiting out its deadline.
+    shared.reference.set_session_over("the test ended it");
+    let _ = client.req_mkt_data(2, &aapl, "mdoff,292:BRFG+DJNL", false, false);
+    let sent: Vec<_> = rx.try_iter().collect();
+    assert!(named_first(&sent), "the description went unnamed: {sent:?}");
+}

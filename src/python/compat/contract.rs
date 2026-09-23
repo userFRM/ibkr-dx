@@ -88,6 +88,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Order>()?;
     m.add_class::<OrderComboLegPy>()?;
     m.add_class::<OptionChain>()?;
+    m.add_class::<SpreadScan>()?;
     m.add_class::<TagValue>()?;
     m.add_class::<IneligibilityReason>()?;
     m.add_class::<OrderState>()?;

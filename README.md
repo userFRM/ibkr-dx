@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/userFRM/ibkr-dx/main/docs/book/src/banner-dark.svg">
-    <img src="https://raw.githubusercontent.com/userFRM/ibkr-dx/main/docs/book/src/banner-light.svg" alt="IBKR-DX: a direct connection engine for Interactive Brokers" width="100%">
+    <img src="https://raw.githubusercontent.com/userFRM/ibkr-dx/main/docs/book/src/banner-light.svg" alt="ibkr-dx: a direct connection engine for Interactive Brokers" width="100%">
   </picture>
 </p>
 
@@ -36,7 +36,7 @@
 
 ## Introduction
 
-IBKR-DX implements the IBKR client protocol directly. It authenticates, maintains
+ibkr-dx implements the IBKR client protocol directly. It authenticates, maintains
 the market-data, trading, historical and security-definition connections, and
 exposes the same API a program would otherwise reach through IB Gateway — with
 no gateway process, JVM, or local socket in between.
@@ -289,7 +289,15 @@ client.closing_option_model(1)      # the same, worked out as the contract close
 
 ### Asking the venue to find a trade
 
-In Rust; the Python `EClient` does not carry this request.
+```python
+scan = ibkr_dx.SpreadScan(version=6, under_con_id=265598,
+                          account="DU1234567", min_delta=0.25)
+client.req_spread_scan(1, aapl, scan)
+for s in client.scanned_strategies(1):
+    s["legs"], s["figures"], s["breakEvens"]
+```
+
+The same fields in Rust:
 
 ```rust
 let scan = ibkr_dx::types::SpreadScan {
@@ -342,12 +350,12 @@ One row per capability, one column per client — every one of the 78 calls and 
 | TWS API | 78 / 78 | 90 / 90 | nothing missing |
 | ibapi | 73 / 78 | 85 / 90 | 5 absent, 5 callbacks absent |
 | ib_async | 77 / 78 | 78 / 90 | 1 absent, 12 callbacks absent |
-| **IBKR-DX Rust** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
-| **IBKR-DX Python** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
+| **ibkr-dx Rust** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
+| **ibkr-dx Python** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
 
 **Nothing on that list is absent here.** 9 exist and never fire, because the venue states nothing on this connection for them to carry: there is no terminal between this client and the venue to make a verification handshake with, no socket layer of the reference client's own to report an error from, this connection does not reroute a request to another contract, and neither an exchange-for-physical quote nor a delta-neutral pairing is stated on it — a share, a fund and two futures were read together and the venue stated fifteen kinds of tick, none of them those. Each says so where it is declared, so a program that implements one still compiles and runs. Everything else is carried.
 
-**And 77 more beyond that list.** The connection a terminal opens carries more than the documented calls describe — what the venue permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and a client that speaks that connection can answer them. Most have no call in the documented API at all; a few are one a reference client happens to name too, and the table below marks which is which, under *Beyond the canonical list*.
+**And 81 more beyond that list.** The connection a terminal opens carries more than the documented calls describe — what the venue permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and a client that speaks that connection can answer them. Most have no call in the documented API at all; a few are one a reference client happens to name too, and the table below marks which is which, under *Beyond the canonical list*.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
@@ -387,7 +395,7 @@ filled in from memory. A mark here is a thing that was read.
 
 What a program asks the venue for.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect` | ● | ● | ● | ● | ● | ● |
 |  | `disconnect` | ● | ● | ● | ● | ● | ● |
@@ -472,7 +480,7 @@ What a program asks the venue for.
 
 What the venue says back. `ib_async` delivers these as events as well as methods, so a mark here says the method exists on its wrapper, not that the information is unavailable by another route.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect_ack` | ● | ● | ● | ● | ● | ● |
 |  | `connection_closed` | ● | ● | ● | ● | ● | ● |
@@ -581,16 +589,18 @@ venue.
 A mark against a reference client here means it happens to name the
 same thing, not that the documented API does.
 
-| Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
+| Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `account` | ● | · | · | · | ● | · |
 | `accountSnapshot` | ● | · | · | · | · | ● |
 | `adjustments` | ● | · | · | · | ● | · |
+| `adjustmentsFor` | ● | · | · | · | ● | ● |
 | `algorithms` | ● | · | · | · | ● | · |
 | `algorithmsFor` | ● | · | · | · | ● | ● |
 | `await_order` | ● | · | · | · | ● | · |
 | `calendar_events` | ● | · | · | · | ● | · |
 | `calendar_schema` | ● | · | · | · | ● | · |
+| `cancelAdjustments` | ● | · | · | · | ● | ● |
 | `cancel_historical_news` | ● | · | · | · | ● | · |
 | `cancelOrderByPermId` | ● | · | · | · | ● | ● |
 | `cancelWshEventData` | ● | ● | · | ● | ● | ● |
@@ -601,7 +611,7 @@ same thing, not that the documented API does.
 | `closingOptionModelByInstrument` | ● | · | · | · | ● | ● |
 | `companyData` | ● | · | · | · | ● | ● |
 | `companyDataSeries` | ● | · | · | · | ● | ● |
-| `competingSession` | ● | · | · | · | · | ● |
+| `competingSession` | ● | · | · | · | ● | ● |
 | `connect_with_events` | ● | · | · | · | ● | · |
 | `contractFigures` | ● | · | · | · | ● | ● |
 | `contractFiguresByInstrument` | ● | · | · | · | ● | ● |
@@ -610,13 +620,14 @@ same thing, not that the documented API does.
 | `eventsLost` | ● | · | · | · | ● | ● |
 | `getAccountId` | ● | · | · | · | · | ● |
 | `instrument_of` | ● | · | · | · | ● | · |
+| `keep_record` | ● | · | · | · | ● | · |
 | `last_rtt` | ● | · | · | · | ● | · |
 | `lastRttMs` | ● | · | · | · | · | ● |
 | `matchingSymbols` | ● | · | · | · | ● | ● |
 | `miscUrl` | ● | · | · | · | ● | ● |
 | `newsHeadlines` | ● | · | · | · | ● | ● |
 | `nextOrderId` | ● | · | · | · | ● | ● |
-| `nextSharedId` | ● | · | · | · | · | ● |
+| `nextSharedId` | ● | · | · | · | ● | ● |
 | `numberedFigures` | ● | · | · | · | ● | ● |
 | `numberedFiguresSeries` | ● | · | · | · | ● | ● |
 | `option_chain` | ● | · | · | · | ● | · |
@@ -630,7 +641,7 @@ same thing, not that the documented API does.
 | `parse_algo_params` | ● | · | · | · | ● | · |
 | `permittedOrderTypes` | ● | · | · | · | ● | ● |
 | `positions` | ● | ● | · | ● | ● | · |
-| `positions_elsewhere` | ● | · | · | · | ● | · |
+| `positionsElsewhere` | ● | · | · | · | ● | ● |
 | `qualifyContract` | ● | · | · | · | ● | ● |
 | `qualifyContracts` | ● | ● | · | ● | ● | ● |
 | `quote` | ● | · | · | · | ● | · |
@@ -638,7 +649,7 @@ same thing, not that the documented API does.
 | `reqAdjustments` | ● | · | · | · | ● | ● |
 | `reqMktDataEx` | ● | · | · | · | ● | ● |
 | `reqPing` | ● | · | · | · | ● | ● |
-| `req_spread_scan` | ● | · | · | · | ● | · |
+| `reqSpreadScan` | ● | · | · | · | ● | ● |
 | `scan` | ● | · | · | · | ● | · |
 | `scannedStrategies` | ● | · | · | · | ● | ● |
 | `schedule` | ● | ● | · | ● | ● | · |
@@ -658,7 +669,8 @@ same thing, not that the documented API does.
 | `tradingSchedule` | ● | · | · | · | · | ● |
 | `twsConnectionTime` | ● | ● | ● | · | · | ● |
 | `unread_wire` | ● | · | · | · | ● | · |
-| `values_elsewhere` | ● | · | · | · | ● | · |
+| `valuesElsewhere` | ● | · | · | · | ● | ● |
+| `waitForData` | ● | · | · | · | ● | ● |
 | `what_if_order` | ● | ● | · | ● | ● | · |
 
 ## Calls, counted
@@ -669,8 +681,8 @@ same thing, not that the documented API does.
 | TWS API | 78 | 0 | 0 |
 | ibapi | 73 | 0 | 5 |
 | ib_async | 77 | 0 | 1 |
-| IBKR-DX Rust | 78 | 0 | 0 |
-| IBKR-DX Python | 78 | 0 | 0 |
+| ibkr-dx Rust | 78 | 0 | 0 |
+| ibkr-dx Python | 78 | 0 | 0 |
 
 </details>
 
@@ -769,10 +781,11 @@ restart cheap. See
 ## Configuration
 
 The gateway's configuration file is replaced by settings on the client:
-announced build, time zone, execution-report scope, and others — 14 in total,
-readable at runtime. Ten gateway settings have no counterpart and report why (no
-window geometry, no local listening socket, no JVM heap, and no message pacing:
-nothing here paces outgoing messages, which the gateway ships with off).
+announced build, time zone, execution-report scope, and others — 17 in total,
+readable at runtime. Sixteen gateway settings are not settings here, and each says
+why or names what stands in for it (no window geometry, no local listening socket,
+no JVM heap, and no message pacing: nothing here paces outgoing messages, which the
+gateway ships with off).
 
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 
@@ -870,8 +883,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,678 | No |
-| Python | 831 | No |
+| Rust, unit and integration | 2,691 | No |
+| Python | 844 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |
@@ -922,15 +935,15 @@ repository's security advisories rather than in a public issue.
 
 ## Credits
 
-IBKR-DX began as a fork of [ibx](https://github.com/deepentropy/ibx) by
+ibkr-dx began as a fork of [ibx](https://github.com/deepentropy/ibx) by
 DeepEntropy and Odyssée, at its v0.7.1 release
 ([deepentropy/ibx@9367845](https://github.com/deepentropy/ibx/commit/9367845), 25 July 2026),
 under the same AGPL-3.0 licence. That history is the first commit here, and its
 full log is in the original repository. Everything after it was written for
-IBKR-DX, from 28 July 2026 on. Thank you to both of them for the foundation.
+ibkr-dx, from 28 July 2026 on. Thank you to both of them for the foundation.
 
 - ibx: Copyright (C) 2026 DeepEntropy and Odyssée
-- IBKR-DX: Copyright (C) 2026 userFRM
+- ibkr-dx: Copyright (C) 2026 userFRM
 
 ## Disclaimer
 
@@ -938,7 +951,7 @@ Interactive Brokers®, IBKR®, Trader Workstation®, and IB Gateway® are
 registered trademarks of Interactive Brokers Group, Inc. This project is **not
 affiliated with, endorsed by, or supported by Interactive Brokers**.
 
-IBKR-DX is an independent, open-source project provided "as is", without warranty
+ibkr-dx is an independent, open-source project provided "as is", without warranty
 of any kind.
 
 > [!CAUTION]
@@ -948,17 +961,17 @@ of any kind.
 
 ### Legal Considerations
 
-- **No warranty.** IBKR-DX is provided "as is", without warranty of any kind. See [LICENSE](LICENSE) for full terms.
-- **Use at your own risk.** Users are solely responsible for ensuring their use of IBKR-DX complies with Interactive Brokers' Terms of Service, Customer Agreement, and any applicable laws or regulations. Using IBKR-DX may carry risks including but not limited to account restriction or termination by IB.
-- **Not financial software.** IBKR-DX is an experimental research project. It is not intended as a replacement for officially supported IB software in production trading environments. The authors accept no liability for financial losses, missed trades, account issues, or any other damages arising from the use of this software.
-- **Protocol stability.** IBKR-DX relies on an undocumented protocol that IB may change at any time without notice. There is no guarantee of continued functionality.
+- **No warranty.** ibkr-dx is provided "as is", without warranty of any kind. See [LICENSE](LICENSE) for full terms.
+- **Use at your own risk.** Users are solely responsible for ensuring their use of ibkr-dx complies with Interactive Brokers' Terms of Service, Customer Agreement, and any applicable laws or regulations. Using ibkr-dx may carry risks including but not limited to account restriction or termination by IB.
+- **Not financial software.** ibkr-dx is an experimental research project. It is not intended as a replacement for officially supported IB software in production trading environments. The authors accept no liability for financial losses, missed trades, account issues, or any other damages arising from the use of this software.
+- **Protocol stability.** ibkr-dx relies on an undocumented protocol that IB may change at any time without notice. There is no guarantee of continued functionality.
 
 ### EU Interoperability
 
 For users and contributors in the European Union: Article 6 of the EU Software
 Directive (2009/24/EC) permits reverse engineering for the purpose of achieving
 interoperability with independently created software, provided that specific
-conditions are met. IBKR-DX was developed with this legal framework in mind,
+conditions are met. ibkr-dx was developed with this legal framework in mind,
 enabling interoperability with IB's trading infrastructure on platforms where
 the official Java-based Gateway cannot run (headless Linux, containers,
 embedded systems).

@@ -2398,6 +2398,41 @@ fn a_refusal_of_a_standalone_actions_query_leaves_the_fold_alone() {
     assert_eq!(errors[0].0, 7);
 }
 
+/// A standalone actions query the venue refuses, or that goes with its
+/// connection, lets go of the slot its caller's request holds for the answer.
+/// Nothing will fill it, and left standing it was held for the rest of the
+/// session unless the caller withdrew a query the venue no longer had.
+#[test]
+fn a_standalone_actions_query_the_engine_gives_up_holds_nothing() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let _peer = listener.accept().unwrap();
+    let mut conn = Some(Connection::new_raw(sock).unwrap());
+
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+    let held_for = |req_id| {
+        let contract = crate::control::adjustments::AdjustedContract {
+            con_id: "756733".into(), ..Default::default()
+        };
+        shared.reference.note_adjustments(contract, Vec::new(), req_id);
+        shared.reference.take_adjustments_answering(req_id).is_some()
+    };
+
+    shared.reference.expect_adjustments(41);
+    hmds.pending_adjustments.push(("adj_41".to_string(), 41, 756733));
+    hmds.process_hmds_message(
+        &make_query_error_msg("adj_41", "no permission"), &mut conn, &shared, &None, &mut hb,
+    );
+    assert!(!held_for(41), "a refused request holds nothing");
+
+    shared.reference.expect_adjustments(42);
+    hmds.pending_adjustments.push(("adj_42".to_string(), 42, 756733));
+    hmds.fail_pending("the connection went", &shared);
+    assert!(!held_for(42), "nor does one that went with its connection");
+}
+
 /// A series whose corporate actions could not be asked for is let go, not held.
 ///
 /// The request is registered as outstanding only if it actually went out, so a

@@ -34,7 +34,7 @@ filled in from memory. A mark here is a thing that was read.
 
 What a program asks the venue for.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect` | ● | ● | ● | ● | ● | ● |
 |  | `disconnect` | ● | ● | ● | ● | ● | ● |
@@ -119,7 +119,7 @@ What a program asks the venue for.
 
 What the venue says back. `ib_async` delivers these as events as well as methods, so a mark here says the method exists on its wrapper, not that the information is unavailable by another route.
 
-| Category | Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
+| Category | Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connection | `connect_ack` | ● | ● | ● | ● | ● | ● |
 |  | `connection_closed` | ● | ● | ● | ● | ● | ● |
@@ -228,16 +228,18 @@ venue.
 A mark against a reference client here means it happens to name the
 same thing, not that the documented API does.
 
-| Call | Gateway wire | TWS API | ibapi | ib_async | IBKR-DX Rust | IBKR-DX Python |
+| Call | Gateway wire | TWS API | ibapi | ib_async | ibkr-dx Rust | ibkr-dx Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `account` | ● | · | · | · | ● | · |
 | `accountSnapshot` | ● | · | · | · | · | ● |
 | `adjustments` | ● | · | · | · | ● | · |
+| `adjustmentsFor` | ● | · | · | · | ● | ● |
 | `algorithms` | ● | · | · | · | ● | · |
 | `algorithmsFor` | ● | · | · | · | ● | ● |
 | `await_order` | ● | · | · | · | ● | · |
 | `calendar_events` | ● | · | · | · | ● | · |
 | `calendar_schema` | ● | · | · | · | ● | · |
+| `cancelAdjustments` | ● | · | · | · | ● | ● |
 | `cancel_historical_news` | ● | · | · | · | ● | · |
 | `cancelOrderByPermId` | ● | · | · | · | ● | ● |
 | `cancelWshEventData` | ● | ● | · | ● | ● | ● |
@@ -248,7 +250,7 @@ same thing, not that the documented API does.
 | `closingOptionModelByInstrument` | ● | · | · | · | ● | ● |
 | `companyData` | ● | · | · | · | ● | ● |
 | `companyDataSeries` | ● | · | · | · | ● | ● |
-| `competingSession` | ● | · | · | · | · | ● |
+| `competingSession` | ● | · | · | · | ● | ● |
 | `connect_with_events` | ● | · | · | · | ● | · |
 | `contractFigures` | ● | · | · | · | ● | ● |
 | `contractFiguresByInstrument` | ● | · | · | · | ● | ● |
@@ -257,13 +259,14 @@ same thing, not that the documented API does.
 | `eventsLost` | ● | · | · | · | ● | ● |
 | `getAccountId` | ● | · | · | · | · | ● |
 | `instrument_of` | ● | · | · | · | ● | · |
+| `keep_record` | ● | · | · | · | ● | · |
 | `last_rtt` | ● | · | · | · | ● | · |
 | `lastRttMs` | ● | · | · | · | · | ● |
 | `matchingSymbols` | ● | · | · | · | ● | ● |
 | `miscUrl` | ● | · | · | · | ● | ● |
 | `newsHeadlines` | ● | · | · | · | ● | ● |
 | `nextOrderId` | ● | · | · | · | ● | ● |
-| `nextSharedId` | ● | · | · | · | · | ● |
+| `nextSharedId` | ● | · | · | · | ● | ● |
 | `numberedFigures` | ● | · | · | · | ● | ● |
 | `numberedFiguresSeries` | ● | · | · | · | ● | ● |
 | `option_chain` | ● | · | · | · | ● | · |
@@ -277,7 +280,7 @@ same thing, not that the documented API does.
 | `parse_algo_params` | ● | · | · | · | ● | · |
 | `permittedOrderTypes` | ● | · | · | · | ● | ● |
 | `positions` | ● | ● | · | ● | ● | · |
-| `positions_elsewhere` | ● | · | · | · | ● | · |
+| `positionsElsewhere` | ● | · | · | · | ● | ● |
 | `qualifyContract` | ● | · | · | · | ● | ● |
 | `qualifyContracts` | ● | ● | · | ● | ● | ● |
 | `quote` | ● | · | · | · | ● | · |
@@ -285,7 +288,7 @@ same thing, not that the documented API does.
 | `reqAdjustments` | ● | · | · | · | ● | ● |
 | `reqMktDataEx` | ● | · | · | · | ● | ● |
 | `reqPing` | ● | · | · | · | ● | ● |
-| `req_spread_scan` | ● | · | · | · | ● | · |
+| `reqSpreadScan` | ● | · | · | · | ● | ● |
 | `scan` | ● | · | · | · | ● | · |
 | `scannedStrategies` | ● | · | · | · | ● | ● |
 | `schedule` | ● | ● | · | ● | ● | · |
@@ -305,7 +308,8 @@ same thing, not that the documented API does.
 | `tradingSchedule` | ● | · | · | · | · | ● |
 | `twsConnectionTime` | ● | ● | ● | · | · | ● |
 | `unread_wire` | ● | · | · | · | ● | · |
-| `values_elsewhere` | ● | · | · | · | ● | · |
+| `valuesElsewhere` | ● | · | · | · | ● | ● |
+| `waitForData` | ● | · | · | · | ● | ● |
 | `what_if_order` | ● | ● | · | ● | ● | · |
 
 ## Calls, counted
@@ -316,6 +320,6 @@ same thing, not that the documented API does.
 | TWS API | 78 | 0 | 0 |
 | ibapi | 73 | 0 | 5 |
 | ib_async | 77 | 0 | 1 |
-| IBKR-DX Rust | 78 | 0 | 0 |
-| IBKR-DX Python | 78 | 0 | 0 |
+| ibkr-dx Rust | 78 | 0 | 0 |
+| ibkr-dx Python | 78 | 0 | 0 |
 

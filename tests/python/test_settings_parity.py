@@ -96,3 +96,35 @@ def test_a_session_states_its_own_settings():
 
     # And the process is not touched by a session stating one.
     assert ibkr_dx.settings()["timezone"] is None
+
+
+#: A count in a sentence may be written as a word, and the published pages
+#: write the small ones that way.
+_NUMBERS = {
+    word: n for n, word in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve "
+        "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+    )
+}
+
+
+def _stated(pattern: str, text: str) -> list[int]:
+    return [
+        int(found) if found.isdigit() else _NUMBERS[found.lower()]
+        for found in re.findall(pattern, text)
+    ]
+
+
+def test_the_published_counts_are_what_the_lists_hold():
+    """Both lists grew and the pages that count them did not: the readme and
+    the evidence page said fourteen settings and ten that are not settings
+    here while the lists held seventeen and sixteen."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    for page in ("README.md", "docs/evidence.md"):
+        # Joined, so a figure broken across a line is read with its words.
+        text = " ".join((root / page).read_text().split())
+        carried = _stated(r"\b(\w+) (?:in total, readable at runtime|settings carried)", text)
+        missing = _stated(r"\b(\w+) (?:gateway settings are|recorded as) not settings here", text)
+        assert carried and missing, f"{page} no longer states either count"
+        assert set(carried) == {len(ibkr_dx.settings())}, f"{page}: {carried}"
+        assert set(missing) == {len(ibkr_dx.UNAVAILABLE)}, f"{page}: {missing}"

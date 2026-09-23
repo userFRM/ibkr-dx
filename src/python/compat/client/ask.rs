@@ -246,6 +246,29 @@ impl EClient {
     }
 }
 
+/// One corporate action as a caller reads it: its kind as the two-letter name
+/// the venue uses, the day it takes effect, its value, and the dates and
+/// dividend descriptions the kind carries. A field the kind does not carry is
+/// empty rather than invented.
+pub(super) fn stated_action(
+    a: crate::control::adjustments::Adjustment,
+) -> std::collections::BTreeMap<String, String> {
+    [
+        ("kind", a.kind.map(|k| k.code()).unwrap_or("").to_string()),
+        ("date", a.date),
+        ("value", a.value),
+        ("currency", a.currency),
+        ("announce_date", a.announce_date),
+        ("record_date", a.record_date),
+        ("pay_date", a.pay_date),
+        ("payment_type", a.payment_type),
+        ("distribution_type", a.distribution_type),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
 /// The window the answer covers, the time zone a venue states its hours in,
 /// and each session as its opening, its close, and the day it belongs to.
 ///
@@ -289,22 +312,7 @@ impl EClient {
     ) -> PyResult<Vec<std::collections::BTreeMap<String, String>>> {
         Ok(self.actions_for(py, contract, start_date, end_date)?
             .into_iter()
-            .map(|a| {
-                [
-                    ("kind", a.kind.map(|k| k.code()).unwrap_or("").to_string()),
-                    ("date", a.date),
-                    ("value", a.value),
-                    ("currency", a.currency),
-                    ("announce_date", a.announce_date),
-                    ("record_date", a.record_date),
-                    ("pay_date", a.pay_date),
-                    ("payment_type", a.payment_type),
-                    ("distribution_type", a.distribution_type),
-                ]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect()
-            })
+            .map(stated_action)
             .collect())
     }
 

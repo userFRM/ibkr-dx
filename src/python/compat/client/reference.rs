@@ -358,11 +358,15 @@ impl EClient {
 
     /// Ask for a contract's corporate actions over a range of days.
     ///
-    /// The venue answers per contract, not per request, so the answer is filed
-    /// against the contract it names. `corporate_actions` asks and waits in one
-    /// call; this is the request on its own.
+    /// No callback carries the answer; a refusal arrives on `error` under this
+    /// id, as any request's does, and gives the request up: nothing is held for
+    /// it after, and there is nothing to withdraw. The answer is held under the
+    /// id until `adjustments_for` takes it or `cancel_adjustments` gives it up,
+    /// so a request that is neither taken nor withdrawn holds its answer for the
+    /// rest of the session. `corporate_actions` asks and waits in one call;
+    /// this is the request on its own.
     #[pyo3(signature = (req_id, con_id, sec_type, exchange, start_date, end_date))]
-    pub(crate) fn req_adjustments(
+    fn req_adjustments(
         &self,
         py: Python<'_>,
         req_id: i64,
@@ -397,14 +401,66 @@ impl EClient {
                  comes back",
             ))
         })?;
+        let wire = wire_req_id(req_id)?;
+        // Said before the request goes out, so an answer that arrives has
+        // somewhere to be put, and given back where the request does not go
+        // out, since nothing will ever answer it.
+        let shared = self.shared_state()?;
+        shared.reference.expect_adjustments(wire);
         if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchAdjustments {
-                req_id: wire_req_id(req_id)?,
+                req_id: wire,
                 con_id,
                 sec_type: sec_type.to_string(),
                 exchange: exchange.to_string(),
                 start_date: start_date.to_string(),
                 end_date: end_date.to_string(),
             }) {
+            shared.reference.stop_waiting_for_adjustments(wire);
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        }
+        Ok(())
+    }
+
+    /// The corporate actions answering a `req_adjustments` under this id, once
+    /// they have arrived: one dict per action, as `corporate_actions` states
+    /// them.
+    ///
+    /// Taken rather than read: the answer is handed over once and the request
+    /// holds nothing after it. `None` until the answer arrives, and for a
+    /// request this session is not holding one for. A contract the venue
+    /// states nothing for answers with an empty list, which is an answer.
+    #[pyo3(signature = (req_id))]
+    fn adjustments_for(
+        &self, req_id: i64,
+    ) -> Option<Vec<std::collections::BTreeMap<String, String>>> {
+        let shared = self.shared_state().ok()?;
+        // Read as a request is numbered, so an answer an answering call is
+        // waiting on is never taken from under it.
+        let req_id = wire_req_id(req_id).ok()?;
+        let actions = shared.reference.take_adjustments_answering(req_id)?;
+        shared.reference.stop_waiting_for_adjustments(req_id);
+        Some(actions.into_iter().map(super::ask::stated_action).collect())
+    }
+
+    /// Give up on a `req_adjustments`: whatever it holds is let go of, and the
+    /// venue is told to stop serving the query.
+    ///
+    /// For a request whose answer has not come and is no longer wanted: the
+    /// venue serves the query until it is withdrawn. A withdrawal naming no
+    /// query this client is waiting on, one already answered included, is
+    /// reported on `error` under 300.
+    #[pyo3(signature = (req_id))]
+    fn cancel_adjustments(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        let wire = wire_req_id(req_id)?;
+        // Let go of before anything can return, as the other surface does
+        // before it sends: a session the engine gave up on still holds it.
+        if let Ok(shared) = self.shared_state() {
+            shared.reference.stop_waiting_for_adjustments(wire);
+        }
+        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = Self::send_control(
+            py, &tx, ControlCommand::CancelCorporateActions { req_id: wire },
+        ) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -815,6 +871,65 @@ mod tests {
                 ("priceAbove".to_string(), "20".to_string()),
                 ("usdMarketCapAbove".to_string(), "10000".to_string()),
             ]);
+        });
+    }
+
+    /// A corporate-actions request holds its answer until it is taken, holds
+    /// nothing once it has been, and holds nothing once it is given up — on
+    /// this surface as on the other.
+    ///
+    /// The only way to an answer here was the call that asks and waits, which
+    /// holds this client while it waits: a program with a loop of its own
+    /// could send the request and had nowhere to read what answered it.
+    #[test]
+    fn a_corporate_actions_request_holds_its_answer_until_it_is_taken() {
+        use crate::control::adjustments::{AdjustedContract, Adjustment, AdjustmentKind};
+        Python::initialize();
+        Python::attach(|py| {
+            let client = EClient::__new__(&pyo3::types::PyTuple::empty(py), None);
+            let wrapper = py.eval(
+                c"__import__('builtins').type('W', (), {'__init__': lambda s: setattr(s, 'calls', []), '__getattr__': lambda s, n: (lambda *a: s.calls.append((n, a)))})()",
+                None, None,
+            ).unwrap().unbind();
+            client.__init__(wrapper).unwrap();
+            let (tx, rx) = std::sync::mpsc::sync_channel(16);
+            let shared = std::sync::Arc::new(crate::bridge::SharedState::new());
+            *client.control_tx.lock().unwrap() = Some(tx);
+            *client.shared.lock().unwrap() = Some(shared.clone());
+            client.connected.store(true, std::sync::atomic::Ordering::Release);
+            let nvda = || AdjustedContract { con_id: "4815747".into(), ..Default::default() };
+            let split = || vec![Adjustment {
+                kind: Some(AdjustmentKind::Split), date: "20240610".into(), value: "10".into(),
+                ..Default::default()
+            }];
+
+            client.req_adjustments(py, 41, 4815747, "STK", "SMART", "20240101", "20241231").unwrap();
+            assert!(matches!(rx.try_recv(), Ok(ControlCommand::FetchAdjustments { req_id: 41, .. })));
+            assert_eq!(client.adjustments_for(41), None, "nothing has arrived");
+            shared.reference.note_adjustments(nvda(), split(), 41);
+            let taken = client.adjustments_for(41).expect("the answer to request 41");
+            assert_eq!(taken.len(), 1);
+            assert_eq!(taken[0]["kind"], "SS");
+            assert_eq!(taken[0]["value"], "10");
+            shared.reference.note_adjustments(nvda(), split(), 41);
+            assert_eq!(client.adjustments_for(41), None, "the slot went with the answer");
+
+            client.req_adjustments(py, 42, 4815747, "STK", "SMART", "20240101", "20241231").unwrap();
+            let _ = rx.try_recv();
+            client.cancel_adjustments(py, 42).unwrap();
+            assert!(matches!(rx.try_recv(), Ok(ControlCommand::CancelCorporateActions { req_id: 42 })));
+            shared.reference.note_adjustments(nvda(), split(), 42);
+            assert_eq!(client.adjustments_for(42), None, "a withdrawn request keeps no answer");
+
+            // Withdrawn after the engine gave the session up: nothing is sent,
+            // and nothing is held either.
+            client.req_adjustments(py, 43, 4815747, "STK", "SMART", "20240101", "20241231").unwrap();
+            let _ = rx.try_recv();
+            shared.reference.set_session_over("the test ended it");
+            client.cancel_adjustments(py, 43).unwrap();
+            assert!(rx.try_recv().is_err(), "nothing goes to an engine that stopped");
+            shared.reference.note_adjustments(nvda(), split(), 43);
+            assert_eq!(client.adjustments_for(43), None, "and the request holds nothing");
         });
     }
 

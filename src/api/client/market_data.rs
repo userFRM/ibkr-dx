@@ -76,7 +76,9 @@ impl EClient {
     ///   from.
     /// * `236` — whether it can be borrowed, and how much of it.
     /// * `258` (or `47`) — the company ratios, as the venue writes them.
-    /// * `292` — news for the contract.
+    /// * `292` — news for the contract, from the providers the session names;
+    ///   `292:BRFG+DJNL` names the providers to ask instead. A contract's
+    ///   headlines are asked for once, by the first request that wants them.
     /// * `293`, `294`, `295` — how fast it is trading.
     /// * `318` — what last traded in the regular session.
     /// * `456` (or `59`) — what it pays out.
@@ -151,10 +153,11 @@ impl EClient {
         // and the caller may have stated a description instead. Resolved only
         // when news is what was asked for: a quote on a description is asked
         // for by description and the venue names it itself.
-        // The whole entry, not a number ending in it: 1292 is not 292. Matching on
-        // the ending qualifies the contract, which is a request to the venue and a
-        // wait on the caller's thread, while the core subscribes to no news.
-        let wants_news = generic_tick_list.split(',').any(|t| t.trim() == "292");
+        // Read the way the core reads the list, since the core is what then
+        // subscribes: `1292` is not 292, and `292:BRFG+DJNL` is. Read any other
+        // way, this names a contract the core asks no headlines for, or leaves
+        // unnamed one it does.
+        let wants_news = crate::client_core::parse_generic_tick_list(generic_tick_list).news;
         // Named by the venue where the caller named it by id alone, and where
         // headlines are wanted for a contract named by description.
         let named;

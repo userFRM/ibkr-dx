@@ -2197,6 +2197,8 @@ impl HotLoop {
                 }
                 ControlCommand::FetchAdjustments { req_id, con_id, sec_type, exchange, start_date, end_date } => {
                     if self.hmds_conn.is_none() {
+                        // Nothing will answer it, so nothing is held for it.
+                        self.shared.reference.stop_waiting_for_adjustments(req_id);
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
                         self.hmds.send_adjustments_request(req_id, con_id, &sec_type, &exchange, &start_date, &end_date, &self.shared, &mut self.hmds_conn, &mut self.hb);

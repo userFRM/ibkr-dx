@@ -1,7 +1,7 @@
 [book]
-title = "IBKR-DX"
+title = "ibkr-dx"
 description = "Talk directly to IBKR: the TWS API with no gateway in between. Rust and Python."
-authors = ["IBKR-DX contributors"]
+authors = ["ibkr-dx contributors"]
 language = "en"
 src = "src"
 

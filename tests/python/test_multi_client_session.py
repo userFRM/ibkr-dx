@@ -1,6 +1,6 @@
 """Multi-client session — cross-session order visibility.
 
-Since IBKR-DX does not support clientId routing (single session per connect),
+Since ibkr-dx does not support clientId routing (single session per connect),
 this test verifies cross-session order visibility using sequential sessions
 (Session A places order, Session B sees it via req_all_open_orders).
 
