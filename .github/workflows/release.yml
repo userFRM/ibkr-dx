@@ -1,184 +1,242 @@
 name: release
 
-# A tag is a promise, so everything that decides whether the promise holds runs
-# again here rather than being trusted from the commit it points at. A release
-# runs the workflow as it exists at the tag, so a fix to this file has to land
-# before the tag is cut, not after.
+# A tag `vX.Y.Z` publishes version X.Y.Z: the crate to crates.io, and to PyPI
+# every wheel built below and one source distribution. Nothing is published
+# until the tag names the version both manifests state and the tagged commit
+# passes everything a change has to pass. Run by hand, this builds and checks
+# the same things and publishes nothing.
+#
+# A release runs the workflow as it exists at the tag, so a fix to this file
+# has to land before the tag is cut, not after.
 on:
   push:
     tags: ["v*"]
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+# A tag pushed while a run on it is still going waits for that run rather than
+# racing it to the registries.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Nothing is built for a release until what is being released passes. The
-  # test workflow runs on every push; this runs it again against the tag,
-  # because a tag can point at a commit that was green before its neighbour
-  # landed.
-  gate:
-    name: everything the tag has to pass
+  version:
+    name: the tag names the version both manifests state
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The orphaned-doc check compares against the commit this one was
-          # built on, which a shallow checkout does not have.
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The Python step below builds and runs through uv, the same way the test
-      # workflow does. Without this it is not on PATH and the step dies at its
-      # first line.
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Install tzdata
-        run: sudo apt-get update && sudo apt-get install -y tzdata
-
-      - name: Lint
+      - name: Compare the tag, Cargo.toml and pyproject.toml
+        shell: python
         run: |
-          cargo clippy --lib --all-targets --features dev-tools -- -D warnings
-          cargo clippy --lib --all-targets --features python -- -D warnings
+          import os, sys, tomllib
 
-      - name: Test
+          crate = tomllib.load(open("Cargo.toml", "rb"))["package"]["version"]
+          package = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          wrong = []
+          if crate != package:
+              wrong.append(f"Cargo.toml states {crate} and pyproject.toml states {package}")
+          ref = os.environ["GITHUB_REF"]
+          if ref.startswith("refs/tags/") and ref.removeprefix("refs/tags/") != f"v{crate}":
+              wrong.append(f"the tag is {ref.removeprefix('refs/tags/')}, the manifests state {crate}")
+          for line in wrong:
+              print(f"::error::{line}")
+          sys.exit(1 if wrong else 0)
+
+  # The test workflow itself, run against the tag: the same jobs, the same
+  # prerequisites, the same pinned comparison clients, and the same comparison
+  # of every generated page and the readme. A copy kept here drifted from it.
+  gate:
+    name: everything a change has to pass
+    needs: version
+    uses: ./.github/workflows/tests.yml
+
+  crate:
+    name: the crate packages and builds as published
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The file list first, so the log says what a caller downloads; then the
+      # packaged crate built on its own, which is what a caller compiles.
+      - name: Package
         run: |
-          cargo test --lib
-          cargo test --lib --features python
-          cargo test --lib --features python,test-helpers
-          cargo test --doc
+          cargo package --list
+          cargo publish --dry-run
 
-      - name: The suites that need no session
-        env:
-          IBKR_DX_REGISTRATION_TIMEOUT_MS: "20"
-        run: |
-          cargo test --test control_plane --test depth_wire_test \
-            --test error_edge_concurrency --test hot_loop_lifecycle \
-            --test malformed_input --test protocol_vectors --test scenarios
-          IBKR_DX_ALLOW_SKIP_NO_CREDS=1 cargo test --test ib_paper_compat
-
-      - name: The published surface still resolves
-        run: cargo test --test public_surface
-
-      # The Python surface and the checks that hold every published number.
-      # Without these a tag can ship past a failure they would have caught.
-      - name: The Python suite and the gates
-        run: |
-          uv venv
-          uv pip install maturin pytest ib_async
-          # As in tests.yml: the suites ask for the injection methods, the
-          # published wheel below does not carry them.
-          # Every feature, not just the added one: this replaces what
-          # pyproject configures rather than adding to it, and without
-          # `python` maturin finds no pyo3 bindings, decides the crate is
-          # cffi and fails on a missing module — after reporting the build
-          # it did not do.
-          .venv/bin/maturin develop --features python,extension-module,test-helpers
-          .venv/bin/pytest tests/python -q
-          python scripts/check_status_counts.py
-          python scripts/check_module_graph.py
-          python scripts/check_wrapper_tee.py
-          python scripts/check_injection_stays_out_of_the_wheel.py
-          python scripts/check_orphaned_docs.py
-          # The generators are gates too: each one fails when a published page
-          # or count stops matching the source, and a tag that skips them ships
-          # a promise the ordinary build would have refused.
-          python scripts/gen_api_docs.py
-          python scripts/gen_wire_coverage.py
-          python scripts/gen_wire_reach.py
-          python scripts/gen_order_field_reach.py
-          python scripts/gen_arg_reach.py
-          # Staged first, because a plain diff says nothing about a page a
-          # generator has only just started producing.
-          git add -A docs/
-          git diff --cached --exit-code docs/
-
-      - name: Documentation builds
-        run: cargo doc --no-deps --lib
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-      - name: The crate would publish
-        run: cargo publish --dry-run
-
-  # One wheel per platform and per interpreter a caller runs on. The extension
-  # links against the interpreter it was built for, so a wheel built on 3.12
-  # will not install on 3.13 — every version `requires-python` claims is built,
-  # or the claim is one a caller finds out is untrue at `pip install`. Built
-  # from the tag, so what is attached to the release is what the tag says and
-  # not what a developer had on their machine.
+  # One wheel per platform and per interpreter the bindings build for: each
+  # CPython `requires-python` admits, and the free-threaded 3.14t. PyO3 builds
+  # for no free-threaded interpreter older than 3.14, so there is no 3.13t. The
+  # extension links against the interpreter it was built for, so a version left
+  # out is one a caller finds missing at `pip install`.
   wheels:
     name: wheel (${{ matrix.os }}, py${{ matrix.python }})
     needs: gate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.12", "3.13"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
+        id: python
         with:
           python-version: ${{ matrix.python }}
 
       - name: Build
         uses: PyO3/maturin-action@v1
         with:
-          # Linux builds inside a manylinux container, where the interpreter
-          # has to be named; on macOS and Windows it is the one setup-python
-          # just put on PATH.
+          # Linux builds inside a manylinux container, where the interpreter is
+          # named; on macOS and Windows it is the one setup-python installed.
+          manylinux: "2_28"
+          # The TLS layer links OpenSSL, and the manylinux image carries the
+          # library without its headers.
+          before-script-linux: dnf install -y openssl-devel
           args: >-
             --release --out dist --interpreter
-            ${{ matrix.os == 'ubuntu-latest' && format('python{0}', matrix.python) || 'python' }}
+            ${{ matrix.os == 'ubuntu-latest' && format('python{0}', matrix.python) || steps.python.outputs.python-path }}
           sccache: "true"
 
-      # A wheel that compiles is not a wheel that loads: an extension can fail
-      # to find its runtime only when something tries to import it. Windows
-      # included, where that is likeliest.
-      - name: The wheel imports what it says it does
+      # A wheel that compiles is not a wheel that loads, or one that carries
+      # what it should: installed into an interpreter of its own and checked
+      # from outside the checkout.
+      # A leg asking for the free-threaded interpreter and handed the other one
+      # builds a wheel under its neighbour's name, and the upload below keeps
+      # one of the two without a word. The check fails that leg instead.
+      - name: The wheel installs and carries the published surface
         shell: bash
+        env:
+          EXPECT_FREE_THREADED: ${{ endsWith(matrix.python, 't') }}
         run: |
-          python -m venv /tmp/check
-          BIN=/tmp/check/bin
-          [ -d "$BIN" ] || BIN=/tmp/check/Scripts
-          "$BIN/pip" install --find-links dist --no-index ibkr_dx
-          "$BIN/python" -c "import ibkr_dx; print(ibkr_dx.__name__, 'imports')"
+          "${{ steps.python.outputs.python-path }}" -m venv "$RUNNER_TEMP/check"
+          BIN="$RUNNER_TEMP/check/bin"
+          [ -d "$BIN" ] || BIN="$RUNNER_TEMP/check/Scripts"
+          "$BIN/python" -m pip install --find-links dist --no-index ibkr-dx
+          "$BIN/python" scripts/check_installed_package.py
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-py${{ matrix.python }}
           path: dist/*.whl
 
-  # Attached to the release rather than published to an index: pushing to PyPI
-  # or crates.io is a decision with a token behind it, and this workflow holds
-  # neither.
-  attach:
-    name: attach the wheels to the release
-    needs: wheels
-    if: github.event_name == 'release'
+  sdist:
+    name: source distribution
+    needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      # Built from the archive alone, away from the checkout, so a file the
+      # archive leaves out fails here rather than on a caller's machine.
+      - name: The archive builds and installs on its own
+        run: |
+          python -m venv "$RUNNER_TEMP/check"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/check/bin/python" -m pip install "$GITHUB_WORKSPACE"/dist/*.tar.gz
+          "$RUNNER_TEMP/check/bin/python" "$GITHUB_WORKSPACE/scripts/check_installed_package.py"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  crates-io:
+    name: publish the crate
+    needs: [crate, wheels, sdist]
+    # A tag pushed, not a run started by hand on one.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # The environment is where the registry tokens and the reviewers who
+    # approve a publish are set.
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned by commit: this job holds the registry token.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: cargo publish
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # After the crate rather than beside it: two registries published in parallel
+  # can end with one holding the version and the other not.
+  pypi:
+    name: publish the wheels and the source distribution
+    needs: [crate, wheels, sdist, crates-io]
+    # A tag pushed, not a run started by hand on one.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # Merged by name, so two legs that built the same file leave one. Three
+      # systems by five interpreters is fifteen wheels, and one archive.
+      - name: Every wheel and the archive are here
+        run: |
+          ls dist
+          test "$(find dist -name '*.whl' | wc -l)" -eq 15
+          test "$(find dist -name '*.tar.gz' | wc -l)" -eq 1
+      # Pinned by commit: this job holds the registry token. An upload that
+      # failed part-way is finished by running the job again.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
 
+  github-release:
+    name: attach the distributions to the release
+    needs: [crates-io, pypi]
+    # A tag pushed, not a run started by hand on one.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       # `gh` learns the repository from a checkout or from GH_REPO, and this
-      # job has no checkout. Without it the upload fails looking for one.
+      # job has no checkout.
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.whl --clobber
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes ""
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

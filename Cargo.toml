@@ -2,12 +2,11 @@
 name = "ibkr-dx"
 version = "0.1.0"
 edition = "2024"
-# The oldest compiler this builds on. Enforced here so it is checked
-# rather than claimed: the sources use let-chains and fixed-size slice
-# chunking, both of which arrived after the edition did, and the order id
-# counter takes a lock the kernel releases on its own.
+# The oldest compiler supported, and built on by a job of its own in CI so it
+# is checked rather than claimed. The sources use let-chains and fixed-size
+# slice chunking, both of which arrived after the edition did.
 rust-version = "1.89"
-description = "Talk directly to IBKR: a client for Interactive Brokers with full TWS API compatibility. No gateway required."
+description = "Talk directly to IBKR: an Interactive Brokers client with the TWS API's EClient interface, and no gateway in between."
 license = "AGPL-3.0-only"
 repository = "https://github.com/userFRM/ibkr-dx"
 keywords = ["interactive-brokers", "ibkr", "tws-api", "trading", "market-data"]
@@ -16,17 +15,21 @@ categories = ["api-bindings", "finance", "network-programming"]
 # developing this library rather than for using it, and a caller who installs
 # the crate should not be handed 30 of them.
 autobins = false
-# What a caller installing this crate needs, and nothing else. The published
-# package was 355 files and nine megabytes: notebooks, capture tools, the CI
-# gates, the live suites and the engineering notes, none of which a dependency
-# has any use for.
+# What a caller installing this crate needs, and nothing else: the library, the
+# Python layer the bindings ship with, and what builds them. The developer
+# binaries under `src/bin` and the examples are left out, and with their sources
+# gone `cargo package` drops their targets from the published manifest.
 exclude = [
     ".github/",
     "docs/",
+    "examples/",
     "notebooks/",
     "scripts/",
+    "src/bin/",
     "tests/",
     "python/ibkr_dx/*.so",
+    "rustfmt.toml",
+    "uv.lock",
 ]
 
 [lib]
@@ -161,11 +164,10 @@ serde_json = "1"
 [profile.release]
 lto = "fat"
 
-# Which card belongs to the address a session opened on. The venue's own client
-# takes the local address off the socket it connected with and reads the card of
-# that interface, which is not the first card the machine answers with: on some
-# systems that is a virtual one, and the identity then describes a machine the
-# venue has never seen. `getifaddrs` is how the address is matched to the
-# interface; the card itself still comes from `mac_address`.
+# Which card belongs to the address a session opened on. The identity a session
+# states is the card of the interface its socket left from, which is not
+# necessarily the first card the machine answers with: on some systems that is a
+# virtual one. `getifaddrs` is how the address is matched to the interface; the
+# card itself still comes from `mac_address`.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["net"] }

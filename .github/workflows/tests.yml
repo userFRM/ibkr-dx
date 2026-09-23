@@ -9,9 +9,15 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The release workflow runs this one against the tag, so a tag is held to
+  # exactly what a change is held to rather than to a copy kept beside it.
+  workflow_call:
 
+# Named by the workflow that started the run as well as by the ref: called by
+# the release workflow, this runs under the caller's name, and a release run
+# by hand from main would otherwise cancel main's own run and be cancelled by it.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -74,7 +80,7 @@ jobs:
           IBKR_DX_REGISTRATION_TIMEOUT_MS: "20"
         run: |
           set +e
-          timeout -k 30 1500 cargo test --test control_plane --test depth_wire_test --test error_edge_concurrency --test hot_loop_lifecycle --test malformed_input --test protocol_vectors --test scenarios > test-suites.log 2>&1
+          timeout -k 30 1500 cargo test --test control_plane --test depth_wire_test --test error_edge_concurrency --test hot_loop_lifecycle --test malformed_input --test protocol_vectors --test public_surface --test scenarios > test-suites.log 2>&1
           code=$?
           # Printed from the file rather than streamed, so a test that
           # outlives the timeout cannot hold the step's own output open:
@@ -98,8 +104,12 @@ jobs:
           # that orphan inherits the pipe the step is read through.
           if [ $code -ne 0 ]; then cat test-py.log; else tail -n 3 test-py.log; fi
           exit $code
-          # And again with the injection methods compiled in, or the tests
-          # that drive the client through them run nowhere.
+
+      # And again with the injection methods compiled in, or the tests that
+      # drive the client through them run nowhere. A step of its own: written
+      # after the `exit` above, it never ran.
+      - name: Test the Python bindings with the test helpers
+        run: |
           set +e
           timeout -k 30 1500 cargo test --lib --features python,test-helpers > test-pyh.log 2>&1
           code=$?
@@ -381,6 +391,27 @@ jobs:
 
       - name: Build
         run: cargo build --lib
+
+  msrv:
+    name: rust 1.89, the declared minimum
+    runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 30
+    # `rust-version` in the manifest is a claim; every other job here builds on
+    # `stable`, which says nothing about the oldest compiler a caller may have.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+      - uses: Swatinem/rust-cache@v2
+
+      - name: The library, with and without the bindings
+        run: |
+          cargo check --lib
+          cargo check --lib --features python
+          cargo check --lib --features python,extension-module
 
   rustdoc:
     name: rustdoc -D warnings

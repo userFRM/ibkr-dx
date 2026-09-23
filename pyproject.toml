@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "ibkr-dx"
 version = "0.1.0"
-description = "Talk directly to IBKR: a client for Interactive Brokers with full TWS API compatibility. No gateway required."
+description = "Talk directly to IBKR: an Interactive Brokers client with the TWS API's EClient/EWrapper interface, and no gateway in between."
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
 keywords = ["interactive-brokers", "ibkr", "tws-api", "ibapi", "trading"]
@@ -13,6 +13,7 @@ requires-python = ">=3.11"
 
 [project.urls]
 Repository = "https://github.com/userFRM/ibkr-dx"
+Documentation = "https://userfrm.github.io/ibkr-dx/"
 
 [tool.maturin]
 features = ["python", "extension-module"]
