@@ -1,4 +1,4 @@
-# Getting Started
+# Getting started
 
 ## What you need
 
@@ -114,6 +114,20 @@ programs under `examples/` read the same two:
 export IB_USERNAME="your_username"
 export IB_PASSWORD="your_password"
 ```
+
+## Pick a surface
+
+Every surface below drives the same engine and the same session. Pick by the
+program you have, not by capability.
+
+| Language | Surface | Pick it when |
+| --- | --- | --- |
+| Python | `ibkr_dx.EClient` / `EWrapper` | Your program is written against `ibapi`. Change `ibapi` to `ibkr_dx` in its imports. |
+| Python | `ibkr_dx.IB` | You want calls that hand back their answer, shaped like ib_async's `IB`, with nothing else installed. |
+| Python | `ibkr_dx.ib_async.attach(ib)` | You already run [ib_async](https://github.com/ib-api-reloaded/ib_async). It keeps running, unmodified, on this engine. |
+| Rust | `EClient` / `Wrapper` | You are porting a TWS API program and want its callbacks. |
+| Rust | `Client` | You are writing new Rust: state you read rather than ask for, and streams you iterate. |
+| Rust | `AsyncClient` (feature `async`) | You are inside a Tokio runtime. |
 
 ## Hello, world
 

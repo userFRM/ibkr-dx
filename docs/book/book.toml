@@ -1,13 +1,13 @@
 [book]
 title = "IBKR-DX"
-description = "Direct IB connection engine — Rust + Python."
+description = "Talk directly to IBKR: the TWS API with no gateway in between. Rust and Python."
 authors = ["IBKR-DX contributors"]
 language = "en"
 src = "src"
 
 [output.html]
 default-theme = "light"
-preferred-dark-theme = "navy"
+preferred-dark-theme = "coal"
 git-repository-url = "https://github.com/userFRM/ibkr-dx"
 edit-url-template = "https://github.com/userFRM/ibkr-dx/edit/main/docs/book/{path}"
 no-section-label = true

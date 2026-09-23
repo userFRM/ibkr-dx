@@ -1,29 +1,28 @@
-<div class="ibkr-dx-hero">
+<div class="dx-hero">
 
-<img class="ibkr-dx-logo" src="./banner-light.svg" alt="IBKR-DX" />
+<h1 class="dx-title">IBKR-DX</h1>
 
-# IBKR-DX
+<img class="dx-banner dx-banner-light" src="./banner-light.svg" alt="ibkr-dx: direct connection engine for Interactive Brokers" />
+<img class="dx-banner dx-banner-dark" src="./banner-dark.svg" alt="ibkr-dx: direct connection engine for Interactive Brokers" />
 
-<p class="ibkr-dx-tagline">An Interactive Brokers client that speaks the venue's protocol itself. Nothing to install alongside it, no process to keep alive. One engine, reachable from Rust and from Python.</p>
+<p class="dx-lede">Talk directly to IBKR. The TWS API your program already uses, with no IB Gateway, no Trader Workstation and no JVM between you and the venue.</p>
 
-<p class="ibkr-dx-cta">
-  <a class="primary" href="./getting-started.html">Get started</a>
-  <a class="secondary" href="./recipes/python/login.html">Recipes</a>
-  <a class="secondary" href="./reference/limits.html">What it does not do</a>
-  <a class="secondary" href="https://github.com/userFRM/ibkr-dx">GitHub</a>
+<p class="dx-cta">
+  <a class="dx-primary" href="./getting-started.html">Get started</a>
+  <a href="./recipes/python/login.html">Python recipes</a>
+  <a href="./recipes/rust/login.html">Rust recipes</a>
+  <a href="https://github.com/userFRM/ibkr-dx">GitHub</a>
 </p>
 
 </div>
 
-## What it replaces
+## One line changes
 
 A program written against the TWS API talks to IB Gateway or Trader Workstation
-over a socket on localhost, and that process talks to the venue. IBKR-DX is the
-second half of that arrangement. It logs in, holds the trading, market-data,
-historical and security-definition connections open, and gives your program the
-same calls and the same callbacks.
-
-Migrating an existing program is the connect call:
+over a socket on localhost, and that process talks to the venue. IBKR-DX takes
+the gateway's place: it logs in, holds the trading, market-data, historical and
+security-definition connections open, and gives your program the same calls and
+the same callbacks.
 
 ```diff
 - ib.connect("127.0.0.1", 4001, clientId=1)     # needs a gateway running
@@ -33,82 +32,69 @@ Migrating an existing program is the connect call:
 `host` and `port` are still accepted and are ignored. There is no local process
 to point them at.
 
-What goes with the gateway:
+## What goes away
 
-* **The process.** Nothing to install, launch, log into on a schedule, or restart.
-* **The JVM.** No heap to size.
-* **The localhost socket.** Ticks are delivered in-process.
-* **The window.** It runs headless, in a container, over ssh.
-
-<div class="ibkr-dx-features">
-
-<div class="ibkr-dx-feature">
-
-### The shape your program already has
-
-`EClient` / `EWrapper`, with the same method names and the same callbacks. In
-Python there is also `ibkr_dx.IB`, shaped like the widely used asynchronous wrapper,
-and `ibkr_dx.ib_async.attach`, which points an unmodified
-[ib_async](https://github.com/ib-api-reloaded/ib_async) program at this engine.
-
+<div class="dx-cards">
+<div class="dx-card">
+<p class="dx-card-title">The process</p>
+<p>Nothing to install, launch, log into on a schedule, or restart.</p>
+</div>
+<div class="dx-card">
+<p class="dx-card-title">The JVM</p>
+<p>No heap to size, and no garbage collector pausing the thread your ticks arrive on.</p>
+</div>
+<div class="dx-card">
+<p class="dx-card-title">The localhost socket</p>
+<p>Ticks are delivered in-process, to the thread that asked for them.</p>
+</div>
+<div class="dx-card">
+<p class="dx-card-title">The window</p>
+<p>It runs headless: in a container, over ssh, on a machine with no display.</p>
+</div>
 </div>
 
-<div class="ibkr-dx-feature">
+## What you get
 
-### One engine, two languages
-
-The Python module is the same Rust core through [PyO3](https://pyo3.rs). Not a
-second implementation, so there is no parity to drift. A gate on every commit
-fails if either surface grows a call or a callback the other does not have.
-
+<div class="dx-cards">
+<div class="dx-card">
+<p class="dx-card-title">The shape you already have</p>
+<p><code>EClient</code> / <code>EWrapper</code>, with the same method names and the same callbacks, in Rust and in Python. An <a href="https://github.com/ib-api-reloaded/ib_async">ib_async</a> program runs on it unmodified through <code>ibkr_dx.ib_async.attach</code>.</p>
 </div>
-
-<div class="ibkr-dx-feature">
-
-### Nothing between you and the venue
-
-The engine runs on a thread of its own and can be pinned to a core. Quotes are
-published through a seqlock, so the writer never blocks and a reader takes a
-whole quote without taking a lock. A blocking call holds the thread that made
-it and nothing else.
-
+<div class="dx-card">
+<p class="dx-card-title">One engine, two languages</p>
+<p>The Python module is the Rust core through <a href="https://pyo3.rs">PyO3</a>, not a second implementation. A gate on every commit fails if either surface grows a call or a callback the other lacks.</p>
 </div>
-
-<div class="ibkr-dx-feature">
-
-### It says what it cannot do
-
-A call that this protocol cannot carry reports why instead of returning as
-though it acted. Which ones those are is
-[written down](./reference/limits.html), over a coverage matrix regenerated
-from the source on every commit.
-
+<div class="dx-card">
+<p class="dx-card-title">Nothing in between</p>
+<p>The engine runs on a thread of its own and can be pinned to a core. Quotes are published through a seqlock: the writer never blocks, and a reader takes a whole quote without a lock.</p>
 </div>
-
+<div class="dx-card">
+<p class="dx-card-title">More than the API forwards</p>
+<p>The session states things a gateway never passes on: the account's grants, the order types it will take, its algorithms, and data series with no documented call. <a href="./reference/beyond-the-api.html">See what</a>.</p>
+</div>
+<div class="dx-card">
+<p class="dx-card-title">Honest about its limits</p>
+<p>A call the protocol cannot carry says why, instead of returning as though it acted. The <a href="./reference/limits.html">limits</a> are written down, over a coverage matrix regenerated from the source on every commit.</p>
+</div>
 </div>
 
 ## Where to go next
 
-* **Installing it** — [Getting Started](./getting-started.md): the two install
-  routes, the feature flags, credentials, and a program that connects.
-* **Real code** — recipes in [Rust](./recipes/rust/login.md) and
-  [Python](./recipes/python/login.md), each one a runnable file from
-  `examples/`, included rather than copied.
-* **Looking a call up** — [Rust API](./api/rust.md) · [Python API](./api/python.md).
-* **Before you depend on it** — [Limits](./reference/limits.md), then
-  [Endpoint Coverage](./reference/coverage.md) for the call-by-call matrix.
-* **What a gateway never forwards** — [beyond the API](./reference/beyond-the-api.md):
-  the account's grants, the order types it will take, its algorithms, and the
-  round-trip time to the venue.
+<div class="dx-cards">
+<a class="dx-card" href="./getting-started.html"><strong>Getting started</strong><span>Install, credentials, the surface to pick, and a program that connects.</span></a>
+<a class="dx-card" href="./recipes/python/order-lifecycle.html"><strong>Place an order</strong><span>Place, modify, cancel and watch it fill, end to end.</span></a>
+<a class="dx-card" href="./recipes/python/ib_async.html"><strong>Bring an ib_async program</strong><span>Point an existing program at the engine with one line.</span></a>
+<a class="dx-card" href="./api/python.html"><strong>Look a call up</strong><span>The generated reference for every call and callback, in Python and in Rust.</span></a>
+<a class="dx-card" href="./reference/limits.html"><strong>Before you depend on it</strong><span>What it will not do, and why. Then the call-by-call coverage.</span></a>
+</div>
 
 ## Status
 
-Under active development. Every capability claim in this repository is
-assigned from a named artifact — a test, a script, or a
-recorded server response — never from reading the code. The matrix is in
+Under active development. Every capability claim in this repository is assigned
+from a named artifact, a test, a script or a recorded server response, never
+from reading the code. The matrix is in
 [capabilities.md](https://github.com/userFRM/ibkr-dx/blob/main/docs/capabilities.md),
-and the counts in it are recomputed on every commit; the build fails if one
-moves.
+its counts are recomputed on every commit, and the build fails if one moves.
 
 There is no published package yet. Both install routes build from the
-repository. See [Getting Started](./getting-started.md).
+repository: see [Getting started](./getting-started.md).
