@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 600" width="100%" height="100%">
+  <style>
+    /* Light mode */
+    .txt-primary { fill: #0F172A; }
+    .txt-secondary { fill: #1E293B; }
+    .txt-tertiary { fill: #475569; }
+
+    .box-outline { stroke: #94A3B8; }
+
+    .icon-stroke {
+      stroke: #475569;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .icon-fill {
+      fill: #475569;
+      stroke: none;
+    }
+
+    .grid-line {
+      stroke: #000000;
+      stroke-opacity: 0.06;
+    }
+  </style>
+
+  <defs>
+    <!-- Background grid -->
+    <pattern id="grid-pattern" width="80" height="80" patternUnits="userSpaceOnUse">
+      <path d="M 80 0 L 0 0 0 80" fill="none" class="grid-line" stroke-width="1.5" />
+    </pattern>
+
+    <!-- Fade the grid toward the edges: in a mask, white shows and black hides -->
+    <radialGradient id="fade-gradient" cx="50%" cy="50%" r="75%">
+      <stop offset="30%" stop-color="white" />
+      <stop offset="85%" stop-color="black" />
+    </radialGradient>
+
+    <mask id="fade-mask">
+      <rect width="100%" height="100%" fill="url(#fade-gradient)" />
+    </mask>
+
+    <!-- Server icon holes, in the icon's own coordinates (it spans 0..46 x 0..44) -->
+    <mask id="server-holes" maskUnits="userSpaceOnUse" x="-4" y="-4" width="54" height="52">
+      <rect x="-4" y="-4" width="54" height="52" fill="white" />
+      <circle cx="8" cy="6" r="2.5" fill="black" />
+      <circle cx="8" cy="22" r="2.5" fill="black" />
+      <circle cx="8" cy="38" r="2.5" fill="black" />
+    </mask>
+  </defs>
+
+  <!-- Background grid -->
+  <rect width="100%" height="100%" fill="url(#grid-pattern)" mask="url(#fade-mask)" />
+
+  <!-- Main logo -->
+  <text x="800" y="195"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="116" font-weight="900" text-anchor="middle" letter-spacing="-2">
+    <tspan class="txt-primary">ibkr-</tspan><tspan fill="#DE1A22">dx</tspan>
+  </text>
+
+  <!-- Subtitle -->
+  <text x="800" y="255"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="32" font-weight="500" class="txt-secondary"
+        text-anchor="middle" letter-spacing="0.5">
+    Direct connection engine for Interactive Brokers
+  </text>
+
+  <!-- Features -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+     font-size="22" font-weight="400" class="txt-tertiary" text-anchor="middle">
+    <text x="515" y="305">Rust + Python</text>
+    <circle cx="615" cy="298" r="4.5" fill="#DE1A22" />
+
+    <text x="695" y="305">JVM-free</text>
+    <circle cx="775" cy="298" r="4.5" fill="#DE1A22" />
+
+    <text x="920" y="305">direct to IBKR servers</text>
+    <circle cx="1065" cy="298" r="4.5" fill="#DE1A22" />
+
+    <text x="1125" y="305">no GC</text>
+  </g>
+
+  <!-- Diagram -->
+  <g>
+    <!-- Connecting lines -->
+    <line x1="540" y1="390" x2="670" y2="390" stroke="#DE1A22" stroke-width="3" />
+    <circle cx="615" cy="390" r="8" fill="#DE1A22" />
+
+    <line x1="930" y1="390" x2="1060" y2="390" stroke="#DE1A22" stroke-width="3" />
+    <circle cx="995" cy="390" r="8" fill="#DE1A22" />
+
+    <!-- Left box -->
+    <rect x="350" y="340" width="190" height="100" rx="10" fill="none" class="box-outline" stroke-width="2.5" />
+
+    <!-- Left box content centered at (445, 390) -->
+    <g transform="translate(445 390)">
+      <!-- icon, symmetric about x = 0 -->
+      <g class="icon-stroke" stroke-width="3" transform="translate(0 -18)">
+        <path d="M -14 -9 L -28 0 L -14 9" />
+        <line x1="6" y1="-15" x2="-6" y2="15" />
+        <path d="M 14 -9 L 28 0 L 14 9" />
+      </g>
+      <!-- label -->
+      <text x="0" y="28"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+            font-size="16" class="txt-secondary" text-anchor="middle">
+        Your code
+      </text>
+    </g>
+
+    <!-- Middle box -->
+    <rect x="670" y="340" width="260" height="100" rx="12" fill="none" stroke="#DE1A22" stroke-width="3" />
+
+    <!-- Middle box content centered at (800, 390) -->
+    <text x="800" y="402"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+          font-size="42" font-weight="900" text-anchor="middle" letter-spacing="-1">
+      <tspan class="txt-primary">ibkr-</tspan><tspan fill="#DE1A22">dx</tspan>
+    </text>
+
+    <!-- Right box -->
+    <rect x="1060" y="340" width="190" height="100" rx="10" fill="none" class="box-outline" stroke-width="2.5" />
+
+    <!-- Right box content centered at (1155, 390) -->
+    <g transform="translate(1155 390)">
+      <!-- icon -->
+      <g class="icon-fill" mask="url(#server-holes)" transform="translate(-23 -31)">
+        <rect x="0" y="0" width="46" height="12" rx="2.5" />
+        <rect x="0" y="16" width="46" height="12" rx="2.5" />
+        <rect x="0" y="32" width="46" height="12" rx="2.5" />
+      </g>
+      <!-- label -->
+      <text x="0" y="28"
+            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+            font-size="16" class="txt-secondary" text-anchor="middle">
+        IBKR servers
+      </text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <text x="800" y="500"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="20" font-weight="400" class="txt-tertiary"
+        text-anchor="middle">
+    A simpler path without a JVM process in the middle.
+  </text>
+</svg>

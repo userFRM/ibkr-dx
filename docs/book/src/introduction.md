@@ -1,6 +1,6 @@
 <div class="ibkr-dx-hero">
 
-<img class="ibkr-dx-logo" src="./banner.png" alt="IBKR-DX" />
+<img class="ibkr-dx-logo" src="./banner-light.svg" alt="IBKR-DX" />
 
 # IBKR-DX
 

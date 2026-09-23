@@ -223,6 +223,8 @@ pre > code.hljs {
     border-radius: 12px;
     border: 1px solid var(--ibkr-dx-border);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
+    /* The banner is drawn for a light page, and the book has dark themes too. */
+    background: #ffffff;
 }
 
 .ibkr-dx-hero h1 {

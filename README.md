@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/book/src/banner.png" alt="IBKR-DX" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/userFRM/ibkr-dx/main/docs/book/src/banner-dark.svg">
+    <img src="https://raw.githubusercontent.com/userFRM/ibkr-dx/main/docs/book/src/banner-light.svg" alt="IBKR-DX: a direct connection engine for Interactive Brokers" width="100%">
+  </picture>
 </p>
 
 <p align="center">
