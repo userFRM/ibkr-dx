@@ -817,18 +817,20 @@ impl EClient {
     /// client, so the number is a statement about this client and not a
     /// reading off the venue, whose logon names no such level.
     ///
-    /// 217 is the newest gate whose feature is carried here. Nothing above it
-    /// is: attached orders (218), the configuration requests (219, 221),
-    /// `hedgeMaxSize` (223) and `conditionsIncludeOvernight` (226) are absent.
+    /// 217 is the newest gate whose feature is carried here. Above it,
+    /// attached orders (218) are refused by name — a gateway builds them from
+    /// the account's order preset, which this client does not hold — and the
+    /// configuration requests (219, 221) and `conditionsIncludeOvernight`
+    /// are absent. `hedgeMaxSize` (223) is taken and sent on a beta
+    /// hedge, as a gateway sends it; the number stays at 217 because a level
+    /// claims every one below it, and 218 is not carried.
+    ///
     /// Below it, a program that believes the number is wrong about the
     /// following, and every one fails loudly on use rather than quietly:
     ///
-    /// * Order fields this protocol does not carry, refused by name on `error`
-    ///   under 321 when the order is placed: `optOutSmartRouting` (56),
-    ///   `smartComboRoutingParams` (57), the delta-neutral settling, clearing
-    ///   and open/close fields (58, 66), `scaleInitFillQty` (60), `scaleTable`
-    ///   (69), `orderMiscOptions` (70), `algoId` (71), `randomizePrice` (76),
-    ///   `dontUseAutoPriceForHedge` (141), `whatIfType` (217).
+    /// * An order field this client does not carry, refused by name on
+    ///   `error` under 321 when the order is placed: `smartComboRoutingParams`
+    ///   (57).
     /// * Requests and fields that do not exist here, an `AttributeError`: the
     ///   four `verify*` calls (70), `cancelContractData` and
     ///   `cancelHistoricalTicks` (215).
@@ -836,7 +838,7 @@ impl EClient {
     ///   (169, 192), and an execution filter stating `lastNDays` or
     ///   `specificDates` (200): refused by name on `error`.
     /// Every other gate at or below 217 names a request, field or callback
-    /// that is here and carried.
+    /// that is here and does what it does through a gateway.
     fn server_version(&self) -> Option<i32> {
         self.is_connected().then_some(crate::client_core::PROTOCOL_LEVEL)
     }
@@ -1481,6 +1483,22 @@ impl EClient {
     /// Return the account id (empty string if not connected).
     pub(crate) fn account(&self) -> String {
         self.account_id.lock().unwrap().clone().unwrap_or_default()
+    }
+
+    /// What this session says about an order that a gateway checks it
+    /// against: the account, every account the login holds, and what the
+    /// venue enabled. Empty before a session exists.
+    pub(crate) fn order_session(&self) -> crate::client_core::OrderSession {
+        let shared = self.shared_state();
+        let (logon_accounts, advisor) =
+            shared.as_ref().map(|shared| shared.reference.login()).unwrap_or_default();
+        crate::client_core::OrderSession {
+            account: self.account(),
+            accounts: self.accounts.lock().unwrap().clone(),
+            logon_accounts,
+            advisor,
+            features: shared.map(|shared| shared.reference.enabled_features()).unwrap_or_default(),
+        }
     }
 
     /// Call a callback on the caller's wrapper, under the name the reference

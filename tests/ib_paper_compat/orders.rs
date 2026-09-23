@@ -824,7 +824,7 @@ pub(super) fn phase_adaptive_order(conns: Conns) -> Conns {
 pub(super) fn phase_rel_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 31: Relative Order (SPY)",
-        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Rel { offset: 1_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
+        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Rel { offset: 1_000_000, price_cap: 0 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -2511,8 +2511,8 @@ pub(super) fn phase_replace_a_trail_amount(conns: Conns) -> Conns {
 
 /// Whether an order may carry both a type's own instruction and all-or-none.
 ///
-/// They travel on one field, concatenated, and the encoder writes them that
-/// way — a trailing stop that is all-or-none states `18=aG`. This client
+/// They travel on one field, separated by a space, as a gateway writes them —
+/// a trailing stop that is all-or-none states `18=a G`. This client
 /// refused the pair before it, on a reading that they share a slot and cannot
 /// both be stated. That is a message it can build, so the venue is the one to
 /// answer it.
@@ -2622,7 +2622,7 @@ pub(super) fn phase_replace_each_refused_order(conns: Conns) -> Conns {
         ("an OCA group", lmt(), OrderAttrs { oca_group_str: "ibkr-dx-197".into(), ..Default::default() }),
         ("a good-till date", lmt(), OrderAttrs { good_till_date_ymd: 20261231, ..Default::default() }),
         ("a trailing stop limit", OrderKind::TrailingStopLimit { trail_stop_price: 0, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 }, OrderAttrs::default()),
-        ("a relative order", OrderKind::Rel { offset: 1_00_000_000 }, OrderAttrs::default()),
+        ("a relative order", OrderKind::Rel { offset: 1_00_000_000, price_cap: 0 }, OrderAttrs::default()),
         // The offset is refused on this one: "Peg diff offset is not allowed
         // for PegToMid".
         ("pegged to midpoint", OrderKind::PegMid { offset: 0, price_cap: 0 }, OrderAttrs::default()),

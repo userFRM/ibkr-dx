@@ -222,9 +222,16 @@ pub struct Order {
     /// placing it.
     pub conditions_cancel_order: bool,
     // ── ibapi-parity fields ──
-    /// Which account to trade for. Every message states the session's own
-    /// account, so an order naming another is refused rather than filled
-    /// somewhere unintended.
+    /// Which account to trade for, on tag 1.
+    ///
+    /// On a login holding one account a gateway states that account whatever
+    /// the order names, and so does this client. On a login holding several,
+    /// the account named goes on the order, its replacements and its
+    /// withdrawal, and an order naming none is refused: *You must specify an
+    /// account.* An advisor's login is not refused one naming none. Where an
+    /// advisor's order names an account, a gateway allocates the order to it
+    /// rather than stating it on tag 1; this client states it on tag 1, and
+    /// what the venue makes of that is not established here.
     pub account: String,
     /// When a conditional order starts being watched.
     pub active_start_time: String,
@@ -236,19 +243,21 @@ pub struct Order {
     pub adjusted_trailing_amount: f64,
     /// A venue precaution the caller has chosen to accept.
     pub advanced_error_override: String,
-    /// A caller's own name for the algo running this order. **Not carried by
-    /// this protocol.** The venue refuses tag 8016: previewed with
-    /// one, both on an algo and without, it answers `Invalid value in field #
-    /// 8016`. Accepted and retained, so an order built against another client
-    /// reads back what it set.
+    /// A caller's own name for the algo running this order, on tag 8016, as a
+    /// gateway sends it.
+    ///
+    /// The venue refuses an order carrying it — *Invalid value in field #
+    /// 8016* — whether or not the order runs an algo, and that refusal is what
+    /// the caller receives, as it is through a gateway.
     pub algo_id: String,
     /// Whether the order may be worked before the venue opens.
     pub allow_pre_open: bool,
     /// Which auction an order competes in.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway reads nothing from it on a placement,
+    /// so an order that states one reaches the venue as it would through a
+    /// gateway. Kept, so an order built against another client reads back what
+    /// it set.
     pub auction_strategy: i32,
     /// A date on which the venue withdraws the order itself.
     pub auto_cancel_date: String,
@@ -256,23 +265,26 @@ pub struct Order {
     pub auto_cancel_parent: bool,
     /// An offset stated in basis points, and what it is measured against.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway reads nothing from it on a placement,
+    /// so an order that states one reaches the venue as it would through a
+    /// gateway. Kept, so an order built against another client reads back what
+    /// it set.
     pub basis_points: f64,
     /// See `basis_points`.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway reads nothing from it on a placement,
+    /// so an order that states one reaches the venue as it would through a
+    /// gateway. Kept, so an order built against another client reads back what
+    /// it set.
     pub basis_points_type: i32,
     /// A large order worked as a block.
     pub block_order: bool,
     /// Interest accrued on a bond since its last coupon.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway reads nothing from it on a placement,
+    /// so an order that states one reaches the venue as it would through a
+    /// gateway. Kept, so an order built against another client reads back what
+    /// it set.
     pub bond_accrued_interest: String,
     /// Where the trade clears.
     pub clearing_account: String,
@@ -299,79 +311,85 @@ pub struct Order {
     pub deactivate: bool,
     /// Stand the order down if the connection goes (tag 6661).
     pub deactivate_on_disconnect: bool,
-    /// The hedge ratio a delta-neutral order is worked at.
+    /// The delta a pegged-to-stock order is worked at.
     ///
-    /// **Not carried by this protocol.** No tag carries it; the delta that
-    /// travels is the hedging contract's, stated on `delta_neutral_contract`.
-    /// Accepted and retained, so an order built against another client reads
-    /// back what it set.
+    /// **Taken and not sent.** A gateway sends it on tag 6154 for that order
+    /// type alone, which this client does not place; on every type this client
+    /// does place, a gateway sends nothing for it. The delta a delta-neutral
+    /// order hedges at is the hedging contract's, stated on
+    /// `delta_neutral_contract`.
     pub delta: f64,
     /// The hedging leg's own trigger price.
     pub delta_neutral_aux_price: f64,
     /// Where the hedging leg clears.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
     pub delta_neutral_clearing_account: String,
     /// How the hedging leg clears.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
     pub delta_neutral_clearing_intent: String,
     /// The contract the hedge is placed in.
     pub delta_neutral_con_id: i32,
     /// Where the hedging leg's shares are held.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
     pub delta_neutral_designated_location: String,
     /// Whether the hedging leg opens or closes a position.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it, on any
-    /// path. Accepted and retained, so an order built against another client
-    /// still reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
     pub delta_neutral_open_close: String,
     /// What kind of order the hedge is.
     pub delta_neutral_order_type: String,
     /// Who settles the hedging leg.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
     pub delta_neutral_settling_firm: String,
     /// Whether the hedging leg is a short sale.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
+    ///
+    /// Refused on an order that is itself a short sale and names a hedging
+    /// order type. There a gateway applies it over the order's own short-sale
+    /// handling, and what that makes of the order it sends is not established
+    /// here.
     pub delta_neutral_short_sale: bool,
     /// Which short-sale slot the hedging leg uses.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway applies it to the hedging order it
+    /// builds for a volatility order, and to nothing else. This client places
+    /// no volatility order, and for every order it does place a gateway sends
+    /// nothing for it.
     pub delta_neutral_short_sale_slot: i32,
     /// Where a short sale's borrow is located.
     pub designated_location: String,
     /// Whether that discretion is measured to the limit
     /// rather than from it.
     pub discretionary_up_to_limit_price: bool,
-    /// Whether the hedge is priced automatically.
+    /// Leave a hedge child's limit at the price it states.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
-    ///
-    /// False when nothing states it, as the reference client leaves it. True
-    /// stood here, and the refusal that guards an uncarried field reads a value
-    /// away from the default as one the caller asked for: an order that spelled
-    /// out the reference client's own default was refused for it, and one that
-    /// actually asked for the hedge not to be priced automatically was accepted
-    /// and had that instruction dropped. The polarity was the whole of the
-    /// fault.
+    /// Where the venue prices hedge children itself — it says so at logon — a
+    /// gateway states tag 8262 on a new limit order carrying a beta or a pair
+    /// hedge, and leaves it off when this is set. This client does the same.
+    /// False when nothing states it, as the reference client leaves it.
     pub dont_use_auto_price_for_hedge: bool,
     /// How long a duration-limited order lives, in seconds.
     pub duration: i32,
@@ -400,6 +418,11 @@ pub struct Order {
     /// again is the same value it was, which is why it is taken rather
     /// than refused.
     pub filled_quantity: f64,
+    /// The most a beta hedge may trade, on tag 6690.
+    ///
+    /// Sent on a beta hedge only, as a gateway sends it: for any other kind of
+    /// hedge a gateway reads nothing from it. `i32::MAX` states none.
+    pub hedge_max_size: i32,
     /// What the hedge is measured by.
     pub hedge_param: String,
     /// What kind of hedge goes with the order: delta, beta, FX, pair.
@@ -456,9 +479,10 @@ pub struct Order {
     pub open_close: String,
     /// Whether smart routing is declined.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** No gateway sends it. Where the venue has
+    /// withdrawn it — it says so at logon — a gateway refuses the order under
+    /// 10348; otherwise it warns under 2181 and places the order without it.
+    /// This client does the same.
     pub opt_out_smart_routing: bool,
     /// A price for each leg of a combination, in the order the legs
     /// are given. The venue validates the leg order and refuses a spread it
@@ -466,30 +490,31 @@ pub struct Order {
     pub order_combo_legs: Vec<f64>,
     /// Free-form options carried alongside an order.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway knows one key, `manual`, checks it
+    /// and sends nothing for it. It refuses any other key under 10337 and a
+    /// value of `manual` other than `0` or `1` under 10338; where the venue has
+    /// lifted those checks — it says so at logon — only the value of `manual`
+    /// is checked. This client does the same.
     pub order_misc_options: Vec<TagValue>,
     /// The caller's own label, carried back on every message about the
     /// order.
     pub order_ref: String,
-    /// Who originated the order.
-    ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// Who originated the order, on tag 6122 as one character: 0 a customer
+    /// (`c`), 1 a firm (`f`), 2 `b`, 3 `m`, 4 `n`, 5 `y`, 8 `v`, 9 `j`, -1
+    /// `p`, and `?` for any other number. A gateway states it on every order
+    /// and every replacement, and so does this client.
     pub origin: i32,
     /// Whether percentage limits are set aside.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** It sets aside the precautionary checks a
+    /// gateway makes before an order leaves it, which never reach the venue.
+    /// This client makes none, so there is nothing for it to set aside.
     pub override_percentage_constraints: bool,
     /// Parent order id, as the venue assigns it.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway reads nothing from it on a placement.
+    /// It is what an open order reports back, so an order read back and placed
+    /// again carries it.
     pub parent_perm_id: i64,
     /// How far it moves when the reference does.
     pub pegged_change_amount: f64,
@@ -516,21 +541,25 @@ pub struct Order {
     pub professional_customer: bool,
     /// The profit-taking leg's id.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Not carried by this client.** A gateway builds the attached order
+    /// itself, from the order preset the account holds at the venue for that
+    /// instrument. This client holds no presets, so an order naming one is
+    /// refused rather than answered the way a gateway without that preset
+    /// would answer it.
     pub pt_order_id: i32,
     /// The profit-taking leg's type.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Not carried by this client.** A gateway builds the attached order
+    /// itself, from the order preset the account holds at the venue for that
+    /// instrument. This client holds no presets, so an order naming one is
+    /// refused rather than answered the way a gateway without that preset
+    /// would answer it.
     pub pt_order_type: String,
-    /// Whether a ladder's prices are varied.
+    /// Whether a volatility order's price is varied.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway sends it on tag 8053 for a volatility
+    /// order on an option alone, which this client does not place; for every
+    /// order it does place, a gateway sends nothing for it.
     pub randomize_price: bool,
     /// Vary the displayed size so the order is harder to read.
     pub randomize_size: bool,
@@ -553,10 +582,12 @@ pub struct Order {
     pub rule80a: String,
     /// Whether the ladder starts again once it is worked through.
     pub scale_auto_reset: bool,
-    /// How much of a ladder's first component is already filled. **Not carried
-    /// by this protocol.** The venue answers `Can not contain field # 6486` —
-    /// not a bad value but a field that does not belong on an order. The
-    /// position a ladder starts against, beside it, is taken.
+    /// How much of a ladder's first component is already filled, on tag 6486
+    /// where stated on a ladder that steps its price.
+    ///
+    /// The venue refuses an order carrying it — *Can not contain field #
+    /// 6486* — and that refusal is what the caller receives, as it is through
+    /// a gateway.
     pub scale_init_fill_qty: i32,
     /// How much the first level of a scale order trades.
     pub scale_init_level_size: i32,
@@ -567,6 +598,11 @@ pub struct Order {
     /// How far the levels move when they adjust.
     pub scale_price_adjust_value: f64,
     /// How far apart the levels are priced.
+    ///
+    /// The price adjustment, the profit offset, the restart, the varied sizes
+    /// and the position and fill a ladder starts against are sent only where
+    /// this is more than nought: a gateway reads none of them otherwise, and
+    /// the reference clients send none of them.
     pub scale_price_increment: f64,
     /// How far past each level the profit-taking order sits.
     pub scale_profit_offset: f64,
@@ -574,11 +610,16 @@ pub struct Order {
     pub scale_random_percent: bool,
     /// How much each level after it trades.
     pub scale_subs_level_size: i32,
-    /// The name of a scale table held by the venue.
+    /// A ladder stated level by level: `quantity,price,x` for each level, the
+    /// levels separated by `;`.
     ///
-    /// **Not carried by this protocol.** A named table is resolved into the ladder
-    /// it stands for and the levels are sent, so the name never reaches the
-    /// venue. Setting the ladder's own fields has the same effect.
+    /// A new order states the number of levels (6450), then each level's price
+    /// (6447) and quantity (6448), as a gateway sends it, and does not state
+    /// the restart (6461) even where `scale_auto_reset` asks for it. The third
+    /// part of a level is read and not sent. A level of fewer than three parts
+    /// leaves the whole table unsent and the restart stated, which is also
+    /// what a gateway does. A replacement states no table, and states the
+    /// restart.
     pub scale_table: String,
     /// Whether the venue may seek a better price than the
     /// limit. `None` until stated; written only when true, as
@@ -588,30 +629,36 @@ pub struct Order {
     pub settling_firm: String,
     /// The shareholder an order is placed for.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A gateway reads nothing from it on a placement,
+    /// so an order that states one reaches the venue as it would through a
+    /// gateway. Kept, so an order built against another client reads back what
+    /// it set.
     pub shareholder: String,
     /// Who is lending for a short sale: 1 the account, 2 elsewhere,
     /// which is what `designated_location` then names.
     pub short_sale_slot: i32,
     /// The stop-loss leg's id.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Not carried by this client.** A gateway builds the attached order
+    /// itself, from the order preset the account holds at the venue for that
+    /// instrument. This client holds no presets, so an order naming one is
+    /// refused rather than answered the way a gateway without that preset
+    /// would answer it.
     pub sl_order_id: i32,
     /// The stop-loss leg's type.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Not carried by this client.** A gateway builds the attached order
+    /// itself, from the order preset the account holds at the venue for that
+    /// instrument. This client holds no presets, so an order naming one is
+    /// refused rather than answered the way a gateway without that preset
+    /// would answer it.
     pub sl_order_type: String,
     /// Routing parameters for a smart-routed combination.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Not carried by this client.** A gateway sends each on a tag of its
+    /// own after checking the name, the value and the combination it is
+    /// stated on. Those checks are not all established here, so a stated one
+    /// is refused rather than sent unchecked.
     pub smart_combo_routing_params: Vec<TagValue>,
     /// Which soft dollar tier the commission is directed to.
     pub soft_dollar_tier_name: String,
@@ -664,9 +711,13 @@ pub struct Order {
     pub volatility_type: i32,
     /// Which kind of preview is being asked for.
     ///
-    /// **Not carried by this protocol.** No tag in the protocol carries it,
-    /// though its siblings each have one. Accepted and retained, so an order
-    /// built against another client reads back what it set.
+    /// **Taken and not sent.** A released gateway takes nought and one on a
+    /// preview and sends the ordinary preview for both. It refuses any other
+    /// kind, and a kind stated on an order that is not a preview; so does this
+    /// client, under the same words. A gateway reads the kind only from an
+    /// order sent in the protobuf encoding: the text encoding, which ib_async
+    /// and older reference clients use, has no field for it, and there a
+    /// gateway refuses nothing for it.
     pub what_if_type: i32,
 }
 
@@ -750,6 +801,7 @@ impl Default for Order {
             fa_method: String::new(),
             fa_percentage: String::new(),
             filled_quantity: 0.0,
+            hedge_max_size: i32::MAX,
             hedge_param: String::new(),
             hedge_type: String::new(),
             ignore_open_auction: false,
@@ -832,6 +884,66 @@ impl Default for Order {
     }
 }
 
+/// The levels of a ladder stated as a table, as `(quantity, price)`, or
+/// `None` where there is no table to send.
+///
+/// Levels are separated by `;` and trailing empty ones are not levels; each
+/// level is three comma-separated parts — quantity, price and a third that is
+/// read and not sent — each trimmed. One level with fewer than three parts
+/// leaves the whole table unread, which is what a gateway does with it.
+fn scale_table_levels(table: &str) -> Option<Vec<(String, String)>> {
+    if table.trim().is_empty() {
+        return None;
+    }
+    let mut levels: Vec<&str> = table.split(';').collect();
+    while levels.last().is_some_and(|l| l.is_empty()) {
+        levels.pop();
+    }
+    levels
+        .into_iter()
+        .map(|level| {
+            let parts: Vec<&str> = level.split(',').collect();
+            (parts.len() >= 3).then(|| (parts[0].trim().to_string(), parts[1].trim().to_string()))
+        })
+        .collect()
+}
+
+/// An order type under the one name this client spells it, from any of the
+/// names a gateway takes it under, or `None` for a name that is not an order
+/// type.
+///
+/// Four names are this client's own and are kept for the callers that use
+/// them: `MIDPX`, `PEG MIDPT`, `SNAP MIDPT` and `SNAP PRI`.
+pub fn order_type_named(name: &str) -> Option<&'static str> {
+    Some(match name.to_uppercase().as_str() {
+        "MKT" | "MARKET" => "MKT",
+        "LMT" | "LIMIT" => "LMT",
+        "STP" | "STOP" => "STP",
+        "STP LMT" | "STPLMT" | "STOP LIMIT" | "STOPLIMIT" | "STOPLMT" | "STOP_LIMIT" => "STP LMT",
+        "STP PRT" | "STPPRT" | "STOP PROTECT" => "STP PRT",
+        "TRAIL" | "TRAILING STOP" | "TRAILING_STOP" => "TRAIL",
+        "TRAIL LIMIT" | "TRAILLIMIT" | "TRAILLMT" | "TRAILING_STOP_LIMIT" => "TRAIL LIMIT",
+        "MOC" | "MKT CLS" | "MKTCLS" | "MARKETONCLOSE" => "MOC",
+        "LOC" | "LMT CLS" | "LMTCLS" | "LIMITONCLOSE" => "LOC",
+        "MIT" => "MIT",
+        "LIT" => "LIT",
+        "MTL" | "MKT TO LMT" | "MKTTOLMT" | "MARKET_TO_LIMIT" => "MTL",
+        "BOX TOP" | "BOXTOP" | "BOX_TOP" => "BOX TOP",
+        "MKT PRT" | "MKTPRT" | "MKT_PROTECT" => "MKT PRT",
+        "REL" | "RELATIVE" | "PEG PRIM" => "REL",
+        "PASSV REL" => "PASSV REL",
+        "PEG MKT" | "PEGMKT" => "PEG MKT",
+        "PEG MID" | "PEGMID" | "PEG MIDPT" => "PEG MID",
+        "PEG BEST" | "PEGBEST" | "PEG BEST " => "PEG BEST",
+        "PEG BENCH" | "PEGBENCH" | "PEG_TO_BENCH" => "PEG BENCH",
+        "MIDPRICE" | "MIDPX" => "MIDPRICE",
+        "SNAP MID" | "SNAPMID" | "SNAP MIDPT" => "SNAP MID",
+        "SNAP MKT" | "SNAPMKT" => "SNAP MKT",
+        "SNAP PRIM" | "SNAPPRIM" | "SNAP PRI" => "SNAP PRIM",
+        _ => return None,
+    })
+}
+
 impl Order {
     /// Parse the action string to Side.
     pub fn side(&self) -> Result<Side, String> {
@@ -843,15 +955,24 @@ impl Order {
         }
     }
 
-    /// Parse the TIF string to FIX byte.
-    /// The order-type byte this order tracks under, or 0 when the type is one
-    /// a replace cannot state.
+    /// The order type under the one name this client spells it, or `None`
+    /// for a name that is not an order type.
     ///
-    /// Only the types a modify is accepted for are mapped; everything else is
-    /// refused before it reaches a replace, and 0 tells the encoder to keep
-    /// whatever the resting order holds.
+    /// A gateway takes each type under several names, in any case, and so
+    /// does this client: `LIMIT` is `LMT`, `STOP LIMIT` is `STP LMT`, and
+    /// `PEG PRIM` is a relative order.
+    pub fn order_type_named(&self) -> Option<&'static str> {
+        order_type_named(&self.order_type)
+    }
+
+    /// The order-type byte this order tracks under, or 0 when the type is one
+    /// the lean part of a replace does not state.
+    ///
+    /// A replace that carries the caller's statement of the order takes the
+    /// type from that statement instead, so 0 here leaves the type to it — or,
+    /// where there is none, to whatever the resting order holds.
     pub fn ord_type_byte(&self) -> u8 {
-        match self.order_type.to_uppercase().as_str() {
+        match self.order_type_named().unwrap_or("") {
             "MKT" => b'1',
             "LMT" => b'2',
             "STP" => b'3',
@@ -1054,6 +1175,13 @@ impl Order {
             // a call of its own that builds the request directly.
             exercise_action: 0,
             what_if: self.what_if,
+            origin: self.origin,
+            account: self.account.clone(),
+            dont_use_auto_price_for_hedge: self.dont_use_auto_price_for_hedge,
+            // A gateway reads it on a beta hedge and on no other kind.
+            hedge_max_size: (self.hedge_type.eq_ignore_ascii_case("B")
+                && self.hedge_max_size != i32::MAX)
+                .then_some(self.hedge_max_size),
         }
     }
 
@@ -1075,25 +1203,35 @@ impl Order {
             || self.scale_random_percent
             || self.scale_init_position != i32::MAX
             || self.scale_init_fill_qty != i32::MAX
+            || !self.scale_table.trim().is_empty()
             // The public name for varying a ladder's component sizes. One
             // tag carries it.
             || self.randomize_size;
         if !asked {
             return None;
         }
-        let px = |v: f64| if v == f64::MAX { 0 } else { crate::types::price_from_f64(v) };
+        // What a ladder does past its levels — the price adjustment, the
+        // profit offset, the restart, the random size and the position and
+        // fill it starts against — a gateway reads only on a ladder stepping
+        // its price by more than nought, and the reference clients send it on
+        // no other. Stated without a step, none of it goes.
+        let stepped = self.scale_price_increment > 0.0 && self.scale_price_increment != f64::MAX;
+        let px = |v: f64| if v == f64::MAX || !stepped { 0 } else { crate::types::price_from_f64(v) };
         let n = |v: i32| if v == i32::MAX { 0 } else { v.max(0) as u32 };
         Some(Box::new(crate::types::ScaleAttrs {
             init_level_size: n(self.scale_init_level_size),
             subs_level_size: n(self.scale_subs_level_size),
-            price_increment: px(self.scale_price_increment),
+            price_increment: if stepped { crate::types::price_from_f64(self.scale_price_increment) } else { 0 },
             profit_offset: px(self.scale_profit_offset),
             price_adjust_value: px(self.scale_price_adjust_value),
-            price_adjust_interval: n(self.scale_price_adjust_interval),
-            auto_reset: self.scale_auto_reset,
-            random_percent: self.scale_random_percent || self.randomize_size,
-            init_position: if self.scale_init_position == i32::MAX { 0 } else { self.scale_init_position },
-            init_fill_qty: if self.scale_init_fill_qty == i32::MAX { 0 } else { self.scale_init_fill_qty },
+            price_adjust_interval: if stepped { n(self.scale_price_adjust_interval) } else { 0 },
+            // A named table restarts the ladder, whether or not its levels
+            // can be read.
+            auto_reset: (stepped && self.scale_auto_reset) || !self.scale_table.trim().is_empty(),
+            random_percent: (stepped && self.scale_random_percent) || self.randomize_size,
+            init_position: if stepped && self.scale_init_position != i32::MAX { self.scale_init_position } else { 0 },
+            init_fill_qty: (stepped && self.scale_init_fill_qty != i32::MAX).then_some(self.scale_init_fill_qty),
+            table: scale_table_levels(&self.scale_table),
         }))
     }
 
@@ -1202,6 +1340,10 @@ impl Order {
             || !self.auto_cancel_date.is_empty()
             || !self.clearing_account.is_empty()
             || !self.clearing_intent.is_empty()
+            || self.origin != 0
+            || !self.account.is_empty()
+            || self.dont_use_auto_price_for_hedge
+            || self.hedge_max_size != i32::MAX
     }
 }
 
@@ -2189,6 +2331,10 @@ mod tests {
             ("settling_firm", |o| o.settling_firm = "FIRM".into()),
             ("discretionary_up_to_limit_price", |o| o.discretionary_up_to_limit_price = true),
             ("randomize_size", |o| o.randomize_size = true),
+            ("origin", |o| o.origin = 1),
+            ("account", |o| o.account = "U2".into()),
+            ("dont_use_auto_price_for_hedge", |o| o.dont_use_auto_price_for_hedge = true),
+            ("hedge_max_size", |o| o.hedge_max_size = 50),
         ];
 
         // Structural link to `attrs()`: destructured without `..`, so adding a
@@ -2233,6 +2379,7 @@ mod tests {
             // It changes the question the message asks rather than what the
             // order carries, so it is not one of the attributes above.
             what_if: _,
+            origin: _, account: _, dont_use_auto_price_for_hedge: _, hedge_max_size: _,
         } = Order::default().attrs();
 
         assert!(
@@ -2262,7 +2409,7 @@ mod varying_a_ladder_tests {
             (|o: &mut Order| o.randomize_size = true) as fn(&mut Order),
             |o: &mut Order| o.scale_random_percent = true,
         ] {
-            let mut order = Order { scale_init_level_size: 100, ..Default::default() };
+            let mut order = Order { scale_init_level_size: 100, scale_price_increment: 0.1, ..Default::default() };
             set(&mut order);
             let scale = order.attrs().scale.expect("a ladder was asked for");
             assert!(scale.random_percent, "the ladder's sizes are not varied");

@@ -264,6 +264,13 @@ impl EClient {
     }
 
     fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
+        // What was said about an order that went anyway: a warning on its
+        // number, and nothing else about it changes. First, as a gateway says
+        // it before the order goes out, so it comes ahead of anything the
+        // venue says about the order.
+        for (order_id, code, msg) in self.shared.orders.drain_order_notices() {
+            wrapper.error(order_id as i64, code as i64, &msg, "");
+        }
         // Fills → order_status + exec_details + commission_and_fees_report
         // One `order_status` per execution report: a report carrying both a fill
         // and a status emits them together.

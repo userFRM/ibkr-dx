@@ -264,6 +264,11 @@ pub struct Gateway {
     /// Every account this login holds, the first being [`Gateway::account_id`].
     /// A login with one account holds one entry.
     pub accounts: Vec<String>,
+    /// The accounts the logon names as the login's own, leaving out those its
+    /// family links to it.
+    pub logon_accounts: Vec<String>,
+    /// Whether the login is an advisor's, which the logon states on tag 6108.
+    pub advisor: bool,
     /// The token it resumes with.
     pub session_token: BigUint,
     /// Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
@@ -2060,6 +2065,7 @@ impl Gateway {
         let logon::LogonAck {
             account_id,
             mut accounts,
+            advisor,
             mut logged_in_at,
             heartbeat_interval,
             server_session_id,
@@ -2184,6 +2190,11 @@ impl Gateway {
             secdef.as_ref().map(|(h, f, p)| (h.as_str(), f.as_str(), *p)),
         )?;
 
+        // The accounts the logon names as this login's own, before the
+        // family's join them: what a gateway counts when it decides whether an
+        // order has to name its account.
+        let logon_accounts: Vec<String> =
+            accounts.iter().filter(|a| **a != config.username).cloned().collect();
         // A family names the accounts linked to this login, which are accounts
         // this login may trade, so they belong in the list a caller asks for.
         for entry in raw_family_codes.split(';') {
@@ -2224,6 +2235,8 @@ impl Gateway {
             auth_hosts: vec![host.to_string()],
             account_id,
             accounts,
+            logon_accounts,
+            advisor,
             session_token: session_key,
             server_session_id,
             ccp_token,
@@ -2376,6 +2389,10 @@ impl Gateway {
             log::info!("Order permissions: {}", named.join(" "));
         }
         shared.reference.set_order_permissions(perms);
+
+        // What an order is checked against: the login's own accounts and
+        // whether it is an advisor's.
+        shared.reference.set_login(self.logon_accounts.clone(), self.advisor);
 
         // Enabled features: a plain comma-separated token list, logon tag 6542.
         shared.reference.set_enabled_features(

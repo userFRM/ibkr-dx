@@ -1609,7 +1609,7 @@ fn unmodelled_risk_aversion_is_forwarded_and_known_spellings_are_folded() {
                 ],
                 ..Default::default()
             };
-            ClientCore::validate_order(&order, "DU1").unwrap();
+            ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU1")).unwrap();
             let cmd = ClientCore::build_order_request(&order, 7, 0, None).unwrap();
             let ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Algo { algo, .. }, .. }) = cmd else {
                 panic!("the caller's algorithm is carried");
@@ -1656,7 +1656,7 @@ fn unmodelled_algo_flags_are_forwarded_verbatim() {
                 algo_strategy: strategy.into(), algo_params: params,
                 ..Default::default()
             };
-            ClientCore::validate_order(&order, "DU1").unwrap();
+            ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU1")).unwrap();
             let cmd = ClientCore::build_order_request(&order, 7, 0, None).unwrap();
             let ControlCommand::Order(OrderRequest::SubmitEx {
                 kind: OrderKind::Algo { algo: AlgoParams::Named { strategy: name, params }, .. }, ..
@@ -2375,7 +2375,7 @@ fn a_passive_relative_order_is_built_from_the_prices_it_states() {
         tif: "DAY".into(),
         ..Default::default()
     };
-    ClientCore::validate_order(&order, "DU123").unwrap();
+    ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU123")).unwrap();
     let cmd = ClientCore::build_order_request(&order, 7, 0, None).unwrap();
     let ControlCommand::Order(OrderRequest::SubmitEx { kind, .. }) = cmd else {
         panic!("a passive relative order routes through the shared extended submission");
@@ -2401,7 +2401,7 @@ fn a_peg_best_order_is_built_from_the_price_it_states() {
         tif: "DAY".into(),
         ..Default::default()
     };
-    ClientCore::validate_order(&order, "DU123").unwrap();
+    ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU123")).unwrap();
     let cmd = ClientCore::build_order_request(&order, 7, 0, None).unwrap();
     let ControlCommand::Order(OrderRequest::SubmitEx { kind, .. }) = cmd else {
         panic!("a pegged-to-best order routes through the shared extended submission");
@@ -2412,7 +2412,7 @@ fn a_peg_best_order_is_built_from_the_price_it_states() {
     assert_eq!(price, 150 * scale, "the price the caller stated");
 
     let unpriced = ApiOrder { lmt_price: 0.0, ..order };
-    let err = ClientCore::validate_order(&unpriced, "DU123").unwrap_err();
+    let err = ClientCore::validate_order(&unpriced, &crate::client_core::OrderSession::single("DU123")).unwrap_err();
     assert!(err.message.contains("lmt_price"), "a pegged-to-best order with no price is refused: {err}");
 }
 
@@ -2542,16 +2542,15 @@ fn a_family_send_that_stops_partway_forgets_what_it_did_not_send() {
     );
 }
 
-/// A replace carries every number a shape is defined by but a trailing
-/// percent, and names each in the slot the shape's submit reads it from.
+/// A replace carries every number a shape is defined by, and names each in
+/// the slot the shape's submit reads it from.
 ///
 /// The trail of a trailing stop limit, a peg's offset and cap, a snap's offset
 /// and a midprice cap used to be refused as numbers the replace had nowhere to
 /// put. Measured on a paper session, each shape placed and replaced, the venue
 /// takes them on the tags the submit states them on, so the replace carries
-/// them. What it cannot do is change which of the two forms a trail is stated
-/// in: one trail goes out, and for an order placed by percentage that is the
-/// percentage.
+/// them, and a trail moved between a percentage and an amount carries the unit
+/// it is now stated in.
 #[test]
 fn a_replace_carries_every_number_a_trail_is_stated_in() {
     let core = ClientCore::new();
@@ -2580,10 +2579,10 @@ fn a_replace_carries_every_number_a_trail_is_stated_in() {
         core.modify_refusal(43, &ApiOrder { trailing_percent: 2.0, ..pct.clone() }, None).is_none(),
         "a percent travels on the trail tag with its unit beside it",
     );
-    let why = core
-        .modify_refusal(43, &ApiOrder { aux_price: 2.0, ..pct }, None)
-        .expect("one trail is stated, and it is the percentage the order has");
-    assert!(why.message.contains("the trail amount"), "{why}");
+    assert!(
+        core.modify_refusal(43, &ApiOrder { aux_price: 2.0, trailing_percent: f64::MAX, ..pct }, None).is_none(),
+        "and a percentage trail moved to an amount goes, stating its unit",
+    );
 }
 
 /// A field the caller never mentioned is not a field stated wrongly.
@@ -2601,7 +2600,7 @@ fn an_unset_trailing_percentage_is_not_a_wrong_one() {
         ..Default::default()
     };
     assert!(
-        ClientCore::validate_order(&plain, "DU1").is_ok(),
+        ClientCore::validate_order(&plain, &crate::client_core::OrderSession::single("DU1")).is_ok(),
         "an order that states no trailing percentage is not refused for it",
     );
 
@@ -2609,7 +2608,7 @@ fn an_unset_trailing_percentage_is_not_a_wrong_one() {
     for bad in [f64::NAN, f64::INFINITY, -1.0, 1e12] {
         let order = ApiOrder { trailing_percent: bad, ..plain.clone() };
         assert!(
-            ClientCore::validate_order(&order, "DU1").is_err(),
+            ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU1")).is_err(),
             "a trailing percentage of {bad} is not a percentage",
         );
     }
@@ -2619,16 +2618,17 @@ fn an_unset_trailing_percentage_is_not_a_wrong_one() {
 /// statement of it, not against nothing.
 ///
 /// An order named at connect is in no book of this client's. Compared against
-/// nothing, a replace of a midpoint peg read as a change of type and was
-/// refused before the engine saw it; compared against the venue's statement it
-/// is the same type restating itself, and a change of type is still refused.
+/// nothing, there is no group to move and the replace goes; compared against
+/// the venue's statement, a replace moving its group is refused as a gateway
+/// refuses it, and a change of type goes.
 #[test]
 fn a_modify_of_a_venue_named_order_is_judged_against_the_venues_statement() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     let named = ApiOrder {
         order_id: 42, action: "BUY".into(), total_quantity: 1.0,
-        order_type: "PEG MID".into(), lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        order_type: "PEG MID".into(), lmt_price: 100.0, tif: "DAY".into(),
+        oca_group: "A".into(), ..Default::default()
     };
     shared.orders.push_order_info(42, crate::bridge::RichOrderInfo {
         contract: ApiContract::default(),
@@ -2636,11 +2636,12 @@ fn a_modify_of_a_venue_named_order_is_judged_against_the_venues_statement() {
         order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
         last_exec: Default::default(),
     });
-    let capped = ApiOrder { lmt_price: 101.0, ..named.clone() };
-    assert!(core.modify_refusal(42, &capped, None).is_some(), "against nothing it reads as a change of type");
-    assert!(core.modify_refusal(42, &capped, Some(&shared)).is_none(), "against the venue's statement it restates itself");
+    let moved = ApiOrder { oca_group: "B".into(), ..named.clone() };
+    assert!(core.modify_refusal(42, &moved, None).is_none(), "against nothing there is no group to move");
+    let why = core.modify_refusal(42, &moved, Some(&shared)).expect("against the venue's statement it moves the group");
+    assert_eq!((why.code, why.message.as_str()), (10326, "OCA group revision is not allowed"));
     let retyped = ApiOrder { order_type: "REL".into(), ..named };
-    assert!(core.modify_refusal(42, &retyped, Some(&shared)).is_some(), "a change of type is still refused");
+    assert!(core.modify_refusal(42, &retyped, Some(&shared)).is_none(), "a change of type goes");
 }
 
 /// The types a replace restates as themselves, under the names the venue's
@@ -3008,7 +3009,7 @@ fn a_refusal_the_catalogue_names_carries_its_own_number() {
 
     // A stop with nothing to trigger on.
     for order_type in ["STP", "STP LMT", "TRAIL", "TRAIL LIMIT", "MIT", "LIT"] {
-        let why = ClientCore::validate_order(&priced(order_type), "")
+        let why = ClientCore::validate_order(&priced(order_type), &crate::client_core::OrderSession::single(""))
             .expect_err("a stop with no trigger price is refused");
         assert_eq!(why.code, 403, "{order_type}: {why}");
     }
@@ -3036,13 +3037,13 @@ fn a_refusal_the_catalogue_names_carries_its_own_number() {
     let mut triggered = priced("LMT");
     triggered.trigger_method = 9;
     assert_eq!(
-        ClientCore::validate_order(&triggered, "").expect_err("no such trigger").code, 146,
+        ClientCore::validate_order(&triggered, &crate::client_core::OrderSession::single("")).expect_err("no such trigger").code, 146,
     );
     let mut dated = priced("LMT");
     dated.tif = "GTD".into();
     dated.good_till_date = "the day after tomorrow".into();
     assert_eq!(
-        ClientCore::validate_order(&dated, "").expect_err("unreadable date").code, 334,
+        ClientCore::validate_order(&dated, &crate::client_core::OrderSession::single("")).expect_err("unreadable date").code, 334,
     );
 
     // And a request that is malformed with no number of its own keeps the
@@ -3050,7 +3051,7 @@ fn a_refusal_the_catalogue_names_carries_its_own_number() {
     let mut unpriced = priced("LMT");
     unpriced.lmt_price = f64::NAN;
     assert_eq!(
-        ClientCore::validate_order(&unpriced, "").expect_err("not a price").code,
+        ClientCore::validate_order(&unpriced, &crate::client_core::OrderSession::single("")).expect_err("not a price").code,
         Refusal::VALIDATION,
     );
 }
@@ -3261,7 +3262,7 @@ fn a_condition_trigger_of_7_or_8_is_carried() {
             con_id: 756733, exchange: "SMART".into(), price: 100,
             is_more: true, trigger_method: tm, is_conjunction_connection: false,
         });
-        ClientCore::validate_order(&order, "").unwrap_or_else(|e| panic!("condition trigger {tm} refused: {e:?}"));
+        ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("")).unwrap_or_else(|e| panic!("condition trigger {tm} refused: {e:?}"));
     }
     for tm in [5u8, 6] {
         let mut order = priced();
@@ -3270,7 +3271,7 @@ fn a_condition_trigger_of_7_or_8_is_carried() {
             is_more: true, trigger_method: tm, is_conjunction_connection: false,
         });
         assert!(
-            ClientCore::validate_order(&order, "").is_err(),
+            ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("")).is_err(),
             "condition trigger {tm} is not one the venue carries",
         );
     }
@@ -4073,4 +4074,304 @@ fn an_option_solve_forgets_a_released_contracts_slot() {
     let why = core.solve_option(&shared, &option, None, solve)
         .expect_err("another contract's model cannot answer this option");
     assert_eq!(why.message, OPTION_MODEL_UNSTATED);
+}
+
+/// What a gateway refuses in an order, under its numbers and in its words,
+/// and what it takes.
+mod as_a_gateway_checks_it {
+    use super::*;
+
+    fn order() -> ApiOrder {
+        ApiOrder {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        }
+    }
+
+    fn session(features: &[&str]) -> OrderSession {
+        OrderSession {
+            features: features.iter().map(|f| f.to_string()).collect(),
+            ..OrderSession::single("DU1")
+        }
+    }
+
+    fn refused(order: &ApiOrder, session: &OrderSession) -> (i32, String) {
+        let why = ClientCore::validate_order(order, session).expect_err("refused");
+        (why.code, why.message)
+    }
+
+    /// A trail is an amount or a percentage, not both, refused as a gateway
+    /// refuses it while reading the order; the reference client's unset
+    /// percentage is no percentage.
+    #[test]
+    fn a_trail_names_an_amount_or_a_percentage() {
+        for order_type in ["TRAIL", "TRAIL LIMIT", "trailing stop"] {
+            let both = ApiOrder {
+                order_type: order_type.into(), aux_price: 0.25, trailing_percent: 1.5, ..order()
+            };
+            assert_eq!(
+                refused(&both, &session(&[])),
+                (320, "Error reading request: Cannot specify Trailing Amount and Trailing Percent at the same time".to_string()),
+                "{order_type}",
+            );
+        }
+        // A percentage outside what one can be, in a gateway's words.
+        for percent in [150.0, -1.0] {
+            let wide = ApiOrder { order_type: "TRAIL".into(), trailing_percent: percent, ..order() };
+            assert_eq!(
+                refused(&wide, &session(&[])),
+                (321, "Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.".to_string()),
+                "{percent}",
+            );
+        }
+        let whole = ApiOrder { order_type: "TRAIL".into(), trailing_percent: 100.0, ..order() };
+        ClientCore::validate_order(&whole, &session(&[])).expect("a hundred per cent is a percentage");
+        // A trailing stop limit by percentage is refused rather than guessed at.
+        let by_percent = ApiOrder {
+            order_type: "TRAIL LIMIT".into(), trailing_percent: 1.5, lmt_price_offset: 0.1, ..order()
+        };
+        let (code, why) = refused(&by_percent, &session(&[]));
+        assert_eq!(code, 321);
+        assert!(why.starts_with("trailing_percent on a TRAIL LIMIT order is not carried by this client"), "{why}");
+        let amount = ApiOrder {
+            order_type: "TRAIL".into(), aux_price: 0.25, trailing_percent: f64::MAX, ..order()
+        };
+        ClientCore::validate_order(&amount, &session(&[])).expect("an amount alone is a trail");
+        match ClientCore::build_order_request(&amount, 1, 0, None).unwrap() {
+            ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_amt, .. }, .. }) => {
+                assert_eq!(trail_amt, PRICE_SCALE / 4, "the amount, not a percentage of the unset value");
+            }
+            other => panic!("a trailing stop by amount: {other:?}"),
+        }
+    }
+
+    /// The one order option a gateway knows, and what it answers for others.
+    #[test]
+    fn an_order_option_is_checked_as_a_gateway_checks_it() {
+        let with = |tag: &str, value: &str| ApiOrder {
+            order_misc_options: vec![crate::types::model::TagValue { tag: tag.into(), value: value.into() }],
+            ..order()
+        };
+        ClientCore::validate_order(&with("manual", "1"), &session(&[])).expect("the one it knows");
+        assert_eq!(
+            refused(&with("foo", "1"), &session(&[])),
+            (10337, "Misc options key=foo is invalid in PlaceOrder(3) request. Valid keys are: manual".to_string()),
+        );
+        assert_eq!(
+            refused(&with("manual", "2"), &session(&[])),
+            (10338, "Misc options value=2 is invalid for key=manual in PlaceOrder(3) request. Valid values are: 0, 1".to_string()),
+        );
+        // Lifted at logon: any key is taken, and the one it knows still has
+        // to read as one of its values.
+        ClientCore::validate_order(&with("foo", "1"), &session(&["NOAPIMISCVLD"])).expect("lifted");
+        assert_eq!(
+            refused(&with("manual", "2"), &session(&["NOAPIMISCVLD"])),
+            (321, "Order: 'manual' has wrong value=2, expected [1 or 0]".to_string()),
+        );
+        // Lifted, the value is read as a number; checked, it is read as written.
+        for value in [" 1", "01", "+1", "0 "] {
+            ClientCore::validate_order(&with("manual", value), &session(&["NOAPIMISCVLD"]))
+                .unwrap_or_else(|e| panic!("{value:?} reads as a number: {e:?}"));
+            assert_eq!(refused(&with("manual", value), &session(&[])).0, 10338, "{value:?}");
+        }
+    }
+
+    /// Declining smart routing: refused where the venue withdrew it, and
+    /// otherwise placed without it and warned about.
+    #[test]
+    fn declining_smart_routing_is_answered_as_a_gateway_answers_it() {
+        let declining = ApiOrder { opt_out_smart_routing: true, ..order() };
+        let text = "The 'OptOutFromSmartRouting' order attribute is not supported.".to_string();
+        assert_eq!(refused(&declining, &session(&["DEPRPREFBEST"])), (10348, text.clone()));
+        ClientCore::validate_order(&declining, &session(&[])).expect("placed without it");
+        let warned = ClientCore::order_warning(&declining, &session(&[])).expect("and warned");
+        assert_eq!((warned.code, warned.message), (2181, text));
+        assert!(ClientCore::order_warning(&order(), &session(&[])).is_none(), "an ordinary order is not warned");
+    }
+
+    /// The kinds of preview a released gateway takes, and its words for the
+    /// rest.
+    #[test]
+    fn a_preview_kind_is_checked_as_a_gateway_checks_it() {
+        let asked = |what_if: bool, what_if_type: i32| ApiOrder { what_if, what_if_type, ..order() };
+        for kind in [i32::MAX, 0, 1] {
+            ClientCore::validate_order(&asked(true, kind), &session(&[])).expect("the ordinary preview");
+        }
+        assert_eq!(
+            refused(&asked(false, 1), &session(&[])),
+            (321, "What-If type specified but What-If flag is not set. Orders with whatIfType must have whatIf=true.".to_string()),
+        );
+        assert_eq!(
+            refused(&asked(true, 2), &session(&[])),
+            (321, "What-If type 2 is not supported for your account configuration.".to_string()),
+        );
+        assert_eq!(
+            refused(&asked(true, -1), &session(&[])),
+            (321, "What-If type -1 is not supported for your account configuration.".to_string()),
+        );
+        let held = ApiOrder { transmit: false, ..asked(true, i32::MAX) };
+        assert_eq!(
+            refused(&held, &session(&[])),
+            (321, "What-If order should have transmit flag set to TRUE ".to_string()),
+        );
+    }
+
+    /// The hedging leg's short sale is refused only where the order is itself
+    /// a short sale naming a hedging order type.
+    #[test]
+    fn a_hedging_short_sale_is_refused_only_on_a_short_sale() {
+        let hedged = ApiOrder {
+            delta_neutral_short_sale: true, delta_neutral_order_type: "MKT".into(), ..order()
+        };
+        ClientCore::validate_order(&hedged, &session(&[])).expect("on a buy it is taken");
+        let short = ApiOrder { action: "SSHORT".into(), ..hedged };
+        assert_eq!(refused(&short, &session(&[])).0, 321);
+    }
+
+    /// A login whose logon names these accounts as its own.
+    fn logon(accounts: &[&str]) -> OrderSession {
+        let accounts: Vec<String> = accounts.iter().map(|a| a.to_string()).collect();
+        OrderSession {
+            account: accounts[0].clone(), accounts: accounts.clone(), logon_accounts: accounts,
+            ..OrderSession::default()
+        }
+    }
+
+    /// The account an order is for, on each kind of login.
+    #[test]
+    fn an_order_names_the_account_its_login_needs() {
+        let several = logon(&["U1", "U2"]);
+        assert_eq!(refused(&order(), &several), (321, "You must specify an account.".to_string()));
+        let named = ApiOrder { account: "U2".into(), ..order() };
+        ClientCore::validate_order(&named, &several).expect("a named account goes");
+        assert_eq!(ClientCore::as_sent(&named, &several).account, "U2", "and goes out on it");
+        let added = session(&["DYNACCTADD"]);
+        assert_eq!(refused(&order(), &added).1, "You must specify an account.", "a login accounts are added to");
+        let master = logon(&["I1234"]);
+        assert_eq!(refused(&order(), &master).1, "You must specify an account.", "an introducing broker's master");
+        let foreign = ApiOrder { account: "U9".into(), ..order() };
+        ClientCore::validate_order(&foreign, &session(&[])).expect("one account: any name goes");
+        assert_eq!(ClientCore::as_sent(&foreign, &session(&[])).account, "", "on the login's own");
+        // What a gateway does not count: a group's code, and an account the
+        // login's family links to it.
+        ClientCore::validate_order(&order(), &logon(&["U1", "AG123"])).expect("a group is not an account");
+        let family = OrderSession { accounts: vec!["U1".into(), "U2".into()], ..logon(&["U1"]) };
+        ClientCore::validate_order(&order(), &family).expect("a family's account is not the login's own");
+        assert_eq!(ClientCore::as_sent(&foreign, &family).account, "", "and the login states its own");
+        // An advisor's order is allocated, and names no account to be taken.
+        let advisor = OrderSession { advisor: true, ..logon(&["F1", "U1", "U2"]) };
+        let allocated = ApiOrder { fa_group: "Everyone".into(), fa_method: "EqualQuantity".into(), ..order() };
+        ClientCore::validate_order(&allocated, &advisor).expect("an advisor's order names no account");
+        ClientCore::validate_order(&order(), &advisor).expect("with or without an allocation");
+    }
+
+    /// The account an exercise is taken on, on each kind of login.
+    #[test]
+    fn an_exercise_names_an_account_as_a_gateway_needs_it() {
+        let several = logon(&["U1", "U2"]);
+        let why = ClientCore::validate_exercise(1, 1, "", &several).unwrap_err();
+        assert_eq!((why.code, why.message.as_str()), (321, "The account code is required for this operation."));
+        let why = ClientCore::validate_exercise(1, 1, "U9", &several).unwrap_err();
+        assert_eq!((why.code, why.message.as_str()), (321, "Invalid account code 'U9'."));
+        assert_eq!(ClientCore::validate_exercise(1, 1, "U2", &several).unwrap(), (1, 1, "U2".to_string()));
+        let one = session(&[]);
+        let why = ClientCore::validate_exercise(1, 1, "U9", &one).unwrap_err();
+        assert_eq!(
+            (why.code, why.message.as_str()),
+            (322, "Error processing request:No unlapsed position exists in this option in account U9."),
+        );
+        assert_eq!(ClientCore::validate_exercise(2, 1, "DU1", &one).unwrap(), (2, 1, String::new()));
+        assert_eq!(ClientCore::validate_exercise(2, 1, "", &one).unwrap(), (2, 1, String::new()));
+    }
+
+    /// Every name a gateway takes an order type under builds the order its
+    /// own name does; a name that is no type is refused and says so.
+    #[test]
+    fn an_order_type_answers_to_every_name_a_gateway_gives_it() {
+        let kind_of = |name: &str| {
+            let named = ApiOrder { order_type: name.into(), aux_price: 1.0, ..order() };
+            ClientCore::validate_order(&named, &session(&[]))
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            match ClientCore::build_order_request(&named, 1, 0, None).unwrap() {
+                ControlCommand::Order(OrderRequest::SubmitEx { kind, .. }) => std::mem::discriminant(&kind),
+                other => panic!("{name}: {other:?}"),
+            }
+        };
+        for (canonical, aliases) in [
+            ("MKT", &["MARKET", "market"][..]),
+            ("LMT", &["LIMIT"]),
+            ("STP", &["STOP"]),
+            ("STP LMT", &["STPLMT", "STOP LIMIT", "STOPLIMIT", "STOPLMT", "STOP_LIMIT"]),
+            ("STP PRT", &["STPPRT", "STOP PROTECT"]),
+            ("TRAIL", &["TRAILING STOP", "TRAILING_STOP"]),
+            ("TRAIL LIMIT", &["TRAILLIMIT", "TRAILLMT", "TRAILING_STOP_LIMIT"]),
+            ("MOC", &["MKT CLS", "MKTCLS", "MARKETONCLOSE"]),
+            ("LOC", &["LMT CLS", "LMTCLS", "LIMITONCLOSE"]),
+            ("MTL", &["MKT TO LMT", "MKTTOLMT", "MARKET_TO_LIMIT", "BOX TOP", "BOXTOP", "BOX_TOP"]),
+            ("MKT PRT", &["MKTPRT", "MKT_PROTECT"]),
+            ("REL", &["RELATIVE", "PEG PRIM"]),
+            ("PEG MKT", &["PEGMKT"]),
+            ("PEG MID", &["PEGMID"]),
+            ("PEG BEST", &["PEGBEST", "PEG BEST "]),
+            ("PEG BENCH", &["PEGBENCH", "PEG_TO_BENCH"]),
+            ("SNAP MID", &["SNAPMID"]),
+            ("SNAP MKT", &["SNAPMKT"]),
+            ("SNAP PRIM", &["SNAPPRIM"]),
+        ] {
+            for alias in aliases {
+                assert_eq!(kind_of(alias), kind_of(canonical), "{alias} is {canonical}");
+            }
+        }
+        let unknown = ApiOrder { order_type: "XYZ".into(), ..order() };
+        assert_eq!(
+            refused(&unknown, &session(&[])),
+            (387, "Unsupported order type: 'XYZ' is not an order type this client places".to_string()),
+        );
+    }
+
+    /// A replace moving an order's group, or the way it cancels, is refused
+    /// under a gateway's numbers, unless the venue lifted that at logon.
+    #[test]
+    fn a_replace_moving_a_group_is_refused_unless_the_venue_lifted_it() {
+        let core = ClientCore::new();
+        let placed = ApiOrder { oca_group: "A".into(), oca_type: 1, ..order() };
+        core.track_order(42, ApiContract::default(), placed.clone(), 0);
+        let why = core.modify_refusal(42, &ApiOrder { oca_group: "B".into(), ..placed.clone() }, None).unwrap();
+        assert_eq!((why.code, why.message.as_str()), (10326, "OCA group revision is not allowed"));
+        let why = core.modify_refusal(42, &ApiOrder { oca_type: 2, ..placed.clone() }, None).unwrap();
+        assert_eq!((why.code, why.message.as_str()), (10327, "OCA group type revision is not allowed"));
+        assert!(core.modify_refusal(42, &ApiOrder { oca_group: String::new(), ..placed.clone() }, None).is_none(), "naming no group keeps it");
+        // Naming no way to cancel names the default, which is not the first.
+        let why = core.modify_refusal(42, &ApiOrder { oca_type: 0, ..placed.clone() }, None).unwrap();
+        assert_eq!(why.code, 10327, "nought is the default way, not none");
+        assert!(core.modify_refusal(42, &ApiOrder { parent_id: 9, ..placed.clone() }, None).is_none(), "a parent is taken");
+        // The way is compared whether or not a group is named, and a way
+        // outside the four reads as the default.
+        core.track_order(43, ApiContract::default(), order(), 0);
+        let grouped = ApiOrder { oca_group: "A".into(), oca_type: 1, ..order() };
+        assert_eq!(core.modify_refusal(43, &grouped, None).unwrap().code, 10327, "a group added with another way");
+        core.track_order(44, ApiContract::default(), ApiOrder { oca_type: 3, ..order() }, 0);
+        assert!(core.modify_refusal(44, &ApiOrder { oca_type: 5, ..order() }, None).is_none(), "five reads as three");
+        let shared = SharedState::new();
+        shared.reference.set_enabled_features(vec!["NOAPIOCASTRICT".into()]);
+        assert!(core.modify_refusal(42, &ApiOrder { oca_group: "B".into(), ..placed }, Some(&shared)).is_none(), "lifted");
+    }
+
+    /// The account the venue states an order is on is the one read back,
+    /// whatever the order named.
+    #[test]
+    fn the_open_order_view_reads_the_account_the_venue_states() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        let named = ApiOrder { account: "U9".into(), ..order() };
+        core.track_order(42, ApiContract::default(), named.clone(), 0);
+        shared.orders.push_order_info(42, RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder { account: "DU1".into(), ..named },
+            order_state: ApiOrderState { status: "Submitted".into(), ..Default::default() },
+            last_exec: Default::default(),
+        });
+        let read = core.collect_open_orders(&shared).into_iter().find(|(id, _)| *id == 42).unwrap();
+        assert_eq!(read.1.order.account, "DU1");
+    }
 }

@@ -84,9 +84,6 @@ fn spy() -> Contract {
     }
 }
 
-/// Case name paired with the setter that gives an order the named attribute.
-type OrderCase = (&'static str, fn(&mut Order));
-
 // ═══════════════════════════════════════════════════════════════════
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
@@ -841,80 +838,52 @@ fn zero_shares_reaches_the_venue_rather_than_a_refusal_written_here() {
     client.place_order(9603, &spy(), &cash).expect("a cash-sized order still places");
 }
 
-/// Whole quantities are unaffected.
+/// A relative order is modified as itself.
+///
+/// It was refused, on a session where a replace drew no answer. The replace
+/// then stated a trigger a gateway does not state for this type; it now states
+/// the caller's order whole, as its placement does, and goes.
 #[test]
-fn a_whole_quantity_still_places() {
+fn a_relative_order_is_modified_as_itself() {
     let (client, rx, _shared) = test_client();
-    let order = Order {
-        action: "BUY".into(), total_quantity: 200.0, order_type: "MKT".into(),
-        tif: "DAY".into(), ..Default::default()
+    let submit = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "REL".into(),
+        aux_price: 1.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9103, &spy(), &order).expect("a whole quantity places");
-    assert!(rx.try_recv().is_ok(), "and reaches the wire");
-}
-/// A replace states the order type and the prices its type carries. What it
-/// does not state is the peg offset or the execution instruction, so sent for
-/// a pegged order it describes one with no offset, which the venue rejects —
-/// leaving the caller with nothing resting. Refusing keeps the order.
-#[test]
-fn a_type_the_replace_cannot_restate_is_not_modified() {
-    for order_type in ["REL"] {
-        let (client, rx, _shared) = test_client();
-        let submit = Order {
-            action: "SELL".into(), total_quantity: 1.0, order_type: order_type.into(),
-            aux_price: 1.0, trailing_percent: 0.0, tif: "DAY".into(), ..Default::default()
-        };
-        // Submitting is fine; it is the replace that cannot express it.
-        let _ = client.place_order(9201, &spy(), &submit);
-        while rx.try_recv().is_ok() {}
-
-        // Skipping when tracking did not happen would let this pass without
-        // testing anything, which is how the modify gate went unnoticed.
-        assert!(
-            client.core.is_order_tracked(9201),
-            "{order_type} must submit and be tracked, or the refusal below proves nothing",
-        );
-        let err = client.place_order(9201, &spy(), &submit)
-            .expect_err("modifying it must be refused");
-        assert!(err.message.contains("cannot be modified"), "{order_type}: {err}");
-        assert!(rx.try_recv().is_err(), "{order_type}: nothing reaches the wire");
+    client.place_order(9201, &spy(), &submit).expect("the relative order submits");
+    while rx.try_recv().is_ok() {}
+    let moved = Order { aux_price: 1.5, ..submit };
+    client.place_order(9201, &spy(), &moved).expect("and its replace goes");
+    match next_command(&rx).expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert!(
+            matches!(spec.kind, crate::types::OrderKind::Rel { offset, .. }
+                if offset == (1.5 * PRICE_SCALE_F) as i64),
+            "the replace carries the relative order with its new offset: {:?}", spec.kind,
+        ),
+        other => panic!("expected a Modify carrying the order, got {other:?}"),
     }
 }
 
-/// The order type alone does not decide this. An adaptive or algo order is an
-/// ordinary LMT defined by its algo tags; an adjustable stop is an ordinary STP
-/// defined by its conversion; a conditional order rides submit-only tags. A
-/// replace states none of those, so each is destroyed by one just as surely as
-/// a trailing stop is — and each would have passed a gate that looked only at
-/// the type.
+/// An order with a minimum quantity is modified, and the minimum goes with it.
+///
+/// It was refused, as a replace that could not carry the minimum. A replace
+/// states the caller's order whole, the minimum included, as a gateway's does.
 #[test]
-fn an_order_defined_by_more_than_its_type_is_not_modified() {
-    let cases: Vec<OrderCase> = vec![
-        // What is left of the attributes: the minimum quantity, which this
-        // venue refuses as an order on the security type asked, so what a
-        // replace would do to one cannot be put to it. Everything else came off
-        // this list when a session placed it and the venue took the replace,
-        // the adjustable stop last: its replace states the whole conversion.
-        ("minimum quantity", |o| o.min_qty = 50),
-    ];
-    for (name, set) in cases {
-        let (client, rx, _shared) = test_client();
-        let mut order = Order {
-            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
-        };
-        set(&mut order);
-        let _ = client.place_order(9301, &spy(), &order);
-        while rx.try_recv().is_ok() {}
-
-        assert!(
-            client.core.is_order_tracked(9301),
-            "{name} must submit and be tracked, or the refusal below proves nothing",
-        );
-        let err = client.place_order(9301, &spy(), &order)
-            .expect_err("modifying it must be refused");
-        assert!(err.message.contains("cannot be modified"), "{name}: {err}");
-        assert!(rx.try_recv().is_err(), "{name}: nothing reaches the wire");
+fn an_order_with_a_minimum_quantity_is_modified_with_it() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), min_qty: 50, ..Default::default()
+    };
+    client.place_order(9301, &spy(), &order).expect("the order submits");
+    while rx.try_recv().is_ok() {}
+    let moved = Order { lmt_price: 101.0, ..order };
+    client.place_order(9301, &spy(), &moved).expect("and its replace goes");
+    match next_command(&rx).expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => {
+            assert_eq!(spec.attrs.min_qty, 50, "the minimum rides the replace");
+        }
+        other => panic!("expected a Modify carrying the order, got {other:?}"),
     }
 }
 
@@ -979,15 +948,15 @@ fn an_order_that_cannot_be_placed_as_asked_is_refused() {
          |o| o.short_sale_slot = -1, "short_sale_slot"),
         ("a minimum trade quantity below nothing",
          |o| o.min_trade_qty = -10, "min_trade_qty"),
-        // One of the twenty-nine this protocol has no field for. Stated by a
-        // caller, the order would otherwise be placed with the instruction
-        // missing and nothing to say it had been.
-        ("a routing preference this protocol cannot express",
-         |o| o.opt_out_smart_routing = true, "opt_out_smart_routing"),
-        ("an order origin other than the account's own",
-         |o| o.origin = 1, "origin"),
-        ("a scale table this protocol has no field for",
-         |o| o.scale_table = "SCALE".into(), "scale_table"),
+        // One of the fields this client does not carry. Stated by a caller,
+        // the order would otherwise be placed with the instruction missing
+        // and nothing to say it had been.
+        ("an attached order this client cannot build",
+         |o| o.pt_order_id = 5, "pt_order_id"),
+        ("a combination routing parameter this client does not check",
+         |o| o.smart_combo_routing_params.push(crate::types::model::TagValue {
+             tag: "NonGuaranteed".into(), value: "1".into(),
+         }), "smart_combo_routing_params"),
     ];
     for (what, set, names) in cases {
         let (client, rx, _shared) = test_client();
@@ -1029,30 +998,23 @@ fn a_limit_if_touched_is_replaced_as_itself() {
     }
 }
 
-/// The refusal has to read the order the caller is asking for, not only the one
-/// on the book. A modify that *adds* a bracket link or an OCA group states an
-/// order that has neither — so a gate looking only at the resting record lets
-/// the attribute through on the very message that was supposed to carry it.
+/// A minimum quantity added by a modify goes out on the replace.
 #[test]
-fn an_attribute_added_by_the_modify_is_refused_too() {
-    let cases: Vec<OrderCase> = vec![
-        ("minimum quantity", |o| o.min_qty = 50),
-    ];
-    for (name, set) in cases {
-        let (client, rx, _shared) = test_client();
-        let plain = Order {
-            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
-        };
-        client.place_order(9303, &spy(), &plain).expect("a plain limit submits");
-        while rx.try_recv().is_ok() {}
-
-        let mut attributed = plain.clone();
-        set(&mut attributed);
-        let err = client.place_order(9303, &spy(), &attributed)
-            .expect_err("adding it by modify must be refused");
-        assert!(err.message.contains("cannot be modified"), "{name}: {err}");
-        assert!(rx.try_recv().is_err(), "{name}: nothing reaches the wire");
+fn a_minimum_added_by_a_modify_goes_out_on_it() {
+    let (client, rx, _shared) = test_client();
+    let plain = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9303, &spy(), &plain).expect("a plain limit submits");
+    while rx.try_recv().is_ok() {}
+    let attributed = Order { min_qty: 50, ..plain };
+    client.place_order(9303, &spy(), &attributed).expect("the replace goes");
+    match next_command(&rx).expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => {
+            assert_eq!(spec.attrs.min_qty, 50, "the minimum rides the replace");
+        }
+        other => panic!("expected a Modify carrying the order, got {other:?}"),
     }
 }
 
@@ -1096,11 +1058,12 @@ fn every_restatable_type_still_modifies() {
     }
 }
 
-/// The decision is read from the order as it was submitted, not from the one
-/// handed to the modify — a caller cannot make an unrestatable order
-/// modifiable by describing it as a limit on the way in.
+/// A trailing stop limit changed into a limit goes out as the limit.
+///
+/// A gateway takes a change of type and states the new one whole, so this
+/// client does too: nothing of the trailing order it was is carried across.
 #[test]
-fn the_refusal_reads_the_tracked_order_not_the_incoming_one() {
+fn a_trailing_stop_limit_changed_into_a_limit_goes_out_as_the_limit() {
     let (client, rx, _shared) = test_client();
     let trail = Order {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL LIMIT".into(),
@@ -1109,14 +1072,18 @@ fn the_refusal_reads_the_tracked_order_not_the_incoming_one() {
     client.place_order(9702, &spy(), &trail).expect("the trailing stop limit submits");
     while rx.try_recv().is_ok() {}
 
-    let disguised = Order {
+    let limit = Order {
         action: "SELL".into(), total_quantity: 2.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    let err = client.place_order(9702, &spy(), &disguised)
-        .expect_err("the tracked type decides, so this is still refused");
-    assert!(err.message.contains("cannot be modified"), "{err}");
-    assert!(rx.try_recv().is_err(), "and nothing reaches the wire");
+    client.place_order(9702, &spy(), &limit).expect("the change goes");
+    match next_command(&rx).expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert!(
+            matches!(spec.kind, crate::types::OrderKind::Limit { .. }),
+            "the replace carries the limit: {:?}", spec.kind,
+        ),
+        other => panic!("expected a Modify carrying the order, got {other:?}"),
+    }
 }
 
 /// The ordinary types still modify.
@@ -2741,13 +2708,9 @@ fn an_order_held_back_reaches_neither_the_venue_nor_a_refusal() {
     assert!(rx.try_recv().is_ok(), "the order the caller asked to send");
 }
 
-// ── An account this session does not hold must be refused, not dropped ──
+// ── The account an order goes out on ──
 
-/// No encoder reads the account field, so an accepted one fills the whole size
-/// on the connected account while the open-order snapshot echoes the caller's
-/// value back and confirms the wrong one. Naming your own connected account is
-/// the ordinary single-account pattern and must keep working: the guard rejects
-/// a mismatch, not the presence of a value.
+/// Naming your own connected account is the ordinary single-account pattern.
 #[test]
 fn place_order_accepts_the_connected_account_by_name() {
     let (client, rx, _shared) = test_client();
@@ -2759,30 +2722,33 @@ fn place_order_accepts_the_connected_account_by_name() {
     assert!(rx.try_recv().is_ok(), "and the order reaches the engine");
 }
 
+/// On a login holding one account, an order naming another goes out on the
+/// login's own, as a gateway sends it; on a login holding several, the order
+/// goes out on the account it names, and one naming none is refused.
 #[test]
-fn place_order_an_account_this_session_does_not_hold_is_rejected() {
-    // The allocation fields that used to sit beside this one now reach the
-    // wire, so the reason to refuse them is gone: an order stating a group, a
-    // method or a percentage carries them to the venue.
-    let cases: Vec<OrderCase> = vec![
-        ("account", |o| o.account = "U9999999".into()),
-    ];
-    for (name, set) in cases {
-        let (client, rx, _shared) = test_client();
-        let mut order = Order {
-            action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
-            lmt_price: 150.0, ..Default::default()
-        };
-        set(&mut order);
-        let Err(err) = client.place_order(1, &spy(), &order) else {
-            panic!("{name} must be refused");
-        };
-        // The field under test, not a fixed one: asserting "fa_group" for every
-        // arm meant three of them only proved that some error was returned.
-        let field = name.split(' ').next().unwrap();
-        assert!(err.message.contains(field), "{name}: the message must name the field — {err}");
-        assert!(rx.try_recv().is_err(), "{name}: nothing reaches the engine");
-    }
+fn an_order_goes_out_on_the_account_the_login_puts_it_on() {
+    let account_of = |rx: &std::sync::mpsc::Receiver<ControlCommand>| match next_command(rx) {
+        Some(ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. })) => attrs.account,
+        other => panic!("expected a placement, got {other:?}"),
+    };
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, account: "U9999999".into(), ..Default::default()
+    };
+    let (client, rx, _shared) = test_client();
+    client.place_order(1, &spy(), &order).expect("one account: placed");
+    assert_eq!(account_of(&rx), "", "on the login's own account");
+
+    let (mut client, rx, shared) = test_client();
+    client.accounts = vec!["DU123".into(), "U2".into()];
+    shared.reference.set_login(client.accounts.clone(), false);
+    let named = Order { account: "U2".into(), ..order.clone() };
+    client.place_order(1, &spy(), &named).expect("several accounts: placed");
+    assert_eq!(account_of(&rx), "U2", "on the account it names");
+    let unnamed = Order { account: String::new(), ..order };
+    let refused = client.place_order(2, &spy(), &unnamed).expect_err("naming none is refused");
+    assert_eq!((refused.code, refused.message.as_str()), (321, "You must specify an account."));
+    assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
 }
 
 #[test]
@@ -2800,9 +2766,9 @@ fn place_order_unknown_tif_is_rejected() {
 
 /// A trailing stop may be all-or-none.
 ///
-/// Both instructions travel on one field, concatenated — `18=aG` — and this
-/// client refused the pair on a reading that they share a slot. A session
-/// placed it: the venue takes it and the order works.
+/// Both instructions travel on one field, separated by a space — `18=a G` —
+/// and this client refused the pair on a reading that they share a slot. A
+/// session placed it: the venue takes it and the order works.
 #[test]
 fn place_order_all_or_none_trail_reaches_the_wire() {
     let (client, rx, shared) = test_client();
@@ -3298,8 +3264,8 @@ fn place_order_non_stk_contract_rejected() {
 ///
 /// The documented API names a third action, a hold, which is not served here.
 /// A quantity that is not a count reaches the wire through `as u32` as a very
-/// large one. And the account is not carried on the order at all, so an
-/// exercise naming another one would be taken on the connected account.
+/// large one. And an exercise naming an account a login holding one does not
+/// hold is answered as a gateway answers it: there is no position there.
 #[test]
 fn an_exercise_it_cannot_serve_is_refused_before_anything_is_sent() {
     let (client, rx, _shared) = test_client();
@@ -4335,7 +4301,10 @@ fn place_order_rejects_negative_trailing_percent() {
         trailing_percent: -5.0, ..Default::default()
     };
     let err = client.place_order(1, &spy(), &order).unwrap_err();
-    assert!(err.message.contains("trailing_percent"), "got: {err}");
+    assert_eq!(
+        (err.code, err.message.as_str()),
+        (321, "Invalid Trailing Percent value. Valid values are greater than 0 and less than 100."),
+    );
 }
 
 #[test]
@@ -4386,7 +4355,7 @@ fn validate_order_adaptive_rejects_unknown_priority() {
         algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Aggressive".into() }],
         ..Default::default()
     };
-    let err = crate::client_core::ClientCore::validate_order(&order, "DU123").unwrap_err();
+    let err = crate::client_core::ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU123")).unwrap_err();
     assert!(err.message.contains("adaptivePriority"), "got: {err}");
 }
 
@@ -7198,13 +7167,14 @@ fn modify_price_and_qty_simultaneously() {
     assert!(found, "Resubmit with same orderId should emit Modify with new price and qty");
 }
 
-/// A zero order-type states nothing and keeps the resting type, so a modify to
-/// a type the replace cannot express must be refused rather than reaching the
-/// encoder — otherwise the caller's new type is silently restated as the old
-/// one and the client caches an order the venue does not have.
+/// A modify into another type goes out as that type.
+///
+/// Each of these was refused: the replace stated the type byte the caller's
+/// order mapped to, and these map to none, so it restated the old type. The
+/// replace now carries the caller's order whole and states its type from it.
 #[test]
-fn a_modify_to_an_unrepresentable_type_is_refused() {
-    for order_type in ["REL", "TRAIL", "LIT", "MIDPX", "SNAP MKT"] {
+fn a_modify_into_another_type_goes_out_as_that_type() {
+    for order_type in ["REL", "TRAIL", "LIT", "MIDPX", "SNAP MKT", "PEG MKT", "PASSV REL"] {
         let (client, rx, shared) = test_client();
         shared.market.set_instrument_count(1);
         let plain = Order {
@@ -7217,10 +7187,20 @@ fn a_modify_to_an_unrepresentable_type_is_refused() {
         let converted = Order {
             order_type: order_type.into(), aux_price: 99.0, ..plain.clone()
         };
-        let err = client.place_order(9401, &spy(), &converted)
-            .expect_err("converting to a type the replace cannot express must be refused");
-        assert!(err.message.contains("cannot be modified"), "{order_type}: {err}");
-        assert!(rx.try_recv().is_err(), "{order_type}: nothing reaches the wire");
+        client.place_order(9401, &spy(), &converted)
+            .unwrap_or_else(|e| panic!("{order_type}: the conversion goes: {e}"));
+        let expected = crate::client_core::ClientCore::build_order_request(&converted, 9401, 0, None)
+            .expect("the same order places");
+        let ControlCommand::Order(OrderRequest::SubmitEx { kind: placed, .. }) = expected else {
+            panic!("{order_type}: a placement");
+        };
+        match next_command(&rx).expect("the modify") {
+            ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert_eq!(
+                std::mem::discriminant(&spec.kind), std::mem::discriminant(&placed),
+                "{order_type}: the replace carries the type the caller named",
+            ),
+            other => panic!("{order_type}: expected a Modify carrying the order, got {other:?}"),
+        }
     }
 }
 
@@ -9936,11 +9916,11 @@ fn a_leg_replaced_with_a_bare_order_keeps_its_links_in_the_record() {
     );
 }
 
-/// A replace stating a parent or a group an order placed here was not placed
-/// with is refused: the replace carries neither to the venue, so the order
-/// would go on as it was placed while the caller believed it linked.
+/// A replace naming a parent or a group an order placed here was not placed
+/// with goes, and the order keeps the links it was placed with: a gateway
+/// neither applies nor carries either on a replace.
 #[test]
-fn a_replace_stating_other_links_for_an_order_placed_here_is_refused() {
+fn a_replace_naming_links_the_order_lacks_goes_without_them() {
     let (client, rx, _shared) = test_client();
     let plain = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
@@ -9948,23 +9928,52 @@ fn a_replace_stating_other_links_for_an_order_placed_here_is_refused() {
     };
     client.place_order(9305, &spy(), &plain).unwrap();
     while rx.try_recv().is_ok() {}
-    let linked = Order { lmt_price: 101.0, parent_id: 42, oca_group: "G1".into(), oca_type: 2, ..plain };
-    let refused = client.place_order(9305, &spy(), &linked);
-    assert!(refused.is_err_and(|why| why.message.contains("cannot be modified")), "told, not silently ignored");
-    assert!(rx.try_recv().is_err(), "and nothing went to the engine");
+    // The way a group cancels is compared whether or not the order had a
+    // group, so the group comes in under the way the order already has.
+    let moved = Order { lmt_price: 101.0, oca_group: "G1".into(), oca_type: 2, ..plain.clone() };
+    assert_eq!(client.place_order(9305, &spy(), &moved).expect_err("a new way").code, 10327);
+    let linked = Order { lmt_price: 101.0, parent_id: 42, oca_group: "G1".into(), oca_type: 3, ..plain };
+    client.place_order(9305, &spy(), &linked).expect("the replace goes");
+    assert!(
+        matches!(next_command(&rx), Some(ControlCommand::Order(OrderRequest::Modify { .. }))),
+        "to the engine",
+    );
     let record = client.core.tracked_order(9305).expect("tracked");
     assert_eq!((record.parent_id, record.oca_group.as_str(), record.oca_type), (0, "", 0), "the record is as placed");
 }
 
+/// A replace moving an order's group, or the way it cancels, is refused under
+/// the numbers and words a gateway refuses it with.
+#[test]
+fn a_replace_moving_a_group_or_its_type_is_refused() {
+    let (client, rx, _shared) = test_client();
+    let grouped = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), oca_group: "A".into(), oca_type: 1,
+        transmit: true, ..Default::default()
+    };
+    client.place_order(9308, &spy(), &grouped).unwrap();
+    while rx.try_recv().is_ok() {}
+    let moved = Order { oca_group: "B".into(), ..grouped.clone() };
+    let refused = client.place_order(9308, &spy(), &moved).expect_err("a new group is refused");
+    assert_eq!((refused.code, refused.message.as_str()), (10326, "OCA group revision is not allowed"));
+    let retyped = Order { oca_type: 2, ..grouped.clone() };
+    let refused = client.place_order(9308, &spy(), &retyped).expect_err("a new type is refused");
+    assert_eq!((refused.code, refused.message.as_str()), (10327, "OCA group type revision is not allowed"));
+    assert!(rx.try_recv().is_err(), "and nothing went to the engine");
+    // Where the venue lifted those checks at logon, both go.
+    let (client, rx, shared) = test_client();
+    shared.reference.set_enabled_features(vec!["NOAPIOCASTRICT".into()]);
+    client.place_order(9308, &spy(), &grouped).unwrap();
+    while rx.try_recv().is_ok() {}
+    client.place_order(9308, &spy(), &moved).expect("lifted, the replace goes");
+    assert!(rx.try_recv().is_ok(), "to the engine");
+}
+
 /// The record of an order this client did not place follows the caller's
 /// latest statement of it, since that statement is what the venue receives
-/// on every replace of such an order.
-///
-/// The links were kept from the record whatever the caller stated, which is
-/// right for an order placed here — the engine restates them from the
-/// placement — and wrong for one the venue named: there the engine restates
-/// from the caller's statement, so a group the caller moved on the second
-/// replace moved at the venue while the record kept the first.
+/// on every replace of such an order — and a statement moving its group is
+/// refused as a gateway refuses it.
 #[test]
 fn a_venue_named_orders_record_follows_the_callers_latest_statement() {
     let (client, rx, shared) = test_client();
@@ -9980,46 +9989,51 @@ fn a_venue_named_orders_record_follows_the_callers_latest_statement() {
     });
     let first = Order { lmt_price: 101.0, transmit: true, ..named.clone() };
     client.place_order(9307, &spy(), &first).unwrap();
-    let second = Order { lmt_price: 102.0, oca_group: "G2".into(), transmit: true, ..named };
+    let second = Order { lmt_price: 102.0, transmit: true, ..named.clone() };
     client.place_order(9307, &spy(), &second).unwrap();
-    let mut stated_groups = Vec::new();
+    let moved = Order { lmt_price: 103.0, oca_group: "G2".into(), transmit: true, ..named };
+    let refused = client.place_order(9307, &spy(), &moved).expect_err("a new group is refused");
+    assert_eq!(refused.code, 10326);
+    let mut stated = Vec::new();
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) = cmd {
-            stated_groups.push(spec.attrs.oca_group_str.clone());
+        if let ControlCommand::Order(OrderRequest::Modify { price, spec: Some(spec), .. }) = cmd {
+            stated.push((price, spec.attrs.oca_group_str.clone()));
         }
     }
-    assert_eq!(stated_groups, ["G1", "G2"], "each replace carried the caller's statement to the engine");
+    assert_eq!(
+        stated,
+        [((101.0 * PRICE_SCALE_F) as i64, "G1".to_string()), ((102.0 * PRICE_SCALE_F) as i64, "G1".to_string())],
+        "each replace carried the caller's statement to the engine",
+    );
     let record = client.core.tracked_order(9307).expect("tracked");
-    assert_eq!(record.oca_group, "G2", "and the record says what the venue was last told");
+    assert_eq!((record.lmt_price, record.oca_group.as_str()), (102.0, "G1"), "and the record says what the venue was last told");
 }
 
-/// A change of type on an order with a parent or a group is refused.
-///
-/// The replace states the links only where it restates the type the order
-/// was placed under; a change of type goes out without them, and the venue
-/// reads their absence as their removal — measured, a leg replaced with no
-/// group and no parent left its bracket. A plain order changes type as before.
+/// A change of type on an order with a parent or a group goes, and the order
+/// keeps its links: the replace states the caller's order whole under the
+/// links the order was placed with.
 #[test]
-fn a_change_of_type_on_a_linked_order_is_refused() {
+fn a_change_of_type_on_a_linked_order_goes_and_keeps_its_links() {
     let (client, rx, _shared) = test_client();
-    let [_, tp, _] = client.place_bracket(&spy(), "BUY", 1.0, 100.0, 110.0, 90.0).unwrap();
+    let [parent, tp, _] = client.place_bracket(&spy(), "BUY", 1.0, 100.0, 110.0, 90.0).unwrap();
     while rx.try_recv().is_ok() {}
     let as_stop = Order {
         action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
         aux_price: 109.0, tif: "GTC".into(), transmit: true, ..Default::default()
     };
-    let refused = client.place_order(tp, &spy(), &as_stop);
-    assert!(refused.is_err_and(|why| why.message.contains("change type")), "a linked leg keeps its type");
-    assert!(rx.try_recv().is_err(), "and nothing went to the engine for it");
-
-    let plain = Order {
-        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 100.0, tif: "DAY".into(), transmit: true, ..Default::default()
-    };
-    client.place_order(9306, &spy(), &plain).unwrap();
-    while rx.try_recv().is_ok() {}
-    let stop = Order { order_type: "STP".into(), lmt_price: 0.0, aux_price: 99.0, ..plain };
-    assert!(client.place_order(9306, &spy(), &stop).is_ok(), "an unlinked order changes type as before");
+    client.place_order(tp, &spy(), &as_stop).expect("a linked leg changes type");
+    match next_command(&rx).expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert!(
+            matches!(spec.kind, crate::types::OrderKind::Stop { .. }), "as a stop: {:?}", spec.kind,
+        ),
+        other => panic!("expected a Modify carrying the order, got {other:?}"),
+    }
+    let record = client.core.tracked_order(tp as u64).expect("tracked");
+    assert_eq!(
+        (record.parent_id, record.oca_group.as_str()),
+        (parent, format!("OCA_{parent}").as_str()),
+        "and the record keeps the links",
+    );
 }
 
 /// The open-order read names the venue's client without writing it into the
@@ -11174,4 +11188,82 @@ fn a_description_asking_for_headlines_by_provider_is_named_first() {
     let _ = client.req_mkt_data(2, &aapl, "mdoff,292:BRFG+DJNL", false, false);
     let sent: Vec<_> = rx.try_iter().collect();
     assert!(named_first(&sent), "the description went unnamed: {sent:?}");
+}
+
+/// An order declining smart routing goes without it, and the caller is warned
+/// on the order's number in a gateway's words.
+#[test]
+fn an_order_declining_smart_routing_goes_and_is_warned_about() {
+    let (client, rx, shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), opt_out_smart_routing: true, ..Default::default()
+    };
+    client.place_order(9801, &spy(), &order).expect("placed");
+    assert!(
+        matches!(next_command(&rx), Some(ControlCommand::Order(OrderRequest::SubmitEx { .. }))),
+        "the order goes",
+    );
+    assert_eq!(
+        shared.orders.drain_order_notices(),
+        [(9801, 2181, "The 'OptOutFromSmartRouting' order attribute is not supported.".to_string())],
+    );
+    // Where the venue withdrew the choice, the order is refused instead.
+    let (client, rx, shared) = test_client();
+    shared.reference.set_enabled_features(vec!["DEPRPREFBEST".into()]);
+    let refused = client.place_order(9801, &spy(), &order).expect_err("refused");
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (10348, "The 'OptOutFromSmartRouting' order attribute is not supported."),
+    );
+    assert!(rx.try_recv().is_err(), "and nothing reached the engine");
+    assert!(shared.orders.drain_order_notices().is_empty());
+}
+
+/// A warning on a preview's number is not its answer: a preview declining
+/// smart routing is warned about and still answered with what it would cost.
+#[test]
+fn a_preview_warned_about_is_still_answered() {
+    let (client, _rx, shared) = test_client();
+    let preview = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, what_if: true, opt_out_smart_routing: true, ..Default::default()
+    };
+    let pushed = Arc::clone(&shared);
+    let answered = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let id = loop {
+                let found = client.core.open_orders.lock().unwrap().iter()
+                    .find(|(_, tracked)| tracked.order.what_if)
+                    .map(|(id, _)| *id);
+                if let Some(id) = found { break id; }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            };
+            pushed.orders.push_what_if(WhatIfResponse {
+                order_id: id, instrument: 0,
+                init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
+                init_margin_after: 5000 * PRICE_SCALE, maint_margin_after: 3000 * PRICE_SCALE,
+                equity_with_loan_after: 0, commission: Some(PRICE_SCALE),
+                min_commission: None, max_commission: None,
+                commission_currency: String::new(), warning_text: String::new(),
+            });
+        });
+        client.what_if_order(&spy(), &preview)
+    });
+    let state = answered.expect("the preview is answered, not ended by the warning");
+    assert_eq!(state.status, "PreSubmitted");
+
+    // And the warning comes ahead of what the venue says about the order.
+    shared.orders.push_what_if(WhatIfResponse {
+        order_id: 7, instrument: 0,
+        init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
+        init_margin_after: 0, maint_margin_after: 0, equity_with_loan_after: 0,
+        commission: None, min_commission: None, max_commission: None,
+        commission_currency: String::new(), warning_text: String::new(),
+    });
+    shared.orders.push_order_notice(7, 2181, "The 'OptOutFromSmartRouting' order attribute is not supported.".into());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let at = |prefix: &str| w.events.iter().position(|e| e.starts_with(prefix));
+    assert!(at("error:7:2181").unwrap() < at("open_order:7:").unwrap(), "{:?}", w.events);
 }

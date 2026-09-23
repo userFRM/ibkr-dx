@@ -16,6 +16,21 @@ use ibkr_dx::api::client::{EClient, EClientConfig};
 use ibkr_dx::api::types::{Contract, Order};
 use ibkr_dx::api::wrapper::Wrapper;
 
+/// The quantity a preview asks about: the step the venue deals the contract
+/// in, or its least size where it states no step, and never below one.
+///
+/// A Japanese or a Hong Kong share is dealt in board lots, and an order for
+/// one share of either is refused by the exchange for its size — which says
+/// nothing about whether the order itself is one the venue takes.
+fn lot(details: &ibkr_dx::types::model::ContractDetails) -> f64 {
+    let stated = |v: f64| v.is_finite() && v > 0.0 && v != f64::MAX;
+    [details.size_increment, details.min_size]
+        .into_iter()
+        .find(|v| stated(*v))
+        .unwrap_or(1.0)
+        .max(1.0)
+}
+
 /// One contract per market this account can reach.
 fn subjects() -> Vec<(&'static str, Contract)> {
     let equity = |symbol: &str, exchange: &'static str, currency: &'static str| Contract {
@@ -108,13 +123,19 @@ fn main() {
 
     for (n, (what, contract)) in subjects().into_iter().enumerate() {
         let req = n as i64 + 1;
-        let resolved = match client.qualify_contract(&contract) {
-            Ok(c) => c,
+        let details = match client.contract_details(&contract) {
+            Ok(found) if !found.is_empty() => found.into_iter().next().unwrap(),
+            Ok(_) => {
+                println!("{what:<22} no: the venue described no contract");
+                continue;
+            }
             Err(e) => {
                 println!("{what:<22} no: {} ({})", first_line(&e.message), e.code);
                 continue;
             }
         };
+        let resolved = details.contract.clone();
+        let quantity = lot(&details);
 
         // Top of book.
         let _ = client.req_mkt_data(req, &resolved, "", false, false);
@@ -128,7 +149,7 @@ fn main() {
             let order = Order {
                 action: "BUY".into(),
                 order_type: "LMT".into(),
-                total_quantity: 1.0,
+                total_quantity: quantity,
                 lmt_price: 1.0,
                 what_if: true,
                 ..Default::default()
@@ -164,6 +185,23 @@ fn main() {
             "{what:<22} {:>10}  {quote:>9}  {bars:>7}  {priced_ok:>5}  {said}",
             resolved.con_id,
         );
+        // Dealt in lots, the same order for one share, so what the exchange
+        // says of an odd lot is recorded beside the answer at its lot.
+        if priced && quantity > 1.0 {
+            heard.said.clear();
+            let odd = Order {
+                action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0,
+                lmt_price: 1.0, what_if: true, ..Default::default()
+            };
+            let _ = client.place_order(stamp + 100 + req, &resolved, &odd);
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline {
+                client.process_msgs(&mut heard);
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            let said = heard.said.first().map(|s| first_line(s)).unwrap_or_default();
+            println!("{:<22} at {quantity} a lot; at one: {said}", "");
+        }
         let _ = client.cancel_mkt_data(req);
     }
 

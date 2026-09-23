@@ -227,26 +227,15 @@ def capabilities() -> tuple[int, int]:
 def order_types() -> int:
     """How many order types a caller can place.
 
-    Read off the one list that decides it: the check every placement passes
-    before anything is built. Aliases the same type answers to are counted
-    once — the venue is asked for one type whichever spelling the caller used.
+    Read off the one list that decides it: the names every placement is
+    checked against before anything is built, each mapped to the one name the
+    type goes by. The names a type answers to are counted once — the venue is
+    asked for one type whichever spelling the caller used.
     """
-    text = (ROOT / "src/client_core/mod.rs").read_text()
-    at = text.index('match order_type.as_str() {')
-    block = text[at:text.index("_ => return Err", at)]
-    spellings = set(re.findall(r'"([A-Z][A-Z0-9 +]*)"', block))
-    # The spellings that name a type already in the set under another name.
-    same = {
-        "PEG MIDPT": "PEG MID",
-        "MIDPRICE": "MIDPX",
-        "SNAP MIDPT": "SNAP MID",
-        "SNAP PRIM": "SNAP PRI",
-        "PEGBENCH": "PEG BENCH",
-    }
-    for alias, named in same.items():
-        if alias in spellings and named in spellings:
-            spellings.discard(alias)
-    return len(spellings)
+    text = (ROOT / "src/types/model.rs").read_text()
+    at = text.index("pub fn order_type_named(name: &str)")
+    block = text[at:text.index("_ => return None", at)]
+    return len(set(re.findall(r'=> "([A-Z][A-Z0-9 +]*)",', block)))
 
 
 def readme_says() -> tuple[int, int] | None:

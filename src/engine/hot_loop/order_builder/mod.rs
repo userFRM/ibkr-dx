@@ -38,16 +38,21 @@ fn states_a_model(code: &str) -> bool {
 /// about keeps the value it already had.
 ///
 /// Two kinds of field are left alone. Some cannot be changed by a replace at
-/// all — the OCA group an order belongs to, whether it may trade outside the
-/// regular session, and whether it may join the pre-open auction — and the
+/// all — the OCA group an order belongs to and the way it cancels, the parent
+/// it was placed under, whether it may trade outside the regular session, and
+/// whether it may join the pre-open auction — and the
 /// venue answers a replace that tries by naming them rather than by applying
 /// them. The rest are the ones whose absence is not a value: a caller who
 /// states no order reference is not asking for the reference to be cleared,
 /// and clearing it lost the caller's own name for an order they were only
 /// repricing.
 fn merge_statement(resting: &mut crate::types::OrderSpec, stated: crate::types::OrderSpec) {
+    // The group, the way it cancels and the parent are the order's own: a
+    // gateway neither applies nor carries a different one on a replace.
     let keep_oca = resting.attrs.oca_group;
     let keep_oca_str = std::mem::take(&mut resting.attrs.oca_group_str);
+    let keep_oca_type = resting.attrs.oca_type;
+    let keep_parent = resting.attrs.parent_id;
     let keep_outside_rth = resting.attrs.outside_rth;
     let keep_allow_pre_open = resting.attrs.allow_pre_open;
     // Absence is not a value on these: the caller stating nothing leaves what
@@ -66,6 +71,8 @@ fn merge_statement(resting: &mut crate::types::OrderSpec, stated: crate::types::
 
     resting.attrs.oca_group = keep_oca;
     resting.attrs.oca_group_str = keep_oca_str;
+    resting.attrs.oca_type = keep_oca_type;
+    resting.attrs.parent_id = keep_parent;
     resting.attrs.outside_rth = keep_outside_rth;
     resting.attrs.allow_pre_open = keep_allow_pre_open;
     let [order_ref, algo_id, decision_maker, decision_algo, execution_trader, execution_algo] =
@@ -375,6 +382,7 @@ pub(crate) fn drain_and_send_orders(
                     (6210, &destination),
                     (15, &currency),
                     (204, CUSTOMER),
+                    (6122, origin_code(0)),
                 ];
                 parent_fields.extend_from_slice(&identity);
                 let parent_sent = conn.send_fix(&parent_fields);
@@ -412,6 +420,7 @@ pub(crate) fn drain_and_send_orders(
                     (6210, &destination),
                     (15, &currency),
                     (204, CUSTOMER),
+                    (6122, origin_code(0)),
                     (6107, &parent_str),            // ParentOrderID
                     (583, &oca_group),              // OCAGroup
                     (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3
@@ -448,6 +457,7 @@ pub(crate) fn drain_and_send_orders(
                     (6210, &destination),
                     (15, &currency),
                     (204, CUSTOMER),
+                    (6122, origin_code(0)),
                     (6107, &parent_str),            // ParentOrderID
                     (583, &oca_group),              // OCAGroup
                     (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3
@@ -456,7 +466,7 @@ pub(crate) fn drain_and_send_orders(
                 parent_sent.and(tp_sent).and(conn.send_fix(&sl_fields))
             }
             OrderRequest::Cancel { order_id } => {
-                let result = send_cancel(conn, context, account_id, order_id);
+                let result = send_cancel(conn, context, shared, account_id, order_id);
                 if result.is_ok() {
                     synthesize_pending_cancel(context, shared, order_id, event_tx);
                 }
@@ -478,7 +488,7 @@ pub(crate) fn drain_and_send_orders(
                         report_uncertain(context, shared, event_tx, oid);
                         continue;
                     }
-                    match send_cancel(conn, context, account_id, oid) {
+                    match send_cancel(conn, context, shared, account_id, oid) {
                         Ok(()) => synthesize_pending_cancel(context, shared, oid, event_tx),
                         Err(e) => {
                             log::error!(
@@ -523,10 +533,15 @@ pub(crate) fn drain_and_send_orders(
                 // a rejected replace left the record holding the terms the
                 // venue had just refused.
                 let accepted = context.submitted.get(&order_id).cloned();
+                // Whether the caller stated the order whole, as both surfaces
+                // do. Then the statement is the order: its type, its prices
+                // and everything it carries go out as its own placement would
+                // state them, whatever type the order was working as.
+                let statement_given = stated.is_some();
                 // The venue merges what a replace states onto the order it is
                 // already working and sends the result. It does not take the
                 // caller's statement whole: an attribute the caller states
-                // nothing for keeps the value the order already has, and three
+                // nothing for keeps the value the order already has, and some
                 // of them cannot be changed by a replace at all.
                 if let Some(stated) = stated {
                     match context.submitted.get_mut(&order_id) {
@@ -558,6 +573,12 @@ pub(crate) fn drain_and_send_orders(
                 }
                 // Whether the resting order was placed with tag 6433 set.
                 let was_outside_rth = spec.as_ref().is_some_and(|s| s.attrs.outside_rth);
+                let trail_as_t = trail_as_t(shared);
+                // The shape the caller stated, where they stated one.
+                let stated_shape = spec
+                    .as_deref()
+                    .filter(|_| statement_given)
+                    .map(|spec| spec.kind.clone());
                 // What the replace states. A zero field states nothing, so the
                 // resting order's value stays in force. The fields a caller
                 // changed are stated, so a change to the order type, the
@@ -566,7 +587,11 @@ pub(crate) fn drain_and_send_orders(
                 // below overwrites it. A trigger on the request only means one
                 // when the replace also states what it is replacing into.
                 let ord_type_stated = ord_type != 0;
-                let ord_type = if ord_type != 0 { ord_type } else { orig.ord_type };
+                let ord_type = match stated_shape.as_ref() {
+                    Some(kind) => tracked_shape(kind).0,
+                    None if ord_type != 0 => ord_type,
+                    None => orig.ord_type,
+                };
                 let tif = if tif != 0 { tif } else { orig.tif };
                 // Neither price is snapped to the tick grid; see the submit
                 // path above.
@@ -642,16 +667,24 @@ pub(crate) fn drain_and_send_orders(
                 {
                     // The moved trigger is recorded too: a replacement that
                     // kept the old one would leave the next modify restating a
-                    // price this one just moved.
+                    // price this one just moved. A stated shape is recorded as
+                    // its own placement would be.
+                    let (record_price, record_stop) = match stated_shape.as_ref() {
+                        Some(kind) => {
+                            let (_, price, stop) = tracked_shape(kind);
+                            (price, stop)
+                        }
+                        None => (price, new_stop),
+                    };
                     let mut replaced = crate::types::Order::new(
                         order_id,
                         orig.instrument,
                         orig.side,
                         qty,
-                        price,
+                        record_price,
                         ord_type,
                         tif,
-                        new_stop,
+                        record_stop,
                     );
                     // A replace restates the order's terms, not its history.
                     // `filled` and `PendingReplace` carry forward: the next
@@ -755,14 +788,20 @@ pub(crate) fn drain_and_send_orders(
                 // limit leg sends no tag 44 at all: a trigger-only type states
                 // its price on 99, and a market, trailing or on-close order
                 // states none. Stating one as zero is refused —
-                // "Invalid value in field # 44".
-                if states_a_limit_price(ord_type) {
+                // "Invalid value in field # 44". A stated shape states its own
+                // prices below, as its placement does.
+                if stated_shape.is_none() && states_a_limit_price(ord_type) {
                     fields.push((44, &price_str)); // Price
                 }
-                fields.push((1, account_id)); // Account
-                // Tag 6122 is the option account. The replace is accepted with
-                // this value; confirmed against a live session.
-                fields.push((6122, "c"));
+                // The account and the originator the order went out with.
+                // Tag 6122 was accepted on a replace as `c`, confirmed against
+                // a live session, which is a customer's order.
+                let account = spec
+                    .as_deref()
+                    .map_or(account_id, |spec| account_for(&spec.attrs, account_id))
+                    .to_string();
+                fields.push((1, &account)); // Account
+                fields.push((6122, origin_code(spec.as_deref().map_or(0, |s| s.attrs.origin))));
                 // OutsideRTH, from the order the caller resubmitted rather than
                 // hard-coded: the tracked record cannot express it, and asserting
                 // 1 unconditionally opted every modified order into the extended
@@ -801,8 +840,9 @@ pub(crate) fn drain_and_send_orders(
                     fields.retain(|(tag, _)| *tag != 6035);
                 }
                 // The trigger the caller moved, or the one the order already had.
+                // A stated shape states its own, as its placement does.
                 let stop_str;
-                if new_stop != 0 {
+                if stated_shape.is_none() && new_stop != 0 {
                     stop_str = format_price(new_stop);
                     fields.push((99, &stop_str));
                 }
@@ -815,6 +855,7 @@ pub(crate) fn drain_and_send_orders(
                 // order. What the submit said is restated here.
                 let mut attr_fields: Vec<(u32, String)> = Vec::new();
                 let mut restated_type = None;
+                let mut type_named: Option<String> = None;
                 // The record describes the order as it was PLACED, and a
                 // replace never rewrites it. So everything restated from it —
                 // the type's own companions, the execution instruction it
@@ -830,8 +871,8 @@ pub(crate) fn drain_and_send_orders(
                 // as a market keeping tag 44, a trailing stop replaced as a
                 // market keeping 18=a, a midpoint peg writing its own tag 40
                 // over the one the caller asked for. A replace that changes the
-                // type states the lean message alone, which describes the type
-                // it is asking for whole.
+                // type with no statement of the order states the lean message
+                // alone, which describes the type it is asking for whole.
                 //
                 // Compared as the venue names the type, not as this client
                 // holds it. A reconnect replays the order and records the type
@@ -839,10 +880,16 @@ pub(crate) fn drain_and_send_orders(
                 // discriminant it was placed under — two names for one type,
                 // and a pegged order replaced after a reconnect lost its peg to
                 // the difference.
-                let restating_the_record = spec.as_deref().is_some_and(|spec| {
-                    crate::types::ord_type_fix_str(ord_type)
-                        == crate::types::ord_type_fix_str(tracked_shape(&spec.kind).0)
-                });
+                //
+                // A stated shape is the caller's own statement of the order,
+                // and always describes the type it asks for: a change of type
+                // with one states the new type whole, with everything the
+                // order carries, as a gateway's replace does.
+                let restating_the_record = statement_given
+                    || spec.as_deref().is_some_and(|spec| {
+                        crate::types::ord_type_fix_str(ord_type)
+                            == crate::types::ord_type_fix_str(tracked_shape(&spec.kind).0)
+                    });
                 if let Some(spec) = spec.as_deref().filter(|_| restating_the_record) {
                     // A trailing stop carries its trail on tag 211, and a
                     // replace that left it out was refused naming the field —
@@ -864,26 +911,33 @@ pub(crate) fn drain_and_send_orders(
                     if let Some(placed) = context.submitted.get_mut(&order_id) {
                         placed.kind = restated.clone();
                     }
-                    push_type_and_prices(&mut attr_fields, &restated);
+                    push_type_and_prices(&mut attr_fields, &restated, trail_as_t);
+                    // The name the shape goes out under is the name its own
+                    // placement states, so the lean message states that one.
+                    type_named = attr_fields
+                        .iter()
+                        .find(|(tag, _)| *tag == 40)
+                        .map(|(_, name)| name.clone());
                     restated_type = push_order_attrs(
                         &mut attr_fields,
                         &spec.attrs,
                         &restated,
                         orig.side,
-                        exec_inst_for(&spec.kind),
+                        exec_inst_for(&spec.kind, trail_as_t),
                     );
                     // Stated once. The lean message already names these, and the
                     // gateway reads a repeated tag as a second statement of it.
                     let stated: Vec<u32> = fields.iter().map(|(t, _)| *t).collect();
                     attr_fields.retain(|(tag, _)| !stated.contains(tag));
                 }
-                // The attributes can settle on an order type of their own, and
+                // The name the shape's own placement states, unless the
+                // attributes settle on an order type of their own over it:
                 // the lean message above states the continuous form. Restated
                 // here, where the tag it names actually lives.
-                if let Some(stated) = restated_type {
+                if let Some(named) = restated_type.or(type_named.as_deref()) {
                     for (tag, value) in fields.iter_mut() {
                         if *tag == 40 {
-                            *value = stated;
+                            *value = named;
                         }
                     }
                 }
@@ -966,6 +1020,7 @@ pub(crate) fn drain_and_send_orders(
 fn send_cancel(
     conn: &mut Connection,
     context: &mut Context,
+    shared: &SharedState,
     account_id: &str,
     order_id: u64,
 ) -> std::io::Result<()> {
@@ -1004,12 +1059,23 @@ fn send_cancel(
         .get(&order_id)
         .map(|spec| spec.attrs.model_code.clone())
         .filter(|code| states_a_model(code));
+    // The account the order went out for, which on a login holding several
+    // is the one it named. An order the venue named at connect was placed by
+    // no statement here, and is on the account the venue says it is on.
+    let account = context
+        .submitted
+        .get(&order_id)
+        .map(|spec| account_for(&spec.attrs, account_id).to_string())
+        .or_else(|| {
+            shared.orders.get_order_info(order_id).map(|info| info.order.account).filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| account_id.to_string());
     let mut fields = vec![
         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
         (fix::TAG_SENDING_TIME, &now),
         (11, &clord_str),
         (41, &orig_clord),
-        (1, account_id),
+        (1, account.as_str()),
         (6088, "Socket"),
     ];
     if let Some(code) = model.as_deref() {
@@ -1201,6 +1267,8 @@ fn synthesize_pending_cancel(
 /// Unit a trailing amount is expressed in, on tag 6268: percent, as against
 /// an absolute amount (0) or ticks (1).
 pub(crate) const TRAIL_UNIT_PERCENT: u32 = 100;
+/// The same unit for a trail stated as an amount.
+const TRAIL_UNIT_AMOUNT: u32 = 0;
 
 /// SecurityIDSource (tag 22) for a SecurityID carrying IB's local symbol
 /// rather than a public identifier. Not one of the published sources, which
@@ -1428,19 +1496,20 @@ fn send_order_ex(
     let now = chrono_free_timestamp().to_string();
     let tif_byte = [tif];
     let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0");
+    let trail_as_t = trail_as_t(shared);
 
     let mut fields: Vec<(u32, String)> = vec![
         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
         (fix::TAG_SENDING_TIME, now.clone()),
         (11, format!("{order_id}.{ver}")),
-        (1, account_id.to_string()),
+        (1, account_for(attrs, account_id).to_string()),
         (55, symbol),
         (54, fix_side(side).to_string()),
         (38, format_qty(qty).to_string()),
     ];
 
-    let exec_inst = exec_inst_for(&kind);
-    push_type_and_prices(&mut fields, &kind);
+    let exec_inst = exec_inst_for(&kind, trail_as_t);
+    push_type_and_prices(&mut fields, &kind, trail_as_t);
 
     fields.push((59, tif_str.to_string()));
     fields.push((60, now));
@@ -1455,6 +1524,8 @@ fn send_order_ex(
     // emit it, so it reaches the venue some other way there, but what this
     // client sends has to satisfy the venue rather than match the writer.
     fields.push((204, CUSTOMER.to_string()));
+    // Who originated it, which a gateway states on every order it sends.
+    fields.push((6122, origin_code(attrs.origin).to_string()));
     // Tag 6211 names the alert an order came from, and is stated empty when
     // there is no alert. Tag 6238 is what that alert asked for, and belongs to
     // the alert: an order that came from none states it nowhere rather than
@@ -1480,31 +1551,86 @@ fn send_order_ex(
             }
         }
     }
+    // A limit order carrying a beta or pair hedge, where the venue prices
+    // hedge children at the parent's trade: a gateway states that it may,
+    // unless the caller said not to. An adaptive or algo order is a limit
+    // order too. Stated on a new order only; what a gateway states on a
+    // replacement of one is not established here.
+    if matches!(
+        kind,
+        crate::types::OrderKind::Limit { .. }
+            | crate::types::OrderKind::Adaptive { .. }
+            | crate::types::OrderKind::Algo { .. }
+    ) && matches!(attrs.hedge_type, 3 | 4)
+        && !attrs.dont_use_auto_price_for_hedge
+        && shared.reference.enables("HDGLMT")
+    {
+        fields.push((8262, "1".to_string()));
+    }
+    // A ladder stated as a table, which a gateway states on a new order only
+    // and after everything else: how many levels, then each level's price and
+    // quantity, in the order the caller wrote them. The restart the table
+    // would otherwise state goes, as a gateway drops it once the table reads.
+    if let Some(table) = attrs.scale.as_deref().and_then(|scale| scale.table.as_deref()) {
+        fields.retain(|(tag, _)| *tag != 6461);
+        fields.push((6450, table.len().to_string()));
+        for (quantity, price) in table {
+            fields.push((6447, price.clone()));
+            fields.push((6448, quantity.clone()));
+        }
+    }
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
     conn.send_fix(&refs)
 }
 
-/// Everything an order states beyond its identity, contract and price, in the
-/// tag order the reference encoder uses. A replace restates all of it, so this
-/// is shared rather than spelled out twice.
-/// The instruction characters an order type contributes to tag 18. They were
-/// pushed from inside the type's own arm, which a replace does not run — so a
-/// replaced algo or pegged order lost the instruction that made it one.
-fn exec_inst_for(kind: &crate::types::OrderKind) -> String {
+/// The account an order goes out for: the one it names, where the session
+/// holds several and the order named one, and the session's own otherwise.
+fn account_for<'a>(attrs: &'a crate::types::OrderAttrs, session: &'a str) -> &'a str {
+    if attrs.account.is_empty() { session } else { &attrs.account }
+}
+
+/// The character an order type contributes to tag 18, which comes first on
+/// it. They were pushed from inside the type's own arm, which a replace does
+/// not run — so a replaced pegged order lost the instruction that made it one.
+///
+/// The instructions that follow it — all-or-none, the algo marker and the
+/// benchmark peg's own — are added where the rest of the order is stated.
+///
+/// A trailing stop the venue takes under a name of its own (`trail_as_t`)
+/// needs no character to say what it is.
+fn exec_inst_for(kind: &crate::types::OrderKind, trail_as_t: bool) -> String {
     use crate::types::OrderKind as K;
     match kind {
-        K::TrailingStop { .. } | K::TrailPct { .. } => "a",
+        K::TrailingStop { .. } | K::TrailPct { .. } if !trail_as_t => "a",
         K::PegMkt { .. } => "P",
         K::PegMid { .. } => "M",
         K::Rel { .. } => "R",
-        // Pegged to a benchmark states the same instruction a relative order
-        // does, beside its own order type. It had stated none.
-        K::PegBench { .. } => "R",
-        K::Adaptive { .. } | K::Algo { .. } => "e",
         _ => "",
     }
     .to_string()
+}
+
+/// Whether the venue takes a trailing stop under its own name, `T`, rather
+/// than as `P` with the trailing instruction beside it. It says so at logon.
+fn trail_as_t(shared: &SharedState) -> bool {
+    shared.reference.enables("TRAILSENDT")
+}
+
+/// Who originated an order, as the one character tag 6122 carries it in.
+fn origin_code(origin: i32) -> &'static str {
+    match origin {
+        0 => "c",
+        1 => "f",
+        2 => "b",
+        3 => "m",
+        4 => "n",
+        5 => "y",
+        8 => "v",
+        -1 => "p",
+        9 => "j",
+        _ => "?",
+    }
 }
 
 /// Whether replacing this type needs the record of the order as it was placed.
@@ -1514,8 +1640,10 @@ fn exec_inst_for(kind: &crate::types::OrderKind) -> String {
 /// 211, a peg offset, a limit-versus-trail offset. Everything else the lean
 /// replace states whole.
 fn replace_needs_the_placed_record(ord_type: u8) -> bool {
-    // Trailing, relative and both pegs travel as `P`.
+    // Trailing, relative and both pegs travel as `P`, and a trailing stop the
+    // venue names on its own as `T`.
     ord_type == b'P'
+        || ord_type == b'T'
         || matches!(
             ord_type,
             crate::types::ORD_TRAIL_LIMIT
@@ -1567,7 +1695,10 @@ fn restate_with(kind: &crate::types::OrderKind, price: i64, stop_price: i64) -> 
             trail_amt: named(*trail_amt, stop_price),
             trail_stop_price: *trail_stop_price,
         },
-        K::Rel { offset } => K::Rel { offset: named(*offset, stop_price) },
+        K::Rel { offset, price_cap } => K::Rel {
+            offset: named(*offset, stop_price),
+            price_cap: named(*price_cap, price),
+        },
         K::SnapMkt { offset } => K::SnapMkt { offset: named(*offset, stop_price) },
         K::SnapMid { offset } => K::SnapMid { offset: named(*offset, stop_price) },
         K::SnapPri { offset } => K::SnapPri { offset: named(*offset, stop_price) },
@@ -1620,7 +1751,7 @@ fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
         K::SnapPri { offset } => (crate::types::ORD_SNAP_PRI, 0, *offset),
         K::PegMkt { offset, .. } => (crate::types::ORD_PEG_MKT, 0, *offset),
         K::PegMid { offset, .. } => (crate::types::ORD_PEG_MID, 0, *offset),
-        K::Rel { offset } => (b'P', 0, *offset),
+        K::Rel { offset, price_cap } => (b'P', *price_cap, *offset),
         K::PassiveRel { offset, .. } => (crate::types::ORD_PASSV_REL, 0, *offset),
         K::PegBest { price } => (crate::types::ORD_PEG_BEST, *price, 0),
         K::AdjustableStop { stop_price, .. } => (b'3', 0, *stop_price),
@@ -1638,19 +1769,17 @@ fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
 /// only here, the two cannot drift: a replace that left out what the type
 /// needs was refused naming the field — "Message must contain field # 211".
 ///
-/// Order type (40) plus its price tags and type-specific companions —
-/// identical values to the corresponding plain variants. Kinds that put
-/// an instruction in tag 18 (TrailingStop/TrailPct = a, Rel = R) cannot
-/// also carry all_or_none (18=G); validate_order rejects that
-/// combination up front, and the emission below skips 18=G as a second
-/// line of defense.
-/// ExecInst is one field with the instructions concatenated, not one field
-/// per instruction. The terminal builds it as the order type's own character
-/// followed by "G" for all-or-none, and an order that had a character of its
-/// own therefore lost its all-or-none entirely — silently, on every
-/// trailing, relative, pegged and algo order.
-fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::OrderKind) {
+/// ExecInst is one field with the instructions in it separated by spaces, not
+/// one field per instruction: the order type's own character, then `G` for
+/// all-or-none, then `e` for an algo, then `R` for a benchmark peg. An order
+/// that had a character of its own once lost its all-or-none entirely —
+/// silently, on every trailing, relative, pegged and algo order.
+///
+/// A trailing stop is `T` where the venue takes it under that name
+/// (`trail_as_t`), and `P` with its instruction otherwise.
+fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::OrderKind, trail_as_t: bool) {
     use crate::types::OrderKind as K;
+    let trailing = if trail_as_t { "T" } else { "P" };
     match kind {
         K::Market => fields.push((40, "1".to_string())),
         K::Limit { price } => {
@@ -1677,9 +1806,14 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
             // capture: amount-based trailing stop carries
             // the trail amount in both 99 and 211 and requires 18=a.
             let t = format_price(*trail_amt).to_string();
-            fields.push((40, "P".to_string()));
+            fields.push((40, trailing.to_string()));
             fields.push((99, t.clone()));
             fields.push((211, t));
+            // The unit the trail is stated in, on every trailing order and
+            // every replacement of one: an amount is nought. Left off, a
+            // replace moving a percentage trail to an amount said nothing
+            // about which of the two the number on 211 was.
+            fields.push((6268, TRAIL_UNIT_AMOUNT.to_string()));
         }
         K::TrailingStopLimit { lmt_offset, trail_amt, .. } => {
             // capture: TRAIL LIMIT uses OrdType=TSL, no
@@ -1690,6 +1824,7 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
             fields.push((99, t.clone()));
             fields.push((6370, format_price(*lmt_offset).to_string()));
             fields.push((211, t));
+            fields.push((6268, TRAIL_UNIT_AMOUNT.to_string()));
         }
         K::TrailPct { trail_pct, .. } => {
             // The percent itself goes on 99 and 211 in decimal form (1.00 for
@@ -1700,7 +1835,7 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
             // percent, so the one case anybody tried was right by coincidence
             // and every other percentage sent a unit that is not a unit.
             let pct_decimal = format!("{:.2}", *trail_pct as f64 / 100.0);
-            fields.push((40, "P".to_string()));
+            fields.push((40, trailing.to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
             fields.push((6268, TRAIL_UNIT_PERCENT.to_string()));
@@ -1778,11 +1913,15 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
         K::PegMid { .. } => {
             fields.push((40, "P".to_string()));
         }
-        K::Rel { offset } => {
+        K::Rel { offset, price_cap } => {
             // capture: Relative shares OrdType=P and is
-            // disambiguated by 18=R; peg offset on 211, no tag 44.
+            // disambiguated by 18=R; peg offset on 211. It states no trigger
+            // on 99, and the cap — where the caller set one — on 44.
             fields.push((40, "P".to_string()));
             fields.push((211, format_price(*offset).to_string()));
+            if *price_cap != 0 {
+                fields.push((44, format_price(*price_cap).to_string()));
+            }
         }
         // A passive relative order states no instruction beside its name, so
         // the name is the whole of it here; the offset and the cap are
@@ -1814,6 +1953,9 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
     }
 }
 
+/// Everything an order states beyond its identity, contract and price, in the
+/// tag order the reference encoder uses. A replace restates all of it, so this
+/// is shared rather than spelled out twice.
 fn push_order_attrs(
     fields: &mut Vec<(u32, String)>,
     attrs: &crate::types::OrderAttrs,
@@ -1821,12 +1963,18 @@ fn push_order_attrs(
     // The side, because a short sale states where the stock comes from even
     // when the caller names no slot.
     side: Side,
-    // Composed from the order's own kind before this is reached: the pegged,
-    // relative, trailing and algo types each contribute a character, and the
-    // all-or-none instruction below joins them on one field.
-    mut exec_inst: String,
+    // The order type's own character, composed from its kind before this is
+    // reached: the pegged, relative and trailing types each contribute one,
+    // and the instructions below follow it on the same field.
+    exec_inst: String,
 ) -> Option<&'static str> {
     use crate::types::OrderKind as K;
+    // A midpoint peg stated in two parts is a type of its own, whose name
+    // carries the peg, so the peg's own character is not stated beside it.
+    let unset_is_nought = |v: f64| if v == f64::MAX { 0.0 } else { v };
+    let two_part_mid = matches!(kind, K::PegMid { .. })
+        && unset_is_nought(attrs.mid_offset_at_whole) != 0.0
+        && unset_is_nought(attrs.mid_offset_at_half) != 0.0;
     // The order type the attributes below settle on, when they settle on one
     // the caller's own tag 40 does not already state. Returned rather than
     // written over the caller's list: a replace states the type on the lean
@@ -1875,7 +2023,10 @@ fn push_order_attrs(
     } else {
         String::new()
     };
-    if !oca_str.is_empty() {
+    // A preview is not placed, so it joins no group: a gateway states neither
+    // the group nor its type on one. The parent it names is stated below.
+    let in_group = !oca_str.is_empty();
+    if in_group && !attrs.what_if {
         fields.push((583, oca_str));
         fields.push((6209, oca_type_str(attrs.oca_type).to_string()));
     }
@@ -1890,11 +2041,26 @@ fn push_order_attrs(
     if attrs.sweep_to_fill {
         fields.push((6102, "1".to_string()));
     }
-    if attrs.all_or_none {
-        exec_inst.push('G');
+    // One field, its instructions separated by spaces and in this order: the
+    // type's own character, all-or-none, the algo marker, and the benchmark
+    // peg's own `R`. Run together, `aG` names no instruction the venue has.
+    // All-or-none is stated only on an order in no group and carrying no
+    // hedge, a preview's group included, as a gateway states it.
+    let mut instructions: Vec<&str> = Vec::new();
+    if !exec_inst.is_empty() && !two_part_mid {
+        instructions.push(&exec_inst);
     }
-    if !exec_inst.is_empty() {
-        fields.push((18, exec_inst));
+    if attrs.all_or_none && !in_group && attrs.hedge_type == 0 {
+        instructions.push("G");
+    }
+    if matches!(kind, K::Adaptive { .. } | K::Algo { .. }) {
+        instructions.push("e");
+    }
+    if matches!(kind, K::PegBench { .. }) {
+        instructions.push("R");
+    }
+    if !instructions.is_empty() {
+        fields.push((18, instructions.join(" ")));
     }
     // Instructions the caller set. Each changes what is traded, so each goes
     // on the wire: a volatility order priced in
@@ -2214,6 +2380,11 @@ fn push_order_attrs(
         if attrs.hedge_beta != 0.0 {
             fields.push((6703, format!("{:.6}", attrs.hedge_beta)));
         }
+        // The most a beta hedge may trade. Any stated value goes, nought
+        // included, and the venue answers for it.
+        if let Some(size) = attrs.hedge_max_size {
+            fields.push((6690, size.to_string()));
+        }
         if attrs.hedge_ratio != 0.0 {
             fields.push((6666, format!("{:.6}", attrs.hedge_ratio)));
         }
@@ -2278,11 +2449,12 @@ fn push_order_attrs(
         if scale.init_position != 0 {
             fields.push((6485, scale.init_position.to_string()));
         }
-        // How much of the first component is already filled is not sent. The
-        // venue answers "Can not contain field # 6486" — not an invalid value
-        // but a field that does not belong on this message, whatever it is
-        // worth elsewhere. The position a ladder starts against, beside it, is
-        // taken without complaint.
+        // How much of the first component is already filled, as a gateway
+        // sends it. The venue answers "Can not contain field # 6486", and that
+        // answer is the caller's to have.
+        if let Some(filled) = scale.init_fill_qty {
+            fields.push((6486, filled.to_string()));
+        }
     }
     // The soft-dollar arrangement this order's commission goes to. Both parts
     // or neither: a tier named with nothing against it is not an arrangement.
@@ -2290,9 +2462,12 @@ fn push_order_attrs(
         fields.push((6519, attrs.soft_dollar_tier_name.clone()));
         fields.push((6520, attrs.soft_dollar_tier_val.clone()));
     }
-    // The caller's own name for the algo running this order is not sent. The
-    // Tag 8016 is rejected with "Invalid value in field # 8016" whether or not
-    // the order runs an algo; confirmed against a live session both ways.
+    // The caller's own name for the algo running this order, as a gateway
+    // sends it. The venue refuses it — "Invalid value in field # 8016" —
+    // whether or not the order runs an algo, and that answer is the caller's.
+    if !attrs.algo_id.is_empty() {
+        fields.push((8016, attrs.algo_id.clone()));
+    }
     // Who settles this order, where that is not the account's own.
     if !attrs.settling_firm.is_empty() {
         fields.push((6282, attrs.settling_firm.clone()));
@@ -2397,23 +2572,30 @@ fn push_order_attrs(
     // encoders give them: after 204 and the attribute block, not in among the
     // order-type tags. The values and the conditions are unchanged.
     match &kind {
-        K::MidPrice { price_cap } if *price_cap > 0 => {
+        K::MidPrice { price_cap } if *price_cap != 0 => {
             fields.push((44, format_price(*price_cap).to_string()));
         }
         // Tag 211 is stated even when the offset is 0. Omitting it is rejected
         // with "Invalid value in field # 44"; confirmed against a paper
         // account.
+        // The offset rides the peg tag and the trigger tag both, as a gateway
+        // states it for this type.
         K::PegMkt { offset, price_cap } => {
-            fields.push((211, format_price(*offset).to_string()));
-            if *price_cap > 0 {
+            let offset = format_price(*offset).to_string();
+            fields.push((211, offset.clone()));
+            fields.push((99, offset));
+            if *price_cap != 0 {
                 fields.push((44, format_price(*price_cap).to_string()));
             }
         }
-        // The offset rides the peg tag the way a relative order's does; the
+        // The offset rides the peg tag the way a relative order's does, and
+        // the trigger tag beside it, as a gateway states it for this type; the
         // cap rides the limit-price tag, and a zero cap is no cap.
         K::PassiveRel { offset, price_cap } => {
-            fields.push((211, format_price(*offset).to_string()));
-            if *price_cap > 0 {
+            let offset = format_price(*offset).to_string();
+            fields.push((211, offset.clone()));
+            fields.push((99, offset));
+            if *price_cap != 0 {
                 fields.push((44, format_price(*price_cap).to_string()));
             }
         }
@@ -2432,27 +2614,21 @@ fn push_order_attrs(
             // subscription is acknowledged, which downgrades a valid two-part
             // peg to the continuous form with no diagnostic. Add the test once
             // the increment is known before the order is built.
-            let whole = if attrs.mid_offset_at_whole == f64::MAX { 0.0 } else { attrs.mid_offset_at_whole };
-            let half = if attrs.mid_offset_at_half == f64::MAX { 0.0 } else { attrs.mid_offset_at_half };
+            let whole = unset_is_nought(attrs.mid_offset_at_whole);
+            let half = unset_is_nought(attrs.mid_offset_at_half);
             fields.push((8403, format!("{whole:.6}")));
             fields.push((8404, format!("{half:.6}")));
-            if whole != 0.0 && half != 0.0 {
+            if two_part_mid {
                 // The two-part form. The order type stated above is the one for
-                // a continuous offset, so it is restated, and the instruction
-                // that names the peg is dropped — the type carries it.
+                // a continuous offset, so it is restated; the instruction that
+                // names the peg was left off above — the type carries it.
                 order_type = Some("PMID2");
-                for (tag, value) in fields.iter_mut() {
-                    if *tag == 18 {
-                        value.retain(|c| c != 'M');
-                    }
-                }
-                fields.retain(|(tag, value)| *tag != 18 || !value.is_empty());
             }
             fields.push((211, format_price(*offset).to_string()));
             // The worst price the peg may reach, which IBKR documents as the
             // limit-price field for these types. A zero cap is no cap, and zero
             // is not a price, so it is left off rather than stated as one.
-            if *price_cap > 0 {
+            if *price_cap != 0 {
                 fields.push((44, format_price(*price_cap).to_string()));
             }
         }

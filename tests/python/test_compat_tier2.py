@@ -242,16 +242,17 @@ def test_exercise_options_refuses_an_action_it_cannot_serve():
     assert "exercise_action 3" in message
 
 
-def test_exercise_options_refuses_an_account_it_cannot_name():
-    """The account is not carried on the order. Every message states the
-    session account, so an exercise naming another one would be taken here."""
+def test_exercise_options_answers_an_account_the_login_does_not_hold():
+    """A login holding one account holds no position in another, and a gateway
+    looking the position up there says so under 322."""
     c, w = make_client()
     c._test_connect()
     contract = make_contract(con_id=265598, symbol="AAPL")
     c.exercise_options(1, contract, 1, 100, "DU12345", 0)
-    req_id, code, message = w.errors[-1]
-    assert (req_id, code) == (1, 321)
-    assert "DU12345" in message
+    assert w.errors[-1] == (
+        1, 322,
+        "Error processing request:No unlapsed position exists in this option in account DU12345.",
+    )
 
 
 # ═══════════════════════════════════════════════════════════

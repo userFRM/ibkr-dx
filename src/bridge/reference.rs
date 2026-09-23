@@ -166,6 +166,9 @@ pub struct ReferenceState {
     /// Feature tokens the venue enables for this account, from logon tag 6542
     /// and from the account configuration that follows it.
     enabled_features: Mutex<Vec<String>>,
+    /// The accounts the logon names as the login's own, and whether the login
+    /// is an advisor's (logon tag 6108).
+    login: Mutex<(Vec<String>, bool)>,
     /// Whether the venue granted the older spelling of Nasdaq. Settled when
     /// the grants are, because a contract definition is parsed under it and a
     /// lock and a scan per definition is not what that path is for.
@@ -246,6 +249,7 @@ impl ReferenceState {
             trading_over: Mutex::new(None),
             order_permissions: Mutex::new(HashMap::new()),
             enabled_features: Mutex::new(Vec::new()),
+            login: Mutex::new((Vec::new(), false)),
             island_granted: AtomicBool::new(false),
             algorithms: Mutex::new(HashMap::new()),
             order_presets: Mutex::new(Vec::new()),
@@ -1182,6 +1186,18 @@ impl ReferenceState {
         self.enabled_features.lock().unwrap().clone()
     }
 
+    /// Whether the venue enables one feature for this account, read without
+    /// copying the list.
+    pub fn enables(&self, feature: &str) -> bool {
+        self.enabled_features.lock().unwrap().iter().any(|f| f == feature)
+    }
+
+    /// The accounts the logon names as the login's own, family-linked ones
+    /// left out, and whether the login is an advisor's.
+    pub fn login(&self) -> (Vec<String>, bool) {
+        self.login.lock().unwrap().clone()
+    }
+
     /// Which algorithms the venue offers, keyed `PROVIDER/SECTYPE`.
     ///
     /// The venue states this on the session; it is not a property of a
@@ -1367,6 +1383,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_order_permissions(&self, perms: HashMap<String, Vec<String>>) {
         *self.order_permissions.lock().unwrap() = perms;
+    }
+
+    #[doc(hidden)] pub fn set_login(&self, accounts: Vec<String>, advisor: bool) {
+        *self.login.lock().unwrap() = (accounts, advisor);
     }
 
     #[doc(hidden)] pub fn set_enabled_features(&self, features: Vec<String>) {

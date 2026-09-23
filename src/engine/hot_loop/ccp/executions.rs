@@ -139,6 +139,8 @@ pub(crate) fn read_stated_attributes(
     // And where the window closes, which this client writes and read from
     // nowhere: an order handed back without it is one whose watch has no end.
     if let Some(v) = parsed.get(&6671) { order.active_stop_time = v.clone(); }
+    // The most a beta hedge may trade, which the venue states back for one.
+    if let Some(v) = parsed.get(&6690).and_then(|v| v.parse::<i32>().ok()) { order.hedge_max_size = v; }
     if let Some(v) = parsed.get(&6737) { order.imbalance_only = flag(v); }
     if let Some(v) = parsed.get(&6965) { order.auto_cancel_parent = flag(v); }
     if let Some(v) = parsed.get(&8089) { order.ext_operator = v.clone(); }

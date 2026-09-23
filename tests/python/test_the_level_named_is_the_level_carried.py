@@ -76,3 +76,18 @@ def test_every_surface_answers_the_question_with_one_number():
     ).stdout
     answering = [line for line in stated.splitlines() if "client_core::PROTOCOL_LEVEL" in line]
     assert len(answering) >= 1, f"a surface answers with something else:\n{stated}"
+
+
+def test_the_most_a_beta_hedge_may_trade_is_a_field_of_an_order():
+    """`hedgeMaxSize` is taken, at the reference client's unset value until
+    stated, and `conditionsIncludeOvernight` is absent and says so on use."""
+    order = ibkr_dx.Order()
+    assert order.hedgeMaxSize == 2147483647
+    order.hedgeMaxSize = 50
+    assert (order.hedgeMaxSize, order.hedge_max_size) == (50, 50)
+    try:
+        order.conditionsIncludeOvernight = True
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("a field this client does not have took a value")

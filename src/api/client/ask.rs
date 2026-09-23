@@ -255,9 +255,12 @@ impl<T> Default for Pending<T> {
     }
 }
 
-/// The connection notices are not answers to anything.
-fn is_connection_notice(code: i64) -> bool {
-    matches!(code, 2104 | 2106 | 2107 | 2119 | 2158)
+/// A warning is not an answer to anything: the connection notices, and a
+/// warning about a request that goes on, such as an order placed without
+/// something it asked for. ib_async reads every code from 2100 to 2199 as a
+/// warning, and so does this.
+fn is_warning(code: i64) -> bool {
+    (2100..2200).contains(&code)
 }
 
 /// Whether the answering-call guard re-raises a loss on drop: the connection
@@ -440,7 +443,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -501,7 +504,7 @@ impl EClient {
         }
         impl Wrapper for Refused {
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     *self.why.lock().unwrap() = Some(Refusal::stated(code as i32, message));
                 }
             }
@@ -602,7 +605,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -655,7 +658,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -695,7 +698,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -760,7 +763,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -809,7 +812,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -844,7 +847,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -865,17 +868,14 @@ impl EClient {
     /// The order is marked as a question rather than an instruction, so
     /// nothing reaches the market.
     ///
-    /// The preview states the order's own type, so a security that refuses a
-    /// type refuses the preview of it rather than answering about an order
-    /// that was not asked about. What it cannot state is the instruction that
-    /// separates types sharing one: trailing, relative and the pegged pair are
-    /// all sent as "P" and separated by their ExecInst, which a preview does
-    /// not carry, so the venue reads any of them as the same peg. The margin is
-    /// the same either way — it follows the position the order would leave, not
-    /// the instruction that reaches it.
+    /// The preview is the order's own placement with the question marked on
+    /// it, as a gateway sends one: its type, its prices and the instruction
+    /// that separates the types sharing a name — trailing, relative and the
+    /// two pegs all go as `P`, told apart by their ExecInst — so a security
+    /// that refuses a type refuses the preview of it rather than answering
+    /// about an order that was not asked about.
     ///
-    /// A type this client states no value for is previewed as a limit at the
-    /// same price, which is the only thing left to ask.
+    /// A name that is not an order type is refused, as it is when placing.
     pub fn what_if_order(
         &self, contract: &Contract, order: &crate::types::model::Order,
     ) -> Result<crate::types::model::OrderState, Refusal> {
@@ -918,7 +918,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.order_id && !is_connection_notice(code) {
+                if req_id == self.order_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -1014,7 +1014,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -1093,7 +1093,7 @@ impl EClient {
                 *r = Some(report);
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id != self.order_id || is_connection_notice(code) {
+                if req_id != self.order_id || is_warning(code) {
                     return;
                 }
                 let mut r = self.report.lock().unwrap();
@@ -1360,7 +1360,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -1413,7 +1413,7 @@ impl EClient {
                 }
             }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;
@@ -1465,7 +1465,7 @@ impl EClient {
             fn wsh_meta_data(&mut self, req_id: i64, data: &str) { self.take(req_id, data) }
             fn wsh_event_data(&mut self, req_id: i64, data: &str) { self.take(req_id, data) }
             fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
-                if req_id == self.req_id && !is_connection_notice(code) {
+                if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
                     s.done = true;

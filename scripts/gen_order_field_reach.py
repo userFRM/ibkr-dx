@@ -7,10 +7,12 @@ a field the builder never reads has been told nothing about it. The order went
 out without it, and the only sign is that the venue does something other than
 what was asked.
 
-Every field of `Order` falls into one of three kinds:
+Every field of `Order` falls into one of these kinds:
 
   carried   the order builder reads it and it goes out under a tag
-  refused   this protocol does not carry it, and the field says so
+  taken     a gateway sends nothing for it on the orders this client places,
+            so neither does this client, and the field says so
+  refused   this client does not carry it, and the field says so
   dropped   a caller can set it and nothing reads it
 
 `dropped` is the one that matters. It is the order-field form of `silent`: the
@@ -212,6 +214,24 @@ def reported() -> dict[str, str]:
     return out
 
 
+def taken() -> dict[str, str]:
+    """Fields a gateway reads and sends nothing for, on the orders this client places.
+
+    Neither carried nor refused, and not dropped either: the venue receives
+    through this client what it receives through a gateway, which is nothing.
+    Counted apart so that a field genuinely going nowhere still shows up as one.
+    """
+    text = module("src/types/model").read_text()
+    at = text.index("pub struct Order ")
+    end = text.index("\n}", at)
+    out = {}
+    for m in re.finditer(r"((?:^\s*///.*\n)+)\s*pub (\w+):", text[at:end], re.M):
+        doc = " ".join(line.strip(" /") for line in m.group(1).strip().splitlines())
+        if "taken and not sent" in doc.lower():
+            out[m.group(2)] = doc
+    return out
+
+
 def held() -> dict[str, str]:
     """Fields this client acts on itself rather than sending or refusing.
 
@@ -305,9 +325,10 @@ def main() -> int:
 
     echoed = reported()
     kept = held()
+    unsent = taken()
     carried, dropped = [], []
     for field in fields:
-        if field in says_so or field in echoed or field in kept:
+        if field in says_so or field in echoed or field in kept or field in unsent:
             continue
         if re.search(rf"\b{field}\b", read):
             carried.append(field)
@@ -326,7 +347,8 @@ def main() -> int:
         "| Kind | Count | Meaning |",
         "| --- | ---: | --- |",
         f"| carried | {len(carried)} | goes out under a tag |",
-        f"| refused | {len(says_so)} | this protocol does not carry it, and the field says so |",
+        f"| taken | {len(unsent)} | a gateway sends nothing for it on the orders this client places, and neither does this client |",
+        f"| refused | {len(says_so)} | this client does not carry it, and the field says so |",
         f"| reported | {len(echoed)} | the venue fills it on the way back; an order does not carry it out |",
         f"| held | {len(kept)} | this client acts on it rather than sending it |",
         f"| dropped | {len(dropped)} | a caller can set it and nothing reads it |",
@@ -342,9 +364,13 @@ def main() -> int:
     lines.append(
         "\n".join(f"- `{f}` — {why}" for f, why in sorted(kept.items())) if kept else "None."
     )
+    lines += ["", "## Taken and not sent, as a gateway sends nothing for them", ""]
+    lines.append(
+        "\n".join(f"- `{f}` — {why}" for f, why in sorted(unsent.items())) if unsent else "None."
+    )
     lines += ["", "## Reported by the venue, not sent", ""]
     lines.append(", ".join(f"`{f}`" for f in sorted(echoed)) if echoed else "None.")
-    lines += ["", "## Not carried by this protocol", ""]
+    lines += ["", "## Not carried by this client", ""]
     lines.append(
         "\n".join(f"- `{f}` — {why}" for f, why in sorted(says_so.items()))
         if says_so
@@ -380,14 +406,14 @@ def main() -> int:
             print(f"  {f}")
         return 1
 
-    have = [len(fields), len(carried), len(says_so)]
+    have = [len(fields), len(carried), len(unsent), len(says_so), len(echoed)]
     for pattern, want in (
-        (r"\| Order fields \| ([\d,]+)\. ([\d,]+) are sent; ([\d,]+) have no field .*?; ([\d,]+) are what",
-         have + [len(echoed)]),
-        (r"An order has ([\d,]+) fields\. ([\d,]+) are sent\. ([\d,]+) have no field .*?\. ([\d,]+) more are",
-         have + [len(echoed)]),
+        (r"\| Order fields \| ([\d,]+)\. ([\d,]+) are sent; ([\d,]+) are taken and not sent"
+         r".*?; ([\d,]+) are not carried .*?; ([\d,]+) are what", have),
+        (r"An order has ([\d,]+) fields\. ([\d,]+) are sent\. ([\d,]+) are taken and not sent"
+         r".*?\. ([\d,]+) are not carried .*?\. ([\d,]+) more are", have),
         (r"\| ([\d,]+) order fields, none dropped \|", [len(fields)]),
-        (r"\*\*([\d,]+) order fields are not transmitted\.\*\*", [len(says_so)]),
+        (r"\*\*([\d,]+) order fields are not carried by this client\.\*\*", [len(says_so)]),
     ):
         for stated in published(pattern):
             if stated != want:
@@ -402,7 +428,7 @@ def main() -> int:
             print(f"  {f}")
         return 1
 
-    print(f"{len(fields)} order fields: carried={len(carried)} "
+    print(f"{len(fields)} order fields: carried={len(carried)} taken={len(unsent)} "
           f"refused={len(says_so)} reported={len(echoed)} dropped={len(dropped)}")
     return 0
 

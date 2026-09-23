@@ -19,9 +19,9 @@ Verification runs against a paper account on IBKR production servers, and the or
 | | |
 | --- | --- |
 | Requests | 82. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
-| Order fields | 154. 118 are sent; 29 have no field in the protocol to carry them and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
+| Order fields | 155. 124 are sent; 19 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 3,540 offline, and 184 more that live in the suites run against a broker session |
+| Tests | 3,575 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -68,9 +68,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,692 | No |
+| Rust unit and integration | 2,726 | No |
 | Rust, live | 9 | Yes |
-| Python | 848 | No |
+| Python | 849 | No |
 | Python, live | 124 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -123,7 +123,7 @@ nothing.
 | --- | :---: | --- |
 | 24 order types | ✅ Supported | The check every placement passes accepts 24, each sent as itself: MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MIT, LIT, MTL, MKT PRT, STP PRT, REL, PASSV REL, PEG MKT, PEG MID, PEG BEST, PEG BENCH, MIDPX, SNAP MKT, SNAP MID, SNAP PRI and BOX TOP. Every one but PEG BEST and BOX TOP is placed against the venue by `tests/ib_paper_compat` or the Python live suites |
 | PEG BEST and BOX TOP | 🔬 Implemented | Built and checked by the order builder's offline tests, `src/engine/hot_loop/order_builder/tests.rs`; no suite here places them against the venue |
-| Order fields | ✅ Supported | An order has 154 fields. 118 are sent. 29 have no field in this protocol to carry them, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
+| Order fields | ✅ Supported | An order has 155 fields. 124 are sent. 19 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 5 are not carried by this client, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
 | Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn) in [ib_async-dx](https://github.com/userFRM/ib_async-dx); `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |
@@ -169,7 +169,7 @@ stops holding.
 | What is guaranteed | Where it stands |
 | --- | --- |
 | A call never returns success having sent nothing | 82 requests, none silent |
-| A field a caller sets is never quietly ignored | 154 order fields, none dropped |
+| A field a caller sets is never quietly ignored | 155 order fields, none dropped |
 | A field the server sends is never thrown away | What this client has no name for is kept under its tag number — 49 such fields on an equity definition, 46 on a bond |
 
 A fourth is held by a test rather than a measurement: **no wire parser aborts
@@ -183,11 +183,10 @@ What a request meets here. Each says whether it is the protocol's or this
 client's own allocation; what a gateway answers the same way is on
 [Venue behaviour](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html).
 
-- **29 order fields are not transmitted.** For each, the protocol either
-  carries no tag at all, or carries one the server rejects by name
-  (`algo_id` → *Invalid value in field # 8016*; `scale_init_fill_qty` →
-  *Can not contain field # 6486*). Each field retains the caller's value, so an
-  order constructed against another client round-trips unchanged.
+- **Two order fields a gateway sends are refused by the server by name.**
+  `algo_id` → *Invalid value in field # 8016*; `scale_init_fill_qty` → *Can
+  not contain field # 6486*. This client sends both, as a gateway does, and the
+  caller receives the server's refusal.
 - **One market-data subscription per contract on the wire.** The server holds
   one subscription per contract for a session, so callers asking for the same
   contract are multiplexed client-side and each is served from it.
@@ -266,7 +265,25 @@ stream that did not arrive.
 
 ## Known limitations
 
-One, and it is this client's own.
+These are this client's own.
+
+- **5 order fields are not carried by this client.** Four ask for an order
+  attached from the account's order preset, which the venue holds and a
+  gateway builds the attached order from; this client holds none. The fifth,
+  a combination's routing parameters, a gateway checks against the
+  combination in ways not all established here. Each is refused when stated.
+- **An exercise is sent without the moneyness check a gateway makes when
+  `override` is false.** A gateway waits for the venue's word on where the
+  option stands and refuses an exercise out of the money or a lapse in it; how
+  long it waits is not bounded, and this client has not chosen a bound.
+- **A preview under the number of a working order is refused.** A gateway
+  prices it as a new order and leaves the working one alone; this client keys
+  both on the number, and does not yet keep the two apart.
+- **The order types a contract takes on its exchange are not checked before an
+  order goes.** A gateway refuses a change of type into one the contract does
+  not take, and a midpoint or best peg where the exchange takes neither; this
+  client leaves both to the venue, because how the definition keys its lists
+  of order types to each exchange is not yet established here.
 
 - **The carry term in a hypothetical solve is fitted, not read.** The series
   that would state it (`OptExInterestRate`, under the protocol constraints

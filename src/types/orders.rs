@@ -187,7 +187,7 @@ pub fn ord_type_fix_str(t: u8) -> &'static str {
         ORD_PEG_BEST => "E2M",
         b'1' => "1", b'2' => "2", b'3' => "3", b'4' => "4", b'5' => "5",
         b'B' => "B", b'E' => "E", b'J' => "J", b'K' => "K",
-        b'P' => "P", b'R' => "R", b'U' => "U",
+        b'P' => "P", b'R' => "R", b'T' => "T", b'U' => "U",
         _ => "2",
     }
 }
@@ -208,7 +208,7 @@ mod ord_type_round_trip {
             ORD_STP_PRT, ORD_MIDPX, ORD_SNAP_MKT, ORD_SNAP_MID, ORD_SNAP_PRI,
             ORD_PEG_MKT, ORD_PEG_MID, ORD_PEG_BENCH, ORD_LIT, ORD_TRAIL_LIMIT,
             ORD_PASSV_REL, ORD_PEG_BEST,
-            b'1', b'2', b'3', b'4', b'5', b'B', b'J', b'K', b'P', b'U',
+            b'1', b'2', b'3', b'4', b'5', b'B', b'J', b'K', b'P', b'T', b'U',
         ];
         // The instruction the venue states beside the name, for the kinds that
         // share one. Everything else is named uniquely.
@@ -296,6 +296,8 @@ pub fn ord_type_api_name<'a>(ord_type: &'a str, exec_inst: &str) -> &'a str {
         "P" if exec_inst.contains('M') => "PEG MID",
         "P" if exec_inst.contains('R') => "REL",
         "P" => "TRAIL",
+        // A trailing stop, where the venue enables it under its own name.
+        "T" => "TRAIL",
         other => other,
     }
 }
@@ -709,6 +711,22 @@ pub struct OrderAttrs {
     /// that describes the order in fewer fields than the order itself is a
     /// question about a different order.
     pub what_if: bool,
+    /// Who originated the order, on tag 6122 as one character: 0 a customer
+    /// (`c`), 1 a firm (`f`), 2 `b`, 3 `m`, 4 `n`, 5 `y`, 8 `v`, 9 `j`, -1
+    /// `p`, and `?` for any other number. A gateway states it on every order
+    /// it sends.
+    pub origin: i32,
+    /// The account the order is for, on tag 1. Empty states the session's own,
+    /// which is what a login holding one account puts there whatever the order
+    /// names.
+    pub account: String,
+    /// Leave a limit hedge child priced as stated rather than at the parent's
+    /// trade price. A gateway whose venue enables priced hedge children states
+    /// tag 8262 on a new beta or pair hedge limit order unless this is set.
+    pub dont_use_auto_price_for_hedge: bool,
+    /// The most a beta hedge may trade, on tag 6690. Held only for a beta
+    /// hedge: a gateway reads it for no other kind.
+    pub hedge_max_size: Option<i32>,
 }
 
 impl Default for OrderAttrs {
@@ -808,6 +826,10 @@ impl Default for OrderAttrs {
             oca_type: Default::default(),
             exercise_action: Default::default(),
             what_if: Default::default(),
+            origin: 0,
+            account: String::new(),
+            dont_use_auto_price_for_hedge: false,
+            hedge_max_size: None,
         }
     }
 }
@@ -1210,10 +1232,14 @@ pub enum OrderKind {
         /// The furthest it will follow.
         price_cap: Price,
     },
-    /// Sit at the best bid or offer, improved by this much.
+    /// Sit at the best bid or offer, improved by this much, no worse than the
+    /// cap. The offset rides the peg tag and the cap the limit-price tag; zero
+    /// states no cap.
     Rel {
         /// How far from the reference it sits.
         offset: Price,
+        /// The furthest it will follow.
+        price_cap: Price,
     },
     /// Sit on the passive side of the best bid or offer, by this offset.
     /// Pegs the way a relative order does but travels under a name of its
@@ -1300,8 +1326,14 @@ pub struct ScaleAttrs {
     /// A position already held, which the ladder counts against rather than
     /// starting from nothing (tag 6485).
     pub init_position: i32,
-    /// How much of the first component is already filled (tag 6486).
-    pub init_fill_qty: i32,
+    /// How much of the first component is already filled (tag 6486), where
+    /// the caller stated it. Nought is a stated amount.
+    pub init_fill_qty: Option<i32>,
+    /// A ladder stated as a table, level by level, as `(quantity, price)` in
+    /// the order the caller wrote them (tags 6450, 6448 and 6447). `None` where
+    /// none was stated or where the one stated could not be read, which a
+    /// gateway sends as no table at all.
+    pub table: Option<Vec<(String, String)>>,
 }
 
 /// The contract an order hedges against: which one, its delta, and its price.

@@ -100,9 +100,42 @@ pub const CONDITION_CONTRACT_INCOMPLETE: i32 = 147;
 /// The code an unreadable good-till date is refused under.
 pub const GOOD_TILL_DATE_INVALID: i32 = 334;
 
-/// The code a change that would move an order to a type the change cannot
-/// restate is refused under.
+/// The code a change an order cannot take is refused under.
 pub const CHANGE_CANNOT_CHANGE_TYPE: i32 = 329;
+
+/// The code a request the venue's front end could not carry out is refused
+/// under. The reason follows `Error processing request:`.
+pub const REQUEST_NOT_PROCESSED: i32 = 322;
+
+/// The code a request the venue's front end could not read is refused under.
+/// The reason follows `Error reading request:`. A trailing order naming both
+/// an amount and a percentage is refused under it, as a gateway refuses one
+/// while it reads the order.
+pub const REQUEST_NOT_READ: i32 = 320;
+
+/// The code a change naming a one-cancels-all group other than the order's
+/// own is refused under.
+pub const OCA_GROUP_REVISION: i32 = 10326;
+
+/// The code a change naming a one-cancels-all type other than the order's
+/// own is refused under.
+pub const OCA_TYPE_REVISION: i32 = 10327;
+
+/// The code an order option under a key the venue does not know is refused
+/// under.
+pub const MISC_OPTION_KEY_INVALID: i32 = 10337;
+
+/// The code an order option with a value its key does not take is refused
+/// under.
+pub const MISC_OPTION_VALUE_INVALID: i32 = 10338;
+
+/// The code an order declining smart routing is refused under, where the
+/// venue has withdrawn that choice.
+pub const OPT_OUT_SMART_ROUTING_WITHDRAWN: i32 = 10348;
+
+/// The code an order declining smart routing is warned under, where the
+/// choice is dropped and the order placed without it.
+pub const OPT_OUT_SMART_ROUTING_DROPPED: i32 = 2181;
 
 /// The code a withdrawal naming an order this client is not working is
 /// answered under.
@@ -116,8 +149,13 @@ pub const NO_SUCH_ORDER: i32 = 135;
 /// answering is answered under.
 pub const NO_SUCH_HISTORICAL_QUERY: i32 = 366;
 
-/// The code an order type this exchange and security type do not support is
-/// refused under.
+/// The code an order-type name this client does not place is refused under.
+///
+/// The number a gateway gives an order type the exchange does not support.
+/// For a name that is no order type at all, what a gateway answers is not
+/// established here, so this client answers under this number and says what
+/// was wrong; a type a gateway places and this client does not is refused
+/// under it too.
 pub const ORDER_TYPE_UNSUPPORTED: i32 = 387;
 
 /// The code a replace naming a contract other than the order's is refused

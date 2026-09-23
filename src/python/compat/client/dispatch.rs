@@ -272,6 +272,12 @@ impl EClient {
                 false
             });
         }
+        // What was said about an order that went anyway, on its number. Ahead
+        // of anything the venue says about the order, as a gateway says it
+        // before the order goes out.
+        for (order_id, code, msg) in shared.orders.drain_order_notices() {
+            call_wrapper!(self, py, shared, "error", (order_id as i64, 0i64, code as i64, msg.as_str(), ""));
+        }
         let mut paired: Vec<crate::types::OrderUpdate> = shared.orders.drain_order_updates();
 
         // A holding that moved since the caller last heard, where the caller

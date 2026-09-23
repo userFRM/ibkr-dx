@@ -45,39 +45,87 @@ Something the protocol may well carry, which no session has established. Each
 says what would settle it. None of them is a call that returns as though it
 acted: a request this client will not send says so.
 
-## One order a modify cannot restate
+## What a replace states, and what it does not yet
 
-A modify is a full statement of the order, rebuilt from what was placed. One
-kind cannot be stated that way and the call is refused rather than sent: a
-what-if preview, which is a margin preview rather than a resting order, so
-there is nothing on the book for a replace to act on.
+A modify is the caller's order stated whole: its type, its prices and
+everything it carries go out as its own placement would state them, which is
+what a gateway's replace does. An order is replaced as itself whatever it is —
+relative, pegged, trailing, midpoint, snap, limit-if-touched, an adjustable
+stop, an algo, a conditional order, one with a minimum quantity — and a change
+of type states the new type whole and nothing of the old one. A trail moved
+between a percentage and an amount states the unit it is now in, and a trail
+naming both is refused under 320, *Error reading request: Cannot specify
+Trailing Amount and Trailing Percent at the same time*, as a gateway refuses it
+while it reads the order. A ladder stated as a table is stated on its
+placement alone, as a gateway states it, and a replace states its restart
+instead.
 
-Everything else is replaced as itself, including the ones that carry more than
-a type and a price: hidden, all-or-none, iceberg, discretionary, sweep-to-fill,
-an OCA group, a good-till date, a bracket child, an algo, a conditional order,
-an adjustable stop, and the trailing, pegged, midpoint and limit-if-touched
-types. An adjustable stop is an ordinary stop defined by what it becomes, and
-the replace states that conversion again: the marker, the type it adjusts to,
-the trigger, the adjusted stop, its limit and the trailing amount, the same
-numbers the placement wrote and in the same order. A modify of one
-of those names its defining number in the field the placement used: a trail, a
-peg offset or a snap offset on the auxiliary price, a cap on the limit price, a
-trailing stop limit's limit offset on `lmtPriceOffset`. The one number a modify
-cannot move is a trailing percent, and a modify naming a new one is refused
-rather than sent. A modify of an order this session did not place — one the
-venue named at connect — is restated from the caller's own statement of it,
-which is what the reference client sends — links included, on every replace,
-so a statement that omits the group drops it at the venue whatever the type,
-as it does on the reference client. A change of type on an order with a
-parent or a group is refused: the replace carries neither across a change of
-type, and the venue reads their absence as their removal. A replace stating a
-parent or a group other than the one an order placed here was placed with is
-refused too, for the same reason.
+What a gateway refuses in a replace is refused here in its words: a new
+one-cancels-all group on an order that has one, under 10326 (*OCA group
+revision is not allowed*), and a new way for the group to cancel, under 10327
+(*OCA group type revision is not allowed*), unless the venue lifts both at
+logon. The way is compared whether or not either names a group, and a way that
+is not one of the four reads as the default, reduce on fill without block: an
+order placed with the first way and replaced naming none is refused, and one
+replaced from the default to a way outside the four is not. A parent or a group named on an order that had none is taken, and the
+order goes on under the links it was placed with.
 
-A relative order is refused a modify as well. It answers both ways: sometimes
-the venue takes the replace and the order goes on working, and sometimes
-neither the replace nor a withdrawal after it draws any answer at all. A modify
-that strands the order some of the time is worse than one that is refused.
+Five things are not settled:
+
+- **The links on a replace.** A gateway's replace states neither the parent
+  nor the group. This client's restates the ones the order was placed with,
+  because a session once saw a bracket leg replaced without them leave its
+  bracket — by a replace that also stated none of the order's other
+  attributes. A leg replaced without them on a paper session, and then left to
+  see whether its group still cancels it, would settle which is needed.
+- **A relative order's replace.** One session saw a replace of one draw no
+  answer, and a withdrawal after it none either. That replace stated a trigger
+  a gateway does not state for this type; it states none now, and has not been
+  measured since.
+- **A change into a type the contract does not take.** A gateway refuses it
+  before sending, under 329 and *Order modify failed. Cannot change to the new
+  order type:* followed by the type's name, reading the order types the
+  contract takes on its exchange. This client sends it and the venue answers:
+  how a definition keys its lists of order types to each exchange is not
+  established here, and a definition captured on a session would settle it.
+- **A preview under the number of a working order.** A gateway prices it as a
+  new order and leaves the working one alone. This client keys an order's
+  record and its revisions on the number, so a preview there would stand in
+  for the working order; it is refused under 329 until the two are kept apart.
+- **A priced hedge child on a replace.** Where the venue prices hedge children
+  itself, a gateway states tag 8262 on a new limit order — an adaptive or algo
+  one included — carrying a beta or a pair hedge, and so does this client. On
+  a replacement a gateway states it in cases whose rule is not established
+  here, and this client states it on none.
+
+A modify of an order this session did not place — one the venue named at
+connect — is restated from the caller's own statement of it, links included:
+there is no placement here to restate them from.
+
+## A trailing stop limit by percentage
+
+A gateway takes a trailing stop limit whose trail is a percentage. What it
+states as such an order's trigger is not established here, so this client
+refuses one rather than put a price on it the caller did not ask for, and
+takes the trail as an amount. A gateway placing one, read on the wire, would
+settle it.
+
+## The order types a contract takes on its exchange
+
+A gateway refuses a midpoint peg on an exchange whose order types include
+neither form of it, and a peg to best where they do not include the midpoint
+form it rests on, under 387 and *Unsupported order type for this exchange and
+security type.* This client sends both and the venue answers, for the reason
+above: the lists are read here, but how each is keyed to an exchange is not
+established.
+
+## An exercise's override
+
+A gateway told `override` is false waits for the venue's word on where the
+option stands and refuses an exercise of one out of the money, or a lapse of
+one in it, under 322. It sets no bound on that wait. This client sends the
+exercise as given whatever `override` says, and says so in the log, until a
+bound is chosen.
 
 ## Numbered ticks this client does not deliver
 
@@ -148,30 +196,120 @@ the venue's model for the contract, and asking opens the subscription that
 carries it. A gateway gives up after five seconds. This client waits until the
 model arrives or the call is cancelled.
 
-## Order fields the protocol has nowhere to put
+## Order fields
 
-An order carries 154 fields. 118 go out under a tag. 29 have no field in this
-protocol to carry them, and each says so on itself rather than being quietly
-dropped. 6 more are what the venue fills in on the way back, which an order
-being placed does not carry out.
+An order carries 155 fields. 124 go out under a tag. 19 are taken and not
+sent: a gateway reads each and sends nothing for it on the orders this client
+places, and neither does this client. 5 are not carried by this client, and
+each says so on itself rather than being quietly dropped. 6 more are what the
+venue fills in on the way back, which an order being placed does not carry
+out.
 
-The 29 are not a gap in this client. The protocol numbers 288 order fields, and
-not one of them carries a basis-point offset, a bond's accrued interest, an
-auction strategy, an origin, a shareholder, a smart-combo routing parameter, a
-scale table, a price randomisation, a what-if kind, a parent's permanent id, a
-bracket preset's legs, the hedging leg's clearing, settling, short-sale or
-designated location, or the percentage constraints an order would set aside.
-They are fields a caller can state and nothing on the other side can receive,
-which is the same answer a gateway gives.
+The 19 are a basis-point offset and its kind, a bond's accrued interest, an
+auction strategy, a shareholder, a parent's permanent id and the percentage
+constraints an order would set aside — which a gateway reads and sends nothing
+for — together with the order options, the choice to decline smart routing
+and the kind of preview, which it checks and sends nothing for, in the same
+words: an unknown option under 10337, a bad value of `manual` under 10338,
+declining smart routing refused under 10348 where the venue withdrew it and
+warned about under 2181 otherwise — ahead of anything the venue says about
+the order, as a gateway says it before the order goes out — and a preview kind
+other than the ordinary one refused. A gateway reads the kind only from an
+order in the protobuf encoding; the text encoding ib_async uses has no field
+for it. The delta, the price randomisation and the hedging leg's
+clearing, settling, short-sale and designated-location fields go out only on
+order types this client does not place — a pegged-to-stock order, a
+volatility order and the hedge a gateway builds for one — so on every order it
+does place, a gateway sends nothing for them either. The hedging leg's short
+sale is refused on an order that is itself a short sale naming a hedging
+order type, where what a gateway makes of it is not established here.
 
-One of them was settled the other way round, on a session rather than on the
-vocabulary: a caller's own name for an algo has a number in the protocol, and
-the venue refuses an order carrying it — *"Invalid value in field # 8016"* —
-whether or not the order runs an algo.
+The 5 not carried are the four fields that attach a profit taker or a stop
+loss, which a gateway builds from the order preset the account holds and this
+client holds none of, and a combination's routing parameters, which a gateway
+checks against the combination in ways not all established here.
+
+Two fields a gateway sends are refused by the venue by name, and this client
+sends them the same way so the caller receives that answer: a caller's own
+name for an algo — *"Invalid value in field # 8016"* — and how much of a
+ladder's first component is already filled — *"Can not contain field #
+6486"*. The second goes, as a gateway sends it, only on a ladder that steps
+its price, as do the ladder's price adjustment, profit offset, restart, varied
+sizes and starting position.
 
 None is silently dropped, and that is checked rather than claimed:
-`python scripts/gen_order_field_reach.py` recounts all four figures from the
+`python scripts/gen_order_field_reach.py` recounts every figure from the
 order builders and exits non-zero if any field becomes settable and unread.
+
+## A refusal made while an order is checked names no request
+
+Where a gateway refuses an order while it validates it — a login holding
+several accounts naming none, a preview of a kind it does not take, a trailing
+percentage outside what one can be, a value of `manual` that is not a number
+nought or one where the venue has lifted the option checks — it answers under
+321 and puts the name of the request it was validating in front of the reason.
+This client answers under the same number with the same reason, without the
+name. An option under an unknown key, and a value of `manual` other than `0`
+or `1` where the checks stand, are answered under their own numbers, 10337 and
+10338.
+
+## The account an order is for
+
+On a login holding one account, a gateway states that account on every order
+whatever the order names, and so does this client; the open order reads back
+the account the venue states. On a login holding several, the order goes out
+on the account it names, and so do its replacements and its withdrawal; one
+naming none is refused, *You must specify an account.* The withdrawal of an
+order the venue named at connect goes out on the account the venue states it
+is on. An exercise on such a login is refused naming none (*The account code
+is required for this operation.*) or one the login does not hold (*Invalid
+account code 'U9'.*).
+
+A login holds several accounts, as a gateway decides it, where the venue lets
+accounts be added to it as it runs, where the first account its logon names is
+an introducing broker's master, or where its logon names more than one account
+that is not a group. The accounts a family links to the login are not counted.
+Which list a gateway counts is read from the logon, and this client counts the
+accounts the logon names as the login's own; a login holding several accounts,
+placing an order naming none, would settle that the two agree.
+
+An advisor's login is not refused an order naming no account: the order is
+allocated across accounts. Where an advisor's order does name one, a gateway
+allocates it to that account rather than stating it on tag 1; this client
+states it on tag 1, and what the venue makes of that is not established here.
+
+An exercise naming another account on a login holding one is refused under
+322, *No unlapsed position exists in this option in account* followed by the
+account, which is what a gateway answers when it looks the position up there.
+For the login's own account a gateway checks the position before sending, and
+reduces a request for more than is held to what is held; this client sends it
+and the venue answers, under 399, *You have not got the number of options
+requested to be exercised*.
+
+## An order states who it is for twice
+
+A gateway states who originated an order on tag 6122 and nothing on 204. This
+client states both: 6122 from the order's origin, and 204 as a customer's
+order, which the venue once refused an order for leaving out when it stated
+neither. An order placed with 6122 alone on a paper session would settle
+whether 204 can go.
+
+## Order-type names
+
+A gateway takes each order type under several names, in any case, and so does
+this client: `LIMIT` is `LMT`, `STOP LIMIT` is `STP LMT`, `PEG PRIM` is a
+relative order. Four names are this client's own and a gateway does not know
+them: `MIDPX`, `PEG MIDPT`, `SNAP MIDPT` and `SNAP PRI`, taken as `MIDPRICE`,
+`PEG MID`, `SNAP MID` and `SNAP PRIM`. A name this client does not place is
+refused under 387, *Unsupported order type:* followed by the name and that it
+is not an order type this client places; what a gateway answers for a name
+that is no order type is not established here.
+
+Five order types a gateway takes are not placed by this client — trailing
+market-if-touched and limit-if-touched, the retail price improvement order,
+the volatility order and the pegged-to-stock order — nor are the four
+volatility pegs. Each carries prices or companions not yet established here,
+and is refused by name.
 
 ## An account summary is this session's account, whatever group is named
 

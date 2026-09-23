@@ -171,6 +171,8 @@ pub struct Order {
     #[pyo3(get, set)]
     pub filled_quantity: f64,
     #[pyo3(get, set)]
+    pub hedge_max_size: i32,
+    #[pyo3(get, set)]
     pub hedge_param: String,
     #[pyo3(get, set)]
     pub hedge_type: String,
@@ -411,6 +413,7 @@ impl Clone for Order {
             fa_method: self.fa_method.clone(),
             fa_percentage: self.fa_percentage.clone(),
             filled_quantity: self.filled_quantity,
+            hedge_max_size: self.hedge_max_size,
             hedge_param: self.hedge_param.clone(),
             hedge_type: self.hedge_type.clone(),
             ignore_open_auction: self.ignore_open_auction,
@@ -572,6 +575,8 @@ impl Default for Order {
             fa_method: String::new(),
             fa_percentage: String::new(),
             filled_quantity: 0.0,
+            // The reference client's unset integer.
+            hedge_max_size: i32::MAX,
             hedge_param: String::new(),
             hedge_type: String::new(),
             ignore_open_auction: false,
@@ -989,6 +994,7 @@ impl Order {
             fa_method: a.fa_method.clone(),
             fa_percentage: a.fa_percentage.clone(),
             filled_quantity: a.filled_quantity,
+            hedge_max_size: a.hedge_max_size,
             hedge_param: a.hedge_param.clone(),
             hedge_type: a.hedge_type.clone(),
             ignore_open_auction: a.ignore_open_auction,
@@ -1170,6 +1176,7 @@ impl Order {
             fa_method: self.fa_method.clone(),
             fa_percentage: self.fa_percentage.clone(),
             filled_quantity: self.filled_quantity,
+            hedge_max_size: self.hedge_max_size,
             hedge_param: self.hedge_param.clone(),
             hedge_type: self.hedge_type.clone(),
             ignore_open_auction: self.ignore_open_auction,
@@ -1927,6 +1934,7 @@ camel_aliases_copy! {
         get_dont_use_auto_price_for_hedge_alias set_dont_use_auto_price_for_hedge_alias dontUseAutoPriceForHedge dont_use_auto_price_for_hedge bool;
         get_exempt_code_alias set_exempt_code_alias exemptCode exempt_code i32;
         get_filled_quantity_alias set_filled_quantity_alias filledQuantity filled_quantity f64;
+        get_hedge_max_size_alias set_hedge_max_size_alias hedgeMaxSize hedge_max_size i32;
         get_ignore_open_auction_alias set_ignore_open_auction_alias ignoreOpenAuction ignore_open_auction bool;
         get_imbalance_only_alias set_imbalance_only_alias imbalanceOnly imbalance_only bool;
         get_include_overnight_alias set_include_overnight_alias includeOvernight include_overnight bool;

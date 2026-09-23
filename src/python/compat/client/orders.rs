@@ -147,14 +147,14 @@ impl EClient {
             },
             ..Default::default()
         };
-        // Empty before connect, so a named account cannot match and is refused.
-        // That is the right answer either way: the field reaches no encoder, so
-        // an order naming one would fill somewhere else whether or not a session
-        // exists to compare against.
-        let connected = self.account_id.lock().unwrap().clone().unwrap_or_default();
-        if let Err(why) = ClientCore::validate_order(&api_order, &connected) {
+        // Checked against the session as a gateway checks it: which accounts
+        // the login holds and what the venue enabled.
+        let session = self.order_session();
+        if let Err(why) = ClientCore::validate_order(&api_order, &session) {
             return self.report_refusal(py, order_id, why);
         }
+        // From here on, the order as this session sends it.
+        let api_order = ClientCore::as_sent(&api_order, &session).into_owned();
         if let Err(why) = ClientCore::validate_supported_instructions(&api_order) {
             return self.report_refusal(py, order_id, why.into());
         }
@@ -237,7 +237,8 @@ impl EClient {
         // client sends what it is given and the venue answers for it.
         let Some(oid) = u64::try_from(order_id).ok().filter(|id| *id > 0) else {
             return self.report_refusal(py, order_id, Refusal::validation(format!(
-                "place_order: order_id {order_id} is not an order number;                  ask for one with next_order_id() or reqIds()",
+                "place_order: order_id {order_id} is not an order number; \
+                 ask for one with next_order_id() or reqIds()",
             )));
         };
 
@@ -323,8 +324,8 @@ impl EClient {
             if placed_on.is_some_and(|placed_on| placed_on != instrument) {
                 return self.report_refusal(py, order_id, wrong_contract());
             }
-            // A replace states the order type, the limit price and the trigger.
-            // An order defined by anything else cannot survive one.
+            // A replace is the caller's statement of the order, restated whole;
+            // what a gateway refuses in one is refused here.
             if let Some(refusal) = self.core.modify_refusal(oid, &api_order, venue_now) {
                 return self.report_refusal(py, order_id, refusal);
             }
@@ -438,6 +439,14 @@ impl EClient {
                 api_contract.clone(), tracked_order.clone(), instrument,
             );
         }
+        // What a gateway says about an order it places anyway, on the order's
+        // number, as it says it. Said once the order has gone or is held, so
+        // an order that could not be sent draws the failure alone.
+        if let Some(warning) = ClientCore::order_warning(&api_order, &session)
+            && let Some(shared) = venue_now
+        {
+            shared.orders.push_order_notice(oid, warning.code, warning.message);
+        }
 
         Ok(())
     }
@@ -446,6 +455,11 @@ impl EClient {
     ///
     /// `exercise_action` is 1 to exercise and 2 to lapse; anything else is
     /// refused.
+    ///
+    /// `account` is the account the exercise is taken on. A login holding
+    /// several has to name one it holds; a login holding one takes it on its
+    /// own, and an account other than its own holds no position here, which
+    /// is answered under 322 as a gateway answers it.
     ///
     /// `_override` is taken and not sent, because no tag carries it: it names
     /// a check made before the order is built, not one the venue makes. The
@@ -478,11 +492,11 @@ impl EClient {
         // to send, and the caller is told that rather than told about its
         // account.
         let Some(tx) = self.tx_or_report_for_trading(req_id)? else { return Ok(()) };
-        let (action, qty) = match ClientCore::validate_exercise(
-            exercise_action, exercise_quantity, account, &self.account(),
+        let (action, qty, account) = match ClientCore::validate_exercise(
+            exercise_action, exercise_quantity, account, &self.order_session(),
         ) {
-            Ok(pair) => pair,
-            Err(why) => return self.report_refusal(py, req_id, why.into()),
+            Ok(checked) => checked,
+            Err(why) => return self.report_refusal(py, req_id, why),
         };
         if let Err(why) = ClientCore::validate_order_contract(
             contract.con_id,
@@ -506,7 +520,7 @@ impl EClient {
         };
         Self::send_control(py, &tx, ControlCommand::Order(
             ClientCore::build_exercise_request(
-                oid, instrument, action, crate::types::qty_from_wire(qty as i64),
+                oid, instrument, action, crate::types::qty_from_wire(qty as i64), account,
                 crate::client_core::ExerciseStates {
                     manual_order_time: manual_order_time.to_string(),
                     customer_account: customer_account.to_string(),

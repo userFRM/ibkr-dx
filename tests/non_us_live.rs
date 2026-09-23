@@ -179,8 +179,24 @@ fn a_contract_that_trades_around_the_clock_is_described_as_itself() {
         }
 
         // Preview the order without placing it. The preview carries the order
-        // type and the full contract description.
-        let order = ibkr_dx::types::model::Order::limit("BUY", 1.0, 1.0);
+        // type and the full contract description, and asks about the size the
+        // venue deals the contract in: a share dealt in board lots is refused
+        // by its exchange for an odd lot, which says nothing about the order.
+        let stated = |v: f64| v.is_finite() && v > 0.0 && v != f64::MAX;
+        let lot = [found[0].size_increment, found[0].min_size]
+            .into_iter()
+            .find(|v| stated(*v))
+            .unwrap_or(1.0)
+            .max(1.0);
+        println!("    dealt in lots of {lot}");
+        if lot > 1.0 {
+            let odd = ibkr_dx::types::model::Order::limit("BUY", 1.0, 1.0);
+            match client.preview(c, &odd) {
+                Ok(_) => println!("    preview of one: priced"),
+                Err(e) => println!("    preview of one refused: {e}"),
+            }
+        }
+        let order = ibkr_dx::types::model::Order::limit("BUY", lot, 1.0);
         match client.preview(c, &order) {
             Ok(state) => println!(
                 "    preview: init margin {:?} commission {:?}",

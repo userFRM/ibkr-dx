@@ -104,7 +104,7 @@ impl EClient {
         // be placed as asked is a programming error, and answering it with a
         // fifteen-second lookup for a contract it was never going to trade is
         // slower and says less.
-        crate::client_core::ClientCore::validate_order(order, &self.account_id)?;
+        crate::client_core::ClientCore::validate_order(order, &self.order_session())?;
 
         // Resolved before the turn is taken, not during it. `place_order` looks
         // a contract up when it carries no id, and a lookup is a question of
@@ -207,12 +207,15 @@ impl EClient {
         // Refused before anything is registered or sent: an entry the wrong
         // side of its own exits is a bracket that closes itself the moment it
         // opens, and the venue is not the right place to find that out.
+        // The legs go out on the session's own account, so that is the
+        // account the entry names.
         let entering = crate::types::model::Order {
             action: side.into(), total_quantity: quantity,
             order_type: "LMT".into(), lmt_price: entry, tif: "DAY".into(),
+            account: self.account_id.clone(),
             ..Default::default()
         };
-        crate::client_core::ClientCore::validate_order(&entering, &self.account_id)?;
+        crate::client_core::ClientCore::validate_order(&entering, &self.order_session())?;
         // The exits are prices and are range-checked as the entry is. Scaling
         // saturates a value the wire cannot carry, which the ordering check below
         // would then read as a valid price.

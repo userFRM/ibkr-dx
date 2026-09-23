@@ -46,6 +46,20 @@ impl EClient {
         self.shared.reference.enabled_features()
     }
 
+    /// What this session says about an order that a gateway checks it
+    /// against: the account, every account the login holds, and what the
+    /// venue enabled.
+    pub(crate) fn order_session(&self) -> crate::client_core::OrderSession {
+        let (logon_accounts, advisor) = self.shared.reference.login();
+        crate::client_core::OrderSession {
+            account: self.account_id.clone(),
+            accounts: self.accounts.clone(),
+            logon_accounts,
+            advisor,
+            features: self.shared.reference.enabled_features(),
+        }
+    }
+
     /// Which algorithms the venue offers, keyed `PROVIDER/SECTYPE`.
     ///
     /// Stated on the session rather than per contract. An algorithm absent
@@ -133,7 +147,11 @@ impl EClient {
         ClientCore::validate_order_destination(&contract.exchange)?;
 
         // Validate order params and contract before registering instrument (fail fast).
-        ClientCore::validate_order(order, &self.account_id)?;
+        let session = self.order_session();
+        ClientCore::validate_order(order, &session)?;
+        // From here on, the order as this session sends it.
+        let sent = ClientCore::as_sent(order, &session);
+        let order: &Order = &sent;
         ClientCore::validate_supported_instructions(order)?;
         ClientCore::validate_combo_legs(&contract.sec_type, contract.combo_legs.len())?;
         for (at, leg) in contract.combo_legs.iter().enumerate() {
@@ -290,9 +308,8 @@ impl EClient {
             if placed_on.is_some_and(|placed_on| placed_on != instrument) {
                 return Err(wrong_contract());
             }
-            // A replace states the order type, the limit price and the trigger.
-            // An order defined by anything else cannot survive one, so refuse
-            // rather than send a message that destroys it.
+            // A replace is the caller's statement of the order, restated whole;
+            // what a gateway refuses in one is refused here.
             if let Some(refusal) = self.core.modify_refusal(oid, order, Some(&self.shared)) {
                 return Err(refusal);
             }
@@ -391,6 +408,12 @@ impl EClient {
                 oid, order.parent_id, cmd, contract.clone(), placed.clone(), instrument,
             );
         }
+        // What a gateway says about an order it places anyway, on the order's
+        // number, as it says it. Said once the order has gone or is held, so
+        // an order that could not be sent draws the failure alone.
+        if let Some(warning) = ClientCore::order_warning(order, &session) {
+            self.shared.orders.push_order_notice(oid, warning.code, warning.message);
+        }
         Ok(())
     }
 
@@ -398,6 +421,11 @@ impl EClient {
     ///
     /// `exercise_action` is 1 to exercise and 2 to lapse; anything else is
     /// refused.
+    ///
+    /// `account` is the account the exercise is taken on. A login holding
+    /// several has to name one it holds; a login holding one takes it on its
+    /// own, and an account other than its own holds no position here, which
+    /// is answered under 322 as a gateway answers it.
     ///
     /// `override_` is taken and not sent, because there is no tag for it: it
     /// names a check made before the order is built, not one the venue makes.
@@ -423,8 +451,8 @@ impl EClient {
                 contract.symbol,
             );
         }
-        let (action, qty) = ClientCore::validate_exercise(
-            exercise_action, exercise_quantity, account, &self.account_id,
+        let (action, qty, account) = ClientCore::validate_exercise(
+            exercise_action, exercise_quantity, account, &self.order_session(),
         )?;
         let identity = crate::types::model::contract_identity(
             &contract.last_trade_date_or_contract_month, contract.strike,
@@ -475,7 +503,7 @@ impl EClient {
         )?;
         self.send(ControlCommand::Order(
             ClientCore::build_exercise_request(
-                oid, instrument, action, crate::types::qty_from_wire(qty as i64), stated,
+                oid, instrument, action, crate::types::qty_from_wire(qty as i64), account, stated,
             ),
         ))
     }

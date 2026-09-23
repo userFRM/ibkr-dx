@@ -690,7 +690,7 @@ fn replace_one_refused_order_phase_live() {
         account_id: gw.account_id.clone() };
     let lmt = || OrderKind::Limit { price: 100_000_000 };
     for (name, kind, attrs) in [
-        ("a relative order", OrderKind::Rel { offset: 1_00_000_000 }, OrderAttrs::default()),
+        ("a relative order", OrderKind::Rel { offset: 1_00_000_000, price_cap: 0 }, OrderAttrs::default()),
         ("a snap to midpoint", OrderKind::SnapMid { offset: 0 }, OrderAttrs::default()),
         // The four the walk never asked, each refused a modify here on a
         // reading rather than on an answer.
@@ -1586,7 +1586,7 @@ fn what_the_venue_holds_after_a_replace_of_each_priced_shape_live() {
     // Each shape as placed, then the price and the trigger its replace names.
     // Bought, capped far below the market, so nothing here can fill.
     let shapes: Vec<(&str, OrderKind, i64, i64)> = vec![
-        ("REL", OrderKind::Rel { offset: px(0.05) }, 0, px(0.10)),
+        ("REL", OrderKind::Rel { offset: px(0.05), price_cap: 0 }, 0, px(0.10)),
         // A midpoint peg on this route takes no offset: "Peg diff offset is
         // not allowed for PegToMid", the venue said of one. Its replace names
         // the cap alone.

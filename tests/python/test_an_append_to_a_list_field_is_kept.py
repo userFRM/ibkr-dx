@@ -258,15 +258,20 @@ def test_a_routing_parameter_appended_as_the_sample_appends_one_is_refused_by_na
     assert "smart_combo_routing_params" in recorder.errors[-1][2], recorder.errors
 
 
-def test_a_miscellaneous_option_appended_is_refused_by_name():
+def test_a_miscellaneous_option_appended_is_checked_as_a_gateway_checks_it():
+    # The append is kept, so the option reaches the check a gateway makes of
+    # it: `manual` is the one key it knows.
     order = _limit("BUY", 1, 10.0)
     order.orderMiscOptions = []
     order.orderMiscOptions.append(TagValue("cashQtyUsage", "1"))
 
     recorder, client = _session()
     client.place_order(1007, _spy(), order)
-    assert recorder.errors, "an option this protocol cannot carry must be refused"
-    assert "order_misc_options" in recorder.errors[-1][2], recorder.errors
+    assert recorder.errors, "an option a gateway does not know must be refused"
+    assert recorder.errors[-1][1:] == (
+        10337,
+        "Misc options key=cashQtyUsage is invalid in PlaceOrder(3) request. Valid keys are: manual",
+    ), recorder.errors
 
 
 def test_a_list_assigned_whole_is_the_list_the_field_holds():

@@ -13,9 +13,11 @@ use crate::types::NewsSubject;
 use std::collections::{HashMap, HashSet};
 use crate::error_codes::{
     CHANGE_CANNOT_CHANGE_TYPE, COMBINATION_LEG_INVALID, COMBINATION_NEEDS_LEGS,
-    CONDITION_CONTRACT_INCOMPLETE, DUPLICATE_TICKER_ID, GOOD_TILL_DATE_INVALID, NO_SUCH_BOOK,
-    ORDER_TYPE_UNSUPPORTED, Refusal,
-    SECURITY_NOT_PERMITTED, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
+    CONDITION_CONTRACT_INCOMPLETE, DUPLICATE_TICKER_ID, GOOD_TILL_DATE_INVALID,
+    MISC_OPTION_KEY_INVALID, MISC_OPTION_VALUE_INVALID, NO_SUCH_BOOK, OCA_GROUP_REVISION,
+    OCA_TYPE_REVISION, OPT_OUT_SMART_ROUTING_DROPPED, OPT_OUT_SMART_ROUTING_WITHDRAWN,
+    ORDER_TYPE_UNSUPPORTED, REQUEST_NOT_PROCESSED, Refusal,
+    SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -1303,6 +1305,63 @@ pub struct ExerciseStates {
     pub customer_account: String,
     /// Whether the person it is for is a professional.
     pub professional_customer: bool,
+}
+
+/// What the session an order goes out on says about it, which a gateway reads
+/// while it checks one: the account it logged in with, every account the login
+/// holds, the ones its logon names as its own, whether it is an advisor's, and
+/// the features the venue enabled at logon.
+#[derive(Debug, Default, Clone)]
+pub struct OrderSession {
+    /// The account the session logged in with.
+    pub account: String,
+    /// Every account the login holds, those its family links to it included.
+    pub accounts: Vec<String>,
+    /// The accounts the logon names as the login's own.
+    pub logon_accounts: Vec<String>,
+    /// Whether the login is an advisor's.
+    pub advisor: bool,
+    /// The features the venue enabled at logon.
+    pub features: Vec<String>,
+}
+
+impl OrderSession {
+    /// A login holding one account, with nothing enabled.
+    pub fn single(account: &str) -> Self {
+        Self {
+            account: account.to_string(),
+            accounts: vec![account.to_string()],
+            logon_accounts: vec![account.to_string()],
+            ..Self::default()
+        }
+    }
+
+    /// Whether the venue enabled a feature at logon.
+    pub fn enables(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+
+    /// Whether the login holds several accounts, as a gateway decides it: the
+    /// venue lets accounts be added to it as it runs, the first account its
+    /// logon names is an introducing broker's master, or its logon names more
+    /// than one account that is not a group. The accounts a family links to
+    /// the login are not counted.
+    pub fn holds_several_accounts(&self) -> bool {
+        // A group's code has a `G` second or third.
+        let group = |a: &str| a.len() > 3 && (a.as_bytes()[1] == b'G' || a.as_bytes()[2] == b'G');
+        let master = |a: &str| {
+            let a = a.as_bytes();
+            a.len() > 2 && (a[0] == b'I' || (a[0] == b'D' && a[1] == b'I'))
+        };
+        self.enables("DYNACCTADD")
+            || self.logon_accounts.first().is_some_and(|a| master(a) && !group(a))
+            || self.logon_accounts.iter().filter(|a| !group(a)).count() > 1
+    }
+
+    /// Whether the login holds this account.
+    pub fn holds(&self, account: &str) -> bool {
+        account == self.account || self.accounts.iter().any(|a| a == account)
+    }
 }
 
 impl ClientCore {
@@ -3570,131 +3629,13 @@ impl ClientCore {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
     }
 
-    /// Why a replace cannot restate this order, or `None` if it can.
-    ///
-    /// The replace states the order type and the prices that type carries, plus
-    /// the companions the type needs, restated from the record of the order as
-    /// it was placed. What it does not state is the peg offset, the execution
-    /// instruction or the algo block. For an order defined by any of those, the
-    /// replace describes something other than the order being replaced, and the
-    /// venue rejects it — leaving the caller with nothing resting.
-    ///
-    /// `restating_itself` says the replace keeps the order's type. Only then
-    /// can a type be restated from the record of the order that was placed: a
-    /// conversion into a trailing stop has no such record, so its trail goes
-    /// unstated and the venue refuses the replace naming tag 211.
-    ///
-    /// The order type alone does not decide this: an adjustable stop is an
-    /// ordinary `STP` defined by its conversion, which a replace stating only
-    /// the type would leave behind. An algo order and a conditional one were
-    /// refused on the same reading until a session placed each and the venue
-    /// took the replace — the strategy asked was the adaptive one, and the
-    /// block that carries it is restated by the same path for every strategy.
-    ///
-    /// The adjustable stop was refused here for the same reason and is not any
-    /// more. The replace states the whole adjustable block, the same six
-    /// numbers the placement states and in the same order: the marker, the type
-    /// it adjusts to, the trigger, the adjusted stop, its limit and the
-    /// trailing amount. This client's replace is built by the path that writes
-    /// them, so a caller stating a new price on such an order has it restated
-    /// rather than dropped — and a rule here refusing what the venue was never
-    /// asked is the thing this client does not do.
-    pub fn replace_cannot_restate(order: &ApiOrder, restating_itself: bool) -> Option<String> {
-        // A what-if is a margin preview, not a resting order, so there is
-        // nothing on the book for a replace to act on.
-        if order.what_if {
-            return Some("a what-if order".to_string());
-        }
-        // The replace is rebuilt from the tracked record, which holds side,
-        // price, quantity, order type, time-in-force and trigger — and nothing
-        // else. Every attribute below rides a tag the replace does not carry,
-        // so a modify would state the order without it.
-        //
-        // The venue refuses the order itself on the venue and security type a
-        // session asked on — "Partial AON orders not supported for this
-        // combination of exchange and security type" — so what a replace would
-        // do to one is a question it has not been possible to put.
-        if order.min_qty > 0 {
-            return Some("an order with a minimum quantity".to_string());
-        }
-        let ty = order.order_type.to_uppercase();
-        // `LIT` is submitted as `LT` but tracked under a byte the replace
-        // renders as `K`, which is market-to-limit in this dialect — so a
-        // replace would describe a different order type entirely.
-        //
-        // `MTL`, `BOX TOP` and `MKT PRT` are here because the replace renders
-        // the same byte they were submitted under, so it restates them as
-        // themselves — which is the whole test for membership.
-        //
-        // The types below it restate themselves on a session's answer rather
-        // than on a reading. Each was placed with the market open, replaced,
-        // and found still working afterwards.
-        //
-        // `MIDPRICE` is the reference client's name for `MIDPX`, and the name
-        // the venue's own statement of such an order carries. A snap to the
-        // market and a snap to the primary were each placed, replaced twice
-        // and withdrawn on a paper session, with the market closed.
-        //
-        // `REL` is the one that was not. Its replace drew no answer at all, and
-        // neither did the withdrawal that followed — the order stopped
-        // answering for anything, which is the outcome the refusals here were
-        // written to prevent. It keeps its reason, and now has the session
-        // behind it.
-        if matches!(
-            ty.as_str(),
-            "MKT" | "LMT" | "STP" | "STP LMT" | "MOC" | "LOC" | "MIT" | "STP PRT"
-                | "MTL" | "BOX TOP" | "MKT PRT"
-        ) || (restating_itself
-            && matches!(
-                ty.as_str(),
-                "TRAIL" | "TRAIL LIMIT" | "PEG MID" | "PEG MIDPT" | "MIDPX" | "MIDPRICE"
-                    | "SNAP MID" | "SNAP MIDPT" | "SNAP MKT" | "SNAP PRI" | "SNAP PRIM" | "LIT"
-            ))
-        {
-            return None;
-        }
-        Some(format!("a {ty} order"))
-    }
-
-    /// The defining number a replace cannot carry, where the replacement names
-    /// a different one.
-    ///
-    /// A shape that holds its defining price in the form the submit sent — a
-    /// trail, a peg or snap offset, a cap, a limit offset — has it restated
-    /// from the record, with whatever the replace names written into it: each
-    /// was measured on a paper session, placed, replaced and read back. A
-    /// trailing percent is restated the same way, on the trail tag with the
-    /// unit beside it: a stop placed trailing by one per cent and replaced
-    /// naming one and a half was read back on a second session trailing by one
-    /// and a half per cent.
-    ///
-    /// What a replace still cannot do is change which of the two a trail is
-    /// stated in. The replacement states one trail, and a percentage order
-    /// asked for an amount states the percentage the order already had while
-    /// this session records the amount.
-    ///
-    /// A replacement that names none of them still goes: a zero and an unset
-    /// value both leave the placed number in force, which is how a caller
-    /// moves the quantity alone.
-    fn replace_cannot_state(tracked: &ApiOrder, incoming: &ApiOrder) -> Option<&'static str> {
-        let named = |v: f64| v != 0.0 && v != f64::MAX;
-        let moved = |placed: f64, asked: f64| named(asked) && asked != placed;
-        let by_percent = named(tracked.trailing_percent);
-        Some(match tracked.order_type.to_uppercase().as_str() {
-            "TRAIL" if by_percent && moved(tracked.aux_price, incoming.aux_price) => {
-                "the trail amount"
-            }
-            _ => return None,
-        })
-    }
-
     /// The price a replace names, read from the field the shape's own submit
     /// reads it from: a trailing stop limit's limit offset, and every other
     /// type's limit price. Unset names nothing.
     ///
     /// One place, so the two bindings cannot diverge on it.
     pub fn replace_price(order: &ApiOrder) -> i64 {
-        let named = if order.order_type.eq_ignore_ascii_case("TRAIL LIMIT")
+        let named = if order.order_type_named() == Some("TRAIL LIMIT")
             && order.lmt_price_offset != f64::MAX
         {
             order.lmt_price_offset
@@ -3712,85 +3653,53 @@ impl ClientCore {
 
     /// Why a modify of `order_id` cannot be sent, if it cannot.
     ///
-    /// Both sides are checked. The resting order is the one the replace has to
-    /// restate, and the incoming order is what the caller is asking it to
-    /// become — a modify that *adds* a bracket link or an OCA group states an
-    /// order that has neither, so examining only the record on the book lets
-    /// the attribute through on the very message that was supposed to carry it.
+    /// A replace is the caller's statement of the order, restated whole: its
+    /// type, its prices and everything it carries go out as its own placement
+    /// would state them. So a change of type, a relative or pegged order, a
+    /// minimum quantity and a trail moved from a percentage to an amount are
+    /// all sent, as a gateway sends them.
+    ///
+    /// What is refused is what a gateway refuses. A one-cancels-all group
+    /// cannot be changed by a replace where both the order and the change name
+    /// one. The way a group cancels cannot be changed at all, whether or not
+    /// either names a group, and a way that is not one of the four reads as
+    /// the default, reduce on fill without block. The venue can lift both at
+    /// logon. A parent or a group named on an order that had none is taken,
+    /// and the order goes on under the links it was placed with.
+    ///
+    /// A what-if preview under the number of an order is refused as well: the
+    /// preview is not an order the venue holds, so a replace has nothing to act
+    /// on, and previewing beside a working order under its number is not
+    /// something this client does yet.
     ///
     /// One place, so the two bindings cannot diverge on either the rule or the
-    /// wording.
-    ///
-    /// The resting order is this client's own record where it placed the
-    /// order, and otherwise the venue's statement of it: an order the venue
-    /// named at connect is in no book here, and compared against nothing its
-    /// replace read as a change of type and was refused before the engine
-    /// saw it.
+    /// wording. The resting order is this client's own record where it placed
+    /// the order, and otherwise the venue's statement of it.
     pub fn modify_refusal(&self, order_id: u64, incoming: &ApiOrder, venue: Option<&SharedState>) -> Option<Refusal> {
         let tracked = self.tracked_order(order_id)
             .or_else(|| venue.and_then(|v| v.orders.get_order_info(order_id)).map(|info| info.order));
-        // Whether the replace leaves the order the type it already is.
-        let restating_itself = tracked
-            .as_ref()
-            .is_some_and(|t| t.order_type.eq_ignore_ascii_case(&incoming.order_type));
-        // A type the replace can restate can still be asked for a number the
-        // replace does not carry. Answered as sent, the venue went on working
-        // the number the order was placed with while the record here held the
-        // one the caller asked for, and every later action restated from it.
-        if restating_itself
-            && let Some(tracked) = tracked.as_ref()
-            && let Some(field) = Self::replace_cannot_state(tracked, incoming)
-        {
-            // A field the replace has nowhere to put, on a type it can
-            // otherwise restate. The catalogue has no number for that, so it
-            // keeps the general one.
-            return Some(Refusal::validation(format!(
-                "{field} of a {} order cannot be modified: the replace does not carry it, \
-                 and the venue would go on working the order as it was placed",
-                tracked.order_type,
-            )));
-        }
-        // A change of type on an order with a parent or a group. The replace
-        // states the links only where it restates the type the order was
-        // placed under; a change of type goes out without them, and the venue
-        // reads their absence as their removal — measured, a leg replaced with
-        // no group and no parent left its bracket. Refused rather than sent.
-        if !restating_itself
-            && let Some(t) = tracked.as_ref()
-            && (t.parent_id != 0 || !t.oca_group.is_empty())
-        {
-            return Some(Refusal::stated(CHANGE_CANNOT_CHANGE_TYPE, format!(
-                "a {} order with a parent or a group cannot change type: the replace carries \
-                 neither across a change of type, and the venue would work the order detached",
-                t.order_type,
-            )));
-        }
-        // A parent or a group other than the one an order placed here was
-        // placed with. The replace carries neither — the engine restates them
-        // from the placement — so the order would go on as it was placed
-        // while the caller believed it linked otherwise. An order the venue
-        // named is restated from the caller's statement, links included, so
-        // there the caller's word is what the venue receives.
-        if let Some(t) = tracked.as_ref()
-            && self.placed_here(order_id)
-            && ((incoming.parent_id != 0 && incoming.parent_id != t.parent_id)
-                || (!incoming.oca_group.is_empty() && incoming.oca_group != t.oca_group))
-        {
-            return Some(Refusal::validation(
-                "the parent or the group of an order placed here cannot be modified: the replace \
-                 does not carry them, and the venue would go on working the order as it was placed"
-                    .to_string(),
+        if incoming.what_if || tracked.as_ref().is_some_and(|t| t.what_if) {
+            return Some(Refusal::stated(
+                CHANGE_CANNOT_CHANGE_TYPE,
+                "a what-if order cannot be modified: a preview is not an order the venue \
+                 holds, so there is nothing on the book for a replace to act on",
             ));
         }
-        let why = tracked
-            .and_then(|tracked| Self::replace_cannot_restate(&tracked, restating_itself))
-            .or_else(|| Self::replace_cannot_restate(incoming, restating_itself))?;
-        // A change that would move the order to a type the replace cannot
-        // restate, which the catalogue names.
-        Some(Refusal::stated(CHANGE_CANNOT_CHANGE_TYPE, format!(
-            "{why} cannot be modified: the replace does not carry the fields that \
-             define it, and sending one would cancel the order"
-        )))
+        let tracked = tracked?;
+        if venue.is_some_and(|v| v.reference.enables("NOAPIOCASTRICT")) {
+            return None;
+        }
+        if !tracked.oca_group.is_empty()
+            && !incoming.oca_group.is_empty()
+            && tracked.oca_group != incoming.oca_group
+        {
+            return Some(Refusal::stated(OCA_GROUP_REVISION, "OCA group revision is not allowed"));
+        }
+        let way = |t: i32| if (1..=4).contains(&t) { t } else { 3 };
+        if way(tracked.oca_type) != way(incoming.oca_type) {
+            return Some(Refusal::stated(OCA_TYPE_REVISION, "OCA group type revision is not allowed"));
+        }
+        None
     }
 
     /// The venue has taken the replacement outstanding on this order, so the
@@ -3848,7 +3757,9 @@ impl ClientCore {
                 // the parent link, the group and its type from the record of
                 // the placement whatever the replace states, so a caller's
                 // empty value there does not detach the order and a caller's
-                // new one does not attach it; a new one is refused before this.
+                // new one does not attach it, which is what a gateway does
+                // with either; a group or a type changed outright is refused
+                // before this.
                 // An order the venue named is restated from the caller's
                 // statement of it on every replace, so there the record
                 // follows the caller, as the venue does. The client is the
@@ -4120,7 +4031,10 @@ impl ClientCore {
             let mut orders = self.open_orders.lock().unwrap();
             for (oid, info) in &shared_orders {
                 if let Some(o) = orders.get_mut(oid) {
-                    if o.order.account.is_empty() {
+                    // The account the venue states the order is on, which on a
+                    // login holding one account is that account whatever the
+                    // order named.
+                    if !info.order.account.is_empty() {
                         o.order.account = info.order.account.clone();
                     }
                     if o.order.perm_id == 0 {
@@ -5068,7 +4982,12 @@ impl ClientCore {
 
     /// Pre-validate order fields that don't depend on instrument ID.
     /// Call this before `find_or_register_instrument` to fail fast.
-    pub fn validate_order(order: &ApiOrder, connected_account: &str) -> Result<(), Refusal> {
+    ///
+    /// Where a gateway refuses an order while it validates it, it answers under
+    /// 321 and puts the name of the request it was validating in front of the
+    /// reason. This client answers under the same number with the same reason,
+    /// without the name.
+    pub fn validate_order(order: &ApiOrder, session: &OrderSession) -> Result<(), Refusal> {
         order.side()?;
 
         // An execution condition names a symbol, an exchange and a security
@@ -5153,6 +5072,38 @@ impl ClientCore {
                 require_finite_price(&format!("order_combo_legs[{at}]"), *leg)?;
             }
         }
+        // A trail is an amount or a percentage, and a trailing order naming
+        // both is refused as a gateway refuses it, while it reads the order.
+        // Nought is no trail, and so is the reference client's value for one
+        // left unset.
+        let named = |v: f64| v != 0.0 && v != f64::MAX;
+        let trailing = matches!(order.order_type_named(), Some("TRAIL" | "TRAIL LIMIT"));
+        if trailing && named(order.aux_price) && named(order.trailing_percent) {
+            return Err(Refusal::stated(
+                REQUEST_NOT_READ,
+                "Error reading request: Cannot specify Trailing Amount and Trailing Percent \
+                 at the same time",
+            ));
+        }
+        // A trail by percentage, outside what a percentage can be.
+        if trailing
+            && named(order.trailing_percent)
+            && (order.trailing_percent < 0.0 || order.trailing_percent > 100.0)
+        {
+            return Err(Refusal::validation(
+                "Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.",
+            ));
+        }
+        // A trailing stop limit by percentage, which a gateway takes. What it
+        // states for one on the trigger is not established here, and a guess
+        // would put a price the caller did not ask for on the order.
+        if order.order_type_named() == Some("TRAIL LIMIT") && named(order.trailing_percent) {
+            return Err(Refusal::validation(
+                "trailing_percent on a TRAIL LIMIT order is not carried by this client: what \
+                 the order states as its trigger then is not established here. State the trail \
+                 as an amount on aux_price to place the order.",
+            ));
+        }
         // f64::MAX is this API's "not set" here too, and a caller who states
         // it is stating nothing: the models a caller builds from carry it as
         // the default for this field, so refusing it refused every order that
@@ -5217,10 +5168,10 @@ impl ClientCore {
             )));
         }
 
-        // Everything this protocol has no field for. Each is documented on the
-        // field with what is known about the absence; each is refused here,
-        // because a caller that set one and was answered anyway would have an
-        // order the venue never saw the instruction on, and nothing to say so.
+        // Everything this client does not carry. Each is documented on the
+        // field with what is known about it; each is refused here, because a
+        // caller that set one and was answered anyway would have an order the
+        // venue never saw the instruction on, and nothing to say so.
         //
         // Compared against the default rather than against emptiness: a field
         // left alone is not a field asked for, and only what a caller stated
@@ -5236,33 +5187,109 @@ impl ClientCore {
                 $(if order.$field != UNCARRIED.$field {
                     let stated: Option<&str> = None $(.or(Some($why)))?;
                     return Err(match stated {
-                        Some(why) => why.to_string(),
+                        Some(why) => format!("{} {why}", stringify!($field)),
                         None => format!(
-                            "{} is not carried by this protocol: there is no \
-                             field to send it under, so the order would go out \
-                             without it and do something other than what was \
-                             asked. It is documented on the field with what is \
-                             known about the absence. Leave it at its default \
-                             to place the order without it.",
+                            "{} is not carried by this client. It is documented \
+                             on the field with what is known about it. Leave it \
+                             at its default to place the order without it.",
                             stringify!($field),
                         ),
                     }.into());
                 })+
             };
         }
+        const PRESET: &str = "is not carried by this client: it asks for an order \
+             attached from the account's order preset, which the venue holds and \
+             this client does not. Leave it at its default and place the attached \
+             order on its own.";
         refuse_if_stated!(
-            algo_id, auction_strategy, basis_points, basis_points_type,
-            bond_accrued_interest, delta_neutral_clearing_account,
-            delta_neutral_clearing_intent, delta_neutral_designated_location,
-            delta_neutral_open_close, delta_neutral_settling_firm,
-            delta_neutral_short_sale, delta_neutral_short_sale_slot,
-            delta, dont_use_auto_price_for_hedge, opt_out_smart_routing,
-            order_misc_options, origin, override_percentage_constraints,
-            parent_perm_id, pt_order_id, pt_order_type, randomize_price,
-            scale_init_fill_qty, scale_table, shareholder, sl_order_id,
-            sl_order_type, smart_combo_routing_params,
-            what_if_type,
+            pt_order_id: PRESET, pt_order_type: PRESET,
+            sl_order_id: PRESET, sl_order_type: PRESET,
+            smart_combo_routing_params: "is not carried by this client: a gateway \
+                sends each after checking its name and value against the \
+                combination, and those checks are not all established here. Sent \
+                unchecked, a parameter a gateway would refuse could reach the venue. \
+                Leave it empty to place the combination without them.",
         );
+        // Taken, and not sent, as a gateway sends nothing for it on the orders
+        // this client places — except on an order that is itself a short sale
+        // and names a hedging order type, where a gateway applies it over the
+        // order's own short-sale handling and what that makes of the order is
+        // not established here.
+        if order.delta_neutral_short_sale
+            && !order.delta_neutral_order_type.is_empty()
+            && matches!(order.side(), Ok(Side::ShortSell))
+        {
+            return Err(Refusal::validation(
+                "delta_neutral_short_sale on an order that is itself a short sale and \
+                 names a hedging order type is not carried by this client: what a gateway \
+                 makes of the order's own short sale then is not established here. Leave \
+                 it unset to place the order.",
+            ));
+        }
+        // The one option a gateway knows on an order, and what it takes. Where
+        // the venue has lifted the checks on these, only the value of the one
+        // it knows is checked, and later.
+        let options_checked = !session.enables("NOAPIMISCVLD");
+        for option in &order.order_misc_options {
+            let known = option.tag == "manual";
+            let takes = matches!(option.value.as_str(), "0" | "1");
+            // Read as a number, the later check takes `01`, ` 1` and `+1`.
+            let reads = matches!(option.value.trim().parse::<i32>(), Ok(0 | 1));
+            if options_checked && !known {
+                return Err(Refusal::stated(MISC_OPTION_KEY_INVALID, format!(
+                    "Misc options key={} is invalid in PlaceOrder(3) request. \
+                     Valid keys are: manual",
+                    option.tag,
+                )));
+            }
+            if options_checked && known && !takes {
+                return Err(Refusal::stated(MISC_OPTION_VALUE_INVALID, format!(
+                    "Misc options value={} is invalid for key=manual in PlaceOrder(3) \
+                     request. Valid values are: 0, 1",
+                    option.value,
+                )));
+            }
+            if known && !option.value.is_empty() && !reads {
+                return Err(Refusal::validation(format!(
+                    "Order: 'manual' has wrong value={}, expected [1 or 0]",
+                    option.value,
+                )));
+            }
+        }
+        // What kind of preview is asked for. A released gateway previews the
+        // ordinary kind alone; an unset kind is nought.
+        let what_if_type = if order.what_if_type == i32::MAX { 0 } else { order.what_if_type };
+        if order.what_if && !order.transmit {
+            return Err(Refusal::validation("What-If order should have transmit flag set to TRUE "));
+        }
+        if !order.what_if && what_if_type > 0 {
+            return Err(Refusal::validation(
+                "What-If type specified but What-If flag is not set. Orders with \
+                 whatIfType must have whatIf=true.",
+            ));
+        }
+        if !(0..=6).contains(&what_if_type) || (order.what_if && what_if_type > 1) {
+            return Err(Refusal::validation(format!(
+                "What-If type {what_if_type} is not supported for your account configuration.",
+            )));
+        }
+        // A login holding several accounts states which one an order is for,
+        // and one that names none is refused. A login holding one puts its
+        // own account on the order whatever the order names. An advisor's
+        // login is not asked: its order is allocated across accounts.
+        if !session.advisor && session.holds_several_accounts() && order.account.is_empty() {
+            return Err(Refusal::validation("You must specify an account."));
+        }
+        // Declining smart routing, where the venue has withdrawn it. Where it
+        // has not, the order goes without it and the caller is warned: see
+        // `order_warning`.
+        if order.opt_out_smart_routing && session.enables("DEPRPREFBEST") {
+            return Err(Refusal::stated(
+                OPT_OUT_SMART_ROUTING_WITHDRAWN,
+                "The 'OptOutFromSmartRouting' order attribute is not supported.",
+            ));
+        }
 
 
         // Held until a stated moment. Unreadable, the delay used to be dropped
@@ -5401,26 +5428,7 @@ impl ClientCore {
             }
         }
 
-        // Financial-advisor allocation is not wire-encoded, so an accepted
-        // fa_group would put the whole size on the connected account rather
-        // than spread it across the group, with nothing to show for it.
-        // Same class as the FA fields below, and sharper: no encoder reads
-        // `order.account` — every order carries tag 1 from the session account —
-        // so the quantity fills on the connected account. The echo then confirms
-        // the wrong answer, because the open-order snapshot backfills the account
-        // from the report only when the caller left it blank. An FA order at
-        // least errors; this one filled elsewhere and reported success.
-        if !order.account.is_empty() && order.account != connected_account {
-            return Err(format!(
-                "order.account {:?} is not carried on the order: the quantity \
-                 would fill on the connected account {:?} instead, and the \
-                 open-order snapshot would still report {:?}",
-                order.account, connected_account, order.account,
-            ).into());
-        }
-
-
-        let order_type = order.order_type.to_uppercase();
+        let order_type = order.order_type_named().unwrap_or("");
 
         // An order carrying an algorithm is encoded as a limit and nothing
         // else: the strategy rides on an order whose type byte is written
@@ -5434,7 +5442,7 @@ impl ClientCore {
             } else {
                 crate::client_core::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
             }
-            if !order_type.is_empty() && order_type != "LMT" {
+            if !order.order_type.is_empty() && order_type != "LMT" {
                 return Err(format!(
                     "algo_strategy '{}' is carried on a limit order, and this one \
                      states order_type '{}'. Sent as it stands the venue would \
@@ -5445,20 +5453,11 @@ impl ClientCore {
             return Ok(());
         }
         // A preview asks about an order this client could send, so it answers
-        // for the same set of types. Returning before this match sends an
-        // unknown type to the wire as a limit, and the venue answers about an
-        // order the caller did not ask about.
-        match order_type.as_str() {
-            "MKT" | "LMT" | "STP" | "STP LMT" | "TRAIL" | "TRAIL LIMIT"
-            | "MOC" | "LOC" | "MIT" | "LIT" | "MTL" | "MKT PRT" | "STP PRT"
-            | "REL" | "PASSV REL" | "PEG MKT" | "PEG MID" | "PEG MIDPT" | "PEG BEST"
-            | "MIDPX" | "MIDPRICE"
-            | "SNAP MKT" | "SNAP MID" | "SNAP MIDPT" | "SNAP PRI" | "SNAP PRIM"
-            | "PEG BENCH" | "PEGBENCH" | "BOX TOP" => {}
-            _ => return Err(Refusal::stated(
-                ORDER_TYPE_UNSUPPORTED,
-                format!("Unsupported order type: '{}'", order.order_type),
-            )),
+        // for the same set of types. Returning before this sends an unknown
+        // type to the wire as a limit, and the venue answers about an order
+        // the caller did not ask about.
+        if order.order_type_named().is_none() {
+            return Err(Self::not_an_order_type(order));
         }
         if order.what_if {
             return Ok(());
@@ -5466,7 +5465,7 @@ impl ClientCore {
 
         // Reject orders that require aux_price when it is zero — prevents silent no-
         // trigger bugs.
-        match order_type.as_str() {
+        match order_type {
             "STP" | "STP PRT" | "MIT" if order.aux_price == 0.0 => {
                 return Err(Refusal::stated(TRIGGER_PRICE_MISSING, format!(
                     "{} order requires aux_price (stop/trigger price) but got 0.0 — \
@@ -5480,7 +5479,7 @@ impl ClientCore {
                     order.order_type
                 )));
             }
-            "TRAIL" if order.trailing_percent == 0.0 && order.aux_price == 0.0 => {
+            "TRAIL" if !named(order.trailing_percent) && !named(order.aux_price) => {
                 return Err(Refusal::stated(
                     TRIGGER_PRICE_MISSING,
                     "TRAIL order requires either trailing_percent or aux_price (trail amount) \
@@ -5505,6 +5504,41 @@ impl ClientCore {
         }
 
         Ok(())
+    }
+
+    /// The refusal of an order-type name this client does not place: a name
+    /// that is no order type, or one a gateway places and this client does not.
+    fn not_an_order_type(order: &ApiOrder) -> Refusal {
+        Refusal::stated(
+            ORDER_TYPE_UNSUPPORTED,
+            format!("Unsupported order type: '{}' is not an order type this client places", order.order_type),
+        )
+    }
+
+    /// What a gateway warns about an order it places anyway, on the order's
+    /// own number: declining smart routing, which the order goes without.
+    pub fn order_warning(order: &ApiOrder, session: &OrderSession) -> Option<Refusal> {
+        (order.opt_out_smart_routing && !session.enables("DEPRPREFBEST")).then(|| {
+            Refusal::stated(
+                OPT_OUT_SMART_ROUTING_DROPPED,
+                "The 'OptOutFromSmartRouting' order attribute is not supported.",
+            )
+        })
+    }
+
+    /// The order as it goes out on this session.
+    ///
+    /// A login holding one account states that account on every order it
+    /// sends, whatever the order names, so the name goes no further than the
+    /// record of the order. A login holding several states the one the order
+    /// names.
+    pub fn as_sent<'a>(order: &'a ApiOrder, session: &OrderSession) -> std::borrow::Cow<'a, ApiOrder> {
+        if order.account.is_empty() || session.holds_several_accounts() {
+            return std::borrow::Cow::Borrowed(order);
+        }
+        let mut sent = order.clone();
+        sent.account.clear();
+        std::borrow::Cow::Owned(sent)
     }
 
     /// Remember how a request asked for its bar times to be written.
@@ -5820,41 +5854,51 @@ impl ClientCore {
     }
 
     /// What an exercise states, checked before the contract is registered so a
-    /// refused one reaches nothing. Returns the action and the quantity the
-    /// order carries.
+    /// refused one reaches nothing. Returns the action, the quantity and the
+    /// account the order carries — empty for the session's own.
     ///
     /// The documented API names a third action, a hold, which the venue does
     /// not take from a client of this kind. It is refused here rather than sent
     /// and rejected, because the caller who asked for it wants to know that the
     /// position was left alone.
+    ///
+    /// The account is checked as a gateway checks it. A login holding several
+    /// accounts has to name one it holds. A login holding one takes the
+    /// exercise on that account, and a gateway looks the position up in the
+    /// account named: named another, it finds nothing there and says so.
     pub fn validate_exercise(
         exercise_action: i32, exercise_quantity: i32,
-        account: &str, connected_account: &str,
-    ) -> Result<(u8, u32), String> {
+        account: &str, session: &OrderSession,
+    ) -> Result<(u8, u32, String), Refusal> {
         let action = match exercise_action {
             1 | 2 => exercise_action as u8,
             other => {
                 return Err(format!(
                     "exercise_action {other} is not served: 1 exercises, 2 lapses"
-                ));
+                ).into());
             }
         };
         if exercise_quantity <= 0 {
             return Err(format!(
                 "exercise_quantity {exercise_quantity} is not a number of contracts"
-            ));
+            ).into());
         }
-        // Same reason an order's own account field is refused: no encoder reads
-        // it, every message carries tag 1 from the session account, so an
-        // exercise naming another one would take the position on this account
-        // and report the account it was asked for.
-        if !account.is_empty() && account != connected_account {
-            return Err(format!(
-                "account {account:?} is not carried on the order: the exercise \
-                 would be taken on the connected account {connected_account:?}"
-            ));
+        if session.holds_several_accounts() {
+            if account.is_empty() {
+                return Err(Refusal::validation("The account code is required for this operation."));
+            }
+            if !session.holds(account) {
+                return Err(Refusal::validation(format!("Invalid account code '{account}'.")));
+            }
+            return Ok((action, exercise_quantity as u32, account.to_string()));
         }
-        Ok((action, exercise_quantity as u32))
+        if !account.is_empty() && account != session.account {
+            return Err(Refusal::stated(REQUEST_NOT_PROCESSED, format!(
+                "Error processing request:No unlapsed position exists in this option in \
+                 account {account}.",
+            )));
+        }
+        Ok((action, exercise_quantity as u32, String::new()))
     }
 
     /// An exercise or a lapse, as the order the venue takes it for: the buy
@@ -5866,7 +5910,7 @@ impl ClientCore {
     /// order, so no tag carries it and there is nothing to send.
     pub fn build_exercise_request(
         order_id: OrderId, instrument: InstrumentId, action: u8, qty: Qty,
-        stated: ExerciseStates,
+        account: String, stated: ExerciseStates,
     ) -> OrderRequest {
         OrderRequest::SubmitEx {
             order_id,
@@ -5880,6 +5924,7 @@ impl ClientCore {
             tif: b'0',
             attrs: OrderAttrs {
                 exercise_action: action,
+                account,
                 manual_order_time: stated.manual_order_time,
                 customer_account: stated.customer_account,
                 professional_customer: stated.professional_customer,
@@ -5905,7 +5950,7 @@ impl ClientCore {
     ) -> Result<ControlCommand, Refusal> {
         let side = order.side()?;
         let qty = crate::types::qty_from_f64(order.total_quantity);
-        let order_type = order.order_type.to_uppercase();
+        let order_type = order.order_type_named();
 
         // Every order type carries its extended attributes and its time-in-force
         // through one encoder. Choosing per type between an attribute-carrying
@@ -6035,7 +6080,10 @@ impl ClientCore {
             })));
         }
 
-        let req = match order_type.as_str() {
+        let Some(order_type) = order_type else {
+            return Err(Self::not_an_order_type(order));
+        };
+        let req = match order_type {
             "MKT" => {
                 ex(OrderKind::Market)
             }
@@ -6055,7 +6103,8 @@ impl ClientCore {
             "TRAIL" => {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { crate::types::price_from_f64(order.trail_stop_price) };
-                if order.trailing_percent > 0.0 {
+                // The reference client's unset value is not a percentage.
+                if order.trailing_percent > 0.0 && order.trailing_percent != f64::MAX {
                     // Wire granularity is basis points, so a percentage
                     // stated finer than that is put on the nearest one.
                     // Rounded rather than cut: a hundredth of a per cent is
@@ -6114,9 +6163,13 @@ impl ClientCore {
                 let stop = crate::types::price_from_f64(order.aux_price);
                 ex(OrderKind::StpPrt { stop_price: stop })
             }
+            // The offset is the aux price and the cap the limit price, as they
+            // are for the pegged types.
             "REL" => {
-                let offset = crate::types::price_from_f64(order.aux_price);
-                ex(OrderKind::Rel { offset })
+                ex(OrderKind::Rel {
+                    offset: crate::types::price_from_f64(order.aux_price),
+                    price_cap: Self::price_or_unset(order.lmt_price),
+                })
             }
             // Sits away from the best price and follows it, no further than
             // the cap the caller states. The offset is the aux price, as it is
@@ -6138,7 +6191,7 @@ impl ClientCore {
             // Every reference field was already carried here and then read by
             // nobody: a caller setting all six got an order that mentioned none
             // of them.
-            "PEG BENCH" | "PEGBENCH" => {
+            "PEG BENCH" => {
                 ex(OrderKind::PegBench {
                     price: crate::types::price_from_f64(order.lmt_price),
                     ref_con_id: order.reference_contract_id.max(0) as u32,
@@ -6155,12 +6208,12 @@ impl ClientCore {
                 let price_cap = crate::types::price_from_f64(order.lmt_price);
                 ex(OrderKind::PegMkt { offset, price_cap })
             }
-            "PEG MID" | "PEG MIDPT" => {
+            "PEG MID" => {
                 let offset = crate::types::price_from_f64(order.aux_price);
                 let price_cap = crate::types::price_from_f64(order.lmt_price);
                 ex(OrderKind::PegMid { offset, price_cap })
             }
-            "MIDPX" | "MIDPRICE" => {
+            "MIDPRICE" => {
                 let cap = crate::types::price_from_f64(order.lmt_price);
                 ex(OrderKind::MidPrice { price_cap: cap })
             }
@@ -6168,20 +6221,16 @@ impl ClientCore {
                 let offset = crate::types::price_from_f64(order.aux_price);
                 ex(OrderKind::SnapMkt { offset })
             }
-            "SNAP MID" | "SNAP MIDPT" => {
+            "SNAP MID" => {
                 let offset = crate::types::price_from_f64(order.aux_price);
                 ex(OrderKind::SnapMid { offset })
             }
-            "SNAP PRI" | "SNAP PRIM" => {
+            "SNAP PRIM" => {
                 let offset = crate::types::price_from_f64(order.aux_price);
                 ex(OrderKind::SnapPri { offset })
             }
-            // The catalogue names this: a type this client cannot state is a
-            // type this exchange and security type do not support.
-            _ => return Err(Refusal::stated(
-                ORDER_TYPE_UNSUPPORTED,
-                format!("Unsupported order type: '{}'", order.order_type),
-            )),
+            // Every name `order_type_named` answers is placed above.
+            _ => return Err(Self::not_an_order_type(order)),
         };
 
         Ok(ControlCommand::Order(req))

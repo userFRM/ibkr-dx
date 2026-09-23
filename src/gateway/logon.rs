@@ -41,6 +41,8 @@ pub(super) struct LogonAck {
     pub account_id: String,
     /// Every account this login may trade, the default one first.
     pub accounts: Vec<String>,
+    /// Whether the login is an advisor's, which the logon states on tag 6108.
+    pub advisor: bool,
     /// When the venue says this logon happened, by its own clock. The
     /// competing session it names carries a stamp from the same clock, and one
     /// clock's readings are comparable where two are not.
@@ -257,6 +259,9 @@ impl LogonAck {
             if let Some(v) = fields.get(&1) {
                 if ack.account_id.is_empty() { ack.account_id = v.clone(); }
                 note_account(&mut ack.accounts, v);
+            }
+            if fields.get(&6108).is_some_and(|v| v.starts_with('1')) {
+                ack.advisor = true;
             }
             if let Some(v) = fields.get(&108)
                 && let Ok(hb) = v.parse() { ack.heartbeat_interval = hb; }
@@ -1363,6 +1368,18 @@ mod tests {
             let mut wire = answered_with(&[&fields]);
             let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
             assert_eq!(ack.market_data_allowance, expected, "{stated:?}");
+        }
+    }
+
+    /// An advisor's login says so on the logon, as a leading `1`.
+    #[test]
+    fn the_logon_states_whether_the_login_is_an_advisors() {
+        for (stated, advisor) in [(Some("1"), true), (Some("0"), false), (None, false)] {
+            let mut fields = vec![(35, "A"), (1, "F111111")];
+            fields.extend(stated.map(|v| (6108, v)));
+            let mut wire = answered_with(&[&fields]);
+            let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
+            assert_eq!(ack.advisor, advisor, "{stated:?}");
         }
     }
 

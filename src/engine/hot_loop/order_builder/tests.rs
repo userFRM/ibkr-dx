@@ -2243,7 +2243,7 @@ mod modify_wire_tests {
 
             context.pending_orders.push(
                 crate::client_core::ClientCore::build_exercise_request(
-                    7, instrument, action, 3 * crate::types::QTY_SCALE, Default::default()),
+                    7, instrument, action, 3 * crate::types::QTY_SCALE, String::new(), Default::default()),
             );
             let sent = drain(&mut context);
 
@@ -2760,7 +2760,7 @@ mod outside_rth_polarity_tests {
                 subs_level_size: 50,
                 price_increment: crate::types::PRICE_SCALE / 100,
                 init_position: 250,
-                init_fill_qty: 40,
+                init_fill_qty: Some(40),
                 ..Default::default()
             })),
             ..Default::default()
@@ -2776,8 +2776,8 @@ mod outside_rth_polarity_tests {
         let msg = String::from_utf8_lossy(&buf[..n]);
         let f: Vec<&str> = msg.split('\u{1}').collect();
         assert!(f.contains(&"6485=250"), "the position it starts against: {msg}");
-        // Not sent: the venue answers "Can not contain field # 6486".
-        assert!(!msg.contains("6486="), "a field the venue will not take: {msg}");
+        // Sent as a gateway sends it; the venue's answer to it is the caller's.
+        assert!(f.contains(&"6486=40"), "how much of the first component is filled: {msg}");
     }
 
     /// Where an order's commission goes. Taken from a caller and dropped, the
@@ -2803,8 +2803,8 @@ mod outside_rth_polarity_tests {
         let f: Vec<&str> = msg.split('\u{1}').collect();
         assert!(f.contains(&"6519=Tier A"), "the tier: {msg}");
         assert!(f.contains(&"6520=45.5"), "what it is worth: {msg}");
-        // Not sent: the venue answers "Invalid value in field # 8016".
-        assert!(!msg.contains("8016="), "a field the venue will not take: {msg}");
+        // No algo id was stated, so none goes.
+        assert!(!msg.contains("8016="), "nothing the order did not state: {msg}");
     }
 
     /// A tier named with nothing against it is not an arrangement, and half of
@@ -3662,7 +3662,7 @@ fn a_replace_naming_a_new_offset_or_cap_puts_it_where_the_submit_does() {
         all.into_iter().next()
     };
 
-    let msg = replace_frame(K::Rel { offset: 5 * P / 100 }, 0, 10 * P / 100);
+    let msg = replace_frame(K::Rel { offset: 5 * P / 100, price_cap: 0 }, 0, 10 * P / 100);
     assert_eq!(one("211=", &msg).as_deref(), Some("0.1"), "a relative order's offset: {msg}");
     assert_eq!(one("99=", &msg).as_deref(), Some("0.1"), "and the trigger tag agrees with it: {msg}");
 
@@ -3703,7 +3703,7 @@ fn a_second_replace_restates_what_the_first_one_moved_to() {
     use crate::types::{OrderKind as K, PRICE_SCALE as P};
     let one = |tag: &str, msg: &str| stated(msg, tag).into_iter().next();
 
-    let msg = second_replace_frame(K::Rel { offset: 5 * P / 100 }, (0, 10 * P / 100), (0, 0));
+    let msg = second_replace_frame(K::Rel { offset: 5 * P / 100, price_cap: 0 }, (0, 10 * P / 100), (0, 0));
     assert_eq!(one("211=", &msg).as_deref(), Some("0.1"), "a relative order's moved offset stands: {msg}");
     assert_eq!(one("99=", &msg).as_deref(), Some("0.1"), "{msg}");
 
@@ -3918,7 +3918,7 @@ fn a_refused_replace_puts_the_shape_back_with_the_terms() {
     };
     send(&mut context, crate::types::OrderRequest::SubmitEx {
         con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
-        kind: K::Rel { offset: 5 * P / 100 }, tif: b'0', attrs: crate::types::OrderAttrs::default(),
+        kind: K::Rel { offset: 5 * P / 100, price_cap: 0 }, tif: b'0', attrs: crate::types::OrderAttrs::default(),
     });
     let moved = send(&mut context, crate::types::OrderRequest::Modify {
         order_id: 42, price: 0, qty: crate::types::QTY_SCALE, outside_rth: false, ord_type: 0, tif: 0,
@@ -4047,7 +4047,7 @@ fn a_preview_states_everything_the_order_states() {
         K::TrailingStop { trail_amt: scale, trail_stop_price: 99 * scale },
         K::TrailPct { trail_pct: 100, trail_stop_price: 99 * scale },
         K::TrailingStopLimit { lmt_offset: scale, trail_amt: scale, trail_stop_price: 99 * scale },
-        K::Rel { offset: scale / 100 },
+        K::Rel { offset: scale / 100, price_cap: 0 },
         K::PassiveRel { offset: scale / 100, price_cap: 0 },
         K::PegBest { price: 100 * scale },
         K::PegMkt { offset: scale / 100, price_cap: 0 },
@@ -4109,7 +4109,7 @@ fn a_preview_states_everything_the_order_states() {
     assert_eq!(stated(&tsl, "211=").as_deref(), Some("2"), "a trail is stated: {tsl}");
     for (name, kind, inst) in [
         ("a trailing stop", K::TrailingStop { trail_amt: scale, trail_stop_price: 0 }, "a"),
-        ("a relative order", K::Rel { offset: scale / 100 }, "R"),
+        ("a relative order", K::Rel { offset: scale / 100, price_cap: 0 }, "R"),
         ("a market peg", K::PegMkt { offset: scale / 100, price_cap: 0 }, "P"),
         ("a midpoint peg", K::PegMid { offset: scale / 100, price_cap: 0 }, "M"),
     ] {
@@ -4844,7 +4844,7 @@ fn an_order_for_a_model_names_it_on_the_order_and_on_the_cancel() {
         "the model the order trades against: {msg}",
     );
 
-    send_cancel(&mut conn, &mut context, "DU123456", 79).unwrap();
+    send_cancel(&mut conn, &mut context, &shared_for_test(), "DU123456", 79).unwrap();
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(
@@ -4880,7 +4880,7 @@ fn an_order_for_the_default_sleeve_names_no_model() {
         "no model tag at all: {msg}",
     );
 
-    send_cancel(&mut conn, &mut context, "DU123456", 80).unwrap();
+    send_cancel(&mut conn, &mut context, &shared_for_test(), "DU123456", 80).unwrap();
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(
@@ -4923,4 +4923,538 @@ fn a_replace_keeps_the_regulatory_attribution_it_was_placed_with() {
     restated.attrs.mifid2_execution_algo = "EA2".into();
     merge_statement(&mut resting, restated);
     assert_eq!(resting.attrs.mifid2_execution_algo, "EA2");
+}
+
+/// What a gateway puts on the wire for an order and for a replacement of it,
+/// tag by tag.
+mod as_a_gateway_sends_it {
+    use super::super::*;
+    use crate::types::{OrderAttrs, OrderKind as K, OrderSpec, PRICE_SCALE as P};
+
+    /// A placement and a replacement of it that carries the caller's
+    /// statement of the order, as both surfaces send one, under the features
+    /// the venue enabled. The two frames, in that order.
+    fn placed_and_replaced(
+        placed: (K, OrderAttrs),
+        stated: (K, OrderAttrs),
+        features: &[&str],
+    ) -> (String, String) {
+        use std::io::Read;
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
+        context.pending_orders.push(OrderRequest::SubmitEx {
+            con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
+            kind: placed.0, tif: b'0', attrs: placed.1,
+        });
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        let mut buf = vec![0u8; 16384];
+        let n = peer.read(&mut buf).unwrap();
+        let first = String::from_utf8_lossy(&buf[..n]).to_string();
+        context.pending_orders.push(OrderRequest::Modify {
+            order_id: 42, price: 0, qty: crate::types::QTY_SCALE, outside_rth: false,
+            ord_type: 0, tif: 0, stop_price: 0,
+            spec: Some(Box::new(OrderSpec { kind: stated.0, attrs: stated.1 })),
+        });
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        let n = peer.read(&mut buf).unwrap();
+        (first, String::from_utf8_lossy(&buf[..n]).to_string())
+    }
+
+    /// One placement, under the features the venue enabled.
+    fn placed(kind: K, attrs: OrderAttrs, features: &[&str]) -> String {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
+        send_order_ex(&mut conn, &mut context, &shared, "DU1", 7, 0, Side::Buy, 1, kind, b'0', &attrs)
+            .unwrap();
+        let mut buf = vec![0u8; 16384];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    }
+
+    fn all(msg: &str, tag: u32) -> Vec<String> {
+        let prefix = format!("{tag}=");
+        msg.split('\u{1}').filter_map(|f| f.strip_prefix(prefix.as_str()).map(str::to_string)).collect()
+    }
+
+    fn one(msg: &str, tag: u32) -> Option<String> {
+        let found = all(msg, tag);
+        assert!(found.len() <= 1, "tag {tag} stated {} times: {msg}", found.len());
+        found.into_iter().next()
+    }
+
+    fn plain() -> OrderAttrs {
+        OrderAttrs::default()
+    }
+
+    /// A relative order's replace states what its placement states: `P`, its
+    /// instruction and its offset, no trigger, and the cap only where there is
+    /// one.
+    #[test]
+    fn a_relative_order_is_replaced_in_its_own_shape() {
+        let rel = |offset, price_cap| K::Rel { offset, price_cap };
+        let (_, g) = placed_and_replaced((rel(5 * P / 100, 0), plain()), (rel(7 * P / 100, 0), plain()), &[]);
+        assert_eq!(one(&g, 35).as_deref(), Some("G"));
+        assert_eq!(one(&g, 40).as_deref(), Some("P"));
+        assert_eq!(one(&g, 18).as_deref(), Some("R"));
+        assert_eq!(one(&g, 211).as_deref(), Some("0.07"));
+        assert_eq!(one(&g, 99), None, "no trigger: {g}");
+        assert_eq!(one(&g, 44), None, "no cap: {g}");
+        let (d, g) = placed_and_replaced((rel(5 * P / 100, 101 * P), plain()), (rel(7 * P / 100, 101 * P), plain()), &[]);
+        assert_eq!(one(&d, 44).as_deref(), Some("101"), "the cap on the placement: {d}");
+        assert_eq!(one(&g, 44).as_deref(), Some("101"), "and on the replace: {g}");
+        assert_eq!(one(&d, 99), None, "and no trigger on either: {d}");
+    }
+
+    /// A pegged-to-market and a passive relative order state their offset on
+    /// the trigger tag as well as on the peg tag, on both messages.
+    #[test]
+    fn a_market_peg_and_a_passive_relative_order_state_the_offset_twice() {
+        for (kind, name, instruction) in [
+            (K::PegMkt { offset: 3 * P / 100, price_cap: 0 }, "P", Some("P")),
+            (K::PassiveRel { offset: 3 * P / 100, price_cap: 0 }, "PSVR", None),
+        ] {
+            let (d, g) = placed_and_replaced((kind.clone(), plain()), (kind, plain()), &[]);
+            for msg in [&d, &g] {
+                assert_eq!(one(msg, 40).as_deref(), Some(name), "{msg}");
+                assert_eq!(one(msg, 211).as_deref(), Some("0.03"), "{msg}");
+                assert_eq!(one(msg, 99).as_deref(), Some("0.03"), "{msg}");
+                assert_eq!(one(msg, 18).as_deref(), instruction, "{msg}");
+                assert_eq!(one(msg, 44), None, "{msg}");
+            }
+        }
+    }
+
+    /// A change of type states the new type whole and nothing of the old one.
+    #[test]
+    fn a_change_of_type_states_the_new_type_whole() {
+        let limit = K::Limit { price: 100 * P };
+        // Into a midpoint peg: its name, its instruction and its offset.
+        let (_, g) = placed_and_replaced((limit.clone(), plain()), (K::PegMid { offset: 2 * P / 100, price_cap: 0 }, plain()), &[]);
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("P"), Some("M")), "{g}");
+        assert_eq!(one(&g, 211).as_deref(), Some("0.02"), "{g}");
+        assert_eq!((one(&g, 44), one(&g, 99)), (None, None), "{g}");
+        // Into a relative order.
+        let (_, g) = placed_and_replaced((limit.clone(), plain()), (K::Rel { offset: 5 * P / 100, price_cap: 0 }, plain()), &[]);
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("P"), Some("R")), "{g}");
+        assert_eq!((one(&g, 211).as_deref(), one(&g, 44), one(&g, 99)), (Some("0.05"), None, None), "{g}");
+        // Out of one, into a limit: its price and none of the relative order.
+        let (_, g) = placed_and_replaced((K::Rel { offset: 5 * P / 100, price_cap: 0 }, plain()), (K::Limit { price: 101 * P }, plain()), &[]);
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 44).as_deref()), (Some("2"), Some("101")), "{g}");
+        assert_eq!((one(&g, 211), one(&g, 18), one(&g, 99)), (None, None, None), "{g}");
+        // Into a market peg and a passive relative order.
+        let (_, g) = placed_and_replaced((limit.clone(), plain()), (K::PegMkt { offset: P / 100, price_cap: 0 }, plain()), &[]);
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref(), one(&g, 99).as_deref()), (Some("P"), Some("P"), Some("0.01")), "{g}");
+        let (_, g) = placed_and_replaced((limit, plain()), (K::PassiveRel { offset: P / 100, price_cap: 0 }, plain()), &[]);
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 18), one(&g, 211).as_deref()), (Some("PSVR"), None, Some("0.01")), "{g}");
+        // A stop into a trailing stop: the trail on both tags, in an amount.
+        let (_, g) = placed_and_replaced((K::Stop { stop_price: 99 * P }, plain()), (K::TrailingStop { trail_amt: P / 4, trail_stop_price: 0 }, plain()), &[]);
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("P"), Some("a")), "{g}");
+        assert_eq!((one(&g, 99).as_deref(), one(&g, 211).as_deref(), one(&g, 6268).as_deref()), (Some("0.25"), Some("0.25"), Some("0")), "{g}");
+    }
+
+    /// A trail states its unit on every trailing order and every replacement
+    /// of one, so a percentage trail moved to an amount says so.
+    #[test]
+    fn a_trail_states_its_unit_on_every_message() {
+        let (_, g) = placed_and_replaced(
+            (K::TrailPct { trail_pct: 150, trail_stop_price: 0 }, plain()),
+            (K::TrailingStop { trail_amt: P / 4, trail_stop_price: 0 }, plain()),
+            &[],
+        );
+        assert_eq!(one(&g, 35).as_deref(), Some("G"));
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("P"), Some("a")), "{g}");
+        assert_eq!((one(&g, 99).as_deref(), one(&g, 211).as_deref()), (Some("0.25"), Some("0.25")), "{g}");
+        assert_eq!(one(&g, 6268).as_deref(), Some("0"), "an amount: {g}");
+        let d = placed(K::TrailingStop { trail_amt: P / 2, trail_stop_price: 0 }, plain(), &[]);
+        assert_eq!(one(&d, 6268).as_deref(), Some("0"), "{d}");
+        let d = placed(K::TrailingStopLimit { lmt_offset: P / 10, trail_amt: P / 2, trail_stop_price: 0 }, plain(), &[]);
+        assert_eq!(one(&d, 6268).as_deref(), Some("0"), "{d}");
+        let d = placed(K::TrailPct { trail_pct: 150, trail_stop_price: 0 }, plain(), &[]);
+        assert_eq!(one(&d, 6268).as_deref(), Some("100"), "{d}");
+    }
+
+    /// A minimum quantity rides the replace, whether or not the type changes.
+    #[test]
+    fn a_minimum_quantity_rides_the_replace() {
+        let minimum = OrderAttrs { min_qty: 100, ..Default::default() };
+        let (_, g) = placed_and_replaced(
+            (K::Limit { price: 100 * P }, minimum.clone()),
+            (K::Limit { price: 101 * P }, minimum.clone()),
+            &[],
+        );
+        assert_eq!(one(&g, 110).as_deref(), Some("100"), "{g}");
+        let (_, g) = placed_and_replaced(
+            (K::Limit { price: 100 * P }, minimum.clone()),
+            (K::Rel { offset: P / 20, price_cap: 0 }, minimum),
+            &[],
+        );
+        assert_eq!((one(&g, 110).as_deref(), one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("100"), Some("P"), Some("R")), "{g}");
+    }
+
+    /// A replace naming a parent or a group the order was not placed with
+    /// states neither: the order goes on under the links it was placed with.
+    #[test]
+    fn a_replace_names_no_link_the_order_was_not_placed_with() {
+        let linked = OrderAttrs {
+            parent_id: 10, oca_group_str: "OCA_10".into(), oca_type: 2, ..Default::default()
+        };
+        let (_, g) = placed_and_replaced((K::Limit { price: 100 * P }, plain()), (K::Limit { price: 101 * P }, linked.clone()), &[]);
+        assert_eq!((one(&g, 6107), one(&g, 583), one(&g, 6209)), (None, None, None), "{g}");
+        // A linked order keeps the links it was placed with across a change
+        // of type, whatever the statement names.
+        let placed_linked = OrderAttrs { parent_id: 7, oca_group_str: "OCA_7".into(), oca_type: 1, ..Default::default() };
+        let (_, g) = placed_and_replaced(
+            (K::Stop { stop_price: 90 * P }, placed_linked),
+            (K::StopLimit { price: 89 * P, stop_price: 90 * P }, linked),
+            &[],
+        );
+        assert_eq!((one(&g, 40).as_deref(), one(&g, 44).as_deref(), one(&g, 99).as_deref()), (Some("4"), Some("89"), Some("90")), "{g}");
+        assert_eq!((one(&g, 6107).as_deref(), one(&g, 583).as_deref()), (Some("7.0"), Some("OCA_7")), "{g}");
+        assert_eq!(one(&g, 6209).as_deref(), Some("CancelOnFillWBlock"), "{g}");
+    }
+
+    /// A preview is not placed, so it joins no group; the parent it names is
+    /// stated.
+    #[test]
+    fn a_preview_joins_no_group() {
+        let attrs = OrderAttrs {
+            what_if: true, parent_id: 10, oca_group_str: "G1".into(), oca_type: 1, ..Default::default()
+        };
+        let d = placed(K::Limit { price: 100 * P }, attrs, &[]);
+        assert_eq!(one(&d, 6091).as_deref(), Some("1"), "{d}");
+        assert_eq!(one(&d, 6107).as_deref(), Some("10.0"), "{d}");
+        assert_eq!((one(&d, 583), one(&d, 6209)), (None, None), "{d}");
+    }
+
+    /// Who originated the order, on every order and every replacement.
+    #[test]
+    fn the_origin_goes_out_as_one_character() {
+        for (origin, code) in [(0, "c"), (1, "f"), (2, "b"), (3, "m"), (4, "n"), (5, "y"), (8, "v"), (9, "j"), (-1, "p"), (7, "?")] {
+            let d = placed(K::Limit { price: P }, OrderAttrs { origin, ..Default::default() }, &[]);
+            assert_eq!(one(&d, 6122).as_deref(), Some(code), "origin {origin}: {d}");
+        }
+        let firm = OrderAttrs { origin: 1, ..Default::default() };
+        let (_, g) = placed_and_replaced((K::Limit { price: P }, firm.clone()), (K::Limit { price: 2 * P }, firm), &[]);
+        assert_eq!(one(&g, 6122).as_deref(), Some("f"), "{g}");
+    }
+
+    /// The caller's own name for an algo, and how much of a ladder's first
+    /// component is filled, go out as a gateway sends them.
+    #[test]
+    fn an_algo_id_and_a_filled_first_component_go_out() {
+        let named = OrderAttrs { algo_id: "MyAlgo".into(), ..Default::default() };
+        let (d, g) = placed_and_replaced((K::Limit { price: P }, named.clone()), (K::Limit { price: 2 * P }, named), &[]);
+        assert_eq!(one(&d, 8016).as_deref(), Some("MyAlgo"), "{d}");
+        assert_eq!(one(&g, 8016).as_deref(), Some("MyAlgo"), "and the replace restates it: {g}");
+    }
+
+    /// A ladder stated as a table states its levels under their count, price
+    /// then quantity, in the order they were written, on the placement alone
+    /// and in place of the restart; one that does not read states the
+    /// restart alone.
+    #[test]
+    fn a_ladder_stated_as_a_table_states_its_levels() {
+        let order = |table: &str| crate::types::model::Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 10.0, scale_table: table.into(), ..Default::default()
+        };
+        let d = placed(K::Limit { price: 10 * P }, order("100,10.00,;200,9.90,").attrs(), &[]);
+        assert!(
+            d.replace('\u{1}', "|").contains("|6450=2|6447=10.00|6448=100|6447=9.90|6448=200|"),
+            "{d}",
+        );
+        assert_eq!(one(&d, 6461), None, "no restart beside a table that reads: {d}");
+        let restarting = crate::types::model::Order {
+            scale_auto_reset: true, scale_price_increment: 0.1, scale_init_level_size: 100,
+            ..order("100,10.00,;200,9.90,")
+        };
+        let (d, g) = placed_and_replaced(
+            (K::Limit { price: 10 * P }, restarting.attrs()),
+            (K::Limit { price: 10 * P }, restarting.attrs()),
+            &[],
+        );
+        assert_eq!((one(&d, 6461), one(&d, 6450).as_deref()), (None, Some("2")), "asked or not: {d}");
+        assert!(all(&g, 6450).is_empty() && all(&g, 6447).is_empty(), "a replace states no table: {g}");
+        assert_eq!(one(&g, 6461).as_deref(), Some("1"), "and states the restart: {g}");
+        let d = placed(K::Limit { price: 10 * P }, order("100,10.00").attrs(), &[]);
+        assert_eq!(one(&d, 6461).as_deref(), Some("1"), "{d}");
+        assert!(all(&d, 6450).is_empty(), "a level of two parts sends no table: {d}");
+    }
+
+    /// What a ladder does past its levels goes only on a ladder that steps
+    /// its price, as a gateway reads it and the reference clients send it.
+    #[test]
+    fn a_ladder_states_what_follows_only_with_a_step() {
+        let unstepped = crate::types::model::Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 10.0,
+            scale_init_level_size: 100, scale_init_fill_qty: 10, scale_init_position: 5,
+            scale_auto_reset: true, scale_profit_offset: 0.5, scale_random_percent: true,
+            ..Default::default()
+        };
+        let d = placed(K::Limit { price: 10 * P }, unstepped.attrs(), &[]);
+        for tag in [6486, 6485, 6461, 6446, 6795] {
+            assert!(all(&d, tag).is_empty(), "{tag} without a step: {d}");
+        }
+        let stepped = crate::types::model::Order { scale_price_increment: 0.1, ..unstepped };
+        let d = placed(K::Limit { price: 10 * P }, stepped.attrs(), &[]);
+        for (tag, value) in [(6486, "10"), (6485, "5"), (6461, "1"), (6795, "1")] {
+            assert_eq!(one(&d, tag).as_deref(), Some(value), "{tag} with a step: {d}");
+        }
+    }
+
+    /// Where the venue prices hedge children, a new limit order carrying a
+    /// beta or pair hedge says it may be priced so, unless the caller said
+    /// not to.
+    #[test]
+    fn a_hedged_limit_says_it_may_be_priced_by_the_venue() {
+        let hedge = |hedge_type, dont| OrderAttrs {
+            hedge_type, hedge_beta: 1.2, dont_use_auto_price_for_hedge: dont, ..Default::default()
+        };
+        let limit = K::Limit { price: P };
+        assert_eq!(one(&placed(limit.clone(), hedge(4, false), &["HDGLMT"]), 8262).as_deref(), Some("1"));
+        assert_eq!(one(&placed(limit.clone(), hedge(3, false), &["HDGLMT"]), 8262).as_deref(), Some("1"));
+        assert_eq!(one(&placed(limit.clone(), hedge(4, true), &["HDGLMT"]), 8262), None);
+        assert_eq!(one(&placed(limit.clone(), hedge(4, false), &[]), 8262), None);
+        assert_eq!(one(&placed(limit, hedge(2, false), &["HDGLMT"]), 8262), None);
+        assert_eq!(one(&placed(K::Market, hedge(4, false), &["HDGLMT"]), 8262), None);
+        // An adaptive or algo order is a limit order too.
+        let adaptive = K::Adaptive { price: P, priority: crate::types::AdaptivePriority::Normal };
+        assert_eq!(one(&placed(adaptive, hedge(4, false), &["HDGLMT"]), 8262).as_deref(), Some("1"));
+    }
+
+    /// All-or-none is stated only on an order in no group and with no hedge,
+    /// placed, previewed or replaced.
+    #[test]
+    fn all_or_none_is_left_off_an_order_in_a_group_or_with_a_hedge() {
+        let aon = OrderAttrs { all_or_none: true, ..Default::default() };
+        let grouped = OrderAttrs { oca_group_str: "G1".into(), ..aon.clone() };
+        let (d, g) = placed_and_replaced((K::Limit { price: P }, grouped.clone()), (K::Limit { price: 2 * P }, grouped.clone()), &[]);
+        assert_eq!((one(&d, 18), one(&g, 18)), (None, None), "in a group: {d} {g}");
+        let preview = OrderAttrs { what_if: true, ..grouped };
+        let d = placed(K::Limit { price: P }, preview, &[]);
+        assert_eq!((one(&d, 18), one(&d, 583)), (None, None), "a preview naming a group: {d}");
+        let hedged = OrderAttrs { hedge_type: 2, ..aon.clone() };
+        assert_eq!(one(&placed(K::Limit { price: P }, hedged, &[]), 18), None, "with a hedge");
+        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: 0 }, OrderAttrs { oca_group_str: "G1".into(), ..aon }, &[]);
+        assert_eq!(one(&d, 18).as_deref(), Some("a"), "the type's own stays: {d}");
+    }
+
+    /// A relative order's cap goes out wherever it is stated, below nought
+    /// included.
+    #[test]
+    fn a_relative_cap_below_nought_is_stated() {
+        let d = placed(K::Rel { offset: P / 100, price_cap: -P }, plain(), &[]);
+        assert_eq!(one(&d, 44).as_deref(), Some("-1"), "{d}");
+        assert_eq!(one(&placed(K::Rel { offset: P / 100, price_cap: 0 }, plain(), &[]), 44), None);
+    }
+
+    /// The most a beta hedge may trade goes beside the beta, and a delta
+    /// hedge states none.
+    #[test]
+    fn a_beta_hedge_states_the_most_it_may_trade() {
+        let beta = crate::types::model::Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            hedge_type: "B".into(), hedge_param: "1".into(), hedge_max_size: 500, ..Default::default()
+        };
+        let d = placed(K::Limit { price: P }, beta.attrs(), &[]);
+        let f: Vec<&str> = d.split('\u{1}').collect();
+        for field in ["6665=4", "6703=1.000000", "6690=500"] {
+            assert!(f.contains(&field), "{field}: {d}");
+        }
+        let delta = crate::types::model::Order { hedge_type: "D".into(), hedge_param: String::new(), ..beta.clone() };
+        assert_eq!(delta.attrs().hedge_max_size, None);
+        assert!(all(&placed(K::Limit { price: P }, delta.attrs(), &[]), 6690).is_empty());
+        assert_eq!(crate::types::model::Order { hedge_max_size: 0, ..beta.clone() }.attrs().hedge_max_size, Some(0));
+        assert_eq!(crate::types::model::Order { hedge_max_size: i32::MAX, ..beta }.attrs().hedge_max_size, None);
+        // And the venue's statement of it reads back onto the order.
+        let mut read = crate::types::model::Order::default();
+        let stated: std::collections::HashMap<u32, String> = [(6690, "500".to_string())].into_iter().collect();
+        crate::engine::hot_loop::ccp::executions::read_stated_attributes(&mut read, &stated);
+        assert_eq!(read.hedge_max_size, 500);
+    }
+
+    /// The execution instruction is one field, its parts separated by spaces
+    /// and in a fixed order: the type's own, all-or-none, the algo's, the
+    /// benchmark peg's.
+    #[test]
+    fn the_instructions_are_joined_by_spaces_in_their_order() {
+        let aon = OrderAttrs { all_or_none: true, ..Default::default() };
+        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: 0 }, aon.clone(), &[]);
+        assert_eq!(one(&d, 18).as_deref(), Some("a G"), "{d}");
+        let d = placed(K::Adaptive { price: P, priority: crate::types::AdaptivePriority::Normal }, aon.clone(), &[]);
+        assert_eq!(one(&d, 18).as_deref(), Some("G e"), "{d}");
+        let bench = K::PegBench {
+            price: P, ref_con_id: 1, is_peg_decrease: false, pegged_change_amount: P,
+            ref_change_amount: P, starting_price: P, stock_ref_price: P, ref_exchange: "ISLAND".into(),
+        };
+        assert_eq!(one(&placed(bench.clone(), aon.clone(), &[]), 18).as_deref(), Some("G R"));
+        assert_eq!(one(&placed(bench, plain(), &[]), 18).as_deref(), Some("R"));
+        let preview = OrderAttrs { what_if: true, ..aon };
+        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: 0 }, preview, &[]);
+        assert_eq!((one(&d, 18).as_deref(), one(&d, 6091).as_deref()), (Some("a G"), Some("1")), "a preview too: {d}");
+    }
+
+    /// Where the venue takes a trailing stop under its own name, it goes out
+    /// as `T` with no trailing instruction, placed and replaced.
+    #[test]
+    fn a_trailing_stop_goes_out_under_its_own_name_where_the_venue_takes_it() {
+        let trail = K::TrailingStop { trail_amt: P, trail_stop_price: 0 };
+        let (d, g) = placed_and_replaced((trail.clone(), plain()), (trail, plain()), &["TRAILSENDT"]);
+        for msg in [&d, &g] {
+            assert_eq!(one(msg, 40).as_deref(), Some("T"), "{msg}");
+            assert_eq!(one(msg, 18), None, "{msg}");
+            assert_eq!(one(msg, 211).as_deref(), Some("1"), "{msg}");
+        }
+        let d = placed(K::TrailPct { trail_pct: 100, trail_stop_price: 0 }, plain(), &["TRAILSENDT"]);
+        assert_eq!((one(&d, 40).as_deref(), one(&d, 18)), (Some("T"), None), "{d}");
+    }
+
+    /// An order on a login holding several accounts goes out on the one it
+    /// names, and so do its replacement and its withdrawal.
+    #[test]
+    fn an_order_its_replace_and_its_cancel_name_the_account() {
+        use std::io::Read;
+        let named = OrderAttrs { account: "U2".into(), ..Default::default() };
+        let (d, g) = placed_and_replaced((K::Limit { price: P }, named.clone()), (K::Limit { price: 2 * P }, named), &[]);
+        assert_eq!(one(&d, 1).as_deref(), Some("U2"), "{d}");
+        assert_eq!(one(&g, 1).as_deref(), Some("U2"), "{g}");
+        assert_eq!(one(&placed(K::Limit { price: P }, plain(), &[]), 1).as_deref(), Some("DU1"), "none named: the session's");
+
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        context.pending_orders.push(OrderRequest::SubmitEx {
+            con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
+            kind: K::Limit { price: P }, tif: b'0', attrs: OrderAttrs { account: "U2".into(), ..Default::default() },
+        });
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 42 });
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        let mut buf = vec![0u8; 16384];
+        let mut text = String::new();
+        while !text.contains("35=F") {
+            let n = peer.read(&mut buf).unwrap();
+            text.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        let cancel = &text[text.find("35=F").unwrap()..];
+        assert_eq!(one(cancel, 1).as_deref(), Some("U2"), "{cancel}");
+
+        // An order the venue named at connect was placed by no statement
+        // here, and is withdrawn on the account the venue says it is on.
+        shared.orders.push_order_info(77, crate::bridge::RichOrderInfo {
+            contract: Default::default(),
+            order: crate::types::model::Order { account: "U3".into(), ..Default::default() },
+            order_state: Default::default(),
+            last_exec: Default::default(),
+        });
+        send_cancel(conn.as_mut().unwrap(), &mut context, &shared, "DU1", 77).unwrap();
+        let n = peer.read(&mut buf).unwrap();
+        let cancel = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert_eq!(one(&cancel, 1).as_deref(), Some("U3"), "{cancel}");
+    }
+
+    /// Every leg of a bracket states who originated it, as every other order
+    /// does.
+    #[test]
+    fn every_bracket_leg_states_its_originator() {
+        use std::io::Read;
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        context.pending_orders.push(OrderRequest::SubmitBracket {
+            con_id: 756733, parent_id: 10, tp_id: 11, sl_id: 12, instrument,
+            side: Side::Buy, qty: crate::types::QTY_SCALE,
+            entry_price: 150 * P, take_profit: 155 * P, stop_loss: 145 * P,
+        });
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        let mut buf = vec![0u8; 65536];
+        let mut text = String::new();
+        while text.matches("35=D").count() < 3 {
+            let n = peer.read(&mut buf).unwrap();
+            text.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert_eq!(text.matches("\u{1}6122=c\u{1}").count(), 3, "{text}");
+    }
+
+    /// An exercise on a login holding several accounts names the one it is
+    /// taken on.
+    #[test]
+    fn an_exercise_names_the_account_it_is_taken_on() {
+        let request = crate::client_core::ClientCore::build_exercise_request(
+            7, 0, 1, crate::types::QTY_SCALE, "U2".into(), Default::default(),
+        );
+        let OrderRequest::SubmitEx { kind, attrs, .. } = request else { panic!("an order") };
+        let d = placed(kind, attrs, &[]);
+        assert_eq!((one(&d, 1).as_deref(), one(&d, 6809).as_deref()), (Some("U2"), Some("1")), "{d}");
+    }
+
+    /// The fields a gateway reads and sends nothing for leave the frame as it
+    /// is without them.
+    #[test]
+    fn a_field_a_gateway_sends_nothing_for_changes_nothing_on_the_wire() {
+        let base = crate::types::model::Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        let frame = |order: &crate::types::model::Order| {
+            let built = crate::client_core::ClientCore::build_order_request(order, 7, 0, None).unwrap();
+            let crate::types::ControlCommand::Order(OrderRequest::SubmitEx { kind, attrs, tif, .. }) = built else {
+                panic!("a placement");
+            };
+            let _ = tif;
+            placed(kind, attrs, &[])
+                .split('\u{1}')
+                .filter(|f| !f.starts_with("52=") && !f.starts_with("60=") && !f.starts_with("10=") && !f.starts_with("9="))
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        let want = frame(&base);
+        type Setter = fn(&mut crate::types::model::Order);
+        let taken: Vec<(&str, Setter)> = vec![
+            ("auction_strategy", |o| o.auction_strategy = 1),
+            ("basis_points", |o| o.basis_points = 5.0),
+            ("basis_points_type", |o| o.basis_points_type = 1),
+            ("bond_accrued_interest", |o| o.bond_accrued_interest = "1.5".into()),
+            ("shareholder", |o| o.shareholder = "SH".into()),
+            ("parent_perm_id", |o| o.parent_perm_id = 99),
+            ("override_percentage_constraints", |o| o.override_percentage_constraints = true),
+            ("order_misc_options", |o| o.order_misc_options.push(crate::types::model::TagValue {
+                tag: "manual".into(), value: "1".into(),
+            })),
+            ("opt_out_smart_routing", |o| o.opt_out_smart_routing = true),
+            ("delta", |o| o.delta = 0.5),
+            ("randomize_price", |o| o.randomize_price = true),
+            ("delta_neutral_clearing_account", |o| o.delta_neutral_clearing_account = "C".into()),
+            ("delta_neutral_clearing_intent", |o| o.delta_neutral_clearing_intent = "IB".into()),
+            ("delta_neutral_designated_location", |o| o.delta_neutral_designated_location = "L".into()),
+            ("delta_neutral_open_close", |o| o.delta_neutral_open_close = "O".into()),
+            ("delta_neutral_settling_firm", |o| o.delta_neutral_settling_firm = "F".into()),
+            ("delta_neutral_short_sale", |o| o.delta_neutral_short_sale = true),
+            ("delta_neutral_short_sale_slot", |o| o.delta_neutral_short_sale_slot = 2),
+            ("what_if_type", |o| o.what_if_type = 0),
+        ];
+        for (name, set) in taken {
+            let mut order = base.clone();
+            set(&mut order);
+            crate::client_core::ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("DU1"))
+                .unwrap_or_else(|e| panic!("{name} is taken: {e:?}"));
+            assert_eq!(frame(&order), want, "{name} changes nothing on the wire");
+        }
+    }
 }

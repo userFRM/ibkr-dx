@@ -134,6 +134,9 @@ pub struct OrderState {
     /// parked with reason", so this is drained into `Wrapper::error` the
     /// same way a cancel/modify reject is.
     order_inactive: Mutex<Vec<(u64, i32, String)>>,
+    /// What the caller is told about an order that goes anyway, as
+    /// (order_id, code, message).
+    order_notices: Mutex<Vec<(u64, i32, String)>>,
     /// Orders whose outstanding replacement the venue has taken.
     ///
     /// The surfaces hold the terms an order had before a replacement, to put
@@ -199,6 +202,7 @@ impl OrderState {
             working_id_watermark: AtomicU64::new(0),
             narrow_id_watermark: AtomicU64::new(0),
             order_inactive: Mutex::new(Vec::with_capacity(8)),
+            order_notices: Mutex::new(Vec::new()),
             replacements_taken: Mutex::new(Vec::with_capacity(4)),
         }
     }
@@ -499,6 +503,17 @@ impl OrderState {
 
     #[doc(hidden)] pub fn push_order_inactive(&self, order_id: u64, code: i32, message: String) {
         self.order_inactive.lock().unwrap().push((order_id, code, message));
+    }
+
+    /// Say something about an order that goes anyway, on its own number: a
+    /// warning, and not the end of the order.
+    #[doc(hidden)] pub fn push_order_notice(&self, order_id: u64, code: i32, message: String) {
+        self.order_notices.lock().unwrap().push((order_id, code, message));
+    }
+
+    /// Take every notice waiting, leaving none.
+    pub fn drain_order_notices(&self) -> Vec<(u64, i32, String)> {
+        self.order_notices.lock().unwrap().drain(..).collect()
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
