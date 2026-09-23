@@ -19,7 +19,7 @@ use ibkr_dx::api::types::{
     BarData, CommissionAndFeesReport, Contract, ContractDescription, ContractDetails,
     Execution, Order, OrderState, TagValue,
 };
-use ibkr_dx::api::{Client, EClient, EClientConfig, Subscription, Wrapper};
+use ibkr_dx::api::{EClient, EClientConfig, Wrapper};
 use ibkr_dx::{EClient as RootEClient, Refusal as RootRefusal};
 
 // ── Reachable because a program already reaches it ──────────────────────────

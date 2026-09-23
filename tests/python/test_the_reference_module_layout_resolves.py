@@ -137,7 +137,7 @@ def test_the_layout_says_so_when_it_names_something_absent():
 def test_a_star_import_brings_names_and_not_modules():
     brought = {}
     exec("from ibkr_dx import *", brought)
-    assert "EClient" in brought and "IB" in brought
+    assert "EClient" in brought
     for shadowed in ("order", "contract", "client", "wrapper", "common", "inspect", "ibkr_dx"):
         assert shadowed not in brought, f"{shadowed} would shadow the caller's own"
 

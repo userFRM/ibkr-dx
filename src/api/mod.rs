@@ -4,9 +4,6 @@
 //! C++ TWS API (EClientSocket / EWrapper) pattern.
 
 pub mod client;
-pub mod session;
-pub mod direct;
-pub mod subscription;
 pub mod wrapper;
 
 // Reachable under `api::` because that is where callers first met them, and
@@ -15,7 +12,5 @@ pub use crate::types::model as types;
 pub use crate::{error_codes, reliability, settings};
 
 pub use client::{EClient, EClientConfig};
-pub use direct::Client;
-pub use subscription::Subscription;
 pub use crate::types::model::*;
 pub use wrapper::Wrapper;

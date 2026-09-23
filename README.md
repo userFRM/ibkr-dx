@@ -17,13 +17,16 @@
   <a href="https://userfrm.github.io/ibkr-dx/"><img src="https://img.shields.io/badge/docs-book-green.svg" alt="Docs"></a>
 </p>
 
+> [!TIP]
+> **Want ib_async's easier API?** [ib_async-dx](https://github.com/userFRM/ib_async-dx) runs it on this engine — the drop-in successor for ib_async.
+
 ## Contents
 
 **Start here** — [Introduction](#introduction) · [Why this exists](#why-this-exists) · [Installation](#installation) · [Quick start](#quick-start)
 
 **What you get** — [Beyond the documented API](#beyond-the-documented-api) · [Capabilities](#capabilities) · [Calls](#calls) · [Callbacks](#callbacks) · [Beyond the canonical list](#beyond-the-canonical-list)
 
-**Moving across** — [Running an existing program](#running-an-existing-program) · [ib_async](#ib_async) · [TWS API](#tws-api-eclient--ewrapper)
+**Moving across** — [Running an existing program](#running-an-existing-program)
 
 **Under the hood** — [How it works](#how-it-works) · [Configuration](#configuration)
 
@@ -38,13 +41,14 @@ the market-data, trading, historical and security-definition connections, and
 exposes the same API a program would otherwise reach through IB Gateway — with
 no gateway process, JVM, or local socket in between.
 
-The API is source-compatible with the TWS API (`EClient` / `EWrapper`) and, in
-Python, additionally with [ib_async](https://github.com/ib-api-reloaded/ib_async)
-(`IB`). Migrating an existing program changes the connect call:
+The API is source-compatible with the TWS API (`EClient` / `EWrapper`), and the
+same `EClient` answers what the gateway never forwarded — see
+[Beyond the documented API](#beyond-the-documented-api). Migrating an existing
+program changes the connect call:
 
 ```diff
-- ib.connect("127.0.0.1", 4001, clientId=1)     # requires a running gateway
-+ ib.connect(username="...", password="...")    # no external process
+- client.connect("127.0.0.1", 4001, clientId=1)     # requires a running gateway
++ client.connect(username="...", password="...")    # no external process
 ```
 
 > [!TIP]
@@ -124,121 +128,75 @@ ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx" }
 ## Quick start
 
 ```python
-import ibkr_dx
+import threading
+import time
+from ibkr_dx import EWrapper, EClient, Contract
 
-ib = ibkr_dx.IB()
-ib.connect(username="your_user", password="your_pass", paper=True)
+class App(EWrapper):
+    def __init__(self):
+        super().__init__()
+        self.ready = threading.Event()
 
-spy = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+    def next_valid_id(self, order_id):
+        self.next_id = order_id
+        self.ready.set()
 
-(ticker,) = ib.reqTickers(spy)
-print(ticker.bid, ticker.ask)
+    def tick_price(self, req_id, tick_type, price, attrib):
+        print(f"tick {tick_type}: {price}")
 
-order = ibkr_dx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.00)
-trade = ib.placeOrder(spy, order)
-ib.sleep(2)
-print(trade.orderStatus.status)
-ib.cancelOrder(order)
+app = App()
+client = EClient(app)
+client.connect(username="your_user", password="your_pass", paper=True)
+threading.Thread(target=client.run, daemon=True).start()
+app.ready.wait(timeout=10)
 
-ib.disconnect()
+aapl = Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD")
+client.req_mkt_data(1, aapl, "", False)
+time.sleep(5)
+client.cancel_mkt_data(1)
+client.disconnect()
 ```
-
-A contract does not need to be qualified first: a request carrying a contract
-rather than a contract id is resolved before transmission.
 
 In Rust:
 
 ```rust
-use ibkr_dx::types::model::{Contract, Order};
-use ibkr_dx::{Client, Config};
+use ibkr_dx::api::client::{EClient, EClientConfig};
+use ibkr_dx::api::types::{Contract, Order};
 
-let client = Client::connect(&Config {
-    username: "your_user".into(),
-    password: "your_pass".into(),
+let client = EClient::connect(&EClientConfig {
+    username: std::env::var("IB_USERNAME").unwrap_or_default(),
+    password: std::env::var("IB_PASSWORD").unwrap_or_default(),
     paper: true,
     ..Default::default()
 })?;
 
-let spy = client.qualify(Contract::stock("SPY"))?;
+let spy = client.qualify_contract(&Contract {
+    symbol: "SPY".into(),
+    sec_type: "STK".into(),
+    exchange: "SMART".into(),
+    currency: "USD".into(),
+    ..Default::default()
+})?;
 
-// A quote exists because something is watching it, and updates itself after.
-client.watch(&spy)?;
-if let Some(quote) = client.ticker(&spy) {
+let bars = client.historical_data(&spy, "", "2 D", "1 hour", "TRADES", true)?;
+let preview = client.what_if_order(&spy, &Order {
+    action: "BUY".into(),
+    order_type: "LMT".into(),
+    total_quantity: 1.0,
+    lmt_price: 1.0,
+    ..Default::default()
+})?;
+println!("{} bars, preview {}", bars.len(), preview.status);
+
+client.req_mkt_data(1, &spy, "", false, false)?;
+std::thread::sleep(std::time::Duration::from_secs(2));
+if let Some(instrument) = client.instrument_of(spy.con_id) {
+    let quote = client.shared_state().market.quote(instrument);
     println!("bid {} ask {}", quote.bid, quote.ask);
 }
 
-// The order is the thing you hold. Its number is bookkeeping the client keeps.
-let order = client.place(&spy, &Order::limit("BUY", 100.0, 42.50))?;
-order.wait_done(Duration::from_secs(30));
-println!("{} — {} filled", order.status(), order.fills().len());
-order.cancel()?;
-
-// What the session holds, without asking for any of it.
-for position in client.positions() { /* ... */ }
-for value in client.account_values() { /* ... */ }
+client.disconnect();
 ```
-
-One thread reads the session and keeps what arrives, so a position, an order, a
-fill and a quote are things you look at rather than questions you ask. The
-account, its holdings and anything already working are asked for as the session
-opens, so they are there to read the moment it returns.
-
-To be told as it happens rather than reading afterwards, take a stream. Both
-are iterators, so they read the way anything else in Rust reads:
-
-```rust
-for tick in client.ticks(&spy)? {
-    println!("{} at {}", tick.size, tick.price);
-}
-
-for event in client.order_events() {
-    println!("order {} is {}", event.order_id, event.status);
-}
-```
-
-`ticks` subscribes and hands back the stream in one, and only that contract's
-ticks arrive on it — a caller watching one thing does not filter out the rest.
-Dropping the stream withdraws the subscription.
-
-**There is one client.** The calls above are the ones with a shape worth
-having; every other request the protocol carries — scanners, news, corporate
-events, fundamentals, option chains, histograms, market rules, P&L — is on the
-same `client`, in the reference client's own shape:
-
-```rust
-client.req_scanner_parameters()?;
-client.req_historical_news(9001, con_id, "BRFG", "", "", 10)?;
-```
-
-Nothing to import, nothing to choose between: `Client` reaches all 135. Where a
-name appears on both, the session's own is the one you get, because it is the
-better answer — `positions()` reads what the session already holds rather than
-asking again.
-
-### Inside an async runtime
-
-The engine is a thread of its own, so a blocking call holds the thread that
-made it and nothing else. Inside a runtime that thread is one of a shared pool,
-so the `async` feature moves each question onto a thread that may wait. What
-does not wait — reading what the session holds — is not awaited:
-
-```toml
-ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx", features = ["async"] }
-```
-
-```rust
-let client = AsyncClient::connect(config).await?;
-let spy = client.qualify(Contract::stock("SPY")).await?;
-
-client.watch(&spy).await?;           // may have to ask about the contract
-let quote = client.ticker(&spy);     // a memory read
-
-let order = client.place(&spy, &Order::limit("BUY", 1.0, 1.0)).await?;
-client.wait_done(&order, Duration::from_secs(30)).await;
-```
-
-Every question has the same name and the same answer on both, and a test fails
-if either grows a name the other does not have.
 
 ## Beyond the documented API
 
@@ -250,6 +208,11 @@ sits where the gateway sat and reads them.
 Everything below is stated by the venue on an ordinary session. The figures are
 from one paper session and will differ with the account and the day; what does
 not differ is that none of it is reachable through `ibapi` or `ib_async`.
+
+Each is a call on `EClient`, beside the TWS API's own. The examples are Python;
+the Rust `EClient` carries the same calls, spelled as
+[this table](https://userfrm.github.io/ibkr-dx/reference/beyond-the-api.html#the-same-calls-in-rust)
+gives them.
 
 ### What a company is worth, and what it is
 
@@ -326,12 +289,18 @@ client.closing_option_model(1)      # the same, worked out as the contract close
 
 ### Asking the venue to find a trade
 
-```python
-scan = ibkr_dx.SpreadScan(version=6, request=0, under_con_id=265598,
-                      account="DU1234567", min_delta=0.25)
-client.req_spread_scan(1, aapl, scan)
-for s in client.scanned_strategies(1):
-    s["legs"], s["figures"], s["breakEvens"]
+In Rust; the Python `EClient` does not carry this request.
+
+```rust
+let scan = ibkr_dx::types::SpreadScan {
+    version: 6, request: 0, under_con_id: 265598,
+    account: "DU1234567".into(), min_delta: Some(0.25),
+    ..Default::default()
+};
+client.req_spread_scan(1, &aapl, &scan)?;
+for s in client.scanned_strategies(1) {
+    (s.legs, s.figures, s.break_evens);
+}
 ```
 
 ### And the session itself
@@ -346,6 +315,21 @@ client.req_ping(); client.last_rtt_ms()
 
 The full list, with what each returns, is in
 [Beyond the API](https://userfrm.github.io/ibkr-dx/reference/beyond-the-api.html).
+
+> [!TIP]
+> The calls under [Beyond the canonical list](#beyond-the-canonical-list) are
+> the point of this client, not a shortfall in it. The venue states all of it on
+> an ordinary session and the documented API never gave it a message, so a
+> program had no way to ask — a contract's float, where its volatility stands
+> against its own year, what margin it takes, five years of its price with the
+> date of each point. They are reached here the way every other call is.
+>
+> The one thing to know is that the door only opens one way: **a program can
+> move to this client without changing a line, but a program that then calls one
+> of these cannot move back to a gateway**, because a gateway has no message to
+> carry it. Nothing else about it is different — the extras are named under
+> [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) so that the
+> trade is visible before it is made.
 
 <!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->
 
@@ -732,65 +716,13 @@ Four things the venue declares and this client deliberately does not read:
 
 ## Running an existing program
 
-### ib_async
+A program written against the TWS API keeps its calls, its callbacks and its
+order objects — the Python [Quick start](#quick-start) is one. In Python, both
+naming conventions resolve on every type and method: `reqMktData` and
+`req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`.
 
-An unmodified program written against
-[ib_async](https://github.com/ib-api-reloaded/ib_async) runs on this engine
-with its connect call changed. Nothing of ib_async is copied or modified —
-install it as usual, and attach:
-
-```python
-from ib_async import IB, Stock
-import ibkr_dx.ib_async
-
-ib = ibkr_dx.ib_async.attach(IB(), username="your_user", password="your_pass")
-ib.connect()                      # names no host: there is no gateway
-
-spy = Stock("SPY", "SMART", "USD")
-ib.qualifyContracts(spy)
-bars = ib.reqHistoricalData(spy, "", "2 D", "1 hour", "TRADES", useRTH=True)
-
-ib.pendingTickersEvent += lambda tickers: print(len(tickers), "updates")
-ib.reqMktData(spy)
-ib.sleep(5)
-ib.disconnect()
-```
-
-Their `IB`, their `Wrapper`, their events, their types — this engine
-underneath, and no gateway process.
-
-### TWS API (`EClient` / `EWrapper`)
-
-```python
-import threading
-from ibkr_dx import EWrapper, EClient, Contract
-
-class App(EWrapper):
-    def __init__(self):
-        super().__init__()
-        self.ready = threading.Event()
-
-    def next_valid_id(self, order_id):
-        self.next_id = order_id
-        self.ready.set()
-
-    def tick_price(self, req_id, tick_type, price, attrib):
-        print(f"tick {tick_type}: {price}")
-
-app = App()
-client = EClient(app)
-client.connect(username="your_user", password="your_pass", paper=True)
-threading.Thread(target=client.run, daemon=True).start()
-app.ready.wait(timeout=10)
-
-aapl = Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD")
-client.req_mkt_data(1, aapl, "", False)
-```
-
-Both naming conventions resolve on every type and method: `reqMktData` and
-`req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`. Both surfaces
-drive one client and one engine — `ibkr_dx.IB` is a facade over `EClient`, they
-share a session, and either may be used.
+A program written against [ib_async](https://github.com/ib-api-reloaded/ib_async)
+runs on this engine through [ib_async-dx](https://github.com/userFRM/ib_async-dx).
 
 ## How it works
 
@@ -844,28 +776,13 @@ nothing here paces outgoing messages, which the gateway ships with off).
 
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 
-> [!TIP]
-> The calls under *Beyond the canonical list* are the point of this client, not
-> a shortfall in it. The venue states all of it on an ordinary session and the
-> documented API never gave it a message, so a program had no way to ask — a
-> contract's float, where its volatility stands against its own year, what
-> margin it takes, five years of its price with the date of each point. They are
-> reached here the way every other call is.
->
-> The one thing to know is that the door only opens one way: **a program can
-> move to this client without changing a line, but a program that then calls one
-> of these cannot move back to a gateway**, because a gateway has no message to
-> carry it. Nothing else about it is different — the extras are named under
-> [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) so that the
-> trade is visible before it is made.
-
 ## Documentation
 
 * [The book](https://userfrm.github.io/ibkr-dx/) — guides, recipes and the generated API reference
 * [Capabilities](docs/capabilities.md) — one row per capability, one column per client
 * [Evidence](docs/evidence.md) — what each claim rests on, and the session that produced it
-* [Notebooks](notebooks/) — the seven ib_async subjects, in the TWS API shape and in [ib_async's own](notebooks/ib_async_nogateway/)
-* [Examples](examples/) — 45 runnable single-file programs, 29 in Rust and 15 in Python
+* [Notebooks](notebooks/) — the seven ib_async subjects, in the TWS API shape
+* [Examples](examples/) — 42 runnable single-file programs, 27 in Rust and 15 in Python
 * [Beyond the API](https://userfrm.github.io/ibkr-dx/reference/beyond-the-api.html) — what the session states that no documented call asks for
 * [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) — what this client will not do, and why
 
@@ -953,10 +870,10 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,746 | No |
-| Python | 914 | No |
+| Rust, unit and integration | 2,678 | No |
+| Python | 831 | No |
 | Rust, live | 9 | Yes |
-| Python, live | 137 | Yes |
+| Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |
 
 Every published count is checked against what is actually there, so a number in

@@ -250,8 +250,8 @@ impl EClient {
 /// and each session as its opening, its close, and the day it belongs to.
 ///
 /// The window is stated: the venue answers a duration from an end, and what it
-/// actually covered is the first two, which the callback path states and the
-/// shape this facade follows declares. Dropped here, a program reading the
+/// actually covered is the first two, which the callback path states and
+/// ib_async's `HistoricalSchedule` declares. Dropped here, a program reading the
 /// start of the stretch it asked about found no such field.
 type TradingSchedule = (String, String, String, Vec<(String, String, String)>);
 

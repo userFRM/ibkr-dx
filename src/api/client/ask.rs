@@ -9,8 +9,7 @@
 //! has queued, and a question keeps what carries its own request id — but what
 //! it does not keep is no longer thrown away. A session installs the record it
 //! keeps, and everything a question does not want goes there, so a fill or a
-//! tick arriving while a question runs still reaches
-//! [`Client`](crate::api::Client)'s own view of it.
+//! tick arriving while a question runs still reaches that record.
 //!
 //! A bare client with no record of its own has nowhere to put them, and there
 //! a question does still consume what it does not keep. Where nothing may be

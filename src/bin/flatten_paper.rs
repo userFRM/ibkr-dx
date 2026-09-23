@@ -13,8 +13,7 @@
 
 use std::time::{Duration, Instant};
 
-use ibkr_dx::api::session::Client;
-use ibkr_dx::api::client::EClientConfig;
+use ibkr_dx::api::client::{EClient, EClientConfig};
 use ibkr_dx::api::types::Order;
 
 fn main() {
@@ -33,7 +32,7 @@ fn main() {
         paper: true,
         ..Default::default()
     };
-    let session = match Client::connect(&config) {
+    let session = match EClient::connect(&config) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("could not open a session: {e}");
@@ -43,7 +42,7 @@ fn main() {
 
     // The account the venue named, not the one asked for. A live account
     // reached through a paper configuration would still trade.
-    let account = session.managed_accounts().first().cloned().unwrap_or_default();
+    let account = session.accounts.first().cloned().unwrap_or_default();
     if !account.starts_with("DU") && !account.starts_with("DF") {
         eprintln!("account {account} is not a paper account; refusing to trade it");
         std::process::exit(1);
@@ -54,13 +53,13 @@ fn main() {
     // has says the account is empty, which is the one answer that reads as
     // success and does nothing.
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut held = session.positions();
+    let mut held = session.positions().unwrap_or_default();
     while held.is_empty() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
-        held = session.positions();
+        held = session.positions().unwrap_or_default();
     }
 
-    let held: Vec<_> = held.into_iter().filter(|p| p.quantity != 0.0).collect();
+    let held: Vec<_> = held.into_iter().filter(|p| p.position != 0.0).collect();
     if held.is_empty() {
         println!("nothing held");
         return;
@@ -69,23 +68,24 @@ fn main() {
 
     let mut closed = 0usize;
     for position in &held {
-        let side = if position.quantity > 0.0 { "SELL" } else { "BUY" };
+        let side = if position.position > 0.0 { "SELL" } else { "BUY" };
         let order = Order {
             action: side.to_string(),
-            total_quantity: position.quantity.abs(),
+            total_quantity: position.position.abs(),
             order_type: "MKT".to_string(),
             tif: "DAY".to_string(),
             ..Default::default()
         };
         let symbol = position.contract.symbol.clone();
-        match session.place(&position.contract, &order) {
-            Ok(placed) => {
-                let done = placed.wait_done(Duration::from_secs(30));
-                println!("  {side} {} {symbol}: {}", position.quantity.abs(),
+        let order_id = session.next_order_id();
+        match session.place_order(order_id, &position.contract, &order) {
+            Ok(()) => {
+                let done = session.await_order(order_id, Duration::from_secs(30)).is_ok_and(|report| report.is_done());
+                println!("  {side} {} {symbol}: {}", position.position.abs(),
                     if done { "closed" } else { "sent, still working" });
                 closed += 1;
             }
-            Err(why) => println!("  {side} {} {symbol}: refused — {why}", position.quantity.abs()),
+            Err(why) => println!("  {side} {} {symbol}: refused — {why}", position.position.abs()),
         }
     }
     println!("{closed} of {} placed", held.len());

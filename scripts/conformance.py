@@ -20,17 +20,31 @@ sys.path.insert(0, str(ROOT / "python"))
 
 
 def answers() -> dict[str, str]:
+    import time
+
     import ibkr_dx
 
-    ib = ibkr_dx.IB()
-    ib.connect(
+    class Preview(ibkr_dx.EWrapper):
+        def __init__(self):
+            super().__init__()
+            self.order_id = None
+            self.state = None
+
+        def openOrder(self, orderId, contract, order, orderState):
+            if orderId == self.order_id:
+                self.state = orderState
+
+    w = Preview()
+    c = ibkr_dx.EClient(w)
+    c.connect(
+        client_id=1,
         username=os.environ["IB_USERNAME"],
         password=os.environ["IB_PASSWORD"],
         paper=True,
     )
     try:
         asked = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
-        details = ib.reqContractDetails(asked)
+        details = c.contract_details(asked)
         spy = details[0].contract
         out = {
             "con_id": str(spy.conId),
@@ -39,22 +53,30 @@ def answers() -> dict[str, str]:
             "trading_class": spy.tradingClass,
         }
 
-        bars = ib.reqHistoricalData(asked, "", "2 D", "1 hour", "TRADES", True)
+        bars = c.historical_data(asked, "", "2 D", "1 hour", "TRADES", 1)
         out["bars"] = str(len(bars))
         out["first_bar"] = bars[0].date if bars else ""
 
-        chains = ib.reqSecDefOptParams("SPY", "", "STK", spy.conId)
-        out["chain_exchanges"] = ",".join(sorted(c.exchange for c in chains))
+        chains = c.option_chains("SPY", "", "STK", spy.conId)
+        out["chain_exchanges"] = ",".join(sorted(ch.exchange for ch in chains))
 
-        out["symbol_matches"] = str(len(ib.reqMatchingSymbols("APP")))
+        out["symbol_matches"] = str(len(c.matching_symbols("APP")))
 
         order = ibkr_dx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.0)
-        state = ib.whatIfOrder(spy, order)
-        out["preview_status"] = state.status
-        out["preview_commission"] = str(state.commissionAndFees)
+        order.whatIf = True
+        order.orderId = w.order_id = c.next_order_id()
+        c.place_order(order.orderId, spy, order)
+        deadline = time.monotonic() + 5
+        while w.state is None and time.monotonic() < deadline:
+            c.poll()
+            time.sleep(0.01)
+        if w.state is None:
+            raise TimeoutError("the venue did not answer what the order would cost")
+        out["preview_status"] = w.state.status
+        out["preview_commission"] = str(w.state.commissionAndFees)
         return out
     finally:
-        ib.disconnect()
+        c.disconnect()
 
 
 def parse(block: str) -> dict[str, str]:

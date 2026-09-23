@@ -16,6 +16,8 @@
 
 </div>
 
+> **Want ib_async's easier API?** [ib_async-dx](https://github.com/userFRM/ib_async-dx) runs it on this engine — the drop-in successor for ib_async.
+
 ## One line changes
 
 A program written against the TWS API talks to IB Gateway or Trader Workstation
@@ -25,12 +27,12 @@ security-definition connections open, and gives your program the same calls and
 the same callbacks.
 
 ```diff
-- ib.connect("127.0.0.1", 4001, clientId=1)     # needs a gateway running
-+ ib.connect(username="...", password="...")    # no external process
+- client.connect("127.0.0.1", 4001, clientId=1)     # needs a gateway running
++ client.connect(username="...", password="...")    # no external process
 ```
 
-`host` and `port` are still accepted and are ignored. There is no local process
-to point them at.
+`port` is still accepted and is ignored. There is no local process to point it
+at.
 
 ## What goes away
 
@@ -58,7 +60,7 @@ to point them at.
 <div class="dx-cards">
 <div class="dx-card">
 <p class="dx-card-title">The shape you already have</p>
-<p><code>EClient</code> / <code>EWrapper</code>, with the same method names and the same callbacks, in Rust and in Python. An <a href="https://github.com/ib-api-reloaded/ib_async">ib_async</a> program runs on it unmodified through <code>ibkr_dx.ib_async.attach</code>.</p>
+<p><code>EClient</code> / <code>EWrapper</code>, with the same method names and the same callbacks, in Rust and in Python.</p>
 </div>
 <div class="dx-card">
 <p class="dx-card-title">One engine, two languages</p>
@@ -83,7 +85,7 @@ to point them at.
 <div class="dx-cards">
 <a class="dx-card" href="./getting-started.html"><strong>Getting started</strong><span>Install, credentials, the surface to pick, and a program that connects.</span></a>
 <a class="dx-card" href="./recipes/python/order-lifecycle.html"><strong>Place an order</strong><span>Place, modify, cancel and watch it fill, end to end.</span></a>
-<a class="dx-card" href="./recipes/python/ib_async.html"><strong>Bring an ib_async program</strong><span>Point an existing program at the engine with one line.</span></a>
+<a class="dx-card" href="https://github.com/userFRM/ib_async-dx"><strong>Bring an ib_async program</strong><span>ib_async-dx runs it on this engine.</span></a>
 <a class="dx-card" href="./api/python.html"><strong>Look a call up</strong><span>The generated reference for every call and callback, in Python and in Rust.</span></a>
 <a class="dx-card" href="./reference/limits.html"><strong>Before you depend on it</strong><span>What it will not do, and why. Then the call-by-call coverage.</span></a>
 </div>

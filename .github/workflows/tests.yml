@@ -136,9 +136,8 @@ jobs:
       - name: Build the extension into the environment under test
         run: |
           uv venv
-          # ib_async too: twelve tests establish that its own library runs on
-          # this engine, and without it they are not collected and the
-          # claim is tested nowhere.
+          # ib_async too: the scanner test builds its scan from ib_async's own
+          # objects, and the bar-date test reads a bar with its parser.
           # And the reference clients the comparison page is measured against.
           # It is read from the clients it names: one that is not installed is
           # left out of the page rather than filled in from memory, so a
@@ -237,33 +236,10 @@ jobs:
       - name: Lint the Python bindings
         run: cargo clippy --lib --all-targets --features python -- -D warnings
 
-      # The asynchronous surface is off by default, so nothing above builds it.
-      # Left out, a break in it reaches main compiling nowhere.
-      - name: clippy, asynchronous surface
-        run: cargo clippy --lib --all-targets --features async -- -D warnings
-
-      # Bounded inside the step rather than by the job's own limit. A job that
-      # hits its limit is recorded as cancelled, and a cancelled job keeps no
-      # log — so the run that stalls says nothing about where. A step that
-      # times out fails instead, the job fails with it, and a failed job keeps
-      # every line the test runner printed. The runner names each test as it
-      # finishes, so the last name in that log is the one that did not.
-      - name: Test, asynchronous surface
-        run: |
-          set +e
-          timeout -k 30 1500 cargo test --lib --features async > test-async.log 2>&1
-          code=$?
-          # Printed from the file rather than streamed, so a test that
-          # outlives the timeout cannot hold the step's own output open:
-          # killing the runner leaves the binary it spawned behind, and
-          # that orphan inherits the pipe the step is read through.
-          if [ $code -ne 0 ]; then cat test-async.log; else tail -n 3 test-async.log; fi
-          exit $code
-
       # `cargo doc` renders an example without compiling it, so a broken one is
       # published looking right. This compiles and runs them.
       - name: The examples in the documentation
-        run: timeout 600 cargo test --doc --features async
+        run: timeout 600 cargo test --doc
 
   docs:
     name: generated docs match the source

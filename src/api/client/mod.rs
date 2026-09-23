@@ -812,15 +812,6 @@ impl EClient {
         &self.shared
     }
 
-    /// The turn, for the thread that reads the session on its own.
-    ///
-    /// `process_msgs` takes this and then reads. A reader that must order the
-    /// turn ahead of the record it reads into cannot use that — the turn is
-    /// not re-entrant — so it takes the turn here and calls the read directly.
-    pub(crate) fn turn_for_reading(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.asking.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// What tells this session apart from another in the same process.
     pub(crate) fn which_session(&self) -> usize {
         Arc::as_ptr(&self.shared) as usize

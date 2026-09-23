@@ -241,16 +241,16 @@ accounts they are for.
 
 ## Executions and fills are the day's, not the account's
 
-`fills()`, `executions()` and `reqExecutions()` answer with the executions this
-session has seen **and the ones the venue restated when the session opened**.
+`reqExecutions()` answers with the executions this session has seen **and the
+ones the venue restated when the session opened**.
 
 The venue restates the day's executions at every logon. Those are filed for a
 caller that asks and announced to nobody — a restarted program is answered with
 the fills it made before it restarted, including fills on orders that had
 already completed, which it never tracked and knows nothing else about.
 
-What is still absent is anything the venue does not restate. The wrapper this
-follows asks the venue for the account's executions, whoever made them and
+What is still absent is anything the venue does not restate. The reference
+client asks the venue for the account's executions, whoever made them and
 whenever; this protocol carries no such question, and the filter's time is a
 test applied here rather than a question put to the venue. So an answer holds
 today's executions on this account, not its history. A program reconciling

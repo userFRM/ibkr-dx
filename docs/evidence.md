@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 80. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 154. 118 are sent; 29 have no field in the protocol to carry them and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | the same request produces the same call on both, compared against live responses |
-| Tests | 3,660 offline, and 197 more that live in the suites run against a broker session |
+| Tests | 3,509 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -70,10 +70,10 @@ and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,746 | No |
+| Rust unit and integration | 2,678 | No |
 | Rust, live | 9 | Yes |
-| Python | 914 | No |
-| Python, live | 137 | Yes |
+| Python | 831 | No |
+| Python, live | 124 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
 Counted rather than stated: `scripts/check_status_counts.py` names every test
@@ -81,7 +81,7 @@ in each suite and fails the gate when this table disagrees with it, so a figure
 here cannot go quietly out of date as the suites grow.
 
 
-45 of the 47 capabilities are verified against IBKR production servers. Of the
+42 of the 44 capabilities are verified against IBKR production servers. Of the
 other two, advisor configuration reaches the server and needs an advisor
 account to see what it answers, and session lifetime is a property of the venue
 rather than a call this client makes.
@@ -95,29 +95,20 @@ Every figure above is measured on each commit, and the build fails if one moves.
 | Surface | Status | Verification |
 | --- | :---: | --- |
 | `EClient` / `EWrapper` (TWS API shape) | ✅ Supported | `tests/ib_paper_compat`, `tests/python/test_compat_tier1..3.py` |
-| `ib_async`, unmodified | ✅ Supported | Their `IB` on this engine through `ibkr_dx.ib_async.attach` — their events, async variants and types, with no gateway. All 67 transport calls their library makes are carried and gated, and their own suite runs against it; see the note below. `tests/python/test_ib_async_transport.py`, `tests/ib_async_upstream/conftest.py` |
-| `ibkr_dx.IB` (ib_async shape) | ✅ Supported | 90/90 methods present; `tests/python/test_ib_facade.py`, `scripts/sdk_sweep.py` |
-| `ibkr_dx::api::Client` (Rust) | ✅ Supported | 80/80 callable; 5 return an error saying why: two name a handshake with a local process there is none of, one withdraws a contract lookup that does not stream and so has nothing to withdraw, and two ask for a running profit, whose figures arrive on a callback as they change — which is not something a call that answers once can hand back. Counted over the request surface the gate reads, which is the binding's — the two carry the same calls, and the row beside this one is what states that they do |
 | Gateway settings | ✅ Supported | 14 settings carried, 10 recorded as having no counterpart, both lists the same on either client; `tests/python/test_gateway_settings.py`, `tests/python/test_settings_parity.py`; session opened under a stated build and time zone |
 | Rust/Python equivalence | ✅ Supported | 4 static gates (settings, order fields, surface, error behaviour) plus `scripts/conformance.py --compare`, which compares 10 server responses across both clients |
-
-**The upstream `ib_async` suite.** Its three transport tests behave against this
-engine as they do against a gateway. Two pass. The third asserts a `RequestError`
-carrying code 321, which their wrapper cannot raise: it lists 321 among the codes
-it treats as warnings, and a warning never ends the request it belongs to. That
-test fails the same way against any server.
 
 ## Market data
 
 | Capability | Status | Verification |
 | --- | :---: | --- |
-| Top of book | ✅ Supported | Streaming and snapshot; US equities and FX; `scripts/sdk_sweep.py`, `tests/python/test_live_quotes.py`. Concurrent subscribers on one contract share one wire subscription |
-| Market depth (L2) | ✅ Supported | A book is asked for once, at the venue named, and every level names it; inserts, updates and deletes are delivered as the venue states them, ten levels a side through ib_async's own ticker. Which venues answer depends on the account's entitlements — see the note below. `tests/python/test_live_depth.py`, `tests/python/test_ib_async_depth.py`, `src/bin/capture_depth.rs` |
+| Top of book | ✅ Supported | Streaming and snapshot; US equities and FX; `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx). Concurrent subscribers on one contract share one wire subscription |
+| Market depth (L2) | ✅ Supported | A book is asked for once, at the venue named, and every level names it; inserts, updates and deletes are delivered as the venue states them. Which venues answer depends on the account's entitlements — see the note below. `tests/python/test_live_depth.py`, `src/bin/capture_depth.rs` |
 | Historical bars | ✅ Supported | 9 markets in one session (`src/bin/capture_global.rs`); `keepUpToDate` verified in `tests/python/test_historical_and_scanner.py` |
-| Historical ticks and schedules | ✅ Supported | `scripts/sdk_sweep.py`; unsupported tick types return an error rather than substituting another series |
+| Historical ticks and schedules | ✅ Supported | `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx); unsupported tick types return an error rather than substituting another series |
 | Tick-by-tick quotes | ✅ Supported | FX and US equities, concurrent streams, each record carrying its request id; `tests/python/test_live_python_wrappers.py` |
 | Tick-by-tick trades | ✅ Supported | 67,785 trades over a 20-minute session; 327 in the first twenty seconds of one subscription. A stream is asked for by the venue's id for the contract, which is resolved first when the caller states a description, and by the name the caller used: `Last` and `AllLast` are two queries the venue answers apart, and which trades are on which is the venue's to say — measured on a liquid future, 104 and 139 records over two windows of the same length |
-| Real-time bars | ✅ Supported | Five-second bars streaming during regular hours, each carrying open, high, low, close and volume, alongside a book on the same session and through ib_async's own `reqRealTimeBars` |
+| Real-time bars | ✅ Supported | Five-second bars streaming during regular hours, each carrying open, high, low, close and volume, alongside a book on the same session |
 | Trading halt status | ✅ Supported | Tick 437 decoded from status mask and status index; `src/bin/capture_status.rs` |
 | Tick attributes | ✅ Supported | Per-trade `unreported` and `pastLimit`, read from the marks the venue writes beside a print. They were read from the size for a long time, and varied because sizes vary; a frame the venue sent is now kept in the tests, and on it no mark is set and the sizes are 1, 2, 1, 4, 1 |
 | Venue map behind the exchange mask | ✅ Supported | Asked for beside the quote and answered at regular trading hours with 18 venues, each with the letter the mask's bits refer to. Outside those hours the server states none, and a venue's letter is empty until it does |
@@ -135,7 +126,7 @@ entitlement is answered with.
 | 24 order types | ✅ Supported | `whatIf` preview accepted by the server for each; `tests/ib_paper_compat`. Every type this client places is previewed as itself |
 | Order fields | ✅ Supported | An order has 154 fields. 118 are sent. 29 have no field in this protocol to carry them, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what the counterpart this replaces does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
-| Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel), `tests/ib_paper_compat` Phase 9 / 9b |
+| Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) in [ib_async-dx](https://github.com/userFRM/ib_async-dx), `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |
 | Conditions | ✅ Supported | All 6 types (price, volume, percent change, margin, execution, time) accepted and held by the server; `tests/ib_paper_compat` Phase 60 |
 | Order acceptance | ✅ Supported | Every change to an order answers with the order as this client sent it and the status it is now in, which is the pair the protocol answers a change with. 45 orders placed, modified and withdrawn over a 15-cycle session, every one reaching Cancelled, with no error |
@@ -157,7 +148,7 @@ entitlement is answered with.
 | Capability | Status | Verification |
 | --- | :---: | --- |
 | Contract details | ✅ Supported | 11 of 12 resolved across 9 countries; the 12th matched 2 contracts and returned an ambiguity error rather than a selection; `src/bin/capture_global.rs` |
-| Option chains, symbol search | ✅ Supported | `scripts/sdk_sweep.py` |
+| Option chains, symbol search | ✅ Supported | `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx) |
 | Scanners, fundamentals | ✅ Supported | 697 KB scanner parameter set, fundamental report; `tests/python/test_historical_and_scanner.py` |
 | News | ✅ Supported | 117 providers parsed. Headline retrieval requires a news subscription; this account holds none, and every provider returns an empty result set |
 | Exchange directory | ✅ Supported | 203 exchanges, in the two sections the venue states them in: shares and derivatives. What each carries and which group each aggregates into are not stated by the venue and are not stated here |
@@ -271,7 +262,7 @@ book nobody subscribes to is answered with nothing at all on some venues and
 refused by name on others, and both read from here as a stream that did not
 arrive.
 
-An order's round trip can be checked at any hour: `scripts/order_round_trip.py`
+An order's round trip can be checked at any hour: `scripts/order_round_trip.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx)
 places a limit far under the market on a contract that trades nearly around the
 clock, changes its price, withdraws it, and reads back what the venue did with
 each step. The paper suite's own order phases name US shares and wait for the

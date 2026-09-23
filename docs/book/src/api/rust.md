@@ -1,15 +1,12 @@
 # Rust API
 
-Two shapes reach the same session. Neither is a wrapper around the other in the
-sense of a second implementation — they are two surfaces on one engine.
-
 | Type | What it is |
 | --- | --- |
-| `ibkr_dx::Client` | The one to reach for in new code. A call sends the question and hands back the answer, and what the session already holds — a position, an order, a fill, a quote — is read rather than asked for |
-| `ibkr_dx::EClient` / `ibkr_dx::Wrapper` | The reference client's shape: a request under an id, and an answer later on a callback you implement. For a program being moved onto this |
-| `ibkr_dx::AsyncClient` | `Client` for a program already inside a runtime. Behind the `async` feature |
+| `ibkr_dx::EClient` / `ibkr_dx::Wrapper` | The reference client's shape: a request under an id, and an answer later on a callback you implement |
 | `ibkr_dx::Config` | What a session is opened with. The same type `EClient` takes |
-| `ibkr_dx::PlacedOrder` | An order that has been placed, and what is becoming of it |
+
+The same `EClient` also carries [the calls that answer](#calls-that-answer) and
+[the calls beyond the documented API](../reference/beyond-the-api.md).
 
 `Contract` and `Order` are at `ibkr_dx::api::client::{Contract, Order}`.
 

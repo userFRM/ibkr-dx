@@ -1,15 +1,8 @@
 # Python API
 
-Three ways in, one session underneath.
-
-| Import | What it is |
-| --- | --- |
-| `ibkr_dx.IB` | Shaped like the widely used asynchronous wrapper: a method sends the question and hands back the answer. Also exported as `ibkr_dx.Client` — the same class either way |
-| `ibkr_dx.EClient` / `ibkr_dx.EWrapper` | The TWS API shape. A request under an id, an answer later on a callback |
-| `ibkr_dx.ib_async.attach` | Points an unmodified [ib_async](https://github.com/ib-api-reloaded/ib_async) program at this engine. Their `IB`, their events, their types |
-
-`ibkr_dx.IB` is a facade over `EClient`, not a second client, so the two see the
-same session and either may be used.
+`ibkr_dx.EClient` / `ibkr_dx.EWrapper` is the TWS API shape: a request under an id, an answer later on a callback.
+The same `EClient` also carries [the calls that answer](#calls-that-answer) and
+[the calls beyond the documented API](../reference/beyond-the-api.md).
 
 Both naming conventions resolve on every type and method: `reqMktData` and
 `req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`.

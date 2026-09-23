@@ -183,9 +183,8 @@ def main() -> int:
         print("a call returns as though it acted and did not:", ", ".join(silent))
         return 1
     # Every place the figure is published, not only the headline: the same
-    # count is stated three times over and each one is a claim.
+    # count is stated twice and each one is a claim.
     for pattern in (r"\| Requests \| ([\d,]+)\.",
-                    r"([\d,]+)/([\d,]+) callable",
                     r"\| ([\d,]+) requests, none silent \|"):
         for stated in published(pattern):
             if any(n != len(calls) for n in stated):

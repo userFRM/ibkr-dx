@@ -2,6 +2,7 @@
 
 [IBKR-DX](./introduction.md)
 [Getting started](./getting-started.md)
+[Beyond the documented API](./reference/beyond-the-api.md)
 
 # Python recipes
 
@@ -15,7 +16,6 @@
 - [Limit order](./recipes/python/limit-order.md)
 - [Stop order](./recipes/python/stop-order.md)
 - [Order lifecycle](./recipes/python/order-lifecycle.md)
-- [An existing ib_async program](./recipes/python/ib_async.md)
 
 # Rust recipes
 
@@ -37,6 +37,5 @@
 # Reference
 
 - [Limits](./reference/limits.md)
-- [Beyond the documented API](./reference/beyond-the-api.md)
 - [Endpoint coverage](./reference/coverage.md)
 - [Wire coverage](./reference/wire-coverage.md)

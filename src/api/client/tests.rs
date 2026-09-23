@@ -8515,6 +8515,25 @@ fn a_request_named_by_id_refuses_a_contract_that_has_none() {
     assert!(client.req_histogram_data(6, &spy(), true, "3 days").is_ok());
 }
 
+/// A refusal that can never work keeps its own number.
+///
+/// A contract the venue has not named is refused before anything is
+/// sent, under the number that says so. Rewritten as "not connected",
+/// it read as a session problem, and a caller retried for ever what
+/// no session could carry.
+#[test]
+fn a_permanent_refusal_keeps_its_own_number() {
+    let (client, _rx, _shared) = test_client();
+    let refused = client
+        .fundamental_data(&Contract::default(), "ReportsOwnership")
+        .expect_err("a contract without the venue's id cannot be asked about");
+    assert_eq!(
+        refused.code,
+        Refusal::VALIDATION,
+        "a permanent refusal is not a session problem: {refused}",
+    );
+}
+
 /// A depth request on a contract naming no exchange and no security type is sent
 /// as it stands.
 ///
@@ -8756,15 +8775,12 @@ fn two_questions_asked_at_once_do_not_consume_each_other() {
 /// with no session to answer it.
 #[test]
 fn a_question_takes_its_turn_before_it_sends() {
-    // Both shapes: the answering calls here, and the ones the shape that
-    // returns its answers asks. A schedule was the one of the second set that
-    // took no turn, and nothing said so.
-    let waits_for_an_answer: Vec<&str> = [include_str!("ask.rs"), include_str!("../direct.rs")]
-        .iter()
-        .flat_map(|source| source.split("\n    pub fn ").skip(1))
+    let waits_for_an_answer: Vec<&str> = include_str!("ask.rs")
+        .split("\n    pub fn ")
+        .skip(1)
         .filter(|body| body.contains("self.wait_for(") || body.contains("holding_the_turn("))
         .collect();
-    assert!(waits_for_an_answer.len() >= 15, "the reader found the questions");
+    assert!(waits_for_an_answer.len() >= 10, "the reader found the questions");
     let without: Vec<&str> = waits_for_an_answer
         .iter()
         .filter(|body| !body.contains("take_the_turn()"))

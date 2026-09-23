@@ -8,11 +8,9 @@
 //! # Where to start
 //!
 //! [`api`] is the surface a program touches, and the only part covered by the
-//! compatibility promise. It carries the reference client's own shapes:
+//! compatibility promise. It carries the reference client's own shape:
 //!
 //! - [`EClient`] for requests and [`Wrapper`] for what arrives
-//! - [`api::direct::Client`] for the same session with answers returned rather
-//!   than delivered on callbacks
 //!
 //! ```no_run
 //! use ibkr_dx::api::client::{EClient, EClientConfig};
@@ -26,8 +24,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! In Python, the same surface is `ibkr_dx.EClient` and `ibkr_dx.EWrapper`, and an
-//! unmodified `ib_async` program runs on it through `ibkr_dx.ib_async.attach`.
+//! In Python, the same surface is `ibkr_dx.EClient` and `ibkr_dx.EWrapper`.
+//! For the `ib_async` interface, [ib_async-dx](https://github.com/userFRM/ib_async-dx)
+//! is the drop-in successor for `ib_async`.
 //!
 //! # Everything else
 //!
@@ -99,27 +98,5 @@ pub use control::adjustments::{AdjustedContract, Adjustment, AdjustmentKind, sca
 pub use error_codes::Refusal;
 pub use api::{EClient, EClientConfig, Wrapper};
 
-
-
-/// The client a program that is not being migrated should reach for.
-///
-/// It keeps what the session is told, so a position, an order, a fill and a
-/// quote are things to read rather than questions to ask. [`EClient`] is the
-/// same session under the reference client's own shape, for a program that is
-/// being moved onto this one.
-pub use api::session::Client;
-
-/// What a session is opened with.
-///
-/// The same type [`EClient`] takes, under a name that does not carry the
-/// reference client's prefix into a surface that is not the reference client.
+/// What a session is opened with: the same type [`EClient`] takes.
 pub use api::EClientConfig as Config;
-
-/// An order that has been placed, and what is becoming of it.
-pub use api::session::PlacedOrder;
-
-
-
-/// [`Client`] for a program already running an asynchronous runtime.
-#[cfg(feature = "async")]
-pub use api::session::AsyncClient;

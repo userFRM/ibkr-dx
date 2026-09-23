@@ -6,7 +6,7 @@ reader more than a missing page would: they assume their setup is wrong.
 
 This does not run the snippets — they need a broker session. It parses each
 one, then checks the names: every `ibkr_dx.Thing` the module actually exports, and
-every method called on a client built from `ibkr_dx.IB()` or `ibkr_dx.EClient(...)`.
+every method called on a client built from `ibkr_dx.EClient(...)`.
 That is where the rot shows up first, because those are what a release renames.
 
 Exits non-zero on its own findings.
@@ -47,7 +47,7 @@ def resolved(block: str, page: pathlib.Path) -> str | None:
     return target.read_text()
 
 # What a client is built from, and what to check its methods against.
-BUILDERS = {"IB": ibkr_dx.IB, "EClient": ibkr_dx.EClient, "Client": getattr(ibkr_dx, "Client", ibkr_dx.IB)}
+BUILDERS = {"EClient": ibkr_dx.EClient}
 
 problems: list[str] = []
 checked = 0

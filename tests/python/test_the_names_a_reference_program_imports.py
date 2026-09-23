@@ -147,3 +147,8 @@ def test_a_scan_row_and_a_mid_offset_that_means_the_midpoint():
 def test_a_clock_reading_written_for_a_person():
     assert ibkr_dx.getTimeStrFromMillis(0) == ""
     assert ibkr_dx.getTimeStrFromMillis(1772202600000).endswith(".000")
+
+
+def test_the_reference_client_surface_is_still_exported():
+    for name in ("EClient", "EWrapper", "Contract", "Order", "ContractDetails"):
+        assert hasattr(ibkr_dx, name)

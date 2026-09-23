@@ -43,29 +43,13 @@ whatever was built last, so rebuild before running one.
 
 ## Feature flags
 
-`default = []`. The Rust client and its blocking calls need nothing turned on.
+`default = []`. The Rust client needs nothing turned on.
 
 | Feature | What it adds |
 | --- | --- |
-| `async` | `AsyncClient`, for driving the client from inside a Tokio runtime. Pulls in Tokio, which a program with its own thread does not need to pay for |
 | `python` | The PyO3 bindings |
 | `extension-module` | Tells PyO3 not to link libpython. Right for the wheel, wrong for `cargo test`. maturin sets it; you do not |
 | `dev-tools` | The binaries under `src/bin` — the benchmarks, and the capture tools this repository is developed with. Most of them read credentials and open a session |
-
-```toml
-ibkr-dx = { git = "https://github.com/userFRM/ibkr-dx", features = ["async"] }
-```
-
-`AsyncClient` names the calls a session is usually asked. Everything else the
-client can do is reached through `off_reactor`, which runs the call on a thread
-that may wait:
-
-```rust,ignore
-client.off_reactor(|c| c.req_scanner_parameters()).await??;
-```
-
-Reads — positions, fills, orders — are a lock and a copy, so they are taken
-inline and need none of this.
 
 The features not in that table exist for this repository's own test suites.
 They are off by default and should stay off in anything you install.
@@ -76,11 +60,11 @@ The credentials go in the connect call. There is no configuration file and no
 process holding a login on your behalf.
 
 ```python
-ib.connect(username="your_user", password="your_pass", paper=True)
+client.connect(username="your_user", password="your_pass", paper=True)
 ```
 
 ```rust
-let client = Client::connect(&Config {
+let client = EClient::connect(&Config {
     username: "your_user".into(),
     password: "your_pass".into(),
     paper: true,
@@ -106,9 +90,8 @@ and the shape of the prompt as the venue's to state rather than as described.
 Use a paper account while you are writing something. A live account is a live
 account.
 
-Two places read the environment instead of the call. `ibkr_dx.ib_async.attach`
-falls back to `IB_USERNAME` and `IB_PASSWORD` when they are not passed, and the
-programs under `examples/` read the same two:
+One place reads the environment instead of the call: the programs under
+`examples/` read `IB_USERNAME` and `IB_PASSWORD`:
 
 ```bash
 export IB_USERNAME="your_username"
@@ -117,17 +100,15 @@ export IB_PASSWORD="your_password"
 
 ## Pick a surface
 
-Every surface below drives the same engine and the same session. Pick by the
-program you have, not by capability.
+Every surface below drives the same engine. Pick by the program you have, not
+by capability.
 
 | Language | Surface | Pick it when |
 | --- | --- | --- |
 | Python | `ibkr_dx.EClient` / `EWrapper` | Your program is written against `ibapi`. Change `ibapi` to `ibkr_dx` in its imports. |
-| Python | `ibkr_dx.IB` | You want calls that hand back their answer, shaped like ib_async's `IB`, with nothing else installed. |
-| Python | `ibkr_dx.ib_async.attach(ib)` | You already run [ib_async](https://github.com/ib-api-reloaded/ib_async). It keeps running, unmodified, on this engine. |
 | Rust | `EClient` / `Wrapper` | You are porting a TWS API program and want its callbacks. |
-| Rust | `Client` | You are writing new Rust: state you read rather than ask for, and streams you iterate. |
-| Rust | `AsyncClient` (feature `async`) | You are inside a Tokio runtime. |
+
+> **Want ib_async's easier API?** [ib_async-dx](https://github.com/userFRM/ib_async-dx) runs it on this engine — the drop-in successor for ib_async.
 
 ## Hello, world
 
@@ -156,33 +137,9 @@ IB_USERNAME=... IB_PASSWORD=... cargo run --example hello_tick_data
 IB_USERNAME=... IB_PASSWORD=... python examples/hello_tick_data.py
 ```
 
-That example uses `EClient` / `EWrapper`, which is the shape a TWS API program
-already has. Python has a second surface over the same session, `ibkr_dx.IB`, shaped
-like the widely used asynchronous wrapper — a call sends the question and hands
-back the answer, with no callback to register:
-
-```python
-import ibkr_dx
-
-ib = ibkr_dx.IB()
-ib.connect(username="your_user", password="your_pass", paper=True)
-
-spy = ibkr_dx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
-(ticker,) = ib.reqTickers(spy)
-print(ticker.bid, ticker.ask)
-
-ib.disconnect()
-```
-
-The two are one client: `ibkr_dx.IB` is a facade over `EClient`, they share a
-session, and either may be used. A contract does not have to be qualified
-first — a request carrying a contract rather than a contract id is resolved
-before it is sent.
-
 ## Next steps
 
 * [Login](./recipes/python/login.md) — connect, take the first order id, disconnect
 * [Streaming ticks](./recipes/python/tick-data.md) · [L2 depth](./recipes/rust/streaming-l2.md)
 * [Order lifecycle](./recipes/python/order-lifecycle.md) — place, modify, cancel, fill
-* [An existing ib_async program](./recipes/python/ib_async.md) — one line changed
 * [Limits](./reference/limits.md) — read this before you depend on a call

@@ -139,10 +139,6 @@ def steps(suites):
         (["cargo", "clippy", "--lib", "--all-targets", "--features", "dev-tools", "--", "-D", "warnings"], {}),
         (["cargo", "clippy", "--lib", "--all-targets", "--features", "python",
           "--", "-D", "warnings"], {}),
-        # Off by default, so no step above builds it. Left out, a break in it
-        # reaches main having compiled nowhere.
-        (["cargo", "clippy", "--lib", "--all-targets", "--features", "async",
-          "--", "-D", "warnings"], {}),
         (["cargo", "test", "--lib"], {}),
         # Both configurations the workflow builds. Run with only the helpers,
         # three tests that need them exist and a failure belonging to the plain
@@ -150,11 +146,10 @@ def steps(suites):
         # not exist at all.
         (["cargo", "test", "--lib", "--features", "python"], {}),
         (["cargo", "test", "--lib", "--features", "python,test-helpers"], {}),
-        (["cargo", "test", "--lib", "--features", "async"], {}),
         # The examples in the documentation are compiled by nothing else. Two
         # of them were broken and building, because `cargo doc` renders an
         # example without compiling it and no suite collects them.
-        (["cargo", "test", "--doc", "--features", "async"], {}),
+        (["cargo", "test", "--doc"], {}),
         # The registration timeout is overridden for the same reason the
         # workflow overrides it: without it every call with no engine to answer
         # waits the full timeout, which is minutes across these.

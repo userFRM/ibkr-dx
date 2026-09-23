@@ -746,12 +746,11 @@ impl EClient {
     /// also carry.
     ///
     /// A caller that numbers its orders and its requests out of one counter —
-    /// which is how the client this one stands in for is written — needs both
-    /// at once: clear of every id an order has spent, and inside the four
-    /// billion a request is carried in. An account that has been given a wider
-    /// order id than that has no such number above it, so this answers with
-    /// the widest the account has used that a request can carry, and the
-    /// counting goes on from there.
+    /// which is how `ib_async` is written — needs both at once: clear of every
+    /// id an order has spent, and inside the four billion a request is carried
+    /// in. An account that has been given a wider order id than that has no
+    /// such number above it, so this answers with the widest the account has
+    /// used that a request can carry, and the counting goes on from there.
     fn next_shared_id(&self, py: Python<'_>) -> PyResult<i64> {
         self.wait_for_the_replay(py);
         let Ok(shared) = self.shared_state() else { return Ok(1) };

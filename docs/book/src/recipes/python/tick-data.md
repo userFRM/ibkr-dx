@@ -22,8 +22,7 @@ With `snapshot=True` you get the first available quote, then
 
 `regulatory_snapshot=True` is the venue's own one-shot snapshot. It is a
 different request type, and an account without the
-entitlement is refused by the venue. `EClient` carries it. The `IB` facade does
-not, and says so by name rather than answering with an ordinary subscription.
+entitlement is refused by the venue.
 
 ## Limits
 
