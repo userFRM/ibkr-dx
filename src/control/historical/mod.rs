@@ -870,7 +870,7 @@ pub fn validate_tick_window(start_date_time: &str, end_date_time: &str) -> Resul
 pub fn build_tick_query_xml(
     query_id: &str, con_id: i64, start_date_time: &str, end_date_time: &str,
     number_of_ticks: u32, what_to_show: &str, use_rth: bool,
-    sec_type: &str, exchange: &str, include_expired: bool,
+    sec_type: &str, exchange: &str, include_expired: bool, ignore_size: bool,
 ) -> String {
     let expired = if include_expired { "yes" } else { "no" };
     // Stated from the contract, and left unstated where the contract does
@@ -902,6 +902,14 @@ pub fn build_tick_query_xml(
         format!("<startTime>{start_date_time}</startTime>")
     };
     let length_tag = format!("<timeLength>{number_of_ticks} t</timeLength>");
+    // The filter that leaves out a change moving only the size, where a
+    // gateway writes one: on bid/ask when the caller asks for it, and on
+    // every midpoint query whatever the caller asked. Trades carry none.
+    let filter = if data == "MidPoint" || (data == "BidAsk" && ignore_size) {
+        "<filter><ignoreSize>true</ignoreSize></filter>"
+    } else {
+        ""
+    };
 
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -921,6 +929,7 @@ pub fn build_tick_query_xml(
          <source>API</source>\
          <wholeDays>true</wholeDays>\
          <delay>auto</delay>\
+         {filter}\
          </Query>\
          </ListOfQueries>",
     )

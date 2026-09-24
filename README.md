@@ -391,7 +391,7 @@ One row per capability, one column per client — every one of the 87 calls and 
 
 **Every call and callback on that list is present on both surfaces.** 2 callbacks are declared and not fired: a gateway reroutes a request to another contract for a contract for difference whose definition asks for it, and this client does not read a definition's flags for that before subscribing: the request goes to the venue as asked. Each says so where it is declared, so a program that implements one still compiles and runs. 7 more are declared by the TWS API and never fire on a gateway — the four steps of the verification handshake, the exchange-for-physical quote, the delta-neutral validation, which a gateway never sends, and `win_error`, which no message on the wire carries — so they fire here exactly as often as there: never.
 
-**And 73 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
+**And 74 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
@@ -710,6 +710,7 @@ ib_async's transport, has a method by that name.
 | `statedFigures` | venue | · | · | · | ● | ● |
 | `statedFiguresSeries` | venue | · | · | · | ● | ● |
 | `statedRows` | venue | · | · | · | ● | ● |
+| `statedRowsSeries` | venue | · | · | · | ● | ● |
 | `twsConnectionTime` | venue | ● | ● | · | ● | ● |
 | `unreadWire` | this client | · | · | · | ● | ● |
 | `valuesElsewhere` | venue | · | · | · | ● | ● |
@@ -954,8 +955,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,795 | No |
-| Python | 931 | No |
+| Rust, unit and integration | 2,810 | No |
+| Python | 949 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

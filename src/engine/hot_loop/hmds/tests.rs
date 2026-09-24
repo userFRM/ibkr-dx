@@ -51,7 +51,7 @@ mod historical_contract_tests {
 fn a_reconnect_puts_the_tick_by_tick_streams_back() {
     let mut hmds = HmdsState::new();
     let mut market = crate::engine::market_state::MarketState::new();
-    let instrument = market.try_register(756733).expect("slot");
+    let instrument = market.register(756733);
     hmds.tbt_subscriptions.push(TbtSubscription { ignore_size: false, instrument, query_id: "tbt_0".to_string(), kind: TbtType::Last, caller_req_id: 0, venue_id: 0, min_tick: 0, size_tick: 0.0, running: Default::default() });
     // One with no contract behind it: it must be reported, not resubscribed
     // against a contract id the engine does not have.

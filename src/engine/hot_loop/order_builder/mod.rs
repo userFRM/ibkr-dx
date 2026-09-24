@@ -2206,10 +2206,11 @@ fn push_order_attrs(
     if attrs.reference_price_type > 0 {
         fields.push((6279, attrs.reference_price_type.to_string()));
     }
-    if attrs.stock_range_lower != f64::MAX {
+    // Nought is no bound to a gateway, which leaves it unstated.
+    if attrs.stock_range_lower != f64::MAX && attrs.stock_range_lower != 0.0 {
         fields.push((6152, format!("{:.6}", attrs.stock_range_lower)));
     }
-    if attrs.stock_range_upper != f64::MAX {
+    if attrs.stock_range_upper != f64::MAX && attrs.stock_range_upper != 0.0 {
         fields.push((6153, format!("{:.6}", attrs.stock_range_upper)));
     }
     if attrs.percent_offset != f64::MAX {
@@ -2658,12 +2659,11 @@ fn push_order_attrs(
                 fields.push((8404, format!("{half:.6}")));
             }
         }
-        // Optional initial stop trigger.
-        K::TrailingStop { trail_stop_price, .. }
-        | K::TrailingStopLimit { trail_stop_price, .. }
-        | K::TrailPct { trail_stop_price, .. }
-            if *trail_stop_price > 0 =>
-        {
+        // Optional initial stop trigger, carried wherever it was stated:
+        // nought and below included, as a gateway carries them.
+        K::TrailingStop { trail_stop_price: Some(trail_stop_price), .. }
+        | K::TrailingStopLimit { trail_stop_price: Some(trail_stop_price), .. }
+        | K::TrailPct { trail_stop_price: Some(trail_stop_price), .. } => {
             fields.push((6117, format_price(*trail_stop_price).to_string()));
         }
         _ => {}

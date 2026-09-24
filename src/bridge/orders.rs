@@ -105,17 +105,6 @@ pub struct OrderState {
     pub(super) completed: Mutex<HashMap<u64, Instant>>,
     /// What this connection has said about the orders it already has working.
     replay: Mutex<Replay>,
-    /// How many orders the venue named that this client could not give a slot
-    /// in its instrument table.
-    ///
-    /// The table holds a fixed number of contracts, and the naming at connect
-    /// is when it fills: every resting order is replayed at once. An order
-    /// arriving with the table full is kept in the order cache and left out of
-    /// the engine's book, so nothing books its fills, nothing announces its
-    /// status, and a withdrawal of everything — which names what the book
-    /// holds — never names it. Counted here so the calls that would otherwise
-    /// answer as though the account were covered can say what they left out.
-    orders_without_a_slot: AtomicU64,
     /// The highest id the venue has named an order working under, from any
     /// session. An id is spent only while its order is live, so this is the
     /// floor a new id has to clear.
@@ -198,7 +187,6 @@ impl OrderState {
             order_cache: Mutex::new(HashMap::new()),
             completed: Mutex::new(HashMap::new()),
             replay: Mutex::new(Replay::default()),
-            orders_without_a_slot: AtomicU64::new(0),
             working_id_watermark: AtomicU64::new(0),
             narrow_id_watermark: AtomicU64::new(0),
             order_inactive: Mutex::new(Vec::with_capacity(8)),
@@ -580,24 +568,6 @@ impl OrderState {
         self.replay.lock().unwrap().began
     }
 
-    /// An order the venue named could not be given a slot in the instrument
-    /// table, so the engine holds no record of it.
-    #[doc(hidden)] pub fn note_an_order_without_a_slot(&self) {
-        self.orders_without_a_slot.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// How many of this account's working orders the engine could not take a
-    /// record of, because the instrument table was full when the venue named
-    /// them.
-    ///
-    /// Zero is the claim that the book holds every order the venue named. Any
-    /// other number is orders that are working there and unreachable from
-    /// here: a caller told its withdrawal covered the account, or handed a
-    /// list of what it has on, is being told something that is not true.
-    pub fn orders_without_a_slot(&self) -> u64 {
-        self.orders_without_a_slot.load(Ordering::Acquire)
-    }
-
     #[doc(hidden)] pub fn set_replay_done(&self) {
         self.replay.lock().unwrap().done = true;
     }
@@ -681,11 +651,6 @@ impl OrderState {
             // nothing.
             replay.deadline = Some(Instant::now() + REPLAY_WAIT);
         }
-        // The orders the previous connection's naming could not hold are that
-        // connection's. The new one names them all again, against a table
-        // whose slots may since have been freed; left standing, the count
-        // refuses for ever a withdrawal that in fact covered the account.
-        self.orders_without_a_slot.store(0, Ordering::Release);
     }
 
     /// File one order the venue has finished, replacing what an earlier event

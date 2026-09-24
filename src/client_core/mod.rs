@@ -12,12 +12,12 @@ pub use crate::types::order_status::{is_open_or_reactivatable, is_open_status, o
 use crate::types::NewsSubject;
 use std::collections::{HashMap, HashSet};
 use crate::error_codes::{
-    CHANGE_CANNOT_CHANGE_TYPE, COMBINATION_LEG_INVALID, COMBINATION_NEEDS_LEGS,
-    CONDITION_CONTRACT_INCOMPLETE, DUPLICATE_TICKER_ID, GOOD_TILL_DATE_INVALID,
+    CHANGE_CANNOT_CHANGE_TYPE, COMBINATION_LEG_INVALID, COMBINATION_NEEDS_LEGS, COMBO_AND_LEG_PRICES,
+    CONDITION_CONTRACT_INCOMPLETE, DISCRETIONARY_AMOUNT_INVALID, DUPLICATE_TICKER_ID, GOOD_TILL_DATE_INVALID,
     MISC_OPTION_KEY_INVALID, MISC_OPTION_VALUE_INVALID, NO_SUCH_BOOK, OCA_GROUP_REVISION,
     OCA_TYPE_REVISION, OPT_OUT_SMART_ROUTING_DROPPED, OPT_OUT_SMART_ROUTING_WITHDRAWN,
-    MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, REQUEST_NOT_PROCESSED, Refusal,
-    SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
+    MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, PER_LEG_PRICES_UNSUPPORTED,
+    REQUEST_NOT_PROCESSED, Refusal, SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -1379,42 +1379,50 @@ pub const PROTOCOL_LEVEL: i32 = 217;
 
 /// A request a gateway reads a free-form option list on: its name for the
 /// request, and the words its later check of `manual` puts in front of a bad
-/// value. `manual` is the one key every such request takes.
+/// value. `manual` is the one key any such request takes, and the two option
+/// calculations take no key at all.
 #[derive(Debug)]
 pub struct OptionList {
     /// The request as a gateway names it in a refusal.
     pub request: &'static str,
-    /// What the later check of `manual` calls the request.
-    pub checked_as: &'static str,
+    /// What the later check of `manual` calls the request; `None` where the
+    /// request takes no key, and so makes no later check.
+    pub checked_as: Option<&'static str>,
 }
 
 /// An order's options.
 pub const ORDER_OPTIONS: OptionList =
-    OptionList { request: "PlaceOrder(3)", checked_as: "Order" };
+    OptionList { request: "PlaceOrder(3)", checked_as: Some("Order") };
 /// A quote subscription's options.
 pub const MKT_DATA_OPTIONS: OptionList =
-    OptionList { request: "ReqMktData(1)", checked_as: "Market data" };
+    OptionList { request: "ReqMktData(1)", checked_as: Some("Market data") };
 /// A book's options.
 pub const MKT_DEPTH_OPTIONS: OptionList =
-    OptionList { request: "ReqMktDepth(10)", checked_as: "Market data" };
+    OptionList { request: "ReqMktDepth(10)", checked_as: Some("Market data") };
 /// Historical bars' options.
 pub const CHART_OPTIONS: OptionList =
-    OptionList { request: "ReqHistoricalData(20)", checked_as: "Historical data" };
+    OptionList { request: "ReqHistoricalData(20)", checked_as: Some("Historical data") };
 /// A scan's options.
 pub const SCANNER_OPTIONS: OptionList =
-    OptionList { request: "ReqScannerSubscription(22)", checked_as: "Historical data" };
+    OptionList { request: "ReqScannerSubscription(22)", checked_as: Some("Historical data") };
 /// Real-time bars' options.
 pub const REAL_TIME_BARS_OPTIONS: OptionList =
-    OptionList { request: "ReqRealTimeBars(50)", checked_as: "Historical data" };
+    OptionList { request: "ReqRealTimeBars(50)", checked_as: Some("Historical data") };
 /// A news article's options.
 pub const NEWS_ARTICLE_OPTIONS: OptionList =
-    OptionList { request: "ReqNewsArticle(84)", checked_as: "Historical data" };
+    OptionList { request: "ReqNewsArticle(84)", checked_as: Some("Historical data") };
 /// Historical news' options.
 pub const HISTORICAL_NEWS_OPTIONS: OptionList =
-    OptionList { request: "ReqHistoricalNews(86)", checked_as: "Historical data" };
+    OptionList { request: "ReqHistoricalNews(86)", checked_as: Some("Historical data") };
 /// Historical ticks' options.
 pub const HISTORICAL_TICKS_OPTIONS: OptionList =
-    OptionList { request: "ReqHistoricalTicks(96)", checked_as: "Market data" };
+    OptionList { request: "ReqHistoricalTicks(96)", checked_as: Some("Market data") };
+/// An implied-volatility calculation's options, of which it takes none.
+pub const IMPL_VOL_OPTIONS: OptionList =
+    OptionList { request: "ReqCalcImpliedVolatility(54)", checked_as: None };
+/// An option-price calculation's options, of which it takes none.
+pub const OPT_PRC_OPTIONS: OptionList =
+    OptionList { request: "ReqCalcOptionPrice(55)", checked_as: None };
 
 /// What an exercise states beyond the instruction itself.
 ///
@@ -1968,8 +1976,10 @@ impl ClientCore {
     }
 
     /// Wait for the hot loop to register a contract, and answer with the slot
-    /// it gave. A full instrument table comes back as an `Err` for this
-    /// request alone; the engine keeps running.
+    /// it gave. A registration the engine refuses — a contract numbered
+    /// beyond what a request carries — comes back as an `Err` for this request
+    /// alone; the engine keeps running. No contract is refused for want of
+    /// room.
     fn recv_registration<E: Into<Refusal>>(
         &self, reply_rx: std::sync::mpsc::Receiver<Result<InstrumentId, E>>,
     ) -> Result<InstrumentId, Refusal> {
@@ -5555,12 +5565,13 @@ impl ClientCore {
     /// value. Unless the venue has lifted the checks at logon, each entry is
     /// then checked in the order a gateway holds them — its table's, not the
     /// caller's — a key the request does not take refused under 10337 and a
-    /// value other than `0` or `1` under 10338. The later check of `manual`
-    /// refuses a value that is not the number nought or one under 321, which
-    /// is reached only where the checks were lifted.
+    /// value other than `0` or `1` under 10338. On a request that takes
+    /// `manual`, the later check of it refuses a value that is not the number
+    /// nought or one under 321, which is reached only where the checks were
+    /// lifted.
     ///
-    /// `manual` is the only key any request takes, and an accepted one changes
-    /// nothing a gateway sends or does.
+    /// `manual` is the only key any request takes, the two option calculations
+    /// take none, and an accepted one changes nothing a gateway sends or does.
     pub fn check_option_list(list: &OptionList, text: &str, features: &[String]) -> Result<(), Refusal> {
         let mut read: Vec<(&str, &str)> = Vec::new();
         for entry in text.split(';').filter(|e| !e.is_empty()) {
@@ -5593,10 +5604,11 @@ impl ClientCore {
             };
             let mut walked = read.clone();
             walked.sort_by_key(|(key, _)| bucket(key));
+            let valid_keys = if list.checked_as.is_some() { "manual" } else { "" };
             for (key, value) in walked {
-                if key != "manual" {
+                if key != valid_keys {
                     return Err(Refusal::stated(MISC_OPTION_KEY_INVALID, format!(
-                        "Misc options key={key} is invalid in {} request. Valid keys are: manual",
+                        "Misc options key={key} is invalid in {} request. Valid keys are: {valid_keys}",
                         list.request,
                     )));
                 }
@@ -5615,13 +5627,13 @@ impl ClientCore {
         // a value holding another script's is let through rather than refused
         // on a reading a gateway may not share; an accepted `manual` changes
         // nothing sent. Read them when a caller writes them.
-        if let Some((_, value)) = read.iter().find(|(key, _)| *key == "manual")
+        if let (Some(checked_as), Some((_, value))) =
+            (list.checked_as, read.iter().find(|(key, _)| *key == "manual"))
             && !value.chars().any(|c| !c.is_ascii() && c.is_numeric())
             && !matches!(value.trim_matches(|c: char| c <= ' ').parse::<i32>(), Ok(0 | 1))
         {
             return Err(Refusal::validation(format!(
-                "{}: 'manual' has wrong value={value}, expected [1 or 0]",
-                list.checked_as,
+                "{checked_as}: 'manual' has wrong value={value}, expected [1 or 0]",
             )));
         }
         Ok(())
@@ -5675,6 +5687,14 @@ impl ClientCore {
         require_finite_price("lmt_price", order.lmt_price)?;
         require_finite_price("aux_price", order.aux_price)?;
         require_finite_price("discretionary_amt", order.discretionary_amt)?;
+        // Nought is no discretion; below it is no amount a gateway takes.
+        if order.discretionary_amt < 0.0 {
+            return Err(Refusal::stated(
+                DISCRETIONARY_AMOUNT_INVALID,
+                "Discretionary amount does not conform to the minimum price variation for \
+                 this contract",
+            ));
+        }
         require_finite_price("cash_qty", order.cash_qty)?;
         require_finite_price("trigger_price", order.trigger_price)?;
         require_finite_price("adjusted_stop_price", order.adjusted_stop_price)?;
@@ -6613,9 +6633,8 @@ impl ClientCore {
         // The legs live on the contract, not the order, so they are attached
         // here rather than in `attrs()`.
         // The caller may price the legs separately rather than pricing the
-        // combination. The prices are given as their own list, in leg order,
-        // so each is put on the leg it belongs to here — kept apart, one would
-        // go out against another leg the moment the legs were reordered.
+        // combination, as a list of its own in leg order. What a gateway
+        // makes of it is checked once the legs are read, below.
         let leg_prices = order.order_combo_legs.as_slice();
         // A price stated for a leg the combination does not have has nowhere
         // to go. Dropped where the lists ran past each other, the order went
@@ -6633,7 +6652,7 @@ impl ClientCore {
             )));
         }
         let leg_specs: Vec<crate::types::ComboLegSpec> =
-            contract.map(|c| c.combo_legs.as_slice()).unwrap_or(&[]).iter().enumerate().map(|(at, l)| {
+            contract.map(|c| c.combo_legs.as_slice()).unwrap_or(&[]).iter().map(|l| {
             crate::types::ComboLegSpec {
                 con_id: l.con_id,
                 ratio: l.ratio.max(0) as u32,
@@ -6647,13 +6666,52 @@ impl ClientCore {
                 short_sale_slot: l.shorting_policy.clamp(0, 255) as u8,
                 designated_location: l.designated_location.clone(),
                 exempt_code: l.exempt_code,
-                price: leg_prices
-                    .get(at)
-                    .copied()
-                    .filter(|p| *p != f64::MAX)
-                    .map(crate::types::price_from_f64),
+                // No leg's price goes out on an order this client places: see
+                // below.
+                price: None,
             }
         }).collect();
+        // Prices stated for the legs, as a gateway reads them, leg by leg: a
+        // priced leg is refused on any order but a limit, and an unpriced one
+        // after a priced first leg. A priced first leg then refuses a limit
+        // of the combination's own beside it. A combination priced on every
+        // leg is one a gateway prices by its legs only where it is a
+        // non-guaranteed combination of two legs routed by SMART, and refuses
+        // otherwise; this client carries no routing parameter that makes one
+        // non-guaranteed, so it refuses them all. Priced on later legs alone,
+        // the prices are read and not sent, as a gateway sends none.
+        if let Some(order_type) = order_type {
+            let priced: Vec<bool> = (0..legs)
+                .map(|at| leg_prices.get(at).is_some_and(|p| *p != f64::MAX))
+                .collect();
+            for (at, &leg_priced) in priced.iter().enumerate() {
+                let (code, text) = if leg_priced && order_type != "LMT" {
+                    (10055, "Only LMT or REL+LMT order allows using per-leg prices.")
+                } else if !leg_priced && priced[0] {
+                    (10056, "All leg prices are needed when specifying per-leg prices.")
+                } else {
+                    continue;
+                };
+                // A gateway puts the leg in front of the reason and writes
+                // the reason out whole, number and both texts, and answers
+                // it as a request it could not validate.
+                return Err(Refusal::validation(format!(
+                    "The combo details for leg '{at}' are invalid. - \
+                     CodeMsgPair::[m_code={code}m_msg={text}]m_sysMsg={text}]",
+                )));
+            }
+            if priced.first() == Some(&true) {
+                return Err(if order.lmt_price != 0.0 {
+                    Refusal::stated(COMBO_AND_LEG_PRICES, "Can't specify combo price when using per-leg prices.")
+                } else {
+                    Refusal::stated(
+                        PER_LEG_PRICES_UNSUPPORTED,
+                        "Combo per-leg prices are only supported for non-guaranteed smart \
+                         combo with two legs and feature \"IECOMBOPERLEGPRICE\" enabled.",
+                    )
+                });
+            }
+        }
         // The contract the caller named, so the engine can see that the slot
         // beside it is no longer the one they meant.
         let con_id = contract.map_or(0, |c| c.con_id);
@@ -6753,7 +6811,7 @@ impl ClientCore {
             }
             "TRAIL" => {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
-                let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { crate::types::price_from_f64(order.trail_stop_price) };
+                let trail_stop = (order.trail_stop_price != f64::MAX).then(|| crate::types::price_from_f64(order.trail_stop_price));
                 // The reference client's unset value is not a percentage.
                 if order.trailing_percent > 0.0 && order.trailing_percent != f64::MAX {
                     // Wire granularity is basis points, so a percentage
@@ -6785,7 +6843,7 @@ impl ClientCore {
                 };
                 let lmt_offset = crate::types::price_from_f64(offset_f);
                 let trail = crate::types::price_from_f64(order.aux_price);
-                let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { crate::types::price_from_f64(order.trail_stop_price) };
+                let trail_stop = (order.trail_stop_price != f64::MAX).then(|| crate::types::price_from_f64(order.trail_stop_price));
                 ex(OrderKind::TrailingStopLimit { lmt_offset, trail_amt: trail, trail_stop_price: trail_stop })
             }
             "MOC" => {

@@ -15,7 +15,9 @@ impl EClient {
     /// `chart_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=false, chart_options=None))]
     pub(crate) fn req_historical_data(
         &self,
@@ -149,6 +151,7 @@ impl EClient {
         if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchContractDetails {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
+                include_expired: contract.include_expired,
                 filters: contract.lookup_filters(),
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
@@ -231,7 +234,9 @@ impl EClient {
     /// `scanner_subscription_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, subscription, scanner_subscription_options=None, scanner_subscription_filter_options=None))]
     fn req_scanner_subscription(
         &self,
@@ -311,7 +316,9 @@ impl EClient {
     /// `news_article_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, provider_code, article_id, news_article_options=None))]
     fn req_news_article(
         &self,
@@ -344,7 +351,9 @@ impl EClient {
     /// `historical_news_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options=None))]
     pub(crate) fn req_historical_news(
         &self,
@@ -544,13 +553,16 @@ impl EClient {
 
     /// Request historical tick data.
     ///
-    /// `ignore_size` is taken and not applied: the request has no field for
-    /// suppressing size-only changes.
+    /// `ignore_size` leaves out a bid/ask change that moves only a size. A
+    /// gateway asks for midpoint ticks that way whatever the caller asked, and
+    /// so does this client; trades are not filtered.
     ///
     /// `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=false, misc_options=None))]
     fn req_historical_ticks(
         &self,
@@ -566,7 +578,6 @@ impl EClient {
         misc_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let _ = ignore_size;
         if let Some(why) = self.options_refused(py, &crate::client_core::HISTORICAL_TICKS_OPTIONS, misc_options)? {
             return self.report_refusal(py, req_id, why);
         }
@@ -591,6 +602,7 @@ impl EClient {
                 number_of_ticks: super::wire_u32("number_of_ticks", number_of_ticks as i64)?,
                 what_to_show: what_to_show.to_string(),
                 use_rth: use_rth != 0,
+                ignore_size,
                 include_expired: contract.include_expired,
                 filters: contract.lookup_filters(),
             }) {

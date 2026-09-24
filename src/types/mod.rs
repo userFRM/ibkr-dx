@@ -188,22 +188,16 @@ pub fn qty_from_counted(counted: i64, size_tick: f64) -> Qty {
     (counted as f64 * size_tick * QTY_SCALE as f64).round() as Qty
 }
 
-/// How many contracts this client holds a slot for at once.
+/// How many contracts the slot tables are made to hold before they first grow.
+///
+/// Not a limit: past it the tables grow, and a slot's entry never moves while
+/// a reader holds it. Nothing is refused for want of room. What a caller meets
+/// is the venue's allowance of quote lines, stated on the logon and answered
+/// under 101 when reached; orders, fills, holdings and news take slots as
+/// well, and nothing bounds how many of those a session holds. Slots are
+/// reused when nothing holds their contract.
 ///
 /// This number is this client's own and is not stated anywhere on the wire.
-/// The tables are allocated once at this size and never move, so a slot's
-/// address is stable while a reader holds it, and the size has to be chosen
-/// before any of them is taken.
-///
-/// What is measured is that it has to be well above the two hundred and
-/// fifty-six it used to be: one option chain asked for at once is 282 live
-/// subscriptions on a single underlying, and the venue served all of them
-/// without refusing one (`src/bin/capture_line_limit.rs`). At the old size
-/// this client refused the two hundred and fifty-seventh while the venue was
-/// still serving.
-///
-/// The venue states its subscription allowance on the logon. This size only
-/// bounds storage; slots are reused when nothing holds their contract.
 pub const MAX_INSTRUMENTS: usize = 4096;
 
 /// How deep a healthy backlog of order requests goes, which is what the

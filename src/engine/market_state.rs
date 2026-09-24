@@ -43,13 +43,11 @@ pub(crate) struct TradeClock {
 /// Pre-allocated quote storage indexed by InstrumentId.
 /// All quotes live in a contiguous array for cache efficiency.
 pub struct MarketState {
-    quotes: Box<[Quote]>,
+    quotes: Vec<Quote>,
     /// Per-instrument, alongside the quote it stamps.
-    clocks: Box<[TradeClock]>,
+    clocks: Vec<TradeClock>,
     /// High-water mark: slots ever allocated (iteration bound). Freed slots
-    /// below this mark are reused via `free_ids` before new ones are taken,
-    /// so the MAX_INSTRUMENTS cap bounds CONCURRENT instruments, not the
-    /// session's cumulative total.
+    /// below this mark are reused via `free_ids` before new ones are taken.
     active_count: u32,
     /// Freed slot ids available for reuse.
     free_ids: Vec<InstrumentId>,
@@ -57,7 +55,7 @@ pub struct MarketState {
     con_id_to_instrument: HashMap<i64, InstrumentId>,
     /// Reverse map: InstrumentId → conId. Flat array lookup. `FREE_SLOT`
     /// marks a reclaimed slot.
-    instrument_to_con_id: Box<[i64]>,
+    instrument_to_con_id: Vec<i64>,
     /// Maps an IB server_tag → InstrumentId. Keyed rather than indexed: the
     /// tag space is the gateway's to choose and a live session starts well
     /// past any fixed bound. One entry per subscription ack, so an instrument
@@ -65,29 +63,29 @@ pub struct MarketState {
     /// and cleared wholesale on farm disconnect.
     server_tag_to_instrument: HashMap<u32, InstrumentId>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
-    min_ticks: Box<[f64]>,
+    min_ticks: Vec<f64>,
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
-    min_tick_scaled: Box<[i64]>,
+    min_tick_scaled: Vec<i64>,
     /// Per-instrument size increment, stated on the same acknowledgement as
     /// the price increment. A size on the wire is a count of these, whole ones
     /// for a share and hundred-millionths for a crypto, so a fixed count
     /// reports one of the two wrongly. Zero means the venue stated none, which
     /// is what counting in whole ones means.
-    size_ticks: Box<[f64]>,
+    size_ticks: Vec<f64>,
     /// Per-instrument symbol name. Flat array indexed by InstrumentId.
-    symbols: Box<[Option<String>]>,
+    symbols: Vec<Option<String>>,
     /// Per-instrument security type (API string, e.g. `STK`, `CASH`). An empty
     /// slot is unknown and treated as a stock. Carried through registration.
-    sec_types: Box<[Option<String>]>,
+    sec_types: Vec<Option<String>>,
     /// Per-instrument requested exchange. Empty slot = default routing.
-    exchanges: Box<[Option<String>]>,
+    exchanges: Vec<Option<String>>,
     /// What separates two conId-less contracts on the same underlying: expiry,
     /// strike, right, multiplier, joined. Symbol, security type and exchange
     /// are equal for an option's call and put at different strikes, so matching
     /// on those alone put both in one slot — the second contract's quotes and
     /// its minTick landed on the first, and minTick is what snaps an order's
     /// price. Empty for anything that carries no such identity.
-    option_keys: Box<[Option<String>]>,
+    option_keys: Vec<Option<String>>,
     /// What narrowed the lookup that will name a conId-less contract, where
     /// the caller stated anything: where it is listed, the venue's own name
     /// for it, which class of the chain, the identifier it was asked for by.
@@ -97,7 +95,7 @@ pub struct MarketState {
     /// answers with, and two descriptions the venue would answer differently
     /// are not one contract. Left out, the second description followed the
     /// first one's subscription and was served the other listing's prices.
-    narrowings: Box<[Option<String>]>,
+    narrowings: Vec<Option<String>>,
 }
 
 impl Default for MarketState {
@@ -109,37 +107,35 @@ impl Default for MarketState {
 impl MarketState {
     pub fn new() -> Self {
         Self {
-            quotes: vec![Quote::default(); MAX_INSTRUMENTS].into(),
-            clocks: vec![TradeClock::default(); MAX_INSTRUMENTS].into(),
+            quotes: vec![Quote::default(); MAX_INSTRUMENTS],
+            clocks: vec![TradeClock::default(); MAX_INSTRUMENTS],
             active_count: 0,
             free_ids: Vec::new(),
             con_id_to_instrument: HashMap::new(),
-            instrument_to_con_id: vec![0; MAX_INSTRUMENTS].into(),
+            instrument_to_con_id: vec![0; MAX_INSTRUMENTS],
             server_tag_to_instrument: HashMap::new(),
-            min_ticks: vec![0.0; MAX_INSTRUMENTS].into(),
-            min_tick_scaled: vec![0; MAX_INSTRUMENTS].into(),
-            size_ticks: vec![0.0; MAX_INSTRUMENTS].into(),
-            symbols: vec![None; MAX_INSTRUMENTS].into(),
-            sec_types: vec![None; MAX_INSTRUMENTS].into(),
-            exchanges: vec![None; MAX_INSTRUMENTS].into(),
-            option_keys: vec![None; MAX_INSTRUMENTS].into(),
-            narrowings: vec![None; MAX_INSTRUMENTS].into(),
+            min_ticks: vec![0.0; MAX_INSTRUMENTS],
+            min_tick_scaled: vec![0; MAX_INSTRUMENTS],
+            size_ticks: vec![0.0; MAX_INSTRUMENTS],
+            symbols: vec![None; MAX_INSTRUMENTS],
+            sec_types: vec![None; MAX_INSTRUMENTS],
+            exchanges: vec![None; MAX_INSTRUMENTS],
+            option_keys: vec![None; MAX_INSTRUMENTS],
+            narrowings: vec![None; MAX_INSTRUMENTS],
         }
     }
 
-    /// Register an IB contract by conId, returns the assigned InstrumentId, or
-    /// None when MAX_INSTRUMENTS distinct contracts are live concurrently. Freed slots
-    /// are reused first, so unsubscribed contracts
-    /// no longer count against the cap. Callers holding a contract that may
-    /// carry no conId want `try_register_contract`.
-    pub fn try_register(&mut self, con_id: i64) -> Option<InstrumentId> {
+    /// Register an IB contract by conId, returns the assigned InstrumentId.
+    /// Freed slots are reused first. Callers holding a contract that may carry
+    /// no conId want `register_contract`.
+    pub fn register(&mut self, con_id: i64) -> InstrumentId {
         if let Some(&id) = self.con_id_to_instrument.get(&con_id) {
-            return Some(id);
+            return id;
         }
-        let id = self.alloc_slot()?;
+        let id = self.alloc_slot();
         self.con_id_to_instrument.insert(con_id, id);
         self.instrument_to_con_id[id as usize] = con_id;
-        Some(id)
+        id
     }
 
     /// Give a slot the contract id a lookup found for it.
@@ -178,20 +174,20 @@ impl MarketState {
     /// A field the caller left blank matches whatever the slot holds:
     /// tick-by-tick and news register with neither secType nor exchange, and
     /// must land on the slot the L1 subscription for that symbol already has.
-    pub fn try_register_contract(
+    pub fn register_contract(
         &mut self, con_id: i64, symbol: &str, sec_type: &str, exchange: &str, option_key: &str,
-    ) -> Option<InstrumentId> {
-        self.try_register_described(con_id, symbol, sec_type, exchange, option_key, "")
+    ) -> InstrumentId {
+        self.register_described(con_id, symbol, sec_type, exchange, option_key, "")
     }
 
     /// The same, for a caller that also stated what narrows the lookup naming
     /// the contract — see [`MarketState::narrowings`].
-    pub fn try_register_described(
+    pub fn register_described(
         &mut self, con_id: i64, symbol: &str, sec_type: &str, exchange: &str, option_key: &str,
         narrowing: &str,
-    ) -> Option<InstrumentId> {
+    ) -> InstrumentId {
         if con_id != 0 {
-            let id = self.try_register(con_id)?;
+            let id = self.register(con_id);
             // The caller stated what this contract is; recording only its
             // option key and dropping the rest left every order on it going out
             // as a stock on the default venue, because that is what an unset
@@ -209,7 +205,7 @@ impl MarketState {
             if !option_key.is_empty() && self.option_keys[id as usize].is_none() {
                 self.option_keys[id as usize] = Some(option_key.to_string());
             }
-            return Some(id);
+            return id;
         }
         if let Some(id) =
             self.instrument_by_descriptor(symbol, sec_type, exchange, option_key, narrowing)
@@ -222,9 +218,9 @@ impl MarketState {
             if !narrowing.is_empty() && self.narrowings[id as usize].is_none() {
                 self.narrowings[id as usize] = Some(narrowing.to_string());
             }
-            return Some(id);
+            return id;
         }
-        let id = self.alloc_slot()?;
+        let id = self.alloc_slot();
         self.instrument_to_con_id[id as usize] = 0;
         self.option_keys[id as usize] =
             if option_key.is_empty() { None } else { Some(option_key.to_string()) };
@@ -236,12 +232,12 @@ impl MarketState {
             self.set_symbol(id, symbol.to_string());
         }
         self.set_routing(id, sec_type, exchange);
-        Some(id)
+        id
     }
 
     /// The live conId-less slot this descriptor names, if it has one. Bounded
-    /// by MAX_INSTRUMENTS and only ever reached from a control command, so a
-    /// scan costs less than the map it would otherwise need.
+    /// by the slots handed out and only ever reached from a control command,
+    /// so a scan costs less than the map it would otherwise need.
     fn instrument_by_descriptor(
         &self, symbol: &str, sec_type: &str, exchange: &str, option_key: &str, narrowing: &str,
     ) -> Option<InstrumentId> {
@@ -271,25 +267,33 @@ impl MarketState {
         })
     }
 
-    /// Take a slot: a reclaimed one first, else the next unused one, else None
-    /// at the cap.
-    fn alloc_slot(&mut self) -> Option<InstrumentId> {
+    /// Take a slot: a reclaimed one first, else the next unused one, the
+    /// tables grown to hold it where every slot they hold is taken.
+    ///
+    /// Never refused. What a caller meets first is the venue's allowance of
+    /// quote lines, stated on the logon and answered under 101 when reached;
+    /// orders, fills, positions and news each take a slot as well, and nothing
+    /// bounds how many of those a session holds.
+    fn alloc_slot(&mut self) -> InstrumentId {
         if let Some(id) = self.free_ids.pop() {
-            return Some(id);
-        }
-        if (self.active_count as usize) >= MAX_INSTRUMENTS {
-            return None;
+            return id;
         }
         let id = self.active_count;
+        if id as usize == self.quotes.len() {
+            self.quotes.push(Quote::default());
+            self.clocks.push(TradeClock::default());
+            self.instrument_to_con_id.push(0);
+            self.min_ticks.push(0.0);
+            self.min_tick_scaled.push(0);
+            self.size_ticks.push(0.0);
+            self.symbols.push(None);
+            self.sec_types.push(None);
+            self.exchanges.push(None);
+            self.option_keys.push(None);
+            self.narrowings.push(None);
+        }
         self.active_count += 1;
-        Some(id)
-    }
-
-    /// Register an IB contract, returns the assigned InstrumentId.
-    /// Panics when the table is full — use `try_register` on any path that
-    /// must survive that condition (the engine's handlers do;).
-    pub fn register(&mut self, con_id: i64) -> InstrumentId {
-        self.try_register(con_id).expect("too many instruments")
+        id
     }
 
     /// Reclaim an instrument slot: the id becomes reusable by the
@@ -770,13 +774,25 @@ mod tests {
         assert_eq!(ms.bid(msft), 400 * PRICE_SCALE);
     }
 
+    /// The tables grow past the size they are made with, and every slot
+    /// keeps its own contract. At the old size the four thousand and ninety
+    /// seventh contract was refused, while the venue's allowance of quote
+    /// lines and every order, fill and holding past it were still to come.
     #[test]
-    #[should_panic(expected = "too many instruments")]
-    fn register_overflow_panics() {
+    fn slots_are_handed_out_past_the_size_the_tables_are_made_with() {
         let mut ms = MarketState::new();
-        for i in 0..=MAX_INSTRUMENTS as i64 {
-            ms.register(i);
+        let past = MAX_INSTRUMENTS as i64 + 904;
+        for i in 0..past {
+            assert_eq!(ms.register(10_000 + i), i as InstrumentId);
         }
+        for i in [0, MAX_INSTRUMENTS as i64 - 1, MAX_INSTRUMENTS as i64, past - 1] {
+            let id = i as InstrumentId;
+            assert_eq!(ms.con_id(id), Some(10_000 + i), "slot {id} holds its own contract");
+            ms.set_symbol(id, format!("S{i}"));
+            ms.quote_mut(id).bid = i;
+            assert_eq!((ms.symbol(id), ms.bid(id)), (format!("S{i}").as_str(), i));
+        }
+        assert_eq!(ms.count() as i64, past);
     }
 
     // ── routing derivation ──
@@ -797,22 +813,19 @@ mod tests {
 
         // expiry|strike|right|multiplier|trading class|local symbol|currency
         let eu = ms
-            .try_register_contract(102, "SAP", "STK", "IBIS", "||||||EUR")
-            .expect("registers");
+            .register_contract(102, "SAP", "STK", "IBIS", "||||||EUR");
         assert_eq!(ms.order_currency(eu), "EUR");
         assert_eq!(ms.order_currency_stated(eu), Some("EUR".to_string()));
 
         let jp = ms
-            .try_register_contract(103, "7203", "STK", "TSEJ", "||||||JPY")
-            .expect("registers");
+            .register_contract(103, "7203", "STK", "TSEJ", "||||||JPY");
         assert_eq!(ms.order_currency(jp), "JPY");
 
         // A contract that names no currency states none. The venue infers it
         // from the contract id, and a substituted currency describes a
         // different listing.
         let unstated = ms
-            .try_register_contract(104, "AAPL", "STK", "SMART", "|||||")
-            .expect("registers");
+            .register_contract(104, "AAPL", "STK", "SMART", "|||||");
         assert_eq!(ms.order_currency(unstated), "");
         assert_eq!(
             ms.order_currency_stated(unstated), None,
@@ -869,17 +882,6 @@ mod tests {
     // ── unregister + slot reuse ──
 
     #[test]
-    fn try_register_full_returns_none_not_panic() {
-        let mut ms = MarketState::new();
-        for i in 0..MAX_INSTRUMENTS as i64 {
-            assert!(ms.try_register(i).is_some());
-        }
-        assert_eq!(ms.try_register(9999), None, "full table must reject, not panic");
-        // Existing conIds still resolve at the cap.
-        assert!(ms.try_register(0).is_some());
-    }
-
-    #[test]
     fn unregister_frees_slot_for_reuse() {
         let mut ms = MarketState::new();
         let a = ms.register(100);
@@ -887,7 +889,7 @@ mod tests {
         let c = ms.register(300);
         assert_eq!(ms.unregister(b), Some(200));
         // Freed id is reused before a new slot is taken.
-        let d = ms.try_register(400).unwrap();
+        let d = ms.register(400);
         assert_eq!(d, b);
         assert_eq!(ms.con_id(d), Some(400));
         assert_eq!(ms.instrument_by_con_id(200), None, "old conId must not resolve");
@@ -896,12 +898,13 @@ mod tests {
     }
 
     #[test]
-    fn cap_bounds_concurrent_not_cumulative() {
+    fn a_slot_given_back_is_reused_rather_than_the_tables_grown() {
         // The watchlist scenario: cycle far more than MAX_INSTRUMENTS
         // distinct contracts through one session, one live at a time.
         let mut ms = MarketState::new();
         for i in 0..(MAX_INSTRUMENTS as i64 * 4) {
-            let id = ms.try_register(1000 + i).expect("cycling one instrument must never exhaust the table");
+            let id = ms.register(1000 + i);
+            assert_eq!(id, 0, "the one slot, given back and taken again");
             assert_eq!(ms.unregister(id), Some(1000 + i));
         }
         assert_eq!(ms.active_instruments().count(), 0);
@@ -915,7 +918,7 @@ mod tests {
         ms.set_min_tick(id, 0.01);
         ms.register_server_tag(42, id);
         ms.quote_mut(id).bid = 150 * PRICE_SCALE;
-        ms.try_register_contract(100, "AAPL", "OPT", "SMART", "20260918|150|C|100");
+        ms.register_contract(100, "AAPL", "OPT", "SMART", "20260918|150|C|100");
 
         assert_eq!(ms.unregister(id), Some(100));
         // `None` rather than a placeholder, which would reach tag 55 as the
@@ -1164,7 +1167,7 @@ mod tests {
     #[test]
     fn a_slot_named_by_symbol_adopts_the_id_a_lookup_finds() {
         let mut m = MarketState::new();
-        let id = m.try_register_contract(0, "SPY", "STK", "SMART", "").unwrap();
+        let id = m.register_contract(0, "SPY", "STK", "SMART", "");
         // A live slot with no id reads as zero, which is not an identity.
         assert_eq!(m.con_id(id), Some(0), "named by symbol, so it has no id yet");
 
@@ -1175,7 +1178,7 @@ mod tests {
         assert!(!m.adopt_con_id(id, 999), "a slot that has an id keeps it");
         assert_eq!(m.con_id(id), Some(756733));
 
-        let other = m.try_register_contract(0, "QQQ", "STK", "SMART", "").unwrap();
+        let other = m.register_contract(0, "QQQ", "STK", "SMART", "");
         assert!(!m.adopt_con_id(other, 756733), "and an id is not taken from the slot holding it");
         assert_eq!(m.instrument_by_con_id(756733), Some(id));
         assert!(!m.adopt_con_id(other, 0), "nothing is not an identity");
@@ -1203,32 +1206,30 @@ mod tests {
     fn two_descriptions_the_venue_would_answer_differently_do_not_share_a_slot() {
         let mut m = MarketState::new();
         let on_one = m
-            .try_register_described(0, "ABC", "STK", "SMART", "", "NASDAQ|||||")
-            .expect("the first");
+            .register_described(0, "ABC", "STK", "SMART", "", "NASDAQ|||||");
         let on_another = m
-            .try_register_described(0, "ABC", "STK", "SMART", "", "NYSE|||||")
-            .expect("the second");
+            .register_described(0, "ABC", "STK", "SMART", "", "NYSE|||||");
         assert_ne!(on_one, on_another, "one listing's prices would arrive for both");
 
         // The same description finds the slot it took.
         assert_eq!(
-            m.try_register_described(0, "ABC", "STK", "SMART", "", "NASDAQ|||||"),
-            Some(on_one),
+            m.register_described(0, "ABC", "STK", "SMART", "", "NASDAQ|||||"),
+            on_one,
         );
 
         // A slot that narrows nothing adopts the caller's, the way one with no
         // identity adopts that: the pre-flight registration carries neither,
         // and stranding its slot would take a second one for the same
         // contract.
-        let plain = m.try_register_contract(0, "XYZ", "STK", "SMART", "").expect("pre-flight");
+        let plain = m.register_contract(0, "XYZ", "STK", "SMART", "");
         assert_eq!(
-            m.try_register_described(0, "XYZ", "STK", "SMART", "", "ARCA|||||"),
-            Some(plain),
+            m.register_described(0, "XYZ", "STK", "SMART", "", "ARCA|||||"),
+            plain,
             "the description the pre-flight registration stood in for",
         );
         assert_ne!(
-            m.try_register_described(0, "XYZ", "STK", "SMART", "", "BATS|||||"),
-            Some(plain),
+            m.register_described(0, "XYZ", "STK", "SMART", "", "BATS|||||"),
+            plain,
             "and having adopted one, it is that description's slot and no other's",
         );
     }
@@ -1238,8 +1239,8 @@ mod tests {
     #[test]
     fn a_slot_taken_for_a_descriptor_is_the_slot_that_descriptor_finds() {
         let mut m = MarketState::new();
-        let first = m.try_register_contract(0, "SPY", "STK", "SMART", "").unwrap();
-        let again = m.try_register_contract(0, "SPY", "STK", "SMART", "").unwrap();
+        let first = m.register_contract(0, "SPY", "STK", "SMART", "");
+        let again = m.register_contract(0, "SPY", "STK", "SMART", "");
         assert_eq!(first, again, "the same contract is the same instrument");
         assert_eq!(m.count(), 1, "and it took one slot: {}", m.count());
         assert_eq!(m.symbol(first), "SPY", "the slot knows what it was taken for");
@@ -1275,8 +1276,7 @@ mod registration_symbol_tests {
     fn a_contract_registered_by_id_keeps_its_symbol() {
         let mut market = MarketState::new();
         let instrument = market
-            .try_register_contract(756733, "SPY", "STK", "SMART", "")
-            .expect("register a contract");
+            .register_contract(756733, "SPY", "STK", "SMART", "");
         assert_eq!(market.symbol(instrument), "SPY");
     }
 }

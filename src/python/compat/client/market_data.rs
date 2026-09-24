@@ -20,7 +20,9 @@ impl EClient {
     /// `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=None))]
     pub(crate) fn req_mkt_data(
         &self,
@@ -353,7 +355,9 @@ impl EClient {
     /// `mkt_depth_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, contract, num_rows=5, is_smart_depth=false, mkt_depth_options=None))]
     fn req_mkt_depth(
         &self,
@@ -453,7 +457,9 @@ impl EClient {
     /// `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
     /// under 10337, another value under 10338, and an entry not written
-    /// `key=value` under 320.
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// `manual` that does not read as the number nought or one is refused
+    /// under 321.
     #[pyo3(signature = (req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=None))]
     fn req_real_time_bars(
         &self,
@@ -543,7 +549,8 @@ impl EClient {
     /// Zero-copy SeqLock quote read by InstrumentId.
     /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size,
     /// volume, high, low, open, close, and whether the venue has halted the
-    /// contract and why — or None if not connected. Whether it is restricting
+    /// contract and why — or None if not connected, or for an id past every
+    /// slot the instrument table holds. Whether it is restricting
     /// short sales in it is `shortSaleRestrictedByInstrument`, which is stated
     /// on the same record and kept off this one.
     fn quote_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {
@@ -840,6 +847,17 @@ impl EClient {
             }
             Ok(out)
         })
+    }
+
+    /// Which series have stated rows for a subscription, in order.
+    #[pyo3(signature = (req_id))]
+    fn stated_rows_series(&self, req_id: i64) -> PyResult<Vec<u32>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(shared.market.stated_rows_series(instrument))
     }
 
     /// Which series have stated paired figures for a subscription, in order.

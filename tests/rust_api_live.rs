@@ -778,7 +778,7 @@ fn the_calls_no_other_live_test_names() {
 
     // Past trades from a moment: history, answered at any hour.
     client
-        .req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true)
+        .req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true, false)
         .unwrap();
     poll_until(
         &client,

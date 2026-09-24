@@ -113,6 +113,41 @@ single venue.
 `req_contract_details` answers a description that matches several listings
 with every one of them, as a gateway does.
 
+## Looking a contract up
+
+- By identifier: `CUSIP`, `SEDOL`, `ISIN`, `RIC`, `FIGI` and `BB_SYMBOL`,
+  spelled exactly so. A gateway reads any other name — a lower-case one
+  included — as no identifier, and looks the contract up by its symbol with
+  the identifier left out; so does this client. The venue, primary exchange
+  and currency ride beside the identifier, and an ISIN asked about anywhere
+  but SMART is asked of any type. Nothing of an issuer is stated beside an
+  identifier.
+- Only a details request looks a contract up by identifier or issuer. Market
+  data, depth, bars, head timestamps, ticks and the rest carry neither to a
+  gateway, which looks their contract up by its description; so does this
+  client, whatever else the contract holds.
+- A venue or currency left empty is not stated on the lookup.
+- `includeExpired` is stated on every lookup by description a details request
+  makes, and a bars, head-timestamp or ticks request carries it to the venue
+  as the contract states it. A details lookup by identifier or by contract id
+  does not state it.
+- `FUT+CONTFUT` (or `CONTFUT+FUT`): the continuous future is asked for first
+  and the listed months once it is answered, answer or refusal; the months
+  come back first and the continuous contract after them under `CONTFUT`, with
+  the lead month's id. Where the venue names no listed month the request is
+  answered as a contract not found (200), whatever the continuous lookup
+  named. `CONTFUT` alone comes back as `CONTFUT`, one per venue and
+  multiplier. Named by an identifier, both lookups ask by that identifier.
+- A continuous future asked for by contract id is looked up by that id and
+  handed back as the venue names it. A gateway goes on to ask for the
+  continuous contract as well, and this client does not.
+
+## Size-only changes on historical ticks
+
+`ignoreSize` on `req_historical_ticks` leaves out a bid/ask change that moves
+only a size. A gateway asks for midpoint ticks that way whatever the flag
+says, and so does this client; trades and aggregated trades are not filtered.
+
 ## Arguments that change nothing
 
 Two arguments the TWS API defines have no effect on a gateway, and have none

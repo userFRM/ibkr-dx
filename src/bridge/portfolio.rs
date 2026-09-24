@@ -56,7 +56,9 @@ pub struct PortfolioState {
     /// Account figures for the holdings the account does not hold itself,
     /// keyed by which set they describe and what they are called.
     values_elsewhere: Mutex<HashMap<(crate::types::HeldElsewhere, String, String), String>>,
-    positions: Box<[AtomicU64]>,
+    /// What each slot's contract is held at, as the bits of the figure: read
+    /// by callers without a lock while the engine writes it.
+    positions: super::slot_table::SlotTable<AtomicU64>,
     /// Midnight seeds from 6040=143 for client-side daily P&L computation.
     midnight_seeds: Mutex<HashMap<i64, MidnightSeed>>,
     /// Correlation id the venue stamped on the seeds it last sent.
@@ -79,7 +81,7 @@ impl PortfolioState {
             position_changes: Mutex::new(std::collections::BTreeSet::new()),
             positions_elsewhere: Mutex::new(HashMap::new()),
             values_elsewhere: Mutex::new(HashMap::new()),
-            positions: (0..MAX_INSTRUMENTS).map(|_| AtomicU64::new(0)).collect(),
+            positions: super::slot_table::SlotTable::new(|| AtomicU64::new(0)),
             midnight_seeds: Mutex::new(HashMap::new()),
             pnl_request_key: Mutex::new(String::new()),
             venue_prices: Mutex::new(HashMap::new()),
@@ -134,7 +136,7 @@ impl PortfolioState {
     pub fn position(&self, id: InstrumentId) -> f64 {
         // Held as bits so the slot stays lock-free; a holding is fractional and
         // a whole-number one read half a share as flat.
-        f64::from_bits(self.positions[id as usize].load(Ordering::Relaxed))
+        self.positions.get(id).map_or(0.0, |held| f64::from_bits(held.load(Ordering::Relaxed)))
     }
 
     // ── Hot-loop-side writers ──
@@ -385,7 +387,7 @@ impl PortfolioState {
     }
 
     #[doc(hidden)] pub fn set_position(&self, id: InstrumentId, pos: f64) {
-        self.positions[id as usize].store(pos.to_bits(), Ordering::Relaxed);
+        self.positions.get_or_grow(id).store(pos.to_bits(), Ordering::Relaxed);
     }
 
     /// Store midnight seeds from 6040=143 P&L response, under the correlation

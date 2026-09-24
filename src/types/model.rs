@@ -485,8 +485,15 @@ pub struct Order {
     /// This client does the same.
     pub opt_out_smart_routing: bool,
     /// A price for each leg of a combination, in the order the legs
-    /// are given. The venue validates the leg order and refuses a spread it
-    /// reads as inverted.
+    /// are given.
+    ///
+    /// **Taken and not sent.** A gateway sends leg prices only on a
+    /// non-guaranteed combination of two legs routed by SMART, which no order
+    /// placed here is. It refuses a priced leg on any order but a limit, an
+    /// unpriced leg after a priced first one, a limit beside a priced first
+    /// leg under 10054, and a combination priced on every leg under 10058;
+    /// prices on later legs alone it reads and does not send. This client does
+    /// the same.
     pub order_combo_legs: Vec<f64>,
     /// Free-form options carried alongside an order.
     ///
@@ -494,8 +501,9 @@ pub struct Order {
     /// and sends nothing for it. It refuses an entry that is not written
     /// `key=value` under 320, any other key under 10337 and a value of
     /// `manual` other than `0` or `1` under 10338; where the venue has lifted
-    /// the last two checks — it says so at logon — only the value of `manual`
-    /// is checked, as a number. This client does the same.
+    /// the last two checks — it says so at logon — `manual` is read as a
+    /// number and refused under 321 unless it is nought or one. This client
+    /// does the same.
     pub order_misc_options: Vec<TagValue>,
     /// The caller's own label, carried back on every message about the
     /// order.

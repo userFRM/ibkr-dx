@@ -130,6 +130,18 @@ pub const REQUEST_NOT_PROCESSED: i32 = 322;
 /// that is not written `key=value`.
 pub const REQUEST_NOT_READ: i32 = 320;
 
+/// The code an order stating a discretionary amount below nought is refused
+/// under.
+pub const DISCRETIONARY_AMOUNT_INVALID: i32 = 168;
+
+/// The code a combination priced on its legs that states a price of its own as
+/// well is refused under.
+pub const COMBO_AND_LEG_PRICES: i32 = 10054;
+
+/// The code a combination priced on every leg is refused under, where it is
+/// not one a gateway prices by its legs.
+pub const PER_LEG_PRICES_UNSUPPORTED: i32 = 10058;
+
 /// The code a change naming a one-cancels-all group other than the order's
 /// own is refused under.
 pub const OCA_GROUP_REVISION: i32 = 10326;

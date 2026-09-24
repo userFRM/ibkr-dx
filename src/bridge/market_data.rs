@@ -78,7 +78,7 @@ type PairedFiguresHeld =
 
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
-    quotes: Box<[SeqQuote]>,
+    quotes: super::slot_table::SlotTable<SeqQuote>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
     instrument_count: AtomicU64,
     /// Slots that have been given back, for the surfaces to forget.
@@ -257,7 +257,7 @@ pub struct MarketDataState {
 impl MarketDataState {
     pub(super) fn new() -> Self {
         Self {
-            quotes: (0..MAX_INSTRUMENTS).map(|_| SeqQuote::new()).collect(),
+            quotes: super::slot_table::SlotTable::new(SeqQuote::new),
             instrument_count: AtomicU64::new(0),
             released_slots: Mutex::new(Vec::new()),
             moves_unread: Mutex::new(std::collections::HashMap::new()),
@@ -301,25 +301,19 @@ impl MarketDataState {
         }
     }
 
-    /// Read a quote snapshot (lock-free via SeqLock).
-    /// Unchecked hot-path accessor: `id` must be a registered InstrumentId
-    /// (< MAX_INSTRUMENTS) or this panics. External surfaces go through
-    /// `try_quote`.
+    /// Read a quote snapshot (lock-free via SeqLock). A slot no quote has
+    /// reached yet reads as the empty quote.
     #[inline]
     pub fn quote(&self, id: InstrumentId) -> Quote {
-        self.quotes[id as usize].read()
+        self.try_quote(id).unwrap_or_default()
     }
 
-    /// Bounds-checked quote read for user-supplied instrument ids: an
-    /// out-of-range id is a caller error, not a reason to panic the process
-    /// through the language boundary.
+    /// A quote snapshot, or `None` for an id past every slot the table holds:
+    /// a slot this session never handed out is a caller's mistake, not a quote
+    /// of nothing.
     #[inline]
     pub fn try_quote(&self, id: InstrumentId) -> Option<Quote> {
-        if (id as usize) < MAX_INSTRUMENTS {
-            Some(self.quotes[id as usize].read())
-        } else {
-            None
-        }
+        self.quotes.get(id).map(SeqQuote::read)
     }
 
     /// Say that a slot has been given back, and what the client had asked for
@@ -736,7 +730,7 @@ impl MarketDataState {
 
     #[doc(hidden)]
     pub fn push_quote(&self, id: InstrumentId, quote: &Quote) {
-        self.quotes[id as usize].write(quote);
+        self.quotes.get_or_grow(id).write(quote);
     }
 
     /// Zero every quote a caller can read, as the engine zeroes its own copy at
@@ -750,8 +744,7 @@ impl MarketDataState {
     /// went out a second time as nought.
     #[doc(hidden)] pub fn zero_all_quotes(&self) {
         let blank = Quote::default();
-        let held = self.instrument_count.load(Ordering::Relaxed) as usize;
-        for slot in self.quotes.iter().take(held.min(self.quotes.len())) {
+        for slot in self.quotes.iter() {
             slot.write(&blank);
         }
     }
@@ -1212,6 +1205,17 @@ impl MarketDataState {
         self.stated_rows.lock().unwrap().get(&(instrument, series)).cloned().unwrap_or_default()
     }
 
+    /// Which series have stated rows for a contract, in order.
+    pub fn stated_rows_series(&self, instrument: crate::types::InstrumentId) -> Vec<u32> {
+        let mut series: Vec<u32> = self.stated_rows.lock().unwrap()
+            .keys()
+            .filter(|(at, _)| *at == instrument)
+            .map(|(_, series)| *series)
+            .collect();
+        series.sort_unstable();
+        series
+    }
+
     /// The strategies a spread scan last stated for an underlying.
     ///
     /// Each carries its legs, which shape of strategy it is and how pressing
@@ -1406,7 +1410,13 @@ impl MarketDataState {
         self.subscription_failures_direct.lock().unwrap().drain(..).collect()
     }
 
+    /// Publish how many slots the engine has handed out. The quote table is
+    /// grown to hold them here, so a slot handed out reads as the empty quote
+    /// until its first tick wherever it falls, and no tick grows the table.
     #[doc(hidden)] pub fn set_instrument_count(&self, count: u32) {
+        if let Some(last) = count.checked_sub(1) {
+            self.quotes.get_or_grow(last);
+        }
         self.instrument_count.store(count as u64, Ordering::Relaxed);
     }
 }

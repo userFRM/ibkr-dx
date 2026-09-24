@@ -7,8 +7,10 @@ value other than nought or one under 10338, and an entry not written
 `key=value` under 320. Here the list was taken and thrown away, so a program
 that a gateway would have told was told nothing and its request went out.
 
-A fundamental report is the exception a gateway makes: it reads no list on
-that request at all, so nothing in one is checked there or here.
+The two option calculations take no key at all, so a gateway refuses any
+under 10337 and names none it takes. A fundamental report is the other
+exception: a gateway reads no list on that request at all, so nothing in one is
+checked there or here.
 """
 
 import re
@@ -89,19 +91,34 @@ def test_an_entry_that_is_not_key_value_cannot_be_read(name, call):
     assert w.seen == [(1, 320, "Error reading request:Please use 'Key=Value' format for Misc Options")]
 
 
+@pytest.mark.parametrize("value", ["1", "0"])
 @pytest.mark.parametrize("name,call", REQUESTS, ids=[r[0] for r in REQUESTS])
-def test_manual_is_taken_and_changes_nothing(name, call):
+def test_manual_is_taken_and_changes_nothing(name, call, value):
     # Two sessions, so the second request is not answered by what the first
     # already holds.
     plain_w, plain = _client()
     call(plain, 1, [])
     w, c = _client()
-    call(c, 1, [TagValue("manual", "1")])
+    call(c, 1, [TagValue("manual", value)])
     assert w.seen == plain_w.seen, (w.seen, plain_w.seen)
     # Each session counts what it asks for from its own start, so the count
     # is the one thing two identical requests may not share.
     sent = lambda client: [re.sub(r"issued: \d+", "", cmd) for cmd in client._test_take_commands()]
     assert sent(c) == sent(plain)
+
+
+CALCULATIONS = [
+    ("ReqCalcImpliedVolatility(54)", lambda c, n, o: c.calculateImpliedVolatility(n, _spy(), 1.0, 100.0, o)),
+    ("ReqCalcOptionPrice(55)", lambda c, n, o: c.calculateOptionPrice(n, _spy(), 0.2, 100.0, o)),
+]
+
+
+@pytest.mark.parametrize("name,call", CALCULATIONS, ids=[r[0] for r in CALCULATIONS])
+def test_a_request_that_takes_no_key_refuses_every_one(name, call):
+    w, c = _client()
+    call(c, 5, [TagValue("manual", "1")])
+    assert w.seen == [(5, 10337, f"Misc options key=manual is invalid in {name} request. Valid keys are: ")]
+    assert c._test_take_commands() == []
 
 
 def test_a_fundamental_report_reads_no_list():

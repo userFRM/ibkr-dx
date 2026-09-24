@@ -99,6 +99,14 @@ fn split_bbo_exchange(named: &str) -> (&str, Option<u16>) {
     (named, None)
 }
 
+/// How many contracts what the company series state is kept for, the one
+/// heard of longest ago making way for the next. A bound of this client's own
+/// on what it keeps past a subscription, so a scanner swept across thousands
+/// of contracts is not kept whole for the life of the session.
+// ponytail: the number the slot tables start at; raise it if a caller needs
+// more contracts' company data held at once.
+const COMPANY_DATA_HELD: usize = 4096;
+
 /// Historical data, contract definitions, scanners, news archives, market rules,
 /// contract cache.
 pub struct ReferenceState {
@@ -1431,7 +1439,7 @@ impl ReferenceState {
         out
     }
 
-    /// The order presets the account holds, as `(key, version)`.
+    /// The order presets the account holds, as `(key, attributes, changed at)`.
     ///
     /// The venue keeps a set of order defaults per security type and fills
     /// parts of an order the caller left unstated from them — the size a
@@ -1439,9 +1447,10 @@ impl ReferenceState {
     /// caller named neither. So two identical calls on two accounts are not
     /// the same order, and nothing in the reference client's surface says so.
     ///
-    /// The key is the venue's own, `s=STK` or `s=CASH&tc=EUR`. The version is
-    /// what that set is on; the values behind it are asked for separately and
-    /// are not carried here.
+    /// The key is the venue's own, `s=STK` or `s=CASH&tc=EUR`. The attributes
+    /// are as the venue writes them: `v=` the set's variant, `a=1` where it is
+    /// active. The values behind it are asked for separately and are not
+    /// carried here.
     pub fn order_presets(&self) -> Vec<(String, String, String)> {
         self.order_presets.lock().unwrap().clone()
     }
@@ -1509,8 +1518,8 @@ impl ReferenceState {
     /// fetched it ends — it is a fact about the contract rather than about the
     /// watch, so a caller that comes back to a contract finds it still there.
     ///
-    /// Held for as many contracts as this client can hold a slot for, and the
-    /// contract heard of longest ago is dropped to make room. One ordinary
+    /// Held for four thousand and ninety-six contracts, and the contract heard
+    /// of longest ago is dropped to make room. One ordinary
     /// share stating every series is about twenty-three kilobytes, so what this
     /// holds is bounded at a hundred megabytes or so however long a session
     /// runs — where before it grew with every contract ever watched.
@@ -1550,12 +1559,12 @@ impl ReferenceState {
         if held.entry(con_id).or_default().insert(series, pairs).is_none()
             && held[&con_id].len() == 1
         {
-            // First time this contract has stated anything. Held for as many
-            // contracts as this client can hold a slot for and no more: a
-            // session sweeping a scanner across thousands would otherwise keep
-            // every one of them for as long as it ran.
+            // First time this contract has stated anything. Held for this
+            // many contracts and no more: a session sweeping a scanner across
+            // thousands would otherwise keep every one of them for as long as
+            // it ran.
             order.push_back(con_id);
-            while order.len() > crate::types::MAX_INSTRUMENTS
+            while order.len() > COMPANY_DATA_HELD
                 && let Some(gone) = order.pop_front()
             {
                 held.remove(&gone);
@@ -1962,15 +1971,15 @@ mod adjustments_store_tests {
         assert!(state.adjustments_for("4815747").is_some());
     }
 
-    /// What the company series state is kept for as many contracts as this
-    /// client can hold a slot for, and no more.
+    /// What the company series state is kept for a bounded number of
+    /// contracts, and no more.
     ///
     /// Kept for every contract ever watched, a session sweeping a scanner
     /// across thousands holds all of them for as long as it runs.
     #[test]
-    fn what_a_contract_stated_is_kept_for_as_many_as_can_be_watched() {
+    fn what_a_contract_stated_is_kept_for_a_bounded_number_of_contracts() {
         let state = ReferenceState::new();
-        let cap = crate::types::MAX_INSTRUMENTS as u32;
+        let cap = super::COMPANY_DATA_HELD as u32;
 
         for con_id in 1..=cap {
             state.note_company_data(con_id, 434, vec![("RATING".into(), "2".into())]);

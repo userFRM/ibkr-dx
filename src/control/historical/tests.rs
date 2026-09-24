@@ -529,7 +529,7 @@ fn parse_schedule_response_rejects_other() {
 
 #[test]
 fn build_tick_query_xml_structure() {
-    let xml = build_tick_query_xml("tk_1", 265598, "", "20260312-15:00:00", 100, "TRADES", true, "CS", "BEST", false);
+    let xml = build_tick_query_xml("tk_1", 265598, "", "20260312-15:00:00", 100, "TRADES", true, "CS", "BEST", false, false);
     assert!(xml.contains("<id>tk_1</id>"));
     assert!(xml.contains("<type>TickData</type>"));
     assert!(xml.contains("<data>AllLast</data>"));
@@ -540,9 +540,29 @@ fn build_tick_query_xml_structure() {
 
 #[test]
 fn build_tick_query_xml_bid_ask() {
-    let xml = build_tick_query_xml("tk_2", 265598, "", "20260312-15:00:00", 50, "BID_ASK", false, "CS", "BEST", false);
+    let xml = build_tick_query_xml("tk_2", 265598, "", "20260312-15:00:00", 50, "BID_ASK", false, "CS", "BEST", false, false);
     assert!(xml.contains("<data>BidAsk</data>"));
     assert!(xml.contains("<useRTH>false</useRTH>"));
+}
+
+/// The size filter goes where a gateway writes it: on bid/ask when the caller
+/// asks to leave out a change that moves only a size, on every midpoint query
+/// whatever the caller asked, and never on trades. It follows the delay, the
+/// field before it in the venue's query.
+#[test]
+fn a_tick_query_carries_the_size_filter_where_a_gateway_writes_it() {
+    const FILTER: &str = "<filter><ignoreSize>true</ignoreSize></filter>";
+    let q = |what: &str, ignore_size: bool| build_tick_query_xml(
+        "tk", 265598, "", "20260312-15:00:00", 100, what, true, "CS", "BEST", false, ignore_size,
+    );
+    let asked = q("BID_ASK", true);
+    assert!(asked.contains(&format!("<delay>auto</delay>{FILTER}</Query>")), "{asked}");
+    assert!(!q("BID_ASK", false).contains("<filter>"));
+    assert!(q("MIDPOINT", false).contains(FILTER));
+    assert!(q("MIDPOINT", true).contains(FILTER));
+    for what in ["TRADES", "AGGTRADES"] {
+        assert!(!q(what, true).contains("<filter>"), "{what}");
+    }
 }
 
 /// The query counts back from its end. A start written into that same field
@@ -552,7 +572,7 @@ fn build_tick_query_xml_bid_ask() {
 fn a_tick_request_names_one_end_and_counts_from_it() {
     use crate::control::historical::{build_tick_query_xml, validate_tick_window};
     let q = |start: &str, end: &str| build_tick_query_xml(
-        "tk", 265598, start, end, 100, "TRADES", true, "CS", "BEST", false,
+        "tk", 265598, start, end, 100, "TRADES", true, "CS", "BEST", false, false,
     );
     // Either end is served, and the count says how far it reaches. A start
     // used to be refused before it was ever sent; the venue answers one with
@@ -1190,7 +1210,7 @@ fn an_expired_contract_is_asked_about_as_expired() {
     assert!(build_query_xml(&stated(false)).contains("<expired>no</expired>"));
 
     let ticks = |include_expired: bool| build_tick_query_xml(
-        "tk_1", 495512563, "", "20260101-16:00:00", 100, "TRADES", true, "FUT", "CME", include_expired,
+        "tk_1", 495512563, "", "20260101-16:00:00", 100, "TRADES", true, "FUT", "CME", include_expired, false,
     );
     assert!(ticks(true).contains("<expired>yes</expired>"));
     assert!(ticks(false).contains("<expired>no</expired>"));
@@ -1286,7 +1306,7 @@ fn the_auction_and_option_chain_series_are_asked_for_by_the_venues_own_names() {
 fn aggregated_trades_can_be_asked_for_as_ticks() {
     assert_eq!(tick_data_type("AGGTRADES"), Ok("AggLast"));
     let xml = build_tick_query_xml(
-        "tk_agg", 265598, "", "20260312-15:00:00", 10, "AGGTRADES", true, "CS", "BEST", false,
+        "tk_agg", 265598, "", "20260312-15:00:00", 10, "AGGTRADES", true, "CS", "BEST", false, false,
     );
     assert!(xml.contains("<data>AggLast</data>"), "{xml}");
 }

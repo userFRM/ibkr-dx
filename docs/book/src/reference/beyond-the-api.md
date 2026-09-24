@@ -63,8 +63,10 @@ client.order_presets()      # [('s=CASH', 'v=1&a=1'), ('s=FUT', 'v=1&a=1'), ('s=
 ```
 
 The key is the venue's own, and a currency can split one: `s=CASH&tc=EUR` sits
-beside `s=CASH`. The version is what that set is on. The values inside a set
-are asked for separately and are not carried here.
+beside `s=CASH`. The second figure is the set's attributes as the venue
+writes them: `v=` names its variant and `a=1` marks it active, so
+`('s=CASH&tc=EUR', 'v=1')` is a set that is not active. The values inside a
+set are asked for separately and are not carried here.
 
 ## What the session itself is
 
@@ -148,6 +150,16 @@ client.paired_figures(1, 546)           # [(coordinate, volatility), …]
 client.closing_option_model(1)          # {'delta': …, 'rho': …, 'fugit': …, …}
 ```
 
+Others state rows of three figures, and what the three are is the series' own:
+on 547 a quantity, what it is offered at and a second price where the form
+states one; on 320 a packed quote's field, its figure and how far its decimal
+point moves.
+
+```python
+client.stated_rows_series(1)            # [320, 547]  which series stated rows
+client.stated_rows(1, 547)              # [(quantity, price, second price), …]
+```
+
 Two more state what the venue's option model works an underlying's chain from,
 per class of its options and per expiry: 687 as it stands, and 691 as the chain
 closed. Each is asked for on a subscription on the underlying, and this client
@@ -216,6 +228,8 @@ Two consequences worth stating plainly:
 | `client.numbered_figures_series(req_id)` | `client.numbered_figures_series(req_id)` |
 | `client.paired_figures(req_id, series)` | `client.paired_figures(req_id, series)` |
 | `client.paired_figures_series(req_id)` | `client.paired_figures_series(req_id)` |
+| `client.stated_rows(req_id, series)` | `client.stated_rows(req_id, series)` |
+| `client.stated_rows_series(req_id)` | `client.stated_rows_series(req_id)` |
 | `client.closing_option_model(req_id)` | `client.closing_option_model(req_id)` |
 | `client.chain_model_parameters(req_id, series)` | `client.chain_model_parameters(req_id, series)` |
 | `client.req_ping()` | `client.req_ping()` |

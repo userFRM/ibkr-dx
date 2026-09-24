@@ -1116,30 +1116,35 @@ pub enum OrderKind {
         stop_price: Price,
     },
     /// Trailing stop by absolute amount. `trail_stop_price` is the optional
-    /// initial stop trigger (tag 6117); 0 = not set.
+    /// initial stop trigger (tag 6117), `None` where the caller stated none.
     TrailingStop {
         /// How far it follows, scaled by `PRICE_SCALE`.
         trail_amt: Price,
-        /// Where it starts before it has followed anything.
-        trail_stop_price: Price,
+        /// Where it starts before it has followed anything. Nought and below
+        /// are prices like any other: a gateway carries them as stated.
+        trail_stop_price: Option<Price>,
     },
     /// Trailing stop limit; `lmt_offset` is the limit-vs-trail offset (tag 6370).
-    /// `trail_stop_price` is the optional initial stop trigger (tag 6117); 0 = not set.
+    /// `trail_stop_price` is the optional initial stop trigger (tag 6117),
+    /// `None` where the caller stated none.
     TrailingStopLimit {
         /// How far the limit sits from the trigger.
         lmt_offset: Price,
         /// How far it follows, scaled by `PRICE_SCALE`.
         trail_amt: Price,
-        /// Where it starts before it has followed anything.
-        trail_stop_price: Price,
+        /// Where it starts before it has followed anything. Nought and below
+        /// are prices like any other: a gateway carries them as stated.
+        trail_stop_price: Option<Price>,
     },
     /// Trailing stop by percentage. Basis points: 100 = 1%.
-    /// `trail_stop_price` is the optional initial stop trigger (tag 6117); 0 = not set.
+    /// `trail_stop_price` is the optional initial stop trigger (tag 6117),
+    /// `None` where the caller stated none.
     TrailPct {
         /// How far it follows, as a percentage.
         trail_pct: u32,
-        /// Where it starts before it has followed anything.
-        trail_stop_price: Price,
+        /// Where it starts before it has followed anything. Nought and below
+        /// are prices like any other: a gateway carries them as stated.
+        trail_stop_price: Option<Price>,
     },
     /// Pegged to a benchmark contract's price.
     ///

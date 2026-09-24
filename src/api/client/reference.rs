@@ -146,6 +146,7 @@ impl EClient {
         self.send(ControlCommand::FetchContractDetails {
             contract: contract.into(),
             req_id: wire_req_id(req_id)?,
+            include_expired: contract.include_expired,
             filters: contract.lookup_filters(),
         })
     }
@@ -512,10 +513,15 @@ impl EClient {
     /// the ticks after a moment or `end_date_time` for the ones before it, and
     /// `number_of_ticks` says how far it reaches. Naming both, or neither, is
     /// what the venue refuses.
+    ///
+    /// `ignore_size` leaves out a bid/ask change that moves only a size. A
+    /// gateway asks for midpoint ticks that way whatever the caller asked, and
+    /// so does this client; trades are not filtered.
+    #[allow(clippy::too_many_arguments)]
     pub fn req_historical_ticks(
         &self, req_id: i64, contract: &Contract,
         start_date_time: &str, end_date_time: &str,
-        number_of_ticks: i32, what_to_show: &str, use_rth: bool,
+        number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool,
     ) -> Result<(), Refusal> {
         // Before anything that reaches the venue, so an id it cannot carry is
         // named as the trouble rather than whatever is checked first.
@@ -542,6 +548,7 @@ impl EClient {
             number_of_ticks,
             what_to_show: what_to_show.into(),
             use_rth,
+            ignore_size,
             include_expired: contract.include_expired,
         })
     }

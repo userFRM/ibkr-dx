@@ -458,7 +458,7 @@ pub(super) fn phase_fundamental_data(mut conns: Conns) -> Conns {
     // as a caller would, so what follows is the venue's answer.
     control_tx.send(ControlCommand::FetchContractDetails {
         contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
-        req_id: 8299, filters: Default::default(),
+        req_id: 8299, include_expired: false, filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
     let named_by = Instant::now() + Duration::from_secs(20);
@@ -621,6 +621,7 @@ pub(super) fn phase_historical_ticks(mut conns: Conns) -> Conns {
         number_of_ticks: 100,
         what_to_show: "TRADES".to_string(),
         use_rth: true,
+        ignore_size: false,
         include_expired: false,
         filters: Default::default(),
     }).unwrap();
@@ -957,7 +958,7 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns) -> Conns {
     // as a caller would, so what follows is the venue's answer.
     control_tx.send(ControlCommand::FetchContractDetails {
         contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
-        req_id: 7000, filters: Default::default(),
+        req_id: 7000, include_expired: false, filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
     let named_by = Instant::now() + Duration::from_secs(20);

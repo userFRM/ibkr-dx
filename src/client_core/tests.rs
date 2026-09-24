@@ -2564,17 +2564,9 @@ fn a_price_for_a_leg_the_combination_does_not_have_is_refused() {
     };
     let priced = |prices: Vec<f64>| ApiOrder {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 1.0, tif: "DAY".into(), order_combo_legs: prices, ..Default::default()
+        lmt_price: 0.0, tif: "DAY".into(), order_combo_legs: prices, ..Default::default()
     };
 
-    assert!(
-        ClientCore::build_order_request(&priced(vec![1.0, 2.0]), 7, 0, Some(&contract)).is_ok(),
-        "one price per leg goes",
-    );
-    assert!(
-        ClientCore::build_order_request(&priced(vec![1.0]), 7, 0, Some(&contract)).is_ok(),
-        "pricing fewer than the legs leaves the rest to the combination's own price",
-    );
     let why = ClientCore::build_order_request(&priced(vec![1.0, 2.0, 3.0]), 7, 0, Some(&contract))
         .expect_err("a third price on a two-legged combination has nowhere to go");
     assert!(why.message.contains("3 legs"), "{why}");
@@ -2586,6 +2578,80 @@ fn a_price_for_a_leg_the_combination_does_not_have_is_refused() {
         ClientCore::build_order_request(&priced(vec![1.0, 2.0]), 7, 0, None).is_ok(),
         "a price list on a contract that is not a combination is not a refusal",
     );
+}
+
+/// Prices stated for a combination's legs are answered as a gateway answers
+/// them: leg by leg as it reads them, then the combination's own price, then
+/// whether it is a combination a gateway prices by its legs at all — which,
+/// with no routing parameter to make it non-guaranteed, none placed here is.
+/// Priced on later legs alone, the prices are read and not sent.
+#[test]
+fn prices_stated_for_the_legs_are_answered_as_a_gateway_answers_them() {
+    let leg = |con_id: i64| crate::types::model::ComboLeg {
+        con_id, ratio: 1, action: "BUY".into(), exchange: "SMART".into(),
+        ..Default::default()
+    };
+    let contract = crate::types::model::Contract {
+        symbol: "SPX".into(), sec_type: "BAG".into(), exchange: "SMART".into(),
+        currency: "USD".into(), combo_legs: vec![leg(111), leg(222)],
+        ..Default::default()
+    };
+    let answered = |order_type: &str, lmt_price: f64, prices: Vec<f64>| {
+        let order = ApiOrder {
+            action: "BUY".into(), total_quantity: 1.0, order_type: order_type.into(),
+            lmt_price, tif: "DAY".into(), order_combo_legs: prices, ..Default::default()
+        };
+        ClientCore::build_order_request(&order, 7, 0, Some(&contract))
+    };
+    let refused = |order_type: &str, lmt_price: f64, prices: Vec<f64>| {
+        let why = answered(order_type, lmt_price, prices).expect_err("refused");
+        (why.code, why.message)
+    };
+    let leg_invalid = |at: usize, code: i32, text: &str| (321, format!(
+        "The combo details for leg '{at}' are invalid. - CodeMsgPair::[m_code={code}m_msg={text}]m_sysMsg={text}]",
+    ));
+    let only_limit = "Only LMT or REL+LMT order allows using per-leg prices.";
+    let all_needed = "All leg prices are needed when specifying per-leg prices.";
+    assert_eq!(refused("MKT", 0.0, vec![1.0, 2.0]), leg_invalid(0, 10055, only_limit));
+    assert_eq!(refused("MKT", 0.0, vec![f64::MAX, 2.0]), leg_invalid(1, 10055, only_limit));
+    assert_eq!(refused("LMT", 0.0, vec![1.0]), leg_invalid(1, 10056, all_needed));
+    assert_eq!(refused("LMT", 0.0, vec![1.0, f64::MAX]), leg_invalid(1, 10056, all_needed));
+    assert_eq!(
+        refused("LMT", 3.0, vec![1.0, 2.0]),
+        (10054, "Can't specify combo price when using per-leg prices.".to_string()),
+    );
+    assert_eq!(
+        refused("LMT", 0.0, vec![1.0, 2.0]),
+        (10058, "Combo per-leg prices are only supported for non-guaranteed smart combo with \
+                 two legs and feature \"IECOMBOPERLEGPRICE\" enabled.".to_string()),
+    );
+    match answered("LMT", 1.5, vec![f64::MAX, 2.0]) {
+        Ok(ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Limit { price }, attrs, .. })) => {
+            assert_eq!(price, 3 * PRICE_SCALE / 2, "the combination's own price");
+            assert!(attrs.combo_legs.iter().all(|l| l.price.is_none()), "no leg's price: {:?}", attrs.combo_legs);
+        }
+        other => panic!("placed at its own price: {other:?}"),
+    }
+}
+
+/// A discretionary amount below nought is refused as a gateway refuses it.
+/// Taken, it was dropped on the way out and the order went without the
+/// discretion the caller named, reported as placed.
+#[test]
+fn a_discretionary_amount_below_nought_is_refused_under_168() {
+    let order = ApiOrder {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 1.0, tif: "DAY".into(), discretionary_amt: -0.01, ..Default::default()
+    };
+    let session = crate::client_core::OrderSession::single("DU1");
+    let why = ClientCore::validate_order(&order, &session).expect_err("no such amount");
+    assert_eq!(why.code, 168);
+    assert_eq!(
+        why.message,
+        "Discretionary amount does not conform to the minimum price variation for this contract",
+    );
+    let nought = ApiOrder { discretionary_amt: 0.0, ..order };
+    assert!(ClientCore::validate_order(&nought, &session).is_ok(), "nought is no discretion");
 }
 
 /// A passive relative order is taken as the caller states it: the offset on
@@ -4396,6 +4462,13 @@ mod as_a_gateway_checks_it {
             refused(&with("manual", "2"), &session(&["NOAPIMISCVLD"])),
             (321, "Order: 'manual' has wrong value=2, expected [1 or 0]".to_string()),
         );
+        // Not a key and a value: refused while the order is read, lifted or not.
+        for features in [&[][..], &["NOAPIMISCVLD"][..]] {
+            assert_eq!(
+                refused(&with("manual", ""), &session(features)),
+                (320, "Error reading request:Please use 'Key=Value' format for Misc Options".to_string()),
+            );
+        }
         // Lifted, the value is read as a number; checked, it is read as written.
         for value in [" 1", "01", "+1", "0 "] {
             ClientCore::validate_order(&with("manual", value), &session(&["NOAPIMISCVLD"]))
@@ -4410,9 +4483,9 @@ mod as_a_gateway_checks_it {
     #[test]
     fn every_option_list_is_checked_as_a_gateway_checks_it() {
         use crate::client_core::{
-            CHART_OPTIONS, HISTORICAL_NEWS_OPTIONS, HISTORICAL_TICKS_OPTIONS, MKT_DATA_OPTIONS,
-            MKT_DEPTH_OPTIONS, NEWS_ARTICLE_OPTIONS, ORDER_OPTIONS, OptionList,
-            REAL_TIME_BARS_OPTIONS, SCANNER_OPTIONS,
+            CHART_OPTIONS, HISTORICAL_NEWS_OPTIONS, HISTORICAL_TICKS_OPTIONS, IMPL_VOL_OPTIONS,
+            MKT_DATA_OPTIONS, MKT_DEPTH_OPTIONS, NEWS_ARTICLE_OPTIONS, OPT_PRC_OPTIONS, ORDER_OPTIONS,
+            OptionList, REAL_TIME_BARS_OPTIONS, SCANNER_OPTIONS,
         };
         let list = |pairs: &[(&str, &str)]| -> Vec<crate::types::model::TagValue> {
             pairs.iter().map(|(t, v)| crate::types::model::TagValue { tag: (*t).into(), value: (*v).into() }).collect()
@@ -4479,6 +4552,26 @@ mod as_a_gateway_checks_it {
         assert_eq!(checked(&CHART_OPTIONS, &[("manual", "2"), ("manual", "1")]), Ok(()));
         // What separates entries inside a value separates them there too.
         assert!(checked(&HISTORICAL_TICKS_OPTIONS, &[("manual", "1;foo=2")]).unwrap_err().1.contains("key=foo"));
+        // A key is matched as written.
+        assert_eq!(
+            checked(&MKT_DATA_OPTIONS, &[("Manual", "1")]),
+            Err((10337, "Misc options key=Manual is invalid in ReqMktData(1) request. Valid keys are: manual".into())),
+        );
+        // Lifted, a value is trimmed of what sorts at or below a space.
+        assert_eq!(lifted(&MKT_DATA_OPTIONS, &[("manual", "\u{1}1")]), Ok(()));
+        // The two option calculations take no key: an empty list states
+        // nothing, any key is refused with none named, and lifted, anything
+        // that reads as a key and a value is taken, with no later check.
+        for (l, name) in [(&IMPL_VOL_OPTIONS, "ReqCalcImpliedVolatility(54)"), (&OPT_PRC_OPTIONS, "ReqCalcOptionPrice(55)")] {
+            assert_eq!(checked(l, &[]), Ok(()), "{name}");
+            assert_eq!(
+                checked(l, &[("manual", "1")]),
+                Err((10337, format!("Misc options key=manual is invalid in {name} request. Valid keys are: "))),
+            );
+            assert_eq!(lifted(l, &[("foo", "1")]), Ok(()), "{name}");
+            assert_eq!(lifted(l, &[("manual", "2")]), Ok(()), "{name}");
+            assert_eq!(lifted(l, &[("manual", "")]), unreadable, "{name}");
+        }
         // And the order path is the same rule.
         let order = ApiOrder {
             order_misc_options: list(&[("manual", "")]),

@@ -90,6 +90,16 @@ impl EClient {
         Ok(())
     }
 
+    /// Hold the rows one series stated for a contract, as the farm does when
+    /// the series answers (test-only).
+    #[doc(hidden)]
+    fn _test_note_stated_rows(
+        &self, instrument: u32, series: u32, rows: Vec<(f64, f64, f64)>,
+    ) -> PyResult<()> {
+        self.shared_state()?.market.note_stated_rows(instrument, series, rows);
+        Ok(())
+    }
+
     /// Seed one histogram bucket, so a test can read the shape the callback
     /// hands over and not only that it fired (test-only).
     #[doc(hidden)]

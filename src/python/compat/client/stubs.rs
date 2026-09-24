@@ -42,17 +42,17 @@ impl EClient {
     }
 
     /// The sets of order defaults this account holds, as
-    /// `(key, version, when it last changed)`.
+    /// `(key, attributes, when it last changed)`.
     ///
     /// The venue keeps one per security type and fills parts of an order the
     /// caller left unstated from them, so the same call on two accounts is not
-    /// the same order. The key is the venue's own and the version is what that
-    /// set is on; the values in a set are asked for separately.
+    /// the same order. The key is the venue's own. The attributes are as the
+    /// venue writes them, `&` between them: `v=` names the set's variant and
+    /// `a=1` marks it active. The values in a set are asked for separately.
     ///
-    /// The version says *that* a set changed and the moment says *when*, which
-    /// is what tells a caller whether an order it sent at a given time was
-    /// filled in from the old defaults or the new. Empty where the venue
-    /// stated none.
+    /// The moment says *when* a set last changed, which is what tells a caller
+    /// whether an order it sent at a given time was filled in from the old
+    /// defaults or the new. Empty where the venue stated none.
     fn order_presets(&self) -> PyResult<Vec<(String, String, String)>> {
         Ok(self.shared_state().map(|s| s.reference.order_presets()).unwrap_or_default())
     }
@@ -105,16 +105,20 @@ impl EClient {
     /// the venue publishes for that contract. Answered on
     /// `tick_option_computation`.
     ///
-    /// `implied_vol_options` is taken, and nothing in it is checked or sent: this
-    /// client answers the calculation itself, from the venue's model, and
-    /// sends no request that could carry it.
+    /// `implied_vol_options` is checked as a gateway checks it: this request
+    /// takes no key, so any is refused under 10337, and an entry not written
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// list that reads is taken. Nothing in it is sent: this client answers
+    /// the calculation itself, from the venue's model.
     #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=None))]
     fn calculate_implied_volatility(
         &self, py: Python<'_>, req_id: i64, contract: &Contract, option_price: f64,
         under_price: f64, implied_vol_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let _ = implied_vol_options;
+        if let Some(why) = self.options_refused(py, &crate::client_core::IMPL_VOL_OPTIONS, implied_vol_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = self.answer_option_model(req_id, contract, |terms, model, schedule| {
             crate::control::option_model::implied_volatility(
                 terms, model, schedule, option_price, under_price,
@@ -147,16 +151,20 @@ impl EClient {
     /// What an option is worth at a stated volatility, under the same
     /// model. Answered on `tick_option_computation`.
     ///
-    /// `opt_prc_options` is taken, and nothing in it is checked or sent: this
-    /// client answers the calculation itself, from the venue's model, and
-    /// sends no request that could carry it.
+    /// `opt_prc_options` is checked as a gateway checks it: this request
+    /// takes no key, so any is refused under 10337, and an entry not written
+    /// `key=value` under 320. Where the venue has lifted the key checks, a
+    /// list that reads is taken. Nothing in it is sent: this client answers
+    /// the calculation itself, from the venue's model.
     #[pyo3(signature = (req_id, contract, volatility, under_price, opt_prc_options=None))]
     fn calculate_option_price(
         &self, py: Python<'_>, req_id: i64, contract: &Contract, volatility: f64,
         under_price: f64, opt_prc_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let _ = opt_prc_options;
+        if let Some(why) = self.options_refused(py, &crate::client_core::OPT_PRC_OPTIONS, opt_prc_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = self.answer_option_model(req_id, contract, |terms, model, schedule| {
             crate::control::option_model::option_price(
                 terms, model, schedule, volatility, under_price,

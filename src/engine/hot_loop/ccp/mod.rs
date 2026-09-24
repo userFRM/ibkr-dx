@@ -357,19 +357,21 @@ fn known_unread(subtype: &str) -> Option<&'static str> {
     }
 }
 
-/// The order presets a session is told about, as `(key, version, changed at)`.
+/// The order presets a session is told about, as `(key, attributes, changed
+/// at)`.
 ///
 /// The venue states how many follow on 8167 and then repeats three fields for
-/// each: the key it names the set by on 8168, the version on 8169, and the
+/// each: the key it names the set by on 8168, the set's attributes on 8169 —
+/// `&` between them, `v=` its variant and `a=1` where it is active — and the
 /// moment it last changed on 8170. The values in a set are not here; asking
 /// for those is a request of its own.
 ///
-/// The moment is carried. The version says *that* a set changed and the moment
-/// says *when*, which is what tells a caller whether an order it sent at a
-/// given time was filled in from the old defaults or the new — and these
-/// defaults fill in terms the caller left unstated on orders already placed.
-/// Read past, the question could not be asked. A set the venue states no
-/// moment for carries none rather than being dropped for want of it.
+/// The moment is carried: it says *when* a set changed, which is what tells a
+/// caller whether an order it sent at a given time was filled in from the old
+/// defaults or the new — and these defaults fill in terms the caller left
+/// unstated on orders already placed. Read past, the question could not be
+/// asked. A set the venue states no moment for carries none rather than being
+/// dropped for want of it.
 ///
 /// Read by walking the tags in the order the message states them rather than
 /// by looking each up, because three of them repeat and a keyed read answers
@@ -394,9 +396,10 @@ fn parse_order_presets(msg: &[u8]) -> Option<Vec<(String, String, String)>> {
                     out.push((k, value, String::new()));
                 }
             }
-            // Written onto the set the version just opened, because it follows
-            // it. A set the venue states no moment for keeps the empty one it
-            // was pushed with rather than taking the previous set's.
+            // Written onto the set the attributes just opened, because it
+            // follows them. A set the venue states no moment for keeps the
+            // empty one it was pushed with rather than taking the previous
+            // set's.
             8170 => {
                 if let Some(held) = out.last_mut() {
                     held.2 = value;
@@ -574,6 +577,20 @@ fn filters_named(cmd: &crate::types::ControlCommand) -> crate::types::SecDefFilt
         | C::SubscribeRealTimeBar { filters, .. }
         | C::SubscribeDepth { filters, .. } => filters.clone(),
         _ => crate::types::SecDefFilters::default(),
+    }
+}
+
+/// What a request other than a details request has a gateway look its
+/// contract up by.
+///
+/// Those requests carry no identifier and no issuer, so a gateway looks the
+/// contract up by its description, whatever else the caller's contract held.
+fn described(filters: crate::types::SecDefFilters) -> crate::types::SecDefFilters {
+    crate::types::SecDefFilters {
+        sec_id: String::new(),
+        sec_id_type: String::new(),
+        issuer_id: String::new(),
+        ..filters
     }
 }
 
@@ -825,6 +842,9 @@ pub(crate) struct CcpState {
     /// rides inside each. Delivering them all reported one contract as
     /// twenty-seven listings of itself. Cleared when the request ends.
     pub(crate) details_delivered: std::collections::HashMap<u32, HashSet<i64>>,
+    /// A caller's lookup of a continuous future, by the caller's number, while
+    /// its answer is put together.
+    pub(crate) continuous_lookups: std::collections::HashMap<u32, ContinuousLookup>,
     /// Counter for internal fan-out req IDs (tag 320 on per-exchange `35=c`).
     pub(crate) next_fanout_id: u32,
     /// Counter for internal secdef req IDs (auto-fetch on cold-cache positions).
@@ -897,6 +917,60 @@ pub(crate) struct PendingSchedulePair {
     pub deadline: Instant,
 }
 
+/// The fields a lookup names its identifier on, or none where it names no
+/// identifier a gateway knows.
+///
+/// `22`/`48` carry every kind under the character that names its source. The
+/// kind is read by its exact name, as a gateway reads it: a name it does not
+/// know, a lower-case one included, is no identifier at all, and the lookup
+/// goes by description with the identifier left out.
+fn identifier_fields(filters: &crate::types::SecDefFilters) -> Vec<(u32, &str)> {
+    let sec_id = filters.sec_id.as_str();
+    if sec_id.is_empty() {
+        return Vec::new();
+    }
+    let source = match filters.sec_id_type.as_str() {
+        "CUSIP" => "1",
+        "SEDOL" => "2",
+        "ISIN" => "4",
+        "RIC" => "5",
+        "FIGI" => "S",
+        "BB_SYMBOL" => "A",
+        _ => return Vec::new(),
+    };
+    vec![(22, source), (48, sec_id)]
+}
+
+/// What a caller is told when the venue names no contract for a lookup, in a
+/// gateway's words.
+const NO_DEFINITION_FOUND: &str = "No security definition has been found for the request";
+
+/// A caller's lookup of a continuous future.
+///
+/// A gateway asks for the continuous contract first and holds what it names.
+/// Where the caller asked for the listed months as well, it asks for those
+/// once the continuous answer is in, answer or refusal, and hands them over
+/// first, the continuous contract after them. Where the venue names no listed
+/// month, the lookup is answered as a contract not found, whatever the
+/// continuous lookup named.
+pub(crate) struct ContinuousLookup {
+    /// Whether the listed months are asked for as well.
+    listed_too: bool,
+    /// Whether that second lookup is out, so what arrives now is a listed month.
+    asking_listed: bool,
+    /// Whether a listed month has been handed over.
+    listed_found: bool,
+    /// The continuous contract as each venue states it, one per venue and
+    /// multiplier, the first stated kept.
+    held: Vec<crate::control::contracts::ContractDefinition>,
+    /// What the second lookup states: the caller's own description, as a future.
+    symbol: String,
+    exchange: String,
+    currency: String,
+    filters: crate::types::SecDefFilters,
+    include_expired: bool,
+}
+
 /// In-flight by-symbol fan-out: per-exchange `35=c` requests sent after
 /// the master `35=d` reply. Each per-exchange `35=d` reply (matched by tag
 /// 320 string) is forwarded to `api_req_id` as one `contract_details`.
@@ -951,6 +1025,7 @@ impl CcpState {
             next_schedule_sub_id: 1,
             pending_fanout: Vec::new(),
             details_delivered: std::collections::HashMap::new(),
+            continuous_lookups: std::collections::HashMap::new(),
             next_fanout_id: 1,
             next_internal_secdef_id: 0xF000_0000,
             next_advisor_request: 1,
@@ -1189,12 +1264,10 @@ impl CcpState {
                 if let Some(at) = named {
                     let (req_id, _, _) = self.pending_secdef.remove(at);
                     if req_id < 0xF000_0000 {
-                        shared.reference.push_historical_error(
-                            req_id, 200,
-                            format!("contract details request rejected: {reason}"),
+                        self.refuse_lookup(
+                            req_id, 200, format!("contract details request rejected: {reason}"),
+                            ccp_conn, shared, event_tx, hb,
                         );
-                        shared.reference.push_contract_details_end(req_id);
-                        emit(event_tx, Event::ContractDetailsEnd(req_id));
                     } else {
                         // A lookup the engine made for itself: forgotten, so
                         // the next report naming that contract asks again, as
@@ -1289,7 +1362,7 @@ impl CcpState {
                         "210" => handle_account_config(&parsed, shared),
                         "117" => self.handle_advisor_config(&parsed, shared),
                         "139" => self.handle_option_chain(msg, shared),
-                        "107" => self.handle_schedule_reply(msg, shared, event_tx),
+                        "107" => self.handle_schedule_reply(msg, ccp_conn, shared, event_tx, hb),
                         "18" => {
                             // The venue restating its own clock, unasked. It is
                             // never asked for it — this wire carries no such
@@ -1306,18 +1379,18 @@ impl CcpState {
                                 shared.market.note_venue_millis(seconds.saturating_mul(1_000));
                             }
                         }
+                        // What a contract pays out, answered under the id
+                        // the query went out with. An option model needs the
+                        // dividend schedule this states.
+                        "20" => self.handle_dividends_answer(&parsed, shared),
                         // The order presets this account holds, which this
                         // session asks for at logon and then threw away. The
                         // venue keeps a set of order defaults per security
                         // type and fills parts of an order the caller left
                         // unstated from them, so what sets exist is a fact
-                        // What a contract pays out, answered under the id
-                        // the query went out with. An option model needs the
-                        // dividend schedule this states.
-                        "20" => self.handle_dividends_answer(&parsed, shared),
                         // about every order placed from here.
                         //
-                        // It states the sets and their versions rather than
+                        // It states the sets and their attributes rather than
                         // the values in them: asking for those is a request of
                         // its own, and nothing on the reference client's
                         // surface makes it.
@@ -1479,13 +1552,7 @@ impl CcpState {
                             // underlying apart.
                             crate::types::model::ContractDetails::from_definition(&def).contract,
                         );
-                            if self.details_delivered.entry(rid).or_default().insert(def.con_id as i64) {
-                                let for_event = clone_for_event(event_tx, &def);
-                                shared.reference.push_contract_details(rid, def);
-                                if let Some(details) = for_event {
-                                    emit(event_tx, Event::ContractDetails { req_id: rid, details: Box::new(details) });
-                                }
-                            }
+                            self.hand_over(rid, def, shared, event_tx);
                         }
                     }
                     listings
@@ -1533,14 +1600,8 @@ impl CcpState {
                             let awaiting_schedule = self.pending_schedule_pair.iter().any(|p| {
                                 p.api_req_id == api_req_id && p.def.con_id == def.con_id
                             });
-                            if !awaiting_schedule
-                                && self.details_delivered.entry(api_req_id).or_default().insert(def.con_id as i64)
-                            {
-                                let for_event = clone_for_event(event_tx, &def);
-                                shared.reference.push_contract_details(api_req_id, def);
-                                if let Some(details) = for_event {
-                                    emit(event_tx, Event::ContractDetails { req_id: api_req_id, details: Box::new(details) });
-                                }
+                            if !awaiting_schedule {
+                                self.hand_over(api_req_id, def, shared, event_tx);
                             }
                         }
                     }
@@ -1561,10 +1622,7 @@ impl CcpState {
                             .find(|p| p.api_req_id == api_req_id)
                         {
                             Some(pair) => pair.is_last = true,
-                            None => {
-                                shared.reference.push_contract_details_end(api_req_id);
-                                emit(event_tx, Event::ContractDetailsEnd(api_req_id));
-                            }
+                            None => self.end_lookup(api_req_id, ccp_conn, shared, event_tx, hb),
                         }
                     }
                     let rules = crate::control::contracts::parse_market_rules(msg);
@@ -1689,36 +1747,28 @@ impl CcpState {
                             // waiting for a definition that will not come.
                             self.pending_secdef.retain(|(rid, ss, _)| *rid != req_id || *ss);
                             if !is_internal {
-                                shared.reference.push_historical_error(
-                                    req_id, 200,
-                                    "No security definition has been found for the request".to_string(),
+                                // Ended unconditionally: the pending entry was
+                                // dropped just above, so the fan-out branch
+                                // below can no longer supply the end for the
+                                // by-symbol leg and a caller blocked on it
+                                // would wait forever.
+                                self.refuse_lookup(
+                                    req_id, crate::error_codes::Refusal::NO_DEFINITION, NO_DEFINITION_FOUND.to_string(),
+                                    ccp_conn, shared, event_tx, hb,
                                 );
-                                // Unconditional: the pending entry was dropped
-                                // just above, so the fan-out branch below can no
-                                // longer supply the end for the by-symbol leg and
-                                // a caller blocked on it would wait forever.
-                                shared.reference.push_contract_details_end(req_id);
-                                emit(event_tx, Event::ContractDetailsEnd(req_id));
                             } else {
                                 self.abandon_holders_of(req_id, context, shared);
                             }
                         } else if join_key.is_empty() {
                             // No join key — emit immediately without schedule data.
                             if !is_internal {
-                                if self.details_delivered.entry(req_id).or_default().insert(def.con_id as i64) {
-                                    let for_event = clone_for_event(event_tx, &def);
-                                    shared.reference.push_contract_details(req_id, def);
-                                    if let Some(details) = for_event {
-                                        emit(event_tx, Event::ContractDetails { req_id, details: Box::new(details) });
-                                    }
-                                }
+                                self.hand_over(req_id, def, shared, event_tx);
                                 // The end is the lookup's, not the row's: a
                                 // number reused for a contract it was already
                                 // handed got neither, and waited out its
                                 // deadline.
                                 if is_last {
-                                    shared.reference.push_contract_details_end(req_id);
-                                    emit(event_tx, Event::ContractDetailsEnd(req_id));
+                                    self.end_lookup(req_id, ccp_conn, shared, event_tx, hb);
                                 }
                             }
                         } else if is_internal {
@@ -1756,8 +1806,7 @@ impl CcpState {
                                 {
                                     pair.is_last = true;
                                 } else {
-                                    shared.reference.push_contract_details_end(req_id);
-                                    emit(event_tx, Event::ContractDetailsEnd(req_id));
+                                    self.end_lookup(req_id, ccp_conn, shared, event_tx, hb);
                                 }
                             } else {
                                 let mut fanout_req_ids = Vec::with_capacity(fanout_exchanges.len());
@@ -2096,16 +2145,16 @@ impl CcpState {
                 ),
             };
             log::warn!("Contract-details unanswered: req_id={req_id} ({why})");
-            shared.reference.push_historical_error(req_id, code, why);
-            shared.reference.push_contract_details_end(req_id);
-            emit(event_tx, Event::ContractDetailsEnd(req_id));
+            self.fail_lookup(req_id, code, why, shared, event_tx);
         }
     }
 
     pub(crate) fn sweep_pending_schedule_pairs(
         &mut self,
+        ccp_conn: &mut Option<Connection>,
         shared: &SharedState,
         event_tx: &Option<EventSink>,
+        hb: &mut HeartbeatState,
     ) {
         let now = Instant::now();
         let mut emit_now: Vec<PendingSchedulePair> = Vec::new();
@@ -2132,21 +2181,9 @@ impl CcpState {
         for p in emit_now {
             // Same gate as every other way a contract reaches the caller: the
             // venue fan-out describes one contract many times over.
-            if !self.details_delivered.entry(p.api_req_id).or_default().insert(p.def.con_id as i64) {
-                if p.is_last {
-                    shared.reference.push_contract_details_end(p.api_req_id);
-                    emit(event_tx, Event::ContractDetailsEnd(p.api_req_id));
-                }
-                continue;
-            }
-            let for_event = clone_for_event(event_tx, &p.def);
-            shared.reference.push_contract_details(p.api_req_id, p.def);
-            if let Some(details) = for_event {
-                emit(event_tx, Event::ContractDetails { req_id: p.api_req_id, details: Box::new(details) });
-            }
+            self.hand_over(p.api_req_id, p.def, shared, event_tx);
             if p.is_last {
-                shared.reference.push_contract_details_end(p.api_req_id);
-                emit(event_tx, Event::ContractDetailsEnd(p.api_req_id));
+                self.end_lookup(p.api_req_id, ccp_conn, shared, event_tx, hb);
             }
         }
     }
@@ -2156,8 +2193,10 @@ impl CcpState {
     fn handle_schedule_reply(
         &mut self,
         msg: &[u8],
+        ccp_conn: &mut Option<Connection>,
         shared: &SharedState,
         event_tx: &Option<EventSink>,
+        hb: &mut HeartbeatState,
     ) {
         // Extract 6256 from the reply to locate the matching pair.
         let join_key = match extract_tag_value(msg, b"6256=") {
@@ -2192,24 +2231,12 @@ impl CcpState {
                 crate::control::contracts::format_sessions_string(&sched.liquid_hours, named)
             );
         }
-        let for_event = clone_for_event(event_tx, &pair.def);
         // The schedule reply completes the pairing, and this is where the row
         // that carries the trading hours reaches the caller. Same gate as every
         // other path: one contract, delivered once.
-        if !self.details_delivered.entry(pair.api_req_id).or_default().insert(pair.def.con_id as i64) {
-            if pair.is_last {
-                shared.reference.push_contract_details_end(pair.api_req_id);
-                emit(event_tx, Event::ContractDetailsEnd(pair.api_req_id));
-            }
-            return;
-        }
-        shared.reference.push_contract_details(pair.api_req_id, pair.def);
-        if let Some(details) = for_event {
-            emit(event_tx, Event::ContractDetails { req_id: pair.api_req_id, details: Box::new(details) });
-        }
+        self.hand_over(pair.api_req_id, pair.def, shared, event_tx);
         if pair.is_last {
-            shared.reference.push_contract_details_end(pair.api_req_id);
-            emit(event_tx, Event::ContractDetailsEnd(pair.api_req_id));
+            self.end_lookup(pair.api_req_id, ccp_conn, shared, event_tx, hb);
         }
     }
 
@@ -2482,10 +2509,15 @@ impl CcpState {
         }
     }
 
-    pub(crate) fn send_secdef_request(&mut self, req_id: u32, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    /// Ask the venue for the contract an id names.
+    ///
+    /// `event_tx` is where a caller's lookup that cannot be sent is told it
+    /// ended; a lookup of the engine's own passes none.
+    pub(crate) fn send_secdef_request(&mut self, req_id: u32, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, event_tx: &Option<EventSink>) {
         // A lookup sent afresh under a number forgets what that number was
         // handed before, as the lookup by symbol does.
         self.details_delivered.remove(&req_id);
+        self.continuous_lookups.remove(&req_id);
         let sent = match ccp_conn.as_mut() {
             Some(conn) => {
                 let con_id_str = con_id.to_string();
@@ -2509,7 +2541,7 @@ impl CcpState {
                 hb.last_ccp_sent = Instant::now();
             }
             Err(why) => {
-                if Self::refuse_unsent_lookup(req_id, &why, shared) {
+                if self.refuse_unsent_lookup(req_id, &why, shared, event_tx) {
                     return;
                 }
             }
@@ -2524,18 +2556,149 @@ impl CcpState {
     /// while a matching-symbols or option-chain request in the same state is
     /// refused at once. A lookup of the engine's own is queued all the same
     /// and answers `false`: what waits on it is told by its own sweep.
-    fn refuse_unsent_lookup(req_id: u32, why: &str, shared: &SharedState) -> bool {
+    ///
+    /// Ended through the same helper as every other lookup, so a caller
+    /// listening for events hears the end too — a continuous future's second
+    /// lookup among them.
+    fn refuse_unsent_lookup(&mut self, req_id: u32, why: &str, shared: &SharedState, event_tx: &Option<EventSink>) -> bool {
         if req_id >= crate::bridge::ENGINE_ID_BASE {
             log::warn!("secdef request req_id={req_id:#x} queued unsent: {why}");
             return false;
         }
         log::warn!("Contract details request req_id={req_id} not sent: {why}");
-        shared.reference.push_historical_error(
+        self.fail_lookup(
             req_id, crate::error_codes::Refusal::NOT_CONNECTED,
-            format!("contract details request could not be sent: {why}"),
+            format!("contract details request could not be sent: {why}"), shared, event_tx,
         );
-        shared.reference.push_contract_details_end(req_id);
         true
+    }
+
+    /// Hand a caller one contract its lookup found.
+    ///
+    /// Every row reaches a caller through here, and once: a lookup on a
+    /// smart-routed symbol describes one contract many times over. A continuous
+    /// future's own rows are held until its lookup ends instead.
+    fn hand_over(
+        &mut self,
+        req_id: u32,
+        def: crate::control::contracts::ContractDefinition,
+        shared: &SharedState,
+        event_tx: &Option<EventSink>,
+    ) {
+        if let Some(asked) = self.continuous_lookups.get_mut(&req_id)
+            && !asked.asking_listed
+        {
+            // One per venue and multiplier, the first stated kept, as a
+            // gateway keeps them; and one per contract, as every row here.
+            let seen = asked.held.iter().any(|held| {
+                held.con_id == def.con_id
+                    || (held.exchange == def.exchange && held.multiplier == def.multiplier)
+            });
+            if !seen {
+                asked.held.push(def);
+            }
+            return;
+        }
+        if !self.details_delivered.entry(req_id).or_default().insert(def.con_id as i64) {
+            return;
+        }
+        if let Some(asked) = self.continuous_lookups.get_mut(&req_id) {
+            asked.listed_found = true;
+        }
+        let for_event = clone_for_event(event_tx, &def);
+        shared.reference.push_contract_details(req_id, def);
+        if let Some(details) = for_event {
+            emit(event_tx, Event::ContractDetails { req_id, details: Box::new(details) });
+        }
+    }
+
+    /// End a caller's lookup.
+    ///
+    /// A continuous future's end is where the rest of its answer is settled:
+    /// the listed months are asked for where the caller wanted them too, and
+    /// otherwise the continuous contract is handed over, after any listed
+    /// month, under the type a gateway reports it as. A lookup that found
+    /// nothing a gateway would hand over is answered as a contract not found.
+    fn end_lookup(
+        &mut self,
+        req_id: u32,
+        ccp_conn: &mut Option<Connection>,
+        shared: &SharedState,
+        event_tx: &Option<EventSink>,
+        hb: &mut HeartbeatState,
+    ) {
+        if let Some(mut asked) = self.continuous_lookups.remove(&req_id) {
+            if asked.listed_too && !asked.asking_listed {
+                asked.asking_listed = true;
+                let (symbol, exchange, currency) =
+                    (asked.symbol.clone(), asked.exchange.clone(), asked.currency.clone());
+                let (filters, include_expired) = (asked.filters.clone(), asked.include_expired);
+                self.continuous_lookups.insert(req_id, asked);
+                self.send_secdef_request_by_symbol(
+                    req_id, &symbol, "FUT", &exchange, &currency, &filters, include_expired,
+                    ccp_conn, hb, shared, event_tx,
+                );
+                return;
+            }
+            let found = if asked.listed_too { asked.listed_found } else { !asked.held.is_empty() };
+            if !found {
+                shared.reference.push_historical_error(
+                    req_id, crate::error_codes::Refusal::NO_DEFINITION, NO_DEFINITION_FOUND.to_string(),
+                );
+            } else {
+                for mut def in asked.held {
+                    def.sec_type = crate::control::contracts::SecurityType::Other("CONTFUT".into());
+                    let for_event = clone_for_event(event_tx, &def);
+                    shared.reference.push_contract_details(req_id, def);
+                    if let Some(details) = for_event {
+                        emit(event_tx, Event::ContractDetails { req_id, details: Box::new(details) });
+                    }
+                }
+            }
+        }
+        shared.reference.push_contract_details_end(req_id);
+        emit(event_tx, Event::ContractDetailsEnd(req_id));
+    }
+
+    /// A caller's lookup the venue refused, or answered with no contract.
+    ///
+    /// Refused while a continuous future is asked for, the lookup goes on as
+    /// though that part had ended, which is what a gateway does with it.
+    #[allow(clippy::too_many_arguments)]
+    fn refuse_lookup(
+        &mut self,
+        req_id: u32,
+        code: i32,
+        why: String,
+        ccp_conn: &mut Option<Connection>,
+        shared: &SharedState,
+        event_tx: &Option<EventSink>,
+        hb: &mut HeartbeatState,
+    ) {
+        if self.continuous_lookups.get(&req_id).is_some_and(|asked| !asked.asking_listed) {
+            // The caller is told nothing of it, so it is kept here: the only
+            // word of why the continuous contract is missing from the answer.
+            log::info!("continuous lookup req_id={req_id} refused ({code}): {why}");
+            self.end_lookup(req_id, ccp_conn, shared, event_tx, hb);
+            return;
+        }
+        self.fail_lookup(req_id, code, why, shared, event_tx);
+    }
+
+    /// A caller's lookup that ends without the venue's answer: unanswered, or
+    /// cut off with the connection.
+    fn fail_lookup(
+        &mut self,
+        req_id: u32,
+        code: i32,
+        why: String,
+        shared: &SharedState,
+        event_tx: &Option<EventSink>,
+    ) {
+        self.continuous_lookups.remove(&req_id);
+        shared.reference.push_historical_error(req_id, code, why);
+        shared.reference.push_contract_details_end(req_id);
+        emit(event_tx, Event::ContractDetailsEnd(req_id));
     }
 
     /// Ask the venue to name a contract so a subscription can be sent for it.
@@ -2548,28 +2711,20 @@ impl CcpState {
     ) {
         let req_id = self.next_internal_secdef_id;
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
-        let filters = pending.filters.clone();
+        let filters = described(pending.filters.clone());
         let (symbol, sec_type, exchange, currency) = (
             pending.symbol.clone(), pending.sec_type.clone(),
             pending.exchange.clone(), pending.currency.clone(),
         );
         let con_id = pending.con_id;
-        let instrument = pending.instrument;
-        let outcome = if con_id != 0 {
-            self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared);
-            Ok(())
+        if con_id != 0 {
+            self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
         } else {
             self.send_secdef_request_by_symbol(
-                req_id, &symbol, &sec_type, &exchange, &currency, &filters, ccp_conn, hb, shared,
-            )
-        };
-        match outcome {
-            Ok(()) => self.pending_md_subscribe.push((req_id, pending, Instant::now())),
-            Err(reason) => {
-                log::warn!("subscription lookup refused: {reason}");
-                shared.market.push_subscription_failure(instrument, reason);
-            }
+                req_id, &symbol, &sec_type, &exchange, &currency, &filters, false, ccp_conn, hb, shared, &None,
+            );
         }
+        self.pending_md_subscribe.push((req_id, pending, Instant::now()));
     }
 
     /// Ask the venue to name the contract a request wants, and hold the
@@ -2590,28 +2745,21 @@ impl CcpState {
             Some(c) if !c.symbol.is_empty() => c.clone(),
             _ => return Some(cmd),
         };
-        let filters = filters_named(&cmd);
+        let filters = described(filters_named(&cmd));
+        // Stated on the request, a gateway states it on the lookup that names
+        // the request's contract too.
+        let include_expired = matches!(
+            cmd,
+            crate::types::ControlCommand::FetchHistorical { include_expired: true, .. }
+                | crate::types::ControlCommand::FetchHeadTimestamp { include_expired: true, .. }
+                | crate::types::ControlCommand::FetchHistoricalTicks { include_expired: true, .. }
+        );
         let req_id = self.next_internal_secdef_id;
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
-        if let Err(reason) = self.send_secdef_request_by_symbol(
+        self.send_secdef_request_by_symbol(
             req_id, &named.symbol, &named.sec_type, &named.exchange, &named.currency,
-            &filters, ccp_conn, hb, shared,
-        ) {
-            // The lookup it would be held for cannot be made, so it is not
-            // held: told the reason under its own number, the way the sweep
-            // tells a request the venue never named.
-            log::warn!("Request abandoned: {reason}");
-            if let Some(caller_req_id) = request_id(&cmd) {
-                // The lookup this request needs could not be made, which is a
-                // fault in the request rather than one the data service had
-                // with a query it answered.
-                super::push_hmds_refusal(
-                    shared, caller_req_id, crate::error_codes::Refusal::VALIDATION, reason,
-                    matches!(cmd, crate::types::ControlCommand::FetchHistorical { .. }),
-                );
-            }
-            return None;
-        }
+            &filters, include_expired, ccp_conn, hb, shared, &None,
+        );
         self.pending_named.push((req_id, cmd, Instant::now()));
         None
     }
@@ -2656,47 +2804,41 @@ impl CcpState {
         }
     }
 
-    pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) -> Result<(), String> {
-        // A public identifier and the tags it rides on. Each kind has its
-        // own: a CUSIP goes out as 454=1|455=<id>|456=1, and 22/48 carry an
-        // ISIN or a FIGI under the character that names the source rather
-        // than a number. Sent as 22=1|48=<cusip>, a CUSIP named a source on
-        // the pair that carries an ISIN, and a FIGI was not
-        // sent at all — the lookup fell through to whatever the symbol
-        // matched. When one is set the lookup rides the identifier and
-        // drops the symbol/secType/filters.
-        //
-        // A kind this wire carries no source for is refused rather than
-        // asked by symbol: that is a different question, and its answer
-        // would read as the one the caller put.
-        let sec_id = filters.sec_id.as_str();
-        let identifier_fields: Vec<(u32, &str)> = if sec_id.is_empty() {
-            Vec::new()
+    /// Ask the venue for the contracts a caller's details request describes.
+    ///
+    /// A continuous future is asked for first, and where the caller named the
+    /// listed months as well they are asked for once it is answered, the way a
+    /// gateway asks for them; what the two lookups find is put together as the
+    /// lookup ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_contract_details_lookup(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, include_expired: bool, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, event_tx: &Option<EventSink>) {
+        // By the type alone, as a gateway routes it: named by an identifier,
+        // each of the two lookups asks by that identifier.
+        if matches!(sec_type, "CONTFUT" | "FUT+CONTFUT" | "CONTFUT+FUT") {
+            self.continuous_lookups.insert(req_id, ContinuousLookup {
+                listed_too: sec_type != "CONTFUT",
+                asking_listed: false,
+                listed_found: false,
+                held: Vec::new(),
+                symbol: symbol.to_string(),
+                exchange: exchange.to_string(),
+                currency: currency.to_string(),
+                filters: filters.clone(),
+                include_expired,
+            });
         } else {
-            match filters.sec_id_type.to_uppercase().as_str() {
-                "CUSIP" => vec![(454, "1"), (455, sec_id), (456, "1")],
-                "ISIN" => vec![(22, "4"), (48, sec_id)],
-                "FIGI" => vec![(22, "S"), (48, sec_id)],
-                // The caller named an identifier of a kind this client
-                // carries no wire source for. Asking by symbol instead is a
-                // different question, and answering it under the caller's
-                // number hands back whatever the symbol matches — so the
-                // lookup is refused rather than made.
-                other => {
-                    let kind = if other.is_empty() {
-                        "an identifier of no stated kind".to_string()
-                    } else {
-                        format!("a {other} identifier")
-                    };
-                    return Err(format!(
-                        "the lookup names {kind} this client carries no wire \
-                         source for, and asked by symbol it would answer a \
-                         different question: name the contract by its symbol \
-                         or by the venue's id",
-                    ));
-                }
-            }
-        };
+            self.continuous_lookups.remove(&req_id);
+        }
+        self.send_secdef_request_by_symbol(
+            req_id, symbol, sec_type, exchange, currency, filters, include_expired, ccp_conn, hb, shared, event_tx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, include_expired: bool, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, event_tx: &Option<EventSink>) {
+        // A public identifier and the tags it rides on. When one is set the
+        // lookup rides the identifier and drops the symbol/secType/filters.
+        let identifier_fields = identifier_fields(filters);
         let identifier_lookup = !identifier_fields.is_empty();
 
         if let Some(conn) = ccp_conn.as_mut() {
@@ -2708,8 +2850,8 @@ impl CcpState {
             // asks for the current lead month instead of a listed one; sent as
             // its own type the whole message is refused. The spelling that
             // asks for the expiring months as well asks for the continuous one
-            // the same way — the listed months are a second lookup, which this
-            // client does not yet make.
+            // the same way — the listed months are a second lookup, made once
+            // this one is answered.
             let continuous_future = matches!(sec_type, "CONTFUT" | "FUT+CONTFUT" | "CONTFUT+FUT");
             // A contract named only by its issuer is answered as fixed income,
             // whatever type the caller stated: the issuer rides a field of its
@@ -2762,7 +2904,8 @@ impl CcpState {
             }
             if identifier_lookup {
                 // Identifier lookup: the identifier and its source replace the
-                // symbol/secType/filters; exchange and currency still ride.
+                // symbol/secType/filters; exchange, primary exchange and
+                // currency still ride.
                 fields.extend_from_slice(&identifier_fields);
             } else {
                 // Both, where the caller stated both. The protocol carries
@@ -2804,33 +2947,48 @@ impl CcpState {
             if news_source.is_empty() {
                 fields.push((100, fix_exchange));
             }
-            if !identifier_lookup && !filters.primary_exchange.is_empty() {
+            if !filters.primary_exchange.is_empty() {
                 fields.push((207, &filters.primary_exchange));
             }
             if news_source.is_empty() {
                 fields.push((15, currency));
             }
-            if !issuer_id.is_empty() {
+            // An ISIN asked about anywhere but SMART is asked of any type:
+            // the identifier alone does not say which listing is meant.
+            if identifier_fields.first() == Some(&(22, "4")) && exchange != "SMART" {
+                fields.push((167, "ANY"));
+            }
+            // The issuer rides a lookup by description; beside an identifier a
+            // gateway states nothing of it.
+            if !identifier_lookup {
                 fields.push((6454, issuer_id));
             }
             fields.push((6088, "Socket"));
+            // A contract that has already expired is in scope where the caller
+            // said so, on a lookup by description. An identifier names one
+            // contract and a gateway states nothing more beside it.
+            if include_expired && !identifier_lookup {
+                fields.push((6320, "1"));
+            }
+            // A gateway writes no field it has nothing for: an empty venue or
+            // currency is left out, not stated as nothing.
+            fields.retain(|(_, value)| !value.is_empty());
             if let Err(e) = conn.send_fix(&fields) {
-                if Self::refuse_unsent_lookup(req_id, &e.to_string(), shared) {
-                    return Ok(());
+                if self.refuse_unsent_lookup(req_id, &e.to_string(), shared, event_tx) {
+                    return;
                 }
             } else {
                 log::info!("Sent secdef lookup: req_id={req_id} symbol={symbol} sec_type={sec_type} identifier={identifier_lookup}");
                 hb.last_ccp_sent = Instant::now();
             }
-        } else if Self::refuse_unsent_lookup(req_id, "no connection to the venue", shared) {
-            return Ok(());
+        } else if self.refuse_unsent_lookup(req_id, "no connection to the venue", shared, event_tx) {
+            return;
         }
         // By-symbol lookup: master reply carries `6046={exch_list}`. The
         // server never emits a 323=5/6 terminator; completion is detected
         // by counting per-exchange fan-out replies (see `pending_fanout`).
         self.details_delivered.remove(&req_id);
         self.pending_secdef.push((req_id, false, Instant::now() + unanswered_after(req_id)));
-        Ok(())
     }
 
     /// Send a per-exchange fan-out request after a by-symbol master reply.
@@ -3453,11 +3611,20 @@ impl CcpState {
         }
         self.auto_fetched_conids.retain(|_, rid| !lost_auto_fetch.contains(rid));
         ended.extend(self.pending_fanout.drain(..).map(|p| p.api_req_id));
+        // A continuous future's lookup is answered once every lookup it makes
+        // is in, and the connection that would make the rest has gone: it is
+        // failed whole, rather than handed over in part.
+        for (req_id, _) in self.continuous_lookups.drain() {
+            self.pending_schedule_pair.retain(|p| p.api_req_id != req_id);
+            if !ended.contains(&req_id) {
+                ended.push(req_id);
+            }
+        }
         // A contract the venue did name, whose trading hours it now will not
         // state: delivered without them, the way the pairing's own deadline
         // delivers it.
         for p in &mut self.pending_schedule_pair { p.deadline = Instant::now(); }
-        self.sweep_pending_schedule_pairs(shared, event_tx);
+        self.sweep_pending_schedule_pairs(&mut None, shared, event_tx, &mut HeartbeatState::new());
         self.details_delivered.clear();
         // What the advisor was asked, which only the connection that was asked
         // can answer: the one that replaces it is asked nothing this one was.
@@ -3497,9 +3664,7 @@ impl CcpState {
         );
         let code = crate::error_codes::Refusal::NOT_CONNECTED;
         for req_id in ended {
-            shared.reference.push_historical_error(req_id, code, WHY.to_string());
-            shared.reference.push_contract_details_end(req_id);
-            emit(event_tx, Event::ContractDetailsEnd(req_id));
+            self.fail_lookup(req_id, code, WHY.to_string(), shared, event_tx);
         }
         for req_id in refused {
             shared.reference.push_historical_error(req_id, code, WHY.to_string());
@@ -3830,7 +3995,7 @@ impl CcpState {
         let req_id = self.next_internal_secdef_id;
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
         self.auto_fetched_conids.insert(con_id, req_id);
-        self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared);
+        self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
     }
 
     /// Park a scanner result and dispatch concurrent secdef requests for every cache-
@@ -3873,7 +4038,7 @@ impl CcpState {
                 let req_id = self.next_internal_secdef_id;
                 self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
                 self.auto_fetched_conids.insert(con_id, req_id);
-                self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared);
+                self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
             }
         }
         self.pending_scanner_enrichment.push(PendingScannerEnrichment {

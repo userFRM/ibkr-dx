@@ -16,12 +16,12 @@ pub(super) fn phase_contract_details(conns: Conns) -> Conns {
     );
 
     // Step 2: Send ControlCommand through the channel
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1200, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1200, include_expired: false, filters: Default::default() }).unwrap();
     // The same contract asked for by name. A definition asked for by id and one
     // asked for by name are answered from the same record, so any field that
     // arrives for one and not the other is this client's reading of the reply
     // rather than the venue withholding it.
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "SPY".to_string(), sec_type: "STK".to_string(), exchange: "SMART".to_string(), currency: "USD".to_string(), ..Default::default() }, req_id: 1201, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "SPY".to_string(), sec_type: "STK".to_string(), exchange: "SMART".to_string(), currency: "USD".to_string(), ..Default::default() }, req_id: 1201, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // Step 3: Wait for real server response via Event channel
@@ -98,7 +98,7 @@ pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
     );
 
     // Send by symbol (con_id=0 triggers symbol-based lookup)
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, req_id: 7800, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, req_id: 7800, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut contract: Option<contracts::ContractDefinition> = None;
@@ -145,7 +145,7 @@ pub(super) fn phase_trading_hours(conns: Conns) -> Conns {
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: String::new(), sec_type: String::new(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8000, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: String::new(), sec_type: String::new(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8000, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut details: Option<contracts::ContractDefinition> = None;
@@ -246,7 +246,7 @@ pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8400, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 8400, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut contract: Option<contracts::ContractDefinition> = None;
@@ -327,7 +327,7 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
         shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // A request in flight when the transport drops is answered by nobody. The
@@ -355,7 +355,7 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
             Ok(Event::Disconnected) if !reasked => {
                 reasked = true;
                 std::thread::sleep(Duration::from_secs(3));
-                let _ = control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, filters: Default::default() });
+                let _ = control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 1001, include_expired: false, filters: Default::default() });
             }
             _ => {}
         }

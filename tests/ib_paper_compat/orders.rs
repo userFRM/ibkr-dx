@@ -559,7 +559,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 19: Trailing Stop Order (SPY)",
-        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::TrailingStop { trail_stop_price: 0, trail_amt: 5_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
+        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::TrailingStop { trail_stop_price: None, trail_amt: 5_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -568,7 +568,7 @@ pub(super) fn phase_trailing_stop(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop_limit(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 20: Trailing Stop Limit Order (SPY)",
-        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::TrailingStopLimit { trail_stop_price: 0, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
+        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::TrailingStopLimit { trail_stop_price: None, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -898,7 +898,7 @@ pub(super) fn phase_short_sell(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop_pct(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 36: Trailing Stop Percent Order (SPY)",
-        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::TrailPct { trail_stop_price: 0, trail_pct: 250 }, tif: b'0', attrs: OrderAttrs::default() },
+        OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::TrailPct { trail_stop_price: None, trail_pct: 250 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -2334,7 +2334,7 @@ pub(super) fn phase_replace_a_trailing_stop(conns: Conns) -> Conns {
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
         order_id, instrument: inst_id, con_id: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE,
-        kind: OrderKind::TrailingStop { trail_stop_price: 0, trail_amt: 5_00_000_000 },
+        kind: OrderKind::TrailingStop { trail_stop_price: None, trail_amt: 5_00_000_000 },
         tif: b'0', attrs: OrderAttrs::default(),
     })).unwrap();
     control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
@@ -2436,7 +2436,7 @@ pub(super) fn phase_replace_a_trail_amount(conns: Conns) -> Conns {
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
         order_id, instrument: inst_id, con_id: 0, side: Side::Sell, qty: ibkr_dx::types::QTY_SCALE,
-        kind: OrderKind::TrailingStop { trail_stop_price: 0, trail_amt: placed_trail },
+        kind: OrderKind::TrailingStop { trail_stop_price: None, trail_amt: placed_trail },
         tif: b'0', attrs: OrderAttrs::default(),
     })).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -2533,7 +2533,7 @@ pub(super) fn phase_all_or_none_trailing_stop(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
         order_id: oid, instrument: inst, con_id: 0, side: Side::Sell,
         qty: 200 * ibkr_dx::types::QTY_SCALE,
-        kind: OrderKind::TrailingStop { trail_stop_price: 0, trail_amt: 5_00_000_000 },
+        kind: OrderKind::TrailingStop { trail_stop_price: None, trail_amt: 5_00_000_000 },
         tif: b'0', attrs: OrderAttrs { all_or_none: true, ..Default::default() },
     })).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -2621,7 +2621,7 @@ pub(super) fn phase_replace_each_refused_order(conns: Conns) -> Conns {
         ("sweep to fill", lmt(), OrderAttrs { sweep_to_fill: true, ..Default::default() }),
         ("an OCA group", lmt(), OrderAttrs { oca_group_str: "ibkr-dx-197".into(), ..Default::default() }),
         ("a good-till date", lmt(), OrderAttrs { good_till_date_ymd: 20261231, ..Default::default() }),
-        ("a trailing stop limit", OrderKind::TrailingStopLimit { trail_stop_price: 0, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 }, OrderAttrs::default()),
+        ("a trailing stop limit", OrderKind::TrailingStopLimit { trail_stop_price: None, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 }, OrderAttrs::default()),
         ("a relative order", OrderKind::Rel { offset: 1_00_000_000, price_cap: 0 }, OrderAttrs::default()),
         // The offset is refused on this one: "Peg diff offset is not allowed
         // for PegToMid".

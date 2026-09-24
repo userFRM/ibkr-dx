@@ -1156,24 +1156,20 @@ fn a_trail_the_venue_states_as_a_percentage_is_read_back_as_one() {
     assert_eq!(amount.trailing_percent, 0.0, "and no percentage");
 }
 
-/// A recovery record arriving with the instrument table already full used
-/// to take the engine down. A missing order beats a dead hot loop, and the
-/// conversion to the fallible register is what makes that true — nothing
-/// else in the suite fails if it is reverted.
+/// A recovery record arriving with more contracts live than the tables were
+/// made for is tracked like any other. At the old size the order was left out
+/// of the book, and a withdrawal of everything composed its cancels from that
+/// book and skipped it.
 #[test]
-fn a_full_instrument_table_does_not_abort_the_recovery_path() {
+fn an_order_recovered_past_the_size_the_tables_are_made_with_is_tracked() {
     let mut context = Context::new();
     let mut ccp = CcpState::new();
     let shared = SharedState::new();
 
-    // Fill every slot, so the next registration has nowhere to go.
+    // Every slot the tables are made with, taken.
     for con_id in 1..=(crate::types::MAX_INSTRUMENTS as i64) {
-        assert!(context.try_register_instrument(con_id).is_some(), "slot {con_id}");
+        context.register_instrument(con_id);
     }
-    assert!(
-        context.try_register_instrument(999_999).is_none(),
-        "the table really is full",
-    );
 
     let mut frame = std::collections::HashMap::new();
     for (tag, val) in [
@@ -1182,23 +1178,11 @@ fn a_full_instrument_table_does_not_abort_the_recovery_path() {
     ] {
         frame.insert(tag, val.to_string());
     }
-
-    // The point of the test: this must return rather than panic.
     ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
 
-    assert!(
-        context.order(42).is_none(),
-        "the order is not tracked, which is the acknowledged cost",
-    );
-    // And the cost is counted rather than only logged. The order is working at
-    // the venue and absent from the book a withdrawal of everything composes
-    // its cancels from; uncounted, that withdrawal returns as though the
-    // account had been flattened.
-    assert_eq!(
-        shared.orders.orders_without_a_slot(), 1,
-        "the order the book could not hold is counted for the calls that answer \
-         for the whole account",
-    );
+    let order = context.order(42).expect("the order is in the book");
+    assert_eq!(order.instrument as usize, crate::types::MAX_INSTRUMENTS, "in the slot past them");
+    assert_eq!(context.market.con_id(order.instrument), Some(888888));
 }
 /// A short sale the venue replays is published as a short sale.
 ///
@@ -5189,6 +5173,25 @@ fn a_fill_for_an_untracked_order_is_still_booked() {
     );
 }
 
+/// A fill on a contract past the size the slot tables are made with is booked
+/// like any other, and the holding a caller reads moves with it. At the old
+/// size it was dropped with "instrument table full, position not updated".
+#[test]
+fn a_fill_past_the_size_the_tables_are_made_with_is_booked() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    for con_id in 1..=(crate::types::MAX_INSTRUMENTS as i64) {
+        context.register_instrument(con_id);
+    }
+    ccp.handle_exec_report(&untracked_fill(&[]), b"", &mut context, &shared, &None, "");
+
+    let fills = shared.orders.drain_fills();
+    assert_eq!(fills.len(), 1, "the fill is reported");
+    let slot = fills[0].0.instrument;
+    assert!(slot as usize >= crate::types::MAX_INSTRUMENTS, "in a slot past them: {slot}");
+    assert_eq!(context.position(slot), 5.0, "the engine's holding moved");
+    assert_eq!(shared.portfolio.position(slot), 5.0, "and the one a caller reads");
+}
+
 /// A sell books the other way. Taking the side from the report rather than
 /// defaulting is the whole point: the wrong sign is worse than no fill.
 #[test]
@@ -6542,58 +6545,50 @@ fn price_management_is_read_from_its_own_field() {
     }
 }
 
-/// A lookup named by an identifier this client carries no wire source for is
-/// refused. Asked by symbol instead, it answered a different question than
-/// the one the caller put, under the caller's own number — whatever the
-/// symbol matched.
-#[test]
-fn an_identifier_this_client_cannot_carry_refuses_the_lookup() {
+/// Read a lookup the way the venue receives it, with `|` between the fields.
+fn lookup_sent(
+    req_id: u32, symbol: &str, exchange: &str, filters: &crate::types::SecDefFilters,
+    include_expired: bool,
+) -> (String, CcpState) {
+    use std::io::Read;
+    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
     let mut ccp = CcpState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
-    let mut no_conn: Option<Connection> = None;
-    let filters = crate::types::SecDefFilters {
-        sec_id: "B04KRF9".to_string(),
-        sec_id_type: "SEDOL".to_string(),
-        ..Default::default()
-    };
-    let reason = ccp.send_secdef_request_by_symbol(
-        9, "AAPL", "STK", "SMART", "USD", &filters, &mut no_conn, &mut hb, &shared,
-    ).expect_err("a kind this client cannot carry is not looked up by symbol");
-    assert!(reason.contains("SEDOL"), "the refusal names the kind: {reason}");
-    assert!(ccp.pending_secdef.is_empty(), "nothing was queued to be answered");
+    let mut conn = Some(conn);
+    ccp.send_secdef_request_by_symbol(
+        req_id, symbol, "STK", exchange, "USD", filters, include_expired, &mut conn, &mut hb, &shared, &None,
+    );
+    let mut buf = [0u8; 4096];
+    let n = peer.read(&mut buf).unwrap();
+    (String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|"), ccp)
 }
 
-/// Each public identifier rides the tags the venue reads it on. A CUSIP was
-/// going out as `22=1|48=<id>`, which is the pair an ISIN uses, and a FIGI was
-/// not going out at all — the lookup fell through to the symbol and answered
-/// with whatever that matched.
+/// Each public identifier rides the tags the venue reads it on: `22`/`48`,
+/// under the character that names its source. A CUSIP went out as
+/// `454=1|455|456=1`, the form a gateway uses for a symbol that is itself a
+/// CUSIP, not for an identifier; SEDOL, RIC and Bloomberg symbols were refused
+/// here and never asked, where a gateway asks for each. Nothing of the issuer
+/// rides beside an identifier.
 #[test]
 fn a_public_identifier_rides_the_tags_its_own_kind_uses() {
-    use std::io::Read;
     for (kind, id, wanted, unwanted) in [
-        ("CUSIP", "037833100", vec!["454=1", "455=037833100", "456=1"], vec!["22=", "48="]),
+        ("CUSIP", "037833100", vec!["22=1", "48=037833100"], vec!["454=", "455="]),
         ("ISIN", "US0378331005", vec!["22=4", "48=US0378331005"], vec!["454=", "455="]),
         ("FIGI", "BBG000B9XRY4", vec!["22=S", "48=BBG000B9XRY4"], vec!["454=", "455="]),
+        ("SEDOL", "2046251", vec!["22=2", "48=2046251"], vec!["454=", "455="]),
+        ("RIC", "AAPL.OQ", vec!["22=5", "48=AAPL.OQ"], vec!["454=", "455="]),
+        ("BB_SYMBOL", "AAPL UW Equity", vec!["22=A", "48=AAPL UW Equity"], vec!["454=", "455="]),
     ] {
-        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
-        let mut ccp = CcpState::new();
-        let shared = SharedState::new();
-        let mut hb = HeartbeatState::new();
-        let mut conn = Some(conn);
         let filters = crate::types::SecDefFilters {
             sec_id: id.to_string(),
             sec_id_type: kind.to_string(),
+            primary_exchange: "NASDAQ".to_string(),
+            issuer_id: "e1234567".to_string(),
             ..Default::default()
         };
-        let sent = ccp.send_secdef_request_by_symbol(
-            9, "AAPL", "STK", "SMART", "USD", &filters, &mut conn, &mut hb, &shared,
-        );
-        sent.expect("a CUSIP lookup is one this client can ask");
-
-        let mut buf = [0u8; 4096];
-        let n = peer.read(&mut buf).unwrap();
-        let msg = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
+        let (msg, ccp) = lookup_sent(9, "AAPL", "SMART", &filters, false);
+        assert!(!msg.contains("|6454="), "{kind} states no issuer: {msg}");
         for field in wanted {
             assert!(msg.contains(&format!("|{field}|")), "{kind} states {field}: {msg}");
         }
@@ -6603,33 +6598,75 @@ fn a_public_identifier_rides_the_tags_its_own_kind_uses() {
         // The identifier replaces the symbol, and asking by both is asking a
         // different question from the one the caller put.
         assert!(!msg.contains("|55=AAPL|"), "{kind} does not also ask by symbol: {msg}");
+        // Where it is listed rides beside the identifier, as the venue and
+        // the currency do.
+        assert!(msg.contains("|207=NASDAQ|"), "{kind} states where it is listed: {msg}");
+        assert!(!msg.contains("|167="), "{kind} asked on SMART states no type: {msg}");
+        assert_eq!(ccp.pending_secdef.len(), 1, "{kind} waits for its answer");
     }
 }
 
-/// A kind of identifier this client carries no source for is refused rather
-/// than asked for by symbol: that is a different question, and its answer
-/// would read as the one the caller put.
+/// An ISIN asked about anywhere but SMART is asked of any type, as a gateway
+/// asks it; no other kind of identifier is.
 #[test]
-fn an_identifier_of_an_unknown_kind_is_refused_not_asked_by_symbol() {
-    use std::io::Read;
-    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
-    let mut ccp = CcpState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    let mut conn = Some(conn);
-    let filters = crate::types::SecDefFilters {
-        sec_id: "XS1234567890".to_string(),
-        sec_id_type: "SEDOL".to_string(),
+fn an_isin_asked_off_smart_is_asked_of_any_type() {
+    let isin = crate::types::SecDefFilters {
+        sec_id: "US0378331005".to_string(),
+        sec_id_type: "ISIN".to_string(),
         ..Default::default()
     };
-    let why = ccp.send_secdef_request_by_symbol(
-        16, "AAPL", "STK", "SMART", "USD", &filters, &mut conn, &mut hb, &shared,
-    ).expect_err("the lookup is refused, and says what it could not ask");
-    assert!(why.contains("SEDOL"), "the refusal names what it could not carry: {why}");
-    assert!(ccp.pending_secdef.is_empty(), "and nothing is queued for an answer");
-    peer.set_nonblocking(true).unwrap();
-    let mut buf = [0u8; 4096];
-    assert!(peer.read(&mut buf).is_err(), "and nothing reached the wire");
+    for exchange in ["", "IDEALPRO", "NASDAQ"] {
+        let (msg, _) = lookup_sent(9, "", exchange, &isin, false);
+        assert!(msg.contains("|167=ANY|"), "an ISIN on {exchange:?}: {msg}");
+        // A venue that is nothing is not stated, as a gateway states none.
+        assert!(!msg.contains("|100=|"), "an ISIN on {exchange:?}: {msg}");
+    }
+    let (msg, _) = lookup_sent(9, "", "SMART", &isin, false);
+    assert!(!msg.contains("|167="), "an ISIN on SMART: {msg}");
+    let figi = crate::types::SecDefFilters {
+        sec_id: "BBG000B9XRY4".to_string(),
+        sec_id_type: "FIGI".to_string(),
+        ..Default::default()
+    };
+    let (msg, _) = lookup_sent(9, "", "NASDAQ", &figi, false);
+    assert!(!msg.contains("|167="), "a FIGI off SMART: {msg}");
+}
+
+/// A kind of identifier a gateway does not know is no identifier to it: the
+/// name is read exactly, so a lower-case one is not known either, and the
+/// lookup goes by symbol with the identifier left out. It was refused here,
+/// which a gateway never does.
+#[test]
+fn an_identifier_of_a_kind_a_gateway_does_not_know_is_looked_up_by_symbol() {
+    for kind in ["sedol", "isin", "BBGID", ""] {
+        let filters = crate::types::SecDefFilters {
+            sec_id: "B04KRF9".to_string(),
+            sec_id_type: kind.to_string(),
+            ..Default::default()
+        };
+        let (msg, ccp) = lookup_sent(16, "AAPL", "SMART", &filters, false);
+        assert!(msg.contains("|55=AAPL|"), "{kind:?} is asked by symbol: {msg}");
+        assert!(!msg.contains("|48=") && !msg.contains("|455="), "{kind:?} leaves the identifier out: {msg}");
+        assert_eq!(ccp.pending_secdef.len(), 1, "{kind:?} waits for its answer");
+    }
+}
+
+/// A lookup by description states that an expired contract is in scope where
+/// the caller said so; one by identifier states nothing more beside it, as a
+/// gateway states nothing.
+#[test]
+fn an_expired_contract_is_in_scope_where_the_caller_said_so() {
+    let (msg, _) = lookup_sent(9, "ES", "CME", &Default::default(), true);
+    assert!(msg.contains("|6320=1|"), "{msg}");
+    let (msg, _) = lookup_sent(9, "ES", "CME", &Default::default(), false);
+    assert!(!msg.contains("|6320="), "{msg}");
+    let isin = crate::types::SecDefFilters {
+        sec_id: "US0378331005".to_string(),
+        sec_id_type: "ISIN".to_string(),
+        ..Default::default()
+    };
+    let (msg, _) = lookup_sent(9, "", "SMART", &isin, true);
+    assert!(!msg.contains("|6320="), "{msg}");
 }
 
 /// A lookup states the symbol and the venue's local symbol as two separate
@@ -6650,8 +6687,8 @@ fn a_lookup_states_both_the_symbol_and_the_local_symbol() {
         ..Default::default()
     };
     ccp.send_secdef_request_by_symbol(
-        11, "ES", "FUT", "CME", "USD", &filters, &mut conn, &mut hb, &shared,
-    ).expect("a symbol lookup is one this client can ask");
+        11, "ES", "FUT", "CME", "USD", &filters, false, &mut conn, &mut hb, &shared, &None,
+    );
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -6680,8 +6717,8 @@ fn a_news_feed_states_its_provider_not_a_venue() {
             ..Default::default()
         };
         ccp.send_secdef_request_by_symbol(
-            13, "BRF:BRF_ALL", "NEWS", exchange, "USD", &filters, &mut conn, &mut hb, &shared,
-        ).expect("a news lookup is one this client can ask");
+            13, "BRF:BRF_ALL", "NEWS", exchange, "USD", &filters, false, &mut conn, &mut hb, &shared, &None,
+        );
 
         let mut buf = [0u8; 4096];
         let n = peer.read(&mut buf).unwrap();
@@ -6716,8 +6753,8 @@ fn a_continuous_future_is_a_future_that_names_its_lead_month() {
             ..Default::default()
         };
         ccp.send_secdef_request_by_symbol(
-            14, "GBL", stated, "EUREX", "EUR", &filters, &mut conn, &mut hb, &shared,
-        ).expect("a continuous future lookup is one this client can ask");
+            14, "GBL", stated, "EUREX", "EUR", &filters, false, &mut conn, &mut hb, &shared, &None,
+        );
 
         let mut buf = [0u8; 4096];
         let n = peer.read(&mut buf).unwrap();
@@ -6748,8 +6785,7 @@ fn a_contract_named_by_its_issuer_is_asked_for_as_fixed_income() {
         issuer_id: "e1453318".to_string(),
         ..Default::default()
     };
-    ccp.send_secdef_request_by_symbol(15, "", "", "", "", &filters, &mut conn, &mut hb, &shared)
-        .expect("an issuer lookup is one this client can ask");
+    ccp.send_secdef_request_by_symbol(15, "", "", "", "", &filters, false, &mut conn, &mut hb, &shared, &None);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -8947,9 +8983,15 @@ fn a_naming_that_matches_several_listings_is_refused_rather_than_sent_for_the_la
 fn a_lookup_that_cannot_reach_the_venue_is_refused_now() {
     let (mut ccp, _context, shared) = u186_test_state();
     let mut hb = HeartbeatState::new();
-    ccp.send_secdef_request(7, 756733, &mut None, &mut hb, &shared);
-    ccp.send_secdef_request_by_symbol(8, "SPY", "STK", "SMART", "USD", &Default::default(), &mut None, &mut hb, &shared)
-        .expect("nothing is wrong with the request itself");
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
+    let sink = Some(crate::engine::hot_loop::EventSink::new(tx, Default::default()));
+    ccp.send_secdef_request(7, 756733, &mut None, &mut hb, &shared, &sink);
+    ccp.send_secdef_request_by_symbol(8, "SPY", "STK", "SMART", "USD", &Default::default(), false, &mut None, &mut hb, &shared, &sink);
+    // And a caller listening for events hears each end as well.
+    let heard: Vec<u32> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|e| match e { Event::ContractDetailsEnd(rid) => Some(rid), _ => None })
+        .collect();
+    assert_eq!(heard, [7, 8], "each end is heard");
 
     assert!(ccp.pending_secdef.is_empty(), "nothing waits on a reply that cannot come");
     let told = shared.reference.drain_historical_errors();
@@ -8981,7 +9023,7 @@ fn a_lookup_repeated_under_its_number_is_ended_and_sent_afresh() {
     assert_eq!(shared.reference.drain_contract_details_end(), [7, 7], "and each lookup ends");
 
     let (conn, _peer) = crate::protocol::connection::Connection::for_test();
-    ccp.send_secdef_request(7, 756733, &mut Some(conn), &mut hb, &shared);
+    ccp.send_secdef_request(7, 756733, &mut Some(conn), &mut hb, &shared, &None);
     assert!(!ccp.details_delivered.contains_key(&7), "a lookup sent afresh forgets what its number was handed");
 }
 
@@ -9817,4 +9859,298 @@ fn an_execution_action_comes_from_the_report_or_the_tracked_order() {
     report.remove(&54);
     ccp.handle_exec_report(&report, b"", &mut context, &shared, &None, "");
     assert!(shared.orders.get_order_info(42).unwrap().order.action.is_empty());
+}
+
+// ── a continuous future, and the listed months beside it ──
+
+/// Everything the venue has been sent since the last read, `|` between fields.
+fn sent_since(peer: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    peer.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = peer.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8_lossy(&out).replace('\u{1}', "|")
+}
+
+/// A future as the venue states it in answer to a lookup: one record per
+/// contract, each naming its id, where it trades and its multiplier.
+fn futures_named(req_id: &str, con_ids: &[&str]) -> Vec<u8> {
+    let mut fields = vec![
+        (fix::TAG_MSG_TYPE, "d"),
+        (crate::control::contracts::TAG_SECURITY_REQ_ID, req_id),
+        (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
+    ];
+    for con_id in con_ids {
+        fields.extend([
+            (55, "ES"), (167, "FUT"),
+            (crate::control::contracts::TAG_IB_CON_ID, *con_id),
+            (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+        ]);
+    }
+    crate::protocol::fix::fix_build(&fields, 1)
+}
+
+/// Ask for `sec_type` on ES as a caller's details request does, with the
+/// venue at the other end of a socket.
+fn a_continuous_lookup(sec_type: &str) -> (CcpState, Context, SharedState, Option<Connection>, std::net::TcpStream) {
+    let filters = crate::types::SecDefFilters { trading_class: "ES".to_string(), ..Default::default() };
+    a_continuous_lookup_of(sec_type, &filters, false)
+}
+
+/// The same, naming what the caller's request names beside the type.
+fn a_continuous_lookup_of(
+    sec_type: &str, filters: &crate::types::SecDefFilters, include_expired: bool,
+) -> (CcpState, Context, SharedState, Option<Connection>, std::net::TcpStream) {
+    let (conn, peer) = crate::protocol::connection::Connection::for_test();
+    let (mut ccp, context, shared) = u186_test_state();
+    let mut conn = Some(conn);
+    ccp.send_contract_details_lookup(
+        21, "ES", sec_type, "CME", "USD", filters, include_expired, &mut conn, &mut HeartbeatState::new(), &shared, &None,
+    );
+    (ccp, context, shared, conn, peer)
+}
+
+/// Both lookups of a continuous future state what the caller's request
+/// states: that expired contracts are in scope, and an identifier where it
+/// names one — asked by that identifier each time, as a gateway routes a
+/// continuous future by its type alone.
+#[test]
+fn both_lookups_of_a_continuous_future_state_what_the_request_states() {
+    let filters = crate::types::SecDefFilters { trading_class: "ES".to_string(), ..Default::default() };
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup_of("FUT+CONTFUT", &filters, true);
+    let mut hb = HeartbeatState::new();
+    let first = sent_since(&mut peer);
+    assert!(first.contains("|6320=1|"), "{first}");
+    ccp.process_ccp_message(&futures_named("21", &["111"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    let second = sent_since(&mut peer);
+    assert!(second.contains("|320=21|") && second.contains("|6320=1|"), "{second}");
+
+    let isin = crate::types::SecDefFilters {
+        sec_id: "US0378331005".to_string(), sec_id_type: "ISIN".to_string(), ..Default::default()
+    };
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup_of("FUT+CONTFUT", &isin, false);
+    assert!(ccp.continuous_lookups.contains_key(&21), "a continuous lookup all the same");
+    let first = sent_since(&mut peer);
+    assert!(first.contains("|22=4|48=US0378331005|") && !first.contains("|55=") && !first.contains("|6857="), "{first}");
+    ccp.process_ccp_message(&futures_named("21", &["111"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    let second = sent_since(&mut peer);
+    assert!(second.contains("|320=21|") && second.contains("|22=4|48=US0378331005|"), "{second}");
+    ccp.process_ccp_message(&futures_named("21", &["111"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    assert_eq!(
+        handed_over(&shared),
+        (vec![(111, "FUT".to_string()), (111, "CONTFUT".to_string())], vec![21]),
+        "the listed month, then the continuous contract",
+    );
+}
+
+/// A continuous future the venue answers venue by venue, its first row waiting
+/// on its trading hours, is put together as one answered at once: every row
+/// is held until the last venue has answered and the hours are in, and only
+/// then are the listed months asked for.
+#[test]
+fn a_continuous_lookup_answered_venue_by_venue_asks_for_the_months_once_whole() {
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup("FUT+CONTFUT");
+    let _ = sent_since(&mut peer);
+    let mut hb = HeartbeatState::new();
+    let mut answer = |ccp: &mut CcpState, fields: &[(u32, &str)]| {
+        let msg = crate::protocol::fix::fix_build(fields, 1);
+        ccp.process_ccp_message(&msg, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    };
+    answer(&mut ccp, &[
+        (fix::TAG_MSG_TYPE, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, "21"),
+        (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
+        (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "111"),
+        (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+        (crate::control::contracts::TAG_IB_VALID_EXCHANGES, "CME,QBALGO"),
+        (crate::control::contracts::TAG_SCHEDULE_JOIN_KEY, "ES-hours"),
+    ]);
+    let venues = ccp.pending_fanout.first().map(|p| p.fanout_req_ids.clone()).unwrap_or_default();
+    assert_eq!(venues.len(), 2, "one lookup per venue");
+    for venue in &venues {
+        answer(&mut ccp, &[
+            (fix::TAG_MSG_TYPE, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, venue.as_str()),
+            (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "2"),
+            (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "111"),
+            (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+        ]);
+    }
+    let _ = sent_since(&mut peer);
+    assert_eq!(handed_over(&shared), (vec![], vec![]), "held while the hours are out");
+    answer(&mut ccp, &[
+        (fix::TAG_MSG_TYPE, "U"), (6040, "107"), (crate::control::contracts::TAG_SCHEDULE_JOIN_KEY, "ES-hours"),
+    ]);
+    let second = sent_since(&mut peer);
+    assert!(second.contains("|320=21|") && second.contains("|167=FUT|") && !second.contains("|6857="), "{second}");
+    assert_eq!(handed_over(&shared), (vec![], vec![]), "and while the months are out");
+    answer(&mut ccp, &[
+        (fix::TAG_MSG_TYPE, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, "21"),
+        (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
+        (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "222"),
+        (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+    ]);
+    assert_eq!(
+        handed_over(&shared),
+        (vec![(222, "FUT".to_string()), (111, "CONTFUT".to_string())], vec![21]),
+        "the month, then the continuous contract once",
+    );
+    assert!(ccp.continuous_lookups.is_empty() && ccp.pending_fanout.is_empty() && ccp.pending_schedule_pair.is_empty());
+}
+
+/// A continuous lookup cut off with the connection is failed whole: one
+/// refusal and one end, and nothing held for it after.
+#[test]
+fn a_continuous_lookup_cut_off_is_failed_once() {
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup("FUT+CONTFUT");
+    let _ = sent_since(&mut peer);
+    let mut hb = HeartbeatState::new();
+    ccp.process_ccp_message(&futures_named("21", &["111"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    ccp.handle_disconnect(&mut conn, &mut context, &shared, &None);
+    assert_eq!(handed_over(&shared), (vec![], vec![21]));
+    let told = shared.reference.drain_historical_errors();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!((told[0].0, told[0].1), (21, crate::error_codes::Refusal::NOT_CONNECTED));
+    assert!(ccp.continuous_lookups.is_empty());
+}
+
+/// What a caller's lookup handed over, as (contract id, type), and whether it
+/// ended.
+fn handed_over(shared: &SharedState) -> (Vec<(u32, String)>, Vec<u32>) {
+    let rows = shared.reference.drain_contract_details().into_iter()
+        .map(|(_, def)| (def.con_id, def.sec_type.to_api_str().to_string()))
+        .collect();
+    (rows, shared.reference.drain_contract_details_end())
+}
+
+/// Asked for the listed months and the continuous future together, a gateway
+/// asks for the continuous one first, then the listed months once that is
+/// answered, and hands the months over first and the continuous contract after
+/// them under its own type. Only the continuous lookup was made here, so the
+/// months were never asked for and the lead month came back as a plain future.
+#[test]
+fn the_listed_months_are_asked_for_once_the_continuous_future_is_answered() {
+    for stated in ["FUT+CONTFUT", "CONTFUT+FUT"] {
+        let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup(stated);
+        let first = sent_since(&mut peer);
+        assert!(first.contains("|6857=2|") && first.contains("|8362=ES|"), "{stated}: {first}");
+        assert!(!first.contains("|6035="), "{stated}: {first}");
+
+        let mut hb = HeartbeatState::new();
+        ccp.process_ccp_message(&futures_named("21", &["111"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(handed_over(&shared), (vec![], vec![]), "{stated}: nothing until the months are in");
+        let second = sent_since(&mut peer);
+        assert!(second.contains("|35=c|") && second.contains("|320=21|"), "{stated}: the months are asked for: {second}");
+        assert!(second.contains("|167=FUT|") && second.contains("|6058=ES|"), "{stated}: {second}");
+        assert!(!second.contains("|6857=") && !second.contains("|8362="), "{stated}: as listed months: {second}");
+
+        ccp.process_ccp_message(&futures_named("21", &["111", "222"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let (rows, ended) = handed_over(&shared);
+        let mut months = rows[..2].to_vec();
+        months.sort();
+        assert_eq!(months, [(111, "FUT".to_string()), (222, "FUT".to_string())], "{stated}: {rows:?}");
+        assert_eq!(rows[2..], [(111, "CONTFUT".to_string())], "{stated}: the continuous contract comes last: {rows:?}");
+        assert_eq!(ended, [21], "{stated}");
+        assert!(ccp.continuous_lookups.is_empty() && ccp.pending_secdef.is_empty(), "{stated}");
+    }
+}
+
+/// Where the venue names no listed month, a gateway answers as for a contract
+/// it cannot find, whatever the continuous lookup named.
+#[test]
+fn no_listed_month_is_a_contract_not_found_whatever_the_continuous_lookup_named() {
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup("FUT+CONTFUT");
+    let mut hb = HeartbeatState::new();
+    ccp.process_ccp_message(&futures_named("21", &["111"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    let _ = sent_since(&mut peer);
+    ccp.process_ccp_message(&secdef_not_found("21"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    assert_eq!(handed_over(&shared), (vec![], vec![21]));
+    let told = shared.reference.drain_historical_errors();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!((told[0].0, told[0].1), (21, 200));
+    assert_eq!(told[0].2, "No security definition has been found for the request");
+    assert!(ccp.continuous_lookups.is_empty());
+}
+
+/// A continuous lookup the venue refuses is, to a gateway, one that ended:
+/// the listed months are asked for all the same.
+#[test]
+fn a_refused_continuous_lookup_still_asks_for_the_listed_months() {
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup("FUT+CONTFUT");
+    let _ = sent_since(&mut peer);
+    let mut hb = HeartbeatState::new();
+    let refused = crate::protocol::fix::fix_build(&[
+        (fix::TAG_MSG_TYPE, "3"), (58, "Unknown contract"), (320, "21"),
+    ], 1);
+    ccp.process_ccp_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    assert!(shared.reference.drain_historical_errors().is_empty(), "the refusal is not the caller's answer");
+    let second = sent_since(&mut peer);
+    assert!(second.contains("|320=21|") && !second.contains("|6857="), "{second}");
+
+    ccp.process_ccp_message(&futures_named("21", &["222"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    assert_eq!(handed_over(&shared), (vec![(222, "FUT".to_string())], vec![21]), "the months alone");
+}
+
+/// The continuous future on its own comes back under the type a gateway
+/// reports it as, one per venue and multiplier; where the venue names none,
+/// the lookup is a contract not found.
+#[test]
+fn a_continuous_future_on_its_own_is_reported_as_one() {
+    let (mut ccp, mut context, shared, mut conn, mut peer) = a_continuous_lookup("CONTFUT");
+    let _ = sent_since(&mut peer);
+    let mut hb = HeartbeatState::new();
+    ccp.process_ccp_message(&futures_named("21", &["111", "333"]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    assert_eq!(handed_over(&shared), (vec![(111, "CONTFUT".to_string())], vec![21]), "the first per venue and multiplier");
+    assert!(!sent_since(&mut peer).contains("|35=c|"), "no listed month is asked for");
+
+    let (mut ccp, mut context, shared, mut conn, _peer) = a_continuous_lookup("CONTFUT");
+    ccp.process_ccp_message(&secdef_not_found("21"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    assert_eq!(handed_over(&shared), (vec![], vec![21]));
+    let told = shared.reference.drain_historical_errors();
+    assert_eq!((told[0].0, told[0].1), (21, 200), "{told:?}");
+}
+
+/// A request held until its contract is named states on that lookup what a
+/// gateway states: expired contracts in scope where the request says so, and
+/// nothing of an identifier or an issuer, which none of these requests
+/// carries to a gateway — it looks the contract up by its description.
+#[test]
+fn a_held_request_is_named_by_what_a_gateway_reads_of_it() {
+    use std::io::Read;
+    let named = crate::types::SecDefFilters {
+        sec_id: "US78462F1030".into(), sec_id_type: "ISIN".into(), issuer_id: "e1".into(),
+        ..Default::default()
+    };
+    let asked = |cmd: Option<crate::types::ControlCommand>, pending: Option<PendingSubscribe>| {
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let (mut ccp, _context, shared) = u186_test_state();
+        let (mut conn, mut hb) = (Some(conn), HeartbeatState::new());
+        if let Some(cmd) = cmd {
+            assert!(ccp.hold_until_named(cmd, &mut conn, &mut hb, &shared).is_none());
+        }
+        if let Some(pending) = pending {
+            ccp.resolve_for_subscribe(pending, &mut conn, &mut hb, &shared);
+        }
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|")
+    };
+    let expired = |include_expired: bool| match head_timestamp_by_symbol(7) {
+        crate::types::ControlCommand::FetchHeadTimestamp { req_id, contract, what_to_show, use_rth, .. } => {
+            crate::types::ControlCommand::FetchHeadTimestamp {
+                req_id, contract, what_to_show, use_rth, include_expired, filters: named.clone(),
+            }
+        }
+        _ => unreachable!(),
+    };
+    let msg = asked(Some(expired(true)), None);
+    assert!(msg.contains("|6320=1|") && msg.contains("|55=SPY|"), "{msg}");
+    assert!(!msg.contains("|48=") && !msg.contains("|6454="), "{msg}");
+    assert!(!asked(Some(expired(false)), None).contains("|6320="));
+    let msg = asked(None, Some(PendingSubscribe { filters: named.clone(), ..spy_by_symbol(3) }));
+    assert!(msg.contains("|55=SPY|") && !msg.contains("|48=") && !msg.contains("|6454="), "{msg}");
 }

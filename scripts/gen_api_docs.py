@@ -217,7 +217,7 @@ PARAM_DOCS: dict[str, str] = {
     "tag": "Account tag name (e.g. `\"NetLiquidation\"`).",
     "strategy": "Algo strategy name (e.g. `\"Vwap\"`, `\"Twap\"`).",
     "params": "Algo parameter list.",
-    "ignore_size": "If `true`, ignore size in tick-by-tick data.",
+    "ignore_size": "If `true`, asks that a bid/ask change moving only a size be left out.",
     "shared": "Shared state handle.",
     "handle": "Background thread handle.",
     "control_tx": "Control channel sender.",

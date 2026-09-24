@@ -310,13 +310,16 @@ fn every_slot_in_the_table_can_be_taken() {
     }
 }
 
+/// The table grows past the size it is made with rather than refusing the
+/// next contract: nothing bounds how many a session's orders, fills and
+/// holdings name.
 #[test]
-#[should_panic(expected = "too many instruments")]
-fn one_past_the_table_is_refused() {
+fn a_slot_past_the_size_the_table_is_made_with_is_taken() {
     let shared = Arc::new(SharedState::new());
     let mut engine = HotLoop::new(shared.clone(), None, None);
     for i in 0..ibkr_dx::types::MAX_INSTRUMENTS + 1 {
-        engine.context_mut().register_instrument(i as i64 + 1000);
+        let id = engine.context_mut().register_instrument(i as i64 + 1000);
+        assert_eq!(id, i as u32);
     }
 }
 

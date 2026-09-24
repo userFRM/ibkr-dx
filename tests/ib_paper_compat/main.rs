@@ -1592,7 +1592,7 @@ fn what_the_venue_holds_after_a_replace_of_each_priced_shape_live() {
         // the cap alone.
         ("PEG MID", OrderKind::PegMid { offset: 0, price_cap: px(100.0) }, px(101.0), 0),
         ("PEG MKT", OrderKind::PegMkt { offset: px(0.03), price_cap: px(100.0) }, px(101.0), px(0.06)),
-        ("TRAIL LIMIT", OrderKind::TrailingStopLimit { lmt_offset: px(0.10), trail_amt: px(1.0), trail_stop_price: 0 }, px(0.20), px(2.0)),
+        ("TRAIL LIMIT", OrderKind::TrailingStopLimit { lmt_offset: px(0.10), trail_amt: px(1.0), trail_stop_price: None }, px(0.20), px(2.0)),
         ("PASSV REL", OrderKind::PassiveRel { offset: px(0.05), price_cap: px(100.0) }, px(101.0), px(0.10)),
         ("SNAP MID", OrderKind::SnapMid { offset: px(0.05) }, 0, px(0.10)),
         ("SNAP MKT", OrderKind::SnapMkt { offset: px(0.05) }, 0, px(0.10)),
@@ -2615,14 +2615,14 @@ fn timeout_sweeps_phase_live() {
     };
 
     // 1. By con_id — single record.
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 6001, filters: Default::default() }).expect("send details by con_id failed");
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 6001, include_expired: false, filters: Default::default() }).expect("send details by con_id failed");
     let (rows, end, row_after_end) = wait_details(6001, "by-conId SPY");
     assert!(rows >= 1, "by-conId lookup returned no rows");
     assert!(end, "by-conId end never fired — sweep may have eaten the reply");
     assert!(!row_after_end, "a row arrived AFTER end — ordering regression");
 
     // 2. By symbol — exercises the fan-out counter and the deferred-end path.
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: String::new(), currency: "USD".into(), ..Default::default() }, req_id: 6002, filters: Default::default() }).expect("send details by symbol failed");
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: String::new(), currency: "USD".into(), ..Default::default() }, req_id: 6002, include_expired: false, filters: Default::default() }).expect("send details by symbol failed");
     let (rows, end, row_after_end) = wait_details(6002, "by-symbol AAPL fan-out");
     assert!(rows >= 1, "by-symbol lookup returned no rows");
     assert!(end, "by-symbol end never fired within 30s");

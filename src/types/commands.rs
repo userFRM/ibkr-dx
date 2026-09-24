@@ -28,7 +28,10 @@ pub struct SecDefFilters {
     /// Identifier lookup (e.g. ISIN): raw identifier and its type. When set, the
     /// lookup rides the identifier instead of the symbol.
     pub sec_id: String,
-    /// Which identifier `sec_id` is: ISIN, CUSIP or FIGI.
+    /// Which identifier `sec_id` is: `CUSIP`, `SEDOL`, `ISIN`, `RIC`, `FIGI`
+    /// or `BB_SYMBOL`, spelled exactly so. Any other name, a lower-case one
+    /// included, is not an identifier kind to a gateway: the lookup goes by
+    /// symbol and the identifier is left out.
     pub sec_id_type: String,
     /// Who issued it. A lookup that states one is answered under a fixed-income
     /// security type whatever the caller named, so it narrows the lookup the
@@ -475,6 +478,9 @@ pub enum ControlCommand {
         req_id: u32,
         /// The contract this names.
         contract: ContractRef,
+        /// Whether a contract that has already expired is in scope, as the
+        /// caller's contract states it.
+        include_expired: bool,
         /// What else narrows the lookup: an expiry, a strike, an identifier.
         filters: SecDefFilters,
     },
@@ -664,6 +670,8 @@ pub enum ControlCommand {
         what_to_show: String,
         /// Whether to count only regular trading hours.
         use_rth: bool,
+        /// Whether a bid/ask change that moves only a size is left out.
+        ignore_size: bool,
         /// Whether a contract that has already expired is in scope, as the
         /// caller's contract states it.
         include_expired: bool,

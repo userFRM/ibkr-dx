@@ -414,7 +414,7 @@ mod tests {
         }) = cmd else { panic!("TRAIL LIMIT must build a TrailingStopLimit request") };
 
         assert_eq!(lmt_offset, (0.5 * PRICE_SCALE_F) as Price);
-        assert_eq!(trail_stop_price, (99.0 * PRICE_SCALE_F) as Price);
+        assert_eq!(trail_stop_price, Some((99.0 * PRICE_SCALE_F) as Price));
         assert_eq!(attrs.oca_type, 2);
     }
 

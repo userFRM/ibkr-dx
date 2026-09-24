@@ -830,12 +830,13 @@ impl EClient {
     /// 217 is the newest gate whose feature is carried here. Above it,
     /// attached orders (218) are refused by name — a gateway builds them from
     /// the account's order preset, which this client does not hold — and the
-    /// configuration requests (219, 221), the last price and size stated to
-    /// their precision (222, 224) and odd-lot quotes (225) are absent.
-    /// `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway
-    /// sends it; the number stays at 217 because a level claims every one
-    /// below it, and 218 is not carried. 225 is the highest level a gateway
-    /// announces.
+    /// configuration requests (219, 221) and the last price and size stated
+    /// to their precision (222, 224) are absent. `hedgeMaxSize` (223) is
+    /// taken and sent on a beta hedge, as a gateway sends it, and odd-lot
+    /// quotes (225) are served: generic tick 787 is asked for and its prices,
+    /// sizes and venues delivered. The number stays at 217 because a level
+    /// claims every one below it, and 218 is not carried. 225 is the highest
+    /// level a gateway announces.
     ///
     /// Below it, a program that believes the number is wrong about the
     /// following, and each is said on use rather than passed over:

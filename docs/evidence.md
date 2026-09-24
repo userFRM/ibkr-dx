@@ -19,9 +19,9 @@ Verification runs against a paper account on IBKR production servers, and the or
 | | |
 | --- | --- |
 | Requests | 85. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
-| Order fields | 155. 124 are sent; 19 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
+| Order fields | 155. 123 are sent; 20 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 3,726 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 3,759 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -70,9 +70,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,795 | No |
+| Rust unit and integration | 2,810 | No |
 | Rust, live | 9 | Yes |
-| Python | 931 | No |
+| Python | 949 | No |
 | Python, live | 131 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -125,7 +125,7 @@ nothing.
 | --- | :---: | --- |
 | 24 order types | ✅ Supported | The check every placement passes accepts 24, each sent as itself: MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MIT, LIT, MTL, MKT PRT, STP PRT, REL, PASSV REL, PEG MKT, PEG MID, PEG BEST, PEG BENCH, MIDPX, SNAP MKT, SNAP MID, SNAP PRI and BOX TOP. Every one but PEG BEST and BOX TOP is placed against the venue by `tests/ib_paper_compat` or the Python live suites |
 | PEG BEST and BOX TOP | 🔬 Implemented | Built and checked by the order builder's offline tests, `src/engine/hot_loop/order_builder/tests.rs`; no suite here places them against the venue |
-| Order fields | ✅ Supported | An order has 155 fields. 124 are sent. 19 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 5 are not carried by this client, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
+| Order fields | ✅ Supported | An order has 155 fields. 123 are sent. 20 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 5 are not carried by this client, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
 | Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn); `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |

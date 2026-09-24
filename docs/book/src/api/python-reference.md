@@ -135,7 +135,7 @@ client.asynchronous  # read-only attribute
 
 #### `server_version`
 
-The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session and after one, as the reference client answers before its greeting — and held while a lost connection is recovered, which the reference client rides out holding the number.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221), the last price and size stated to their precision (222, 224) and odd-lot quotes (225) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces.  Below it, a program that believes the number is wrong about the following, and each is said on use rather than passed over:  * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * A withdrawal stating a manual time (169): the withdrawal goes, with its operator and who entered it, and the caller is told on `error` that the time did not travel.  Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
+The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session and after one, as the reference client answers before its greeting — and held while a lost connection is recovered, which the reference client rides out holding the number.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221) and the last price and size stated to their precision (222, 224) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it, and odd-lot quotes (225) are served: generic tick 787 is asked for and its prices, sizes and venues delivered. The number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces.  Below it, a program that believes the number is wrong about the following, and each is said on use rather than passed over:  * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * A withdrawal stating a manual time (169): the withdrawal goes, with its operator and who entered it, and the caller is told on `error` that the time did not travel.  Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
 
 ```python
 def server_version()
@@ -881,7 +881,7 @@ def cancel_order_by_perm_id(perm_id)
 
 #### `req_global_cancel`
 
-Cancel every order the account is working.  This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. The same where the naming did finish and an order it named could not be given a slot in this client's instrument table — the engine holds no record of such an order, so no cancel here names it and it goes on working at the venue.  What the withdrawal states — who is withdrawing and whether a person entered it — travels on every cancel, as a gateway states it on every order it withdraws. A time does not: the reference client writes none on a withdrawal of everything, so a gateway never reads one, and one stated here goes the same way.
+Cancel every order the account is working.  This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer.  What the withdrawal states — who is withdrawing and whether a person entered it — travels on every cancel, as a gateway states it on every order it withdraws. A time does not: the reference client writes none on a withdrawal of everything, so a gateway never reads one, and one stated here goes the same way.
 
 ```python
 def req_global_cancel(order_cancel=None)
@@ -1008,7 +1008,7 @@ def set_news_providers(providers)
 
 #### `req_mkt_data`
 
-Request market data for a contract.  `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request market data for a contract.  `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_mkt_data(req_id, contract, generic_tick_list="", snapshot=False, regulatory_snapshot=False, mkt_data_options=None)
@@ -1072,7 +1072,7 @@ def req_tick_by_tick_data(req_id, contract, tick_type, number_of_ticks=0, ignore
 | `contract` | `Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `tick_type` | `str` | Tick type ID or tick-by-tick type string. |
 | `number_of_ticks` | `int` | Maximum number of ticks to return. |
-| `ignore_size` | `bool` | If `true`, ignore size in tick-by-tick data. |
+| `ignore_size` | `bool` | If `true`, asks that a bid/ask change moving only a size be left out. |
 
 ---
 
@@ -1126,7 +1126,7 @@ def req_market_data_type(market_data_type)
 
 #### `req_mkt_depth`
 
-Request market depth (L2 order book).  `mkt_depth_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request market depth (L2 order book).  `mkt_depth_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_mkt_depth(req_id, contract, num_rows=5, is_smart_depth=False, mkt_depth_options=None)
@@ -1159,7 +1159,7 @@ def cancel_mkt_depth(req_id, is_smart_depth=False)
 
 #### `req_real_time_bars`
 
-Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_real_time_bars(req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=None)
@@ -1206,7 +1206,7 @@ def quote(req_id)
 
 #### `quote_by_instrument`
 
-Zero-copy SeqLock quote read by InstrumentId. Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume, high, low, open, close, and whether the venue has halted the contract and why — or None if not connected. Whether it is restricting short sales in it is `shortSaleRestrictedByInstrument`, which is stated on the same record and kept off this one.
+Zero-copy SeqLock quote read by InstrumentId. Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume, high, low, open, close, and whether the venue has halted the contract and why — or None if not connected, or for an id past every slot the instrument table holds. Whether it is restricting short sales in it is `shortSaleRestrictedByInstrument`, which is stated on the same record and kept off this one.
 
 ```python
 def quote_by_instrument(instrument)
@@ -1394,6 +1394,20 @@ def chain_model_parameters(req_id, series)
 
 ---
 
+#### `stated_rows_series`
+
+Which series have stated rows for a subscription, in order.
+
+```python
+def stated_rows_series(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
 #### `paired_figures_series`
 
 Which series have stated paired figures for a subscription, in order.
@@ -1482,7 +1496,7 @@ def option_model_by_instrument(instrument)
 
 #### `req_historical_data`
 
-Request historical bar data.  `chart_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request historical bar data.  `chart_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_historical_data(req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=False, chart_options=None)
@@ -1623,7 +1637,7 @@ def req_sec_def_opt_params(req_id, underlying_symbol, fut_fop_exchange, underlyi
 
 #### `req_scanner_subscription`
 
-Request scanner subscription.  `scanner_subscription_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request scanner subscription.  `scanner_subscription_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_scanner_subscription(req_id, subscription, scanner_subscription_options=None, scanner_subscription_filter_options=None)
@@ -1664,7 +1678,7 @@ def req_scanner_parameters()
 
 #### `req_news_article`
 
-Request a news article.  `news_article_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request a news article.  `news_article_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_news_article(req_id, provider_code, article_id, news_article_options=None)
@@ -1681,7 +1695,7 @@ def req_news_article(req_id, provider_code, article_id, news_article_options=Non
 
 #### `req_historical_news`
 
-Request historical news.  Bounds are UTC timestamps, `YYYYMMDD-HH:MM:SS` or `YYYYMMDD HH:MM:SS`, optionally with fractional seconds. Empty bounds are omitted; unreadable ones are refused so the window is not lost.  `historical_news_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request historical news.  Bounds are UTC timestamps, `YYYYMMDD-HH:MM:SS` or `YYYYMMDD HH:MM:SS`, optionally with fractional seconds. Empty bounds are omitted; unreadable ones are refused so the window is not lost.  `historical_news_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options=None)
@@ -1793,7 +1807,7 @@ def cancel_fundamental_data(req_id)
 
 #### `req_historical_ticks`
 
-Request historical tick data.  `ignore_size` is taken and not applied: the request has no field for suppressing size-only changes.  `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+Request historical tick data.  `ignore_size` leaves out a bid/ask change that moves only a size. A gateway asks for midpoint ticks that way whatever the caller asked, and so does this client; trades are not filtered.  `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_historical_ticks(req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=False, misc_options=None)
@@ -1808,7 +1822,7 @@ def req_historical_ticks(req_id, contract, start_date_time="", end_date_time="",
 | `number_of_ticks` | `int` | Maximum number of ticks to return. |
 | `what_to_show` | `str` | Data type: `"TRADES"`, `"MIDPOINT"`, `"BID"`, `"ASK"`, `"BID_ASK"`, etc. |
 | `use_rth` | `int` | If `true`, only return data from Regular Trading Hours. |
-| `ignore_size` | `bool` | If `true`, ignore size in tick-by-tick data. |
+| `ignore_size` | `bool` | If `true`, asks that a bid/ask change moving only a size be left out. |
 | `misc_options` | `list` |  |
 
 ---
@@ -1952,7 +1966,7 @@ def algorithms_for(sec_type)
 
 #### `order_presets`
 
-The sets of order defaults this account holds, as `(key, version, when it last changed)`.  The venue keeps one per security type and fills parts of an order the caller left unstated from them, so the same call on two accounts is not the same order. The key is the venue's own and the version is what that set is on; the values in a set are asked for separately.  The version says *that* a set changed and the moment says *when*, which is what tells a caller whether an order it sent at a given time was filled in from the old defaults or the new. Empty where the venue stated none.
+The sets of order defaults this account holds, as `(key, attributes, when it last changed)`.  The venue keeps one per security type and fills parts of an order the caller left unstated from them, so the same call on two accounts is not the same order. The key is the venue's own. The attributes are as the venue writes them, `&` between them: `v=` names the set's variant and `a=1` marks it active. The values in a set are asked for separately.  The moment says *when* a set last changed, which is what tells a caller whether an order it sent at a given time was filled in from the old defaults or the new. Empty where the venue stated none.
 
 ```python
 def order_presets()
@@ -1991,7 +2005,7 @@ def company_data_series(con_id)
 
 #### `calculate_implied_volatility`
 
-What volatility a price implies for an option, under the model the venue publishes for that contract. Answered on `tick_option_computation`.  `implied_vol_options` is taken, and nothing in it is checked or sent: this client answers the calculation itself, from the venue's model, and sends no request that could carry it.
+What volatility a price implies for an option, under the model the venue publishes for that contract. Answered on `tick_option_computation`.  `implied_vol_options` is checked as a gateway checks it: this request takes no key, so any is refused under 10337, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a list that reads is taken. Nothing in it is sent: this client answers the calculation itself, from the venue's model.
 
 ```python
 def calculate_implied_volatility(req_id, contract, option_price, under_price, implied_vol_options=None)
@@ -2009,7 +2023,7 @@ def calculate_implied_volatility(req_id, contract, option_price, under_price, im
 
 #### `calculate_option_price`
 
-What an option is worth at a stated volatility, under the same model. Answered on `tick_option_computation`.  `opt_prc_options` is taken, and nothing in it is checked or sent: this client answers the calculation itself, from the venue's model, and sends no request that could carry it.
+What an option is worth at a stated volatility, under the same model. Answered on `tick_option_computation`.  `opt_prc_options` is checked as a gateway checks it: this request takes no key, so any is refused under 10337, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a list that reads is taken. Nothing in it is sent: this client answers the calculation itself, from the venue's model.
 
 ```python
 def calculate_option_price(req_id, contract, volatility, under_price, opt_prc_options=None)

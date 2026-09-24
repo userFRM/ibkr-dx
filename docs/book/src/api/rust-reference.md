@@ -86,7 +86,7 @@ pub fn session_over(&self) -> bool
 
 #### `server_version`
 
-The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` once the session is over, as the reference client answers before its greeting — and not while a lost connection is being recovered, which the reference client rides out holding the number. In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level. 217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221), the last price and size stated to their precision (222, 224) and odd-lot quotes (225) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces. Below it, a program that believes the number is wrong about the following, and each is said on use rather than passed over: * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * A withdrawal stating a manual time (169): the withdrawal goes, with its operator and who entered it, and the caller is told on `error` that the time did not travel. Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
+The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` once the session is over, as the reference client answers before its greeting — and not while a lost connection is being recovered, which the reference client rides out holding the number. In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level. 217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221) and the last price and size stated to their precision (222, 224) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it, and odd-lot quotes (225) are served: generic tick 787 is asked for and its prices, sizes and venues delivered. The number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces. Below it, a program that believes the number is wrong about the following, and each is said on use rather than passed over: * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * A withdrawal stating a manual time (169): the withdrawal goes, with its operator and who entered it, and the caller is told on `error` that the time did not travel. Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
 
 ```rust
 pub fn server_version(&self) -> Option<i32>
@@ -917,7 +917,7 @@ pub fn algorithms_for(&self, sec_type: &str) -> Vec<String>
 
 #### `order_presets`
 
-The sets of order defaults this account holds, as `(key, version, when it last changed)`. The venue keeps one per security type and fills parts of an order the caller left unstated from them: the size a compete order competes with and the offset it competes by, where neither was named. So the same call on two accounts is not the same order, and the reference client's surface has no way to say which sets are in force. The key is the venue's own — `s=STK`, or `s=CASH&tc=EUR` where a currency splits it — and the version is what that set is on. The values in a set are asked for separately and are not carried here. The version says *that* a set changed; the moment says *when*, which is what tells a caller whether an order it sent at a given time was filled in from the old defaults or the new. Empty where the venue stated none.
+The sets of order defaults this account holds, as `(key, attributes, when it last changed)`. The venue keeps one per security type and fills parts of an order the caller left unstated from them: the size a compete order competes with and the offset it competes by, where neither was named. So the same call on two accounts is not the same order, and the reference client's surface has no way to say which sets are in force. The key is the venue's own — `s=STK`, or `s=CASH&tc=EUR` where a currency splits it. The attributes are as the venue writes them, `&` between them: `v=` names the set's variant and `a=1` marks it active, so `v=1&a=1` is an active set and `v=1` one that is not. The values in a set are asked for separately and are not carried here. The moment says *when* a set last changed, which is what tells a caller whether an order it sent at a given time was filled in from the old defaults or the new. Empty where the venue stated none.
 
 ```rust
 pub fn order_presets(&self) -> Vec<(String, String, String)>
@@ -1002,7 +1002,7 @@ pub fn cancel_order_by_perm_id(&self, perm_id: i64) -> Result<(), Refusal>
 
 #### `req_global_cancel`
 
-Cancel every order the account is working. This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. The same where the naming did finish and an order it named could not be given a slot in this client's instrument table — the engine holds no record of such an order, so no cancel here names it and it goes on working at the venue. What the withdrawal states — who is withdrawing and whether a person entered it — travels on every cancel, as a gateway states it on every order it withdraws. A time does not: the reference client writes none on a withdrawal of everything, so a gateway never reads one, and one stated here goes the same way.
+Cancel every order the account is working. This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. What the withdrawal states — who is withdrawing and whether a person entered it — travels on every cancel, as a gateway states it on every order it withdraws. A time does not: the reference client writes none on a withdrawal of everything, so a gateway never reads one, and one stated here goes the same way.
 
 ```rust
 pub fn req_global_cancel( &self, order_cancel: impl Into<crate::types::model::OrderCancel>, ) -> Result<(), Refusal>
@@ -1251,7 +1251,7 @@ pub fn req_tick_by_tick_data( &self, req_id: i64, contract: &Contract, tick_type
 | `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `tick_type` | `&str` | Tick type ID or tick-by-tick type string. |
 | `number_of_ticks` | `i32` | Maximum number of ticks to return. |
-| `ignore_size` | `bool` | If `true`, ignore size in tick-by-tick data. |
+| `ignore_size` | `bool` | If `true`, asks that a bid/ask change moving only a size be left out. |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -1414,7 +1414,7 @@ pub fn quote(&self, req_id: i64) -> Option<Quote>
 
 #### `quote_by_instrument`
 
-Direct SeqLock read by InstrumentId (for callers who track IDs themselves). Returns `None` for an id outside the instrument table.
+Direct SeqLock read by InstrumentId (for callers who track IDs themselves). Returns `None` for an id past every slot the instrument table holds.
 
 ```rust
 pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote>
@@ -1594,6 +1594,22 @@ pub fn chain_model_parameters( &self, req_id: i64, series: u32, ) -> Vec<crate::
 
 ---
 
+#### `stated_rows_series`
+
+Which series have stated rows for a subscription, in order.
+
+```rust
+pub fn stated_rows_series(&self, req_id: i64) -> Vec<u32>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Vec<u32>`
+
+---
+
 #### `paired_figures_series`
 
 Which series have stated paired figures for a subscription, in order.
@@ -1644,7 +1660,7 @@ pub fn stated_figures_series(&self, req_id: i64) -> Vec<u32>
 
 #### `company_data`
 
-What the venue states about a contract's company or its terms on one series, as the pairs it wrote. Seventeen series carry this text, each asked for by the venue's own number for it in the generic tick list: the analyst ratings, what institutions and insiders hold, the shares on issue and the float, fund terms, the screening scores, margin, the technical readings, the company's accounts and what it has coming. The keys are the venue's own and are handed on unchanged. Held against the venue's id for the contract rather than the request, because it is a fact about the contract and outlives the subscription that fetched it — so it is read by `con_id`, not by request number, and it is still there after the watch ends — for as many contracts as this client can hold a slot for, the one heard of longest ago making way. Empty where that series has stated nothing for the contract.
+What the venue states about a contract's company or its terms on one series, as the pairs it wrote. Seventeen series carry this text, each asked for by the venue's own number for it in the generic tick list: the analyst ratings, what institutions and insiders hold, the shares on issue and the float, fund terms, the screening scores, margin, the technical readings, the company's accounts and what it has coming. The keys are the venue's own and are handed on unchanged. Held against the venue's id for the contract rather than the request, because it is a fact about the contract and outlives the subscription that fetched it — so it is read by `con_id`, not by request number, and it is still there after the watch ends — for four thousand and ninety-six contracts, the one heard of longest ago making way. Empty where that series has stated nothing for the contract.
 
 ```rust
 pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)>
@@ -2215,10 +2231,10 @@ pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), Refusal>
 
 #### `req_historical_ticks`
 
-Request historical tick data. Named from one end and counted from there: give `start_date_time` for the ticks after a moment or `end_date_time` for the ones before it, and `number_of_ticks` says how far it reaches. Naming both, or neither, is what the venue refuses.
+Request historical tick data. Named from one end and counted from there: give `start_date_time` for the ticks after a moment or `end_date_time` for the ones before it, and `number_of_ticks` says how far it reaches. Naming both, or neither, is what the venue refuses. `ignore_size` leaves out a bid/ask change that moves only a size. A gateway asks for midpoint ticks that way whatever the caller asked, and so does this client; trades are not filtered.
 
 ```rust
-pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), Refusal>
+pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool, ) -> Result<(), Refusal>
 ```
 
 | Parameter | Type | Description |
@@ -2230,6 +2246,7 @@ pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date
 | `number_of_ticks` | `i32` | Maximum number of ticks to return. |
 | `what_to_show` | `&str` | Data type: `"TRADES"`, `"MIDPOINT"`, `"BID"`, `"ASK"`, `"BID_ASK"`, etc. |
 | `use_rth` | `bool` | If `true`, only return data from Regular Trading Hours. |
+| `ignore_size` | `bool` | If `true`, asks that a bid/ask change moving only a size be left out. |
 
 **Returns:** `Result<(), Refusal>`
 

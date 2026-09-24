@@ -2406,7 +2406,7 @@ fn place_order_trailing_stop_carries_initial_trigger() {
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_amt, trail_stop_price, .. }, .. }) => {
             assert_eq!(trail_amt, (0.50 * PRICE_SCALE_F) as i64);
-            assert_eq!(trail_stop_price, (10.00 * PRICE_SCALE_F) as i64);
+            assert_eq!(trail_stop_price, Some((10.00 * PRICE_SCALE_F) as i64));
         }
         cmd => panic!("expected a TrailingStop order, got {cmd:?}"),
     }
@@ -2414,7 +2414,7 @@ fn place_order_trailing_stop_carries_initial_trigger() {
 
 #[test]
 fn place_order_trailing_stop_without_trigger_is_unset() {
-    // Default (f64::MAX) must encode as 0 (not set), so the tag is omitted.
+    // Default (f64::MAX) is no trigger stated, so the tag is omitted.
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
@@ -2424,7 +2424,7 @@ fn place_order_trailing_stop_without_trigger_is_unset() {
     client.place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_stop_price, .. }, .. }) => {
-            assert_eq!(trail_stop_price, 0);
+            assert_eq!(trail_stop_price, None);
         }
         cmd => panic!("expected a TrailingStop order, got {cmd:?}"),
     }
@@ -3955,75 +3955,6 @@ fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
     );
 }
 
-/// An order the venue named that could not be given a slot in the instrument
-/// table is in none of the cancels a withdrawal of everything composes: those
-/// are composed from the engine's book, and the order never reached it. The
-/// call says so rather than returning, which would tell the caller the account
-/// had been flattened while that order was still working there.
-#[test]
-fn a_global_cancel_says_when_an_order_has_no_slot_in_the_instrument_table() {
-    let (client, rx, shared) = test_client();
-    // The naming finished. One of the orders it carried arrived with the table
-    // full, so this is the other case from a naming that never ended: what was
-    // left out is established rather than suspected.
-    shared.orders.set_replay_done();
-    shared.market.set_instrument_count(1);
-    shared.orders.note_an_order_without_a_slot();
-    let refusal = client.req_global_cancel("").expect_err(
-        "a withdrawal that cannot reach every working order says so rather than returning",
-    );
-    let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert!(
-        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
-        "what the book does hold is still withdrawn: {sent:?}",
-    );
-    assert_eq!(
-        refusal.code, crate::error_codes::Refusal::NO_ANSWER,
-        "under this client's own number for an answer it cannot give",
-    );
-    assert!(
-        refusal.message.contains("no slot in this client's instrument table"),
-        "the caller is told what the withdrawal did not reach: {refusal}",
-    );
-}
-
-/// An order left out of the engine's book for want of a slot is still listed
-/// from the order cache, and nothing this session does follows it: its fills
-/// are not booked, its status changes are not announced, and a withdrawal of
-/// everything does not reach it. The caller is told so, rather than reading
-/// the list as the orders this session is following.
-#[test]
-fn open_orders_say_when_one_of_them_has_no_slot_in_the_instrument_table() {
-    #[derive(Default)]
-    struct Heard {
-        told: Vec<(i64, i64, String)>,
-        ended: usize,
-    }
-    impl Wrapper for Heard {
-        fn error(&mut self, req_id: i64, code: i64, message: &str, _adv: &str) {
-            self.told.push((req_id, code, message.to_string()));
-        }
-        fn open_order_end(&mut self) { self.ended += 1; }
-    }
-
-    let (client, _rx, shared) = test_client();
-    // The naming finished, and one of the orders it carried has no slot.
-    shared.orders.set_replay_done();
-    shared.orders.note_an_order_without_a_slot();
-    let mut heard = Heard::default();
-    client.req_all_open_orders(&mut heard);
-    assert_eq!(heard.ended, 1, "what is held is still delivered, and still ends");
-    assert!(
-        heard.told.iter().any(|(req_id, code, message)| {
-            *req_id == -1
-                && *code == crate::error_codes::Refusal::NO_ANSWER as i64
-                && message.contains("no slot in this client's instrument table")
-        }),
-        "the caller is told which of the orders it lists it cannot act on: {:?}",
-        heard.told,
-    );
-}
-
 // ═══════════════════════════════════════════════════════════════════
 //  Order validation — aux_price guards
 // ═══════════════════════════════════════════════════════════════════
@@ -4619,7 +4550,7 @@ fn an_unwireable_req_id_is_refused() {
         ("cancel_fundamental_data", |c, id| c.cancel_fundamental_data(id)),
         ("req_histogram_data", |c, id| c.req_histogram_data(id, &spy(), true, "3 days")),
         ("cancel_histogram_data", |c, id| c.cancel_histogram_data(id)),
-        ("req_historical_ticks", |c, id| c.req_historical_ticks(id, &spy(), "", "20260101 16:00:00", 100, "TRADES", true)),
+        ("req_historical_ticks", |c, id| c.req_historical_ticks(id, &spy(), "", "20260101 16:00:00", 100, "TRADES", true, false)),
         ("req_historical_schedule", |c, id| c.req_historical_schedule(id, &spy(), "", "1 D", true)),
         ("req_mkt_depth", |c, id| c.req_mkt_depth(id, &spy(), 5, false)),
         // Asks for the book first: a withdrawal now says when it holds none,
@@ -4763,6 +4694,27 @@ fn req_contract_details_forwards_identifier_lookup() {
             assert_eq!(filters.sec_id_type, "ISIN");
         }
         cmd => panic!("expected FetchContractDetails, got {cmd:?}"),
+    }
+}
+
+/// A contract that says an expired one is in scope is asked about that way.
+/// The request had no field for it, so no lookup carried it and a caller
+/// asking for a future that has expired was answered as though it had not.
+#[test]
+fn req_contract_details_forwards_that_an_expired_contract_is_in_scope() {
+    let (client, rx, _shared) = test_client();
+    for include_expired in [true, false] {
+        let contract = Contract {
+            symbol: "ES".into(), sec_type: "FUT".into(), exchange: "CME".into(),
+            include_expired, ..Default::default()
+        };
+        client.req_contract_details(12, &contract).unwrap();
+        match rx.try_recv().unwrap() {
+            ControlCommand::FetchContractDetails { include_expired: stated, .. } => {
+                assert_eq!(stated, include_expired);
+            }
+            cmd => panic!("expected FetchContractDetails, got {cmd:?}"),
+        }
     }
 }
 
@@ -5917,21 +5869,28 @@ fn req_historical_ticks_sends_fetch() {
     let (client, rx, _shared) = test_client();
     // Either end, and the count says how far it reaches. Naming neither, or
     // both, is what the venue refuses.
-    assert!(client.req_historical_ticks(8, &spy(), "", "", 1000, "TRADES", true).is_err());
-    assert!(client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "20260101 16:00:00", 1000, "TRADES", true).is_err());
-    client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true).unwrap();
+    assert!(client.req_historical_ticks(8, &spy(), "", "", 1000, "TRADES", true, false).is_err());
+    assert!(client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "20260101 16:00:00", 1000, "TRADES", true, false).is_err());
+    client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true, false).unwrap();
     let _ = rx.try_recv();
-    client.req_historical_ticks(8, &spy(), "", "20260101 16:00:00", 1000, "TRADES", true).unwrap();
+    client.req_historical_ticks(8, &spy(), "", "20260101 16:00:00", 1000, "TRADES", true, false).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::FetchHistoricalTicks { contract: ContractRef { con_id, .. }, req_id, number_of_ticks, what_to_show, .. } => {
+        ControlCommand::FetchHistoricalTicks { contract: ContractRef { con_id, .. }, req_id, number_of_ticks, what_to_show, ignore_size, .. } => {
             assert_eq!(req_id, 8);
             assert_eq!(con_id, 756733);
             assert_eq!(number_of_ticks, 1000);
             assert_eq!(what_to_show, "TRADES");
+            assert!(!ignore_size);
         }
         _ => panic!("expected FetchHistoricalTicks"),
     }
+    // Asked to leave out a change that moves only a size, the request says so.
+    client.req_historical_ticks(9, &spy(), "", "20260101 16:00:00", 1000, "BID_ASK", true, true).unwrap();
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        ControlCommand::FetchHistoricalTicks { req_id: 9, ignore_size: true, .. }
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -8695,7 +8654,7 @@ fn a_request_named_by_id_refuses_a_contract_that_has_none() {
     assert!(client.req_histogram_data(2, &described, true, "3 days").is_err());
     assert!(client.req_historical_news(3, -1, "BRFG", "", "", 5).is_err());
     assert!(
-        client.req_historical_ticks(4, &spy(), "", "", -1, "TRADES", true).is_err(),
+        client.req_historical_ticks(4, &spy(), "", "", -1, "TRADES", true, false).is_err(),
         "a count below zero asked for four billion ticks",
     );
 
@@ -11853,4 +11812,18 @@ fn the_holdings_are_read_and_nothing_is_left_watching() {
 
     shared.reference.set_session_over("the session ended");
     assert_eq!(client.positions().unwrap_err().code, 504);
+}
+
+/// The series that stated rows for a subscription are named by its number,
+/// as the series that stated figures, numbered figures and pairs already are.
+/// A caller reading rows had to know every series by heart and ask each one.
+#[test]
+fn the_series_that_stated_rows_are_named_by_the_subscription() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    shared.market.note_stated_rows(0, 547, vec![(10.0, 99.5, 100.5)]);
+    shared.market.note_stated_rows(0, 320, vec![(1.0, 12345.0, 2.0)]);
+    shared.market.note_stated_rows(1, 491, vec![(0.0, 265598.0, 1.0)]);
+    assert_eq!(client.stated_rows_series(1), vec![320, 547]);
+    assert!(client.stated_rows_series(2).is_empty(), "a number naming no subscription");
 }

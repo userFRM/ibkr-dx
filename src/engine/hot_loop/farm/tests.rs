@@ -627,12 +627,14 @@ mod news_tests {
         assert_eq!(rows[0].1, 12345.0, "the figure as the record states it");
         assert_eq!(rows[1].0, 2.0);
         assert_eq!(rows[1].1, 67890.0);
+        assert_eq!(shared.market.stated_rows_series(instrument), vec![320], "the series is named");
 
         shared.market.forget_option_model(instrument);
         assert!(
             shared.market.stated_rows(instrument, 320).is_empty(),
             "a quote outlived the contract it was stated for",
         );
+        assert!(shared.market.stated_rows_series(instrument).is_empty(), "and so did its name");
     }
 
     /// The moving averages, whose record is pairs of a number and a figure
@@ -878,12 +880,14 @@ mod news_tests {
             ],
             "every leg against the strategy it belongs to, in the order stated",
         );
+        assert_eq!(shared.market.stated_rows_series(instrument), vec![491], "the series is named");
 
         shared.market.forget_option_model(instrument);
         assert!(
             shared.market.stated_rows(instrument, 491).is_empty(),
             "a strategy outlived the contract it was stated for",
         );
+        assert!(shared.market.stated_rows_series(instrument).is_empty(), "and so did its name");
     }
 
     /// The book the venue states in two forms, told apart by the record itself.
@@ -931,12 +935,18 @@ mod news_tests {
             shared.market.stated_rows(instrument, 547), vec![(10.0, 99.5, 100.5)],
             "the row with no quantity and the one withdrawn by price are left out",
         );
+        assert_eq!(shared.market.stated_rows_series(instrument), vec![547], "the series is named");
+        assert!(
+            shared.market.stated_rows_series(instrument + 1).is_empty(),
+            "another contract's series are not this one's",
+        );
 
         shared.market.forget_option_model(instrument);
         assert!(
             shared.market.stated_rows(instrument, 547).is_empty(),
             "a book outlived the contract it was stated for",
         );
+        assert!(shared.market.stated_rows_series(instrument).is_empty(), "and so did its name");
     }
 
     /// The venue's other news series, whose every string stands behind a count
@@ -4645,8 +4655,7 @@ mod price_scaling_tests {
         let mut farm = FarmState::new();
         let mut context = Context::new();
         let instrument = context.market
-            .try_register_contract(805711629, "AAPL", "OPT", "SMART", "20260821|220|C|100")
-            .unwrap();
+            .register_contract(805711629, "AAPL", "OPT", "SMART", "20260821|220|C|100");
         let mut conn = None;
         let mut hb = HeartbeatState::new();
         farm.send_mktdata_subscribe(
@@ -4673,7 +4682,7 @@ mod price_scaling_tests {
         let mut farm = FarmState::new();
         let mut context = Context::new();
         let instrument = context.market
-            .try_register_contract(756733, "SPY", "STK", "SMART", "").unwrap();
+            .register_contract(756733, "SPY", "STK", "SMART", "");
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "",
             instrument, 0, false, &mut None, &mut HeartbeatState::new(),

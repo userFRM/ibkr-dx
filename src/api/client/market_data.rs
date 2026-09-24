@@ -490,7 +490,7 @@ impl EClient {
     }
 
     /// Direct SeqLock read by InstrumentId (for callers who track IDs themselves).
-    /// Returns `None` for an id outside the instrument table.
+    /// Returns `None` for an id past every slot the instrument table holds.
     #[inline]
     pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote> {
         self.shared.market.try_quote(instrument)
@@ -680,6 +680,15 @@ impl EClient {
         self.shared.market.chain_model_parameters(instrument, series)
     }
 
+    /// Which series have stated rows for a subscription, in order.
+    pub fn stated_rows_series(&self, req_id: i64) -> Vec<u32> {
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Vec::new();
+        };
+        self.shared.market.stated_rows_series(instrument)
+    }
+
     /// Which series have stated paired figures for a subscription, in order.
     pub fn paired_figures_series(&self, req_id: i64) -> Vec<u32> {
         let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
@@ -720,8 +729,8 @@ impl EClient {
     /// Held against the venue's id for the contract rather than the request,
     /// because it is a fact about the contract and outlives the subscription
     /// that fetched it — so it is read by `con_id`, not by request number, and
-    /// it is still there after the watch ends — for as many contracts as this
-    /// client can hold a slot for, the one heard of longest ago making way.
+    /// it is still there after the watch ends — for four thousand and
+    /// ninety-six contracts, the one heard of longest ago making way.
     ///
     /// Empty where that series has stated nothing for the contract.
     pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)> {

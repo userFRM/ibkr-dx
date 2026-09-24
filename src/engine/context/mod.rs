@@ -54,10 +54,11 @@ impl Clock {
 pub(crate) type PreReplace = (Order, String, Option<Box<crate::types::OrderSpec>>);
 
 /// The context passed to strategy callbacks. Provides market data access and
-/// order management. All hot-path data is pre-allocated.
+/// order management. Hot-path data is allocated for the first 4,096 slots;
+/// past them, a table grows the first time a slot beyond it is written.
 pub struct Context {
     pub(crate) market: MarketState,
-    positions: Box<[f64]>,
+    positions: Vec<f64>,
     open_orders: HashMap<OrderId, Order>,
     /// Slots an order has just stopped holding, for the loop to reconsider.
     ///
@@ -150,7 +151,7 @@ impl Context {
     pub fn new() -> Self {
         Self {
             market: MarketState::new(),
-            positions: vec![0.0f64; MAX_INSTRUMENTS].into(),
+            positions: vec![0.0f64; MAX_INSTRUMENTS],
             open_orders: HashMap::with_capacity(128),
             slots_to_reconsider: Vec::new(),
             pending_orders: OrderBuffer::new(),
@@ -235,7 +236,7 @@ impl Context {
     /// position, in the profit and loss, and in the guard that decides whether
     /// a contract's slot may be handed to another.
     pub fn position(&self, id: InstrumentId) -> f64 {
-        self.positions[id as usize]
+        self.positions.get(id as usize).copied().unwrap_or(0.0)
     }
 
     /// The orders on this contract a cancel-all has to reach.
@@ -430,12 +431,6 @@ impl Context {
         self.market.register(con_id)
     }
 
-    /// Register without panicking when the instrument table is full. Inbound
-    /// message handling must use this — a full table is a condition to report,
-    /// not one to abort the engine on.
-    pub fn try_register_instrument(&mut self, con_id: i64) -> Option<InstrumentId> {
-        self.market.try_register(con_id)
-    }
 
     /// Record what an order was placed as.
     pub fn record_placement(&mut self, order_id: OrderId, spec: Box<crate::types::OrderSpec>) {
@@ -482,7 +477,11 @@ impl Context {
     }
 
     pub fn update_position(&mut self, instrument: InstrumentId, delta: f64) {
-        self.positions[instrument as usize] += delta;
+        let at = instrument as usize;
+        if at >= self.positions.len() {
+            self.positions.resize(at + 1, 0.0);
+        }
+        self.positions[at] += delta;
     }
 
     pub fn insert_order(&mut self, order: Order) {

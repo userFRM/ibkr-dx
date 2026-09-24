@@ -313,6 +313,7 @@ ib_async's transport, has a method by that name.
 | `statedFigures` | venue | · | · | · | ● | ● |
 | `statedFiguresSeries` | venue | · | · | · | ● | ● |
 | `statedRows` | venue | · | · | · | ● | ● |
+| `statedRowsSeries` | venue | · | · | · | ● | ● |
 | `twsConnectionTime` | venue | ● | ● | · | ● | ● |
 | `unreadWire` | this client | · | · | · | ● | ● |
 | `valuesElsewhere` | venue | · | · | · | ● | ● |

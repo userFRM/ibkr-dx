@@ -1123,7 +1123,7 @@ pub(crate) struct FarmState {
     /// several ticks moved is published once. Kept between batches and cleared
     /// bit by bit as each is published, so the cost is the batch rather than
     /// the size of the table.
-    notified: Box<[u64]>,
+    notified: Vec<u64>,
     /// The instruments those bits stand for, in the order they were touched.
     notified_ids: Vec<crate::types::InstrumentId>,
     /// The scan to state beside a subscription for the strategies series,
@@ -2220,8 +2220,8 @@ impl FarmState {
     /// does not already cover — and an entry left there after an unsubscribe is
     /// a defect in its own right, not a reason to pin the slot. Held
     /// on that basis, a subscribe/unsubscribe cycle would consume a slot
-    /// permanently and the instrument cap would become cumulative per session,
-    /// which is the failure exists to prevent.
+    /// permanently, and every table indexed by slot would grow with each cycle
+    /// for the rest of the session.
     pub(crate) fn holds_market_data(&self, instrument: InstrumentId) -> bool {
         self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
             || self.md_resub_info.iter().any(|r| r.0 == instrument)
@@ -2301,7 +2301,7 @@ impl FarmState {
             unread_types: std::collections::HashSet::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
-            notified: vec![0u64; crate::types::MAX_INSTRUMENTS / 64].into(),
+            notified: vec![0u64; crate::types::MAX_INSTRUMENTS / 64],
             notified_ids: Vec::with_capacity(16),
             farm_msg_buf: Vec::with_capacity(32),
         }
@@ -2726,7 +2726,11 @@ impl FarmState {
             }
 
             if applied {
-                let word = &mut notified[(instrument >> 6) as usize];
+                let at = (instrument >> 6) as usize;
+                if at >= notified.len() {
+                    notified.resize(at + 1, 0);
+                }
+                let word = &mut notified[at];
                 let bit = 1u64 << (instrument & 63);
                 if *word & bit == 0 {
                     *word |= bit;

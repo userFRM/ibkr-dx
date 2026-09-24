@@ -268,25 +268,26 @@ model arrives or the call is cancelled.
 
 ## Order fields
 
-An order carries 155 fields. 124 go out under a tag. 19 are taken and not
+An order carries 155 fields. 123 go out under a tag. 20 are taken and not
 sent: a gateway reads each and sends nothing for it on the orders this client
 places, and neither does this client. 5 are not carried by this client, and
 each says so on itself rather than being quietly dropped. 6 more are what the
 venue fills in on the way back, which an order being placed does not carry
 out.
 
-The 19 are a basis-point offset and its kind, a bond's accrued interest, an
+The 20 are a basis-point offset and its kind, a bond's accrued interest, an
 auction strategy, a shareholder, a parent's permanent id and the percentage
 constraints an order would set aside — which a gateway reads and sends nothing
-for — together with the order options, the choice to decline smart routing
-and the kind of preview, which it checks and sends nothing for, in the same
-words: an unknown option under 10337, a bad value of `manual` under 10338,
-an entry not written `key=value` under 320 (*Error reading request:Please use
-'Key=Value' format for Misc Options*), declining smart routing refused under
-10348 where the venue withdrew it and warned about under 2181 otherwise —
-ahead of anything the venue says about the order, as a gateway says it before
-the order goes out — and a preview kind
-other than the ordinary one refused. A gateway reads the kind only from an
+for — together with the order options, the prices on a combination's legs,
+the choice to decline smart routing and the kind of preview, which it checks
+and sends nothing for, in the same words: an unknown option under 10337, a bad
+value of `manual` under 10338, an entry not written `key=value` under 320
+(*Error reading request:Please use 'Key=Value' format for Misc Options*), a
+leg's price as *Prices on a combination's legs* below sets out, declining
+smart routing refused under 10348 where the venue withdrew it and warned about
+under 2181 otherwise — ahead of anything the venue says about the order, as a
+gateway says it before the order goes out — and a preview kind other than the
+ordinary one refused. A gateway reads the kind only from an
 order in the protobuf encoding; the text encoding ib_async uses has no field
 for it. The delta, the price randomisation and the hedging leg's
 clearing, settling, short-sale and designated-location fields go out only on
@@ -313,6 +314,42 @@ None is silently dropped, and that is checked rather than claimed:
 `python scripts/gen_order_field_reach.py` recounts every figure from the
 order builders and exits non-zero if any field becomes settable and unread.
 
+## A price of nought on an order
+
+A gateway reads some prices of nought as no price and carries others as
+stated, and so does this client:
+
+- A trailing stop's starting trigger is carried wherever it is stated, nought
+  and below included.
+- A stock range of nought is no bound, and is not sent.
+- A discretionary amount below nought is refused under 168, *Discretionary
+  amount does not conform to the minimum price variation for this contract*.
+
+A limit of nought, on a single contract or on a combination whose legs carry
+no price, is sent as stated: what a gateway answers for one is not
+established here.
+
+## Prices on a combination's legs
+
+A gateway prices a combination by its legs only where it is a non-guaranteed
+combination of two legs routed by SMART. This client carries no routing
+parameter that makes a combination non-guaranteed, so it places none priced
+that way; the prices are checked as a gateway checks them and answered as it
+answers them:
+
+- A priced leg on any order but a limit is refused under 321, the leg named
+  (*The combo details for leg '0' are invalid. - … Only LMT or REL+LMT order
+  allows using per-leg prices.*).
+- An unpriced leg after a priced first leg is refused the same way (*… All leg
+  prices are needed when specifying per-leg prices.*).
+- A limit of the combination's own beside a priced first leg is refused under
+  10054, *Can't specify combo price when using per-leg prices.*
+- A combination priced on every leg is refused under 10058, *Combo per-leg
+  prices are only supported for non-guaranteed smart combo with two legs and
+  feature "IECOMBOPERLEGPRICE" enabled.*
+- Prices on later legs alone are read and not sent, as a gateway sends none;
+  the combination goes at its own limit.
+
 ## A request's option list
 
 Every request that carries a free-form option list has it checked the way an
@@ -327,14 +364,20 @@ number nought or one is refused under 321, after `Market data:` or
 `Historical data:`; a value written in another script's digits is let
 through, since a gateway reads those digits and this client does not.
 
+The two option calculations, `calculate_implied_volatility` and
+`calculate_option_price`, take no key at all: any key is refused under 10337
+with no key named as valid (*Misc options key=foo is invalid in
+ReqCalcImpliedVolatility(54) request. Valid keys are: *), and an entry that is
+not `key=value` under 320. Where the venue has lifted the checks, any list
+that reads is taken. Nothing in either list is sent: this client answers the
+calculations itself, from the model the venue states for the contract. A
+request for a fundamental report takes a list and a gateway reads none of it;
+neither does this client, and nothing in it is checked or sent.
+
 The Rust client takes a free-form list on an order alone. From Python, `None`
 is no list, and an entry that is not a tag and a value is written as its own
 text, as the reference client writes it — refused under 320 where that text is
-not `key=value`. A request for a fundamental report takes a list and a gateway
-reads none of it; neither does this client. The two option calculations take
-a list and do nothing with it: this client answers them itself, from the model
-the venue states for the contract, and sends nothing that could carry the
-list, so nothing in it is checked or sent.
+not `key=value`.
 
 The checks are the ones a gateway makes on a list written in the text
 encoding ib_async uses. On the protobuf encoding the reference client moves
@@ -474,24 +517,25 @@ waiting on the end is not left waiting.
 with what it has finished rather than with what this session watched finish,
 and the call waits for that answer before handing it back.
 
-## 4,096 instruments at a time
+## Contracts held at a time
 
-The engine holds a slot for 4,096 distinct contracts concurrently. Registering
-one past that is refused with a message naming the limit.
+Nothing here refuses a contract for want of room. The tables that hold a slot
+per contract are made for 4,096 and grow past that, and a slot's entry never
+moves while a caller reads it; a slot handed out reads as an empty quote until
+its first tick, wherever it falls. What a caller meets is the venue's
+allowance of quote lines, stated on the logon and counted against open
+streams: a subscription past it is refused under 101, *Max number of tickers
+has been reached* (100 lines on a paper login). Orders, fills, holdings and
+news each take a slot as well, and nothing bounds how many of those a session
+holds.
 
-Concurrent, not cumulative: cancelling a market-data subscription frees its slot
-and the slot is reused. A long-running process that subscribes and never cancels
-will reach it; one that cancels what it is done with will not.
+Slots are reused: cancelling a market-data subscription gives its slot back,
+and a contract nothing holds any more frees its own.
 
-The number is this client's own allocation, not a limit the venue states, and
-it is not the one a caller meets first. The venue states how many quote lines
-the account may hold on the logon, and this client counts its open streams
-against that allowance: a subscription past it is refused for want of a line,
-which happens well before a slot runs out.
-
-The slot table is sized well clear of it. One option chain asked for at once is
-282 live subscriptions on a single underlying, and the venue served all of
-them.
+What the company series state about a contract is kept for 4,096 contracts
+past their subscriptions, the one heard of longest ago making way — a bound of
+this client's own, so a scanner swept across thousands of contracts is not
+kept whole for a session.
 
 ## A recovery attempt outlives the call that stops it, and opens nothing
 

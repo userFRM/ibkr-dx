@@ -19,8 +19,7 @@ fn only_a_stock_leaves_the_contract_unnamed() {
         let mut context = Context::new();
         let instrument = context
             .market
-            .try_register_contract(1, "X", sec_type, "SMART", key)
-            .expect("register a contract");
+            .register_contract(1, "X", sec_type, "SMART", key);
         context.set_symbol(instrument, "X".to_string());
         let mut fields: Vec<(u32, String)> = Vec::new();
         push_contract_identity(&mut fields, &context, instrument);
@@ -104,8 +103,7 @@ fn a_replace_does_not_name_an_option_by_its_underlying() {
     let mut context = Context::new();
     let instrument = context
         .market
-        .try_register_contract(756733, "SPY", "OPT", "SMART", "20270917|500|C|100|||USD")
-        .expect("register an option");
+        .register_contract(756733, "SPY", "OPT", "SMART", "20270917|500|C|100|||USD");
     context.set_symbol(instrument, "SPY".to_string());
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
@@ -1468,7 +1466,7 @@ fn an_order_states_the_currency_the_contract_is_priced_in() {
     let sent = |key: Option<&str>| {
         let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
         let mut context = Context::new();
-        let id = context.market.try_register_contract(0, "BMW", "STK", "IBIS", "").unwrap();
+        let id = context.market.register_contract(0, "BMW", "STK", "IBIS", "");
         context.set_symbol(id, "BMW".to_string());
         if let Some(k) = key {
             context.set_order_identity(id, k);
@@ -1559,7 +1557,7 @@ fn a_percent_trail_states_the_percent_and_the_unit_separately() {
         0,
         Side::Sell,
         1,
-        crate::types::OrderKind::TrailPct { trail_pct: 250, trail_stop_price: 0 },
+        crate::types::OrderKind::TrailPct { trail_pct: 250, trail_stop_price: None },
         b'0',
         &crate::types::OrderAttrs::default(),
     )
@@ -2015,7 +2013,7 @@ mod modify_wire_tests {
             side: Side::Sell,
             qty: crate::types::QTY_SCALE,
             kind: crate::types::OrderKind::TrailingStop {
-                trail_stop_price: 0,
+                trail_stop_price: None,
                 trail_amt: 5 * crate::types::PRICE_SCALE,
             },
             tif: b'0',
@@ -2177,8 +2175,7 @@ mod modify_wire_tests {
         let mut context = Context::new();
         let instrument = context
             .market
-            .try_register_contract(0, "AAPL", "OPT", "SMART", "20260619|230|C|100")
-            .expect("slot");
+            .register_contract(0, "AAPL", "OPT", "SMART", "20260619|230|C|100");
         context.market.set_symbol(instrument, "AAPL".into());
         context.market.set_routing(instrument, "OPT", "SMART");
 
@@ -2207,8 +2204,7 @@ mod modify_wire_tests {
         let mut context = Context::new();
         let instrument = context
             .market
-            .try_register_contract(0, "AAPL", "STK", "SMART", "")
-            .expect("slot");
+            .register_contract(0, "AAPL", "STK", "SMART", "");
         context.market.set_symbol(instrument, "AAPL".into());
         context.market.set_routing(instrument, "STK", "SMART");
 
@@ -2236,8 +2232,7 @@ mod modify_wire_tests {
             let mut context = Context::new();
             let instrument = context
                 .market
-                .try_register_contract(0, "AAPL", "OPT", "SMART", "20260619|230|C|100")
-                .expect("slot");
+                .register_contract(0, "AAPL", "OPT", "SMART", "20260619|230|C|100");
             context.market.set_symbol(instrument, "AAPL".into());
             context.market.set_routing(instrument, "OPT", "SMART");
 
@@ -2266,8 +2261,7 @@ mod modify_wire_tests {
         let mut context = Context::new();
         let instrument = context
             .market
-            .try_register_contract(793_356_217, "MES", "FUT", "CME", "202609|0||5")
-            .expect("slot");
+            .register_contract(793_356_217, "MES", "FUT", "CME", "202609|0||5");
         context.market.set_symbol(instrument, "MES".into());
         context.market.set_routing(instrument, "FUT", "CME");
 
@@ -3014,8 +3008,7 @@ mod outside_rth_polarity_tests {
             let mut context = Context::new();
             let instrument = context
                 .market
-                .try_register_contract(893091670, "MES", "FUT", "CME", "20270917|0||5|MES|MESU7")
-                .expect("register a future");
+                .register_contract(893091670, "MES", "FUT", "CME", "20270917|0||5|MES|MESU7");
             context.set_symbol(instrument, "MES".to_string());
             submit(&mut context, instrument, false);
             let sent = drain(&mut context);
@@ -3032,8 +3025,7 @@ mod outside_rth_polarity_tests {
             let mut by_month = Context::new();
             let monthly = by_month
                 .market
-                .try_register_contract(893091670, "MES", "FUT", "CME", "202709|0||5|MES|MESU7")
-                .expect("register a future by its month");
+                .register_contract(893091670, "MES", "FUT", "CME", "202709|0||5|MES|MESU7");
             by_month.set_symbol(monthly, "MES".to_string());
             submit(&mut by_month, monthly, false);
             let monthly_sent = drain(&mut by_month);
@@ -3066,8 +3058,7 @@ mod outside_rth_polarity_tests {
         let mut context = Context::new();
         let instrument = context
             .market
-            .try_register_contract(893091670, "MES", "FUT", "CME", "20270917|0||5|MES|MESU7")
-            .expect("register a future");
+            .register_contract(893091670, "MES", "FUT", "CME", "20270917|0||5|MES|MESU7");
         context.set_symbol(instrument, "MES".to_string());
         context.pending_orders.push(crate::types::OrderRequest::SubmitBracket { con_id: 0,
             parent_id: 1,
@@ -3538,7 +3529,7 @@ fn a_replace_naming_a_new_trail_puts_that_trail_on_the_wire() {
         side: Side::Sell,
         qty: crate::types::QTY_SCALE,
         kind: crate::types::OrderKind::TrailingStop {
-            trail_stop_price: 0,
+            trail_stop_price: None,
             trail_amt: 5 * crate::types::PRICE_SCALE,
         },
         tif: b'0',
@@ -3678,7 +3669,7 @@ fn a_replace_naming_a_new_offset_or_cap_puts_it_where_the_submit_does() {
     assert_eq!(one("99=", &msg).as_deref(), Some("0.1"), "on both tags the venue states it on: {msg}");
 
     let msg = replace_frame(
-        K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: 0 },
+        K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: None },
         20 * P / 100, 2 * P,
     );
     assert_eq!(one("99=", &msg).as_deref(), Some("2"), "a trailing stop limit's trail: {msg}");
@@ -3687,7 +3678,7 @@ fn a_replace_naming_a_new_offset_or_cap_puts_it_where_the_submit_does() {
 
     // A replace naming nothing leaves every placed number in force, which is
     // how a caller moves the quantity alone.
-    let msg = replace_frame(K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: 0 }, 0, 0);
+    let msg = replace_frame(K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: None }, 0, 0);
     assert_eq!((one("211=", &msg).as_deref(), one("6370=", &msg).as_deref()), (Some("1"), Some("0.1")), "{msg}");
 }
 
@@ -3711,7 +3702,7 @@ fn a_second_replace_restates_what_the_first_one_moved_to() {
     assert_eq!(one("44=", &msg).as_deref(), Some("101"), "a midpoint peg's moved cap stands: {msg}");
 
     let msg = second_replace_frame(
-        K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: 0 },
+        K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: None },
         (20 * P / 100, 2 * P), (0, 0),
     );
     assert_eq!(
@@ -3719,7 +3710,7 @@ fn a_second_replace_restates_what_the_first_one_moved_to() {
         "a trailing stop limit's moved trail and offset stand: {msg}",
     );
 
-    let msg = second_replace_frame(K::TrailingStop { trail_stop_price: 0, trail_amt: 5 * P }, (0, 9 * P), (0, 0));
+    let msg = second_replace_frame(K::TrailingStop { trail_stop_price: None, trail_amt: 5 * P }, (0, 9 * P), (0, 0));
     assert_eq!(one("211=", &msg).as_deref(), Some("9"), "a trailing stop's moved trail stands: {msg}");
 }
 
@@ -4044,9 +4035,9 @@ fn a_preview_states_everything_the_order_states() {
         K::Mtl,
         K::MktPrt,
         K::Lit { price: 100 * scale, stop_price: 99 * scale },
-        K::TrailingStop { trail_amt: scale, trail_stop_price: 99 * scale },
-        K::TrailPct { trail_pct: 100, trail_stop_price: 99 * scale },
-        K::TrailingStopLimit { lmt_offset: scale, trail_amt: scale, trail_stop_price: 99 * scale },
+        K::TrailingStop { trail_amt: scale, trail_stop_price: Some(99 * scale) },
+        K::TrailPct { trail_pct: 100, trail_stop_price: Some(99 * scale) },
+        K::TrailingStopLimit { lmt_offset: scale, trail_amt: scale, trail_stop_price: Some(99 * scale) },
         K::Rel { offset: scale / 100, price_cap: 0 },
         K::PassiveRel { offset: scale / 100, price_cap: 0 },
         K::PegBest { price: 100 * scale },
@@ -4104,11 +4095,11 @@ fn a_preview_states_everything_the_order_states() {
     let lit = preview(K::Lit { price: 100 * scale, stop_price: 99 * scale });
     assert_eq!(stated(&lit, "99=").as_deref(), Some("99"), "a touch price is stated: {lit}");
     let tsl = preview(K::TrailingStopLimit {
-        lmt_offset: scale, trail_amt: 2 * scale, trail_stop_price: 99 * scale,
+        lmt_offset: scale, trail_amt: 2 * scale, trail_stop_price: Some(99 * scale),
     });
     assert_eq!(stated(&tsl, "211=").as_deref(), Some("2"), "a trail is stated: {tsl}");
     for (name, kind, inst) in [
-        ("a trailing stop", K::TrailingStop { trail_amt: scale, trail_stop_price: 0 }, "a"),
+        ("a trailing stop", K::TrailingStop { trail_amt: scale, trail_stop_price: None }, "a"),
         ("a relative order", K::Rel { offset: scale / 100, price_cap: 0 }, "R"),
         ("a market peg", K::PegMkt { offset: scale / 100, price_cap: 0 }, "P"),
         ("a midpoint peg", K::PegMid { offset: scale / 100, price_cap: 0 }, "M"),
@@ -5056,7 +5047,7 @@ mod as_a_gateway_sends_it {
         let (_, g) = placed_and_replaced((limit, plain()), (K::PassiveRel { offset: P / 100, price_cap: 0 }, plain()), &[]);
         assert_eq!((one(&g, 40).as_deref(), one(&g, 18), one(&g, 211).as_deref()), (Some("PSVR"), None, Some("0.01")), "{g}");
         // A stop into a trailing stop: the trail on both tags, in an amount.
-        let (_, g) = placed_and_replaced((K::Stop { stop_price: 99 * P }, plain()), (K::TrailingStop { trail_amt: P / 4, trail_stop_price: 0 }, plain()), &[]);
+        let (_, g) = placed_and_replaced((K::Stop { stop_price: 99 * P }, plain()), (K::TrailingStop { trail_amt: P / 4, trail_stop_price: None }, plain()), &[]);
         assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("P"), Some("a")), "{g}");
         assert_eq!((one(&g, 99).as_deref(), one(&g, 211).as_deref(), one(&g, 6268).as_deref()), (Some("0.25"), Some("0.25"), Some("0")), "{g}");
     }
@@ -5066,19 +5057,19 @@ mod as_a_gateway_sends_it {
     #[test]
     fn a_trail_states_its_unit_on_every_message() {
         let (_, g) = placed_and_replaced(
-            (K::TrailPct { trail_pct: 150, trail_stop_price: 0 }, plain()),
-            (K::TrailingStop { trail_amt: P / 4, trail_stop_price: 0 }, plain()),
+            (K::TrailPct { trail_pct: 150, trail_stop_price: None }, plain()),
+            (K::TrailingStop { trail_amt: P / 4, trail_stop_price: None }, plain()),
             &[],
         );
         assert_eq!(one(&g, 35).as_deref(), Some("G"));
         assert_eq!((one(&g, 40).as_deref(), one(&g, 18).as_deref()), (Some("P"), Some("a")), "{g}");
         assert_eq!((one(&g, 99).as_deref(), one(&g, 211).as_deref()), (Some("0.25"), Some("0.25")), "{g}");
         assert_eq!(one(&g, 6268).as_deref(), Some("0"), "an amount: {g}");
-        let d = placed(K::TrailingStop { trail_amt: P / 2, trail_stop_price: 0 }, plain(), &[]);
+        let d = placed(K::TrailingStop { trail_amt: P / 2, trail_stop_price: None }, plain(), &[]);
         assert_eq!(one(&d, 6268).as_deref(), Some("0"), "{d}");
-        let d = placed(K::TrailingStopLimit { lmt_offset: P / 10, trail_amt: P / 2, trail_stop_price: 0 }, plain(), &[]);
+        let d = placed(K::TrailingStopLimit { lmt_offset: P / 10, trail_amt: P / 2, trail_stop_price: None }, plain(), &[]);
         assert_eq!(one(&d, 6268).as_deref(), Some("0"), "{d}");
-        let d = placed(K::TrailPct { trail_pct: 150, trail_stop_price: 0 }, plain(), &[]);
+        let d = placed(K::TrailPct { trail_pct: 150, trail_stop_price: None }, plain(), &[]);
         assert_eq!(one(&d, 6268).as_deref(), Some("100"), "{d}");
     }
 
@@ -5244,7 +5235,7 @@ mod as_a_gateway_sends_it {
         assert_eq!((one(&d, 18), one(&d, 583)), (None, None), "a preview naming a group: {d}");
         let hedged = OrderAttrs { hedge_type: 2, ..aon.clone() };
         assert_eq!(one(&placed(K::Limit { price: P }, hedged, &[]), 18), None, "with a hedge");
-        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: 0 }, OrderAttrs { oca_group_str: "G1".into(), ..aon }, &[]);
+        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: None }, OrderAttrs { oca_group_str: "G1".into(), ..aon }, &[]);
         assert_eq!(one(&d, 18).as_deref(), Some("a"), "the type's own stays: {d}");
     }
 
@@ -5288,7 +5279,7 @@ mod as_a_gateway_sends_it {
     #[test]
     fn the_instructions_are_joined_by_spaces_in_their_order() {
         let aon = OrderAttrs { all_or_none: true, ..Default::default() };
-        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: 0 }, aon.clone(), &[]);
+        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: None }, aon.clone(), &[]);
         assert_eq!(one(&d, 18).as_deref(), Some("a G"), "{d}");
         let d = placed(K::Adaptive { price: P, priority: crate::types::AdaptivePriority::Normal }, aon.clone(), &[]);
         assert_eq!(one(&d, 18).as_deref(), Some("G e"), "{d}");
@@ -5299,7 +5290,7 @@ mod as_a_gateway_sends_it {
         assert_eq!(one(&placed(bench.clone(), aon.clone(), &[]), 18).as_deref(), Some("G R"));
         assert_eq!(one(&placed(bench, plain(), &[]), 18).as_deref(), Some("R"));
         let preview = OrderAttrs { what_if: true, ..aon };
-        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: 0 }, preview, &[]);
+        let d = placed(K::TrailingStop { trail_amt: P, trail_stop_price: None }, preview, &[]);
         assert_eq!((one(&d, 18).as_deref(), one(&d, 6091).as_deref()), (Some("a G"), Some("1")), "a preview too: {d}");
     }
 
@@ -5307,14 +5298,14 @@ mod as_a_gateway_sends_it {
     /// as `T` with no trailing instruction, placed and replaced.
     #[test]
     fn a_trailing_stop_goes_out_under_its_own_name_where_the_venue_takes_it() {
-        let trail = K::TrailingStop { trail_amt: P, trail_stop_price: 0 };
+        let trail = K::TrailingStop { trail_amt: P, trail_stop_price: None };
         let (d, g) = placed_and_replaced((trail.clone(), plain()), (trail, plain()), &["TRAILSENDT"]);
         for msg in [&d, &g] {
             assert_eq!(one(msg, 40).as_deref(), Some("T"), "{msg}");
             assert_eq!(one(msg, 18), None, "{msg}");
             assert_eq!(one(msg, 211).as_deref(), Some("1"), "{msg}");
         }
-        let d = placed(K::TrailPct { trail_pct: 100, trail_stop_price: 0 }, plain(), &["TRAILSENDT"]);
+        let d = placed(K::TrailPct { trail_pct: 100, trail_stop_price: None }, plain(), &["TRAILSENDT"]);
         assert_eq!((one(&d, 40).as_deref(), one(&d, 18)), (Some("T"), None), "{d}");
     }
 
@@ -5520,5 +5511,57 @@ mod as_a_gateway_sends_it {
                 .unwrap_or_else(|e| panic!("{name} is taken: {e:?}"));
             assert_eq!(frame(&order), want, "{name} changes nothing on the wire");
         }
+    }
+}
+
+/// A price of nought where a gateway reads none, and where it carries one as
+/// stated.
+mod a_price_of_nought {
+    use super::super::*;
+    use crate::types::{OrderAttrs, OrderKind as K, PRICE_SCALE as P};
+
+    fn placed(kind: K, attrs: OrderAttrs) -> String {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        send_order_ex(&mut conn, &mut context, &shared, "DU1", 7, 0, Side::Buy, 1, kind, b'0', &attrs)
+            .unwrap();
+        let mut buf = vec![0u8; 16384];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    }
+
+    fn all(msg: &str, tag: u32) -> Vec<String> {
+        let prefix = format!("{tag}=");
+        msg.split('\u{1}').filter_map(|f| f.strip_prefix(prefix.as_str()).map(str::to_string)).collect()
+    }
+
+    /// A trailing stop's trigger is carried wherever it was stated, nought and
+    /// below included, as a gateway carries it. Read as unset below one tick,
+    /// a trigger the caller named was dropped without a word.
+    #[test]
+    fn a_trailing_stops_trigger_of_nought_or_below_is_carried() {
+        for (trigger, wanted) in [(None, vec![]), (Some(0), vec!["0"]), (Some(-P), vec!["-1"]), (Some(99 * P), vec!["99"])] {
+            for kind in [
+                K::TrailingStop { trail_amt: P, trail_stop_price: trigger },
+                K::TrailingStopLimit { lmt_offset: P / 10, trail_amt: P, trail_stop_price: trigger },
+                K::TrailPct { trail_pct: 100, trail_stop_price: trigger },
+            ] {
+                let msg = placed(kind.clone(), OrderAttrs::default());
+                assert_eq!(all(&msg, 6117), wanted, "{kind:?}: {msg}");
+            }
+        }
+    }
+
+    /// A stock range of nought is no bound to a gateway, which leaves it
+    /// unstated. Sent as `6152=0.000000`, it bounded the range at nothing.
+    #[test]
+    fn a_stock_range_of_nought_is_no_bound() {
+        let ranged = |lower: f64, upper: f64| OrderAttrs { stock_range_lower: lower, stock_range_upper: upper, ..Default::default() };
+        let msg = placed(K::Limit { price: P }, ranged(0.0, 0.0));
+        assert!(all(&msg, 6152).is_empty() && all(&msg, 6153).is_empty(), "{msg}");
+        let msg = placed(K::Limit { price: P }, ranged(10.0, 20.0));
+        assert_eq!((all(&msg, 6152), all(&msg, 6153)), (vec!["10.000000".to_string()], vec!["20.000000".to_string()]), "{msg}");
     }
 }

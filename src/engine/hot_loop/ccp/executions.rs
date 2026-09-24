@@ -247,15 +247,10 @@ pub(crate) fn untracked_fill_target(
             return None;
         }
     };
-    // Fallible: a full instrument table must not abort the engine on an
-    // inbound message.
     let is_new_slot = context.market.con_id(
         context.market.instrument_by_con_id(con_id).unwrap_or(0),
     ) != Some(con_id);
-    let Some(instrument) = context.try_register_instrument(con_id) else {
-        log::warn!("Untracked fill for conId {con_id}: instrument table full, position not updated");
-        return None;
-    };
+    let instrument = context.register_instrument(con_id);
     // The fill changes what the account already holds. A new slot takes that
     // holding first; an existing slot already includes any fills since it.
     crate::engine::hot_loop::take_what_the_account_already_holds(
@@ -1185,34 +1180,13 @@ impl CcpState {
             .and_then(|s| s.bytes().next())
             .unwrap_or_else(|| prior.map_or(crate::types::TIF_UNSTATED, |o| o.tif));
         if let (Some(side), true) = (side, con_id != 0 && qty > 0) {
-            // Recovery is fed by gateway frames, so a full instrument
-            // table must degrade to a missing order rather than take the
-            // engine down. The reconnect burst replays every
-            // resting order, which is exactly when the table fills.
-            // Skipping only the insert keeps the order in last_clord and
-            // the rich-order cache, so req_open_orders still shows it —
-            // but it is NOT in the engine book, so a later fill or
-            // terminal status for it is dropped and no OrderUpdate
-            // reaches the caller. A missing order beats taking
-            // the engine down; it is not a complete answer.
-            // Counted, not only logged: a withdrawal of everything composes
-            // its cancels from the book, so an order that never reached the
-            // book is one it silently skips, and the caller who asked for the
-            // account to be flattened is answered as though it were.
             // Whether the slot is this registration's to seed. Looking a
             // live contract up returns the slot it already has, and the
             // account's row is older than any fill booked since.
             let is_new_slot = context.market.con_id(
                 context.market.instrument_by_con_id(con_id).unwrap_or(0),
             ) != Some(con_id);
-            match context.try_register_instrument(con_id) {
-                None => {
-                    shared.orders.note_an_order_without_a_slot();
-                    log::warn!(
-                        "recovery: instrument table full, order clord={clord_id} con_id={con_id} not tracked in the engine book",
-                    );
-                }
-                Some(instrument) => {
+            let instrument = context.register_instrument(con_id);
             if let Some(sym) = parsed.get(&55) {
                 context.set_symbol(instrument, sym.clone());
             }
@@ -1335,8 +1309,6 @@ impl CcpState {
                 },
                 last_exec: Default::default(),
             });
-                }
-            }
         }
     }
 

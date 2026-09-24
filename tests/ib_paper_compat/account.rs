@@ -429,7 +429,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     // Fetch secdef first to populate contract cache with exchange/localSymbol/tradingClass
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9999, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9999, include_expired: false, filters: Default::default() }).unwrap();
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
@@ -627,7 +627,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     // Fetch secdef to populate contract cache
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9998, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9998, include_expired: false, filters: Default::default() }).unwrap();
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: false, ..Default::default() } })).unwrap();
@@ -860,7 +860,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     hot_loop.context_mut().set_routing(inst_id, "STK", "SMART");
 
     // Fetch secdef to populate contract cache
-    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9997, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: String::new(), sec_type: "STK".into(), exchange: String::new(), currency: String::new(), ..Default::default() }, req_id: 9997, include_expired: false, filters: Default::default() }).unwrap();
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, con_id: 0, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();

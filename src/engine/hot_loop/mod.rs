@@ -620,8 +620,9 @@ impl HotLoop {
                             // to the slot the contract lives in, and nothing
                             // will ever withdraw it, which is what gives a slot
                             // back. Left, one goes out of the table on every
-                            // collision until the table is full and the next
-                            // subscription is refused for want of one.
+                            // collision, and every table indexed by slot grows
+                            // for the rest of the session to hold slots nothing
+                            // uses.
                             //
                             // Not here, though: the release purges the moves
                             // that name this slot, and that move is the only
@@ -754,12 +755,8 @@ impl HotLoop {
         }    }
 
 
-    /// Register a contract, or say why it could not be.
-    ///
-    /// A full table sends the caller an `Err` on the reply channel rather than
-    /// ending the engine: the request that could not be served fails, and
-    /// every subscription already running keeps running.
-    fn register_or_reject(
+    /// Register a contract, and answer the caller with its slot.
+    fn register_contract(
         &mut self,
         con_id: i64,
         symbol: String,
@@ -775,7 +772,7 @@ impl HotLoop {
         // three transports, and a caller's channel is the caller's to drain.
         // A reply that cannot be delivered is a caller that stopped listening.
         reply_tx: &Option<std::sync::mpsc::SyncSender<Result<InstrumentId, String>>>,
-    ) -> Option<InstrumentId> {
+    ) -> InstrumentId {
         // Whether this call is what created the slot. Registration is also how
         // an already-live contract is looked up, and the account row is older
         // than any fill booked since: reapplying it on every call rolled a
@@ -783,37 +780,22 @@ impl HotLoop {
         let is_new_slot = self.context.market.con_id(
             self.context.market.instrument_by_con_id(con_id).unwrap_or(0),
         ) != Some(con_id);
-        match self.context.market.try_register_described(
+        let id = self.context.market.register_described(
             con_id, &symbol, sec_type, exchange, option_key, narrowing,
-        ) {
-            Some(id) => {
-                // The symbol is written by the registration itself, under a
-                // guard that keeps the one the slot has. Written again here
-                // without one, a registration naming no symbol — which is
-                // every registration made by contract id, as orders, positions
-                // and fills all are — blanked a slot already registered under
-                // its name, and the order built from it went out with an empty
-                // symbol tag.
-                self.context.market.set_routing(id, sec_type, exchange);
-                take_what_the_account_already_holds(
-                    &mut self.context, &self.shared, con_id, id, is_new_slot,
-                );
-                self.shared.market.set_instrument_count(self.context.market.count());
-                if let Some(tx) = reply_tx { let _ = tx.try_send(Ok(id)); }
-                Some(id)
-            }
-            None => {
-                log::error!("Instrument table full: rejecting registration for con_id={con_id}");
-                if let Some(tx) = reply_tx {
-                    let _ = tx.try_send(Err(format!(
-                        "instrument table full: {} contracts are live concurrently; \
-                         cancel unused market-data subscriptions to free slots",
-                        crate::types::MAX_INSTRUMENTS
-                    )));
-                }
-                None
-            }
-        }
+        );
+        // The symbol is written by the registration itself, under a guard that
+        // keeps the one the slot has. Written again here without one, a
+        // registration naming no symbol — which is every registration made by
+        // contract id, as orders, positions and fills all are — blanked a slot
+        // already registered under its name, and the order built from it went
+        // out with an empty symbol tag.
+        self.context.market.set_routing(id, sec_type, exchange);
+        take_what_the_account_already_holds(
+            &mut self.context, &self.shared, con_id, id, is_new_slot,
+        );
+        self.shared.market.set_instrument_count(self.context.market.count());
+        if let Some(tx) = reply_tx { let _ = tx.try_send(Ok(id)); }
+        id
     }
 
     /// Offer back the slots an order has just stopped holding.
@@ -1086,7 +1068,7 @@ impl HotLoop {
             self.ccp.sweep_pending_matching_symbols(&self.shared);
             self.ccp.sweep_pending_option_params(&self.shared);
             self.ccp.sweep_pending_advisor(&self.shared);
-            self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
+            self.ccp.sweep_pending_schedule_pairs(&mut self.ccp_conn, &self.shared, &self.event_tx, &mut self.hb);
             self.ccp.sweep_scanner_enrichments(&self.shared);
             self.ccp.sweep_contract_details(&self.shared, &self.event_tx);
             self.ccp.sweep_pending_subscribes(&mut self.context, &self.shared);
@@ -1456,7 +1438,7 @@ impl HotLoop {
                         filters.sec_id_type, filters.sec_id, filters.issuer_id,
                     );
                     let narrowing = if narrowing.chars().all(|c| c == '|') { String::new() } else { narrowing };
-                    let registered = self.register_or_reject(con_id, symbol.clone(), &sec_type, &exchange, &option_key, &narrowing, &None);
+                    let registered = self.register_contract(con_id, symbol.clone(), &sec_type, &exchange, &option_key, &narrowing, &None);
                     // Held against the slot before the subscription goes out,
                     // so the frame that carries them is built from them and the
                     // rebuild after a reconnect asks for them again.
@@ -1474,12 +1456,11 @@ impl HotLoop {
                     // named beside it went out on nothing — and stayed on the
                     // list the rebuild after a reconnect reads, which asked
                     // the venue for it as part of a stream that never named it.
-                    if let Some(slot) = registered
-                        && !generic_ticks.is_empty()
+                    if !generic_ticks.is_empty()
                         && !regulatory_snapshot
-                        && !self.farm.holds_a_stream(slot)
+                        && !self.farm.holds_a_stream(registered)
                     {
-                        let held = self.farm.asked_generic_ticks.entry(slot).or_default();
+                        let held = self.farm.asked_generic_ticks.entry(registered).or_default();
                         for tick in &generic_ticks {
                             if !held.contains(tick) {
                                 held.push(*tick);
@@ -1487,13 +1468,6 @@ impl HotLoop {
                         }
                     }
                     match registered {
-                        None => {
-                            if let Some(tx) = &reply_tx {
-                                let _ = tx.try_send(Err(format!(
-                                    "instrument table full: cannot subscribe to {symbol}"
-                                ).into()));
-                            }
-                        }
                         // Already subscribed, so nothing goes to the venue
                         // again: one contract holds one subscription on the
                         // wire, and the caller watches the one that is up, so
@@ -1510,7 +1484,7 @@ impl HotLoop {
                         // the slot but is withdrawn as soon as it completes,
                         // so a subscribe pointed at one was never sent and the
                         // withdrawal took the record out from under it.
-                        Some(id) if self.farm.holds_a_stream(id) && !regulatory_snapshot => {
+                        id if self.farm.holds_a_stream(id) && !regulatory_snapshot => {
                             // The answer first, because nothing is done for a
                             // caller that has stopped waiting: its wait is
                             // bounded and this loop is not, and it reports a
@@ -1547,7 +1521,7 @@ impl HotLoop {
                                 );
                             }
                         }
-                        Some(id) => {
+                        id => {
                             self.farm.note_subscription_asked_on(id, issued);
                             // The same rule as the definition path beside it:
                             // a request that begins the stream owns the
@@ -1865,14 +1839,13 @@ impl HotLoop {
                     }
                     // Registered with what the contract is, so the slot carries
                     // it and the subscription can state it.
-                    if let Some(id) = self.register_or_reject(con_id, symbol, &sec_type, &exchange, "", "", &reply_tx) {
-                        let mts = self.context.market.min_tick_scaled(id);
-                        self.hmds.send_tbt_subscribe(
-                            req_id, con_id, id, tbt_type, number_of_ticks, ignore_size,
-                            &sec_type, &exchange, mts,
-                            &mut self.hmds_conn, &mut self.hb,
-                        );
-                    }
+                    let id = self.register_contract(con_id, symbol, &sec_type, &exchange, "", "", &reply_tx);
+                    let mts = self.context.market.min_tick_scaled(id);
+                    self.hmds.send_tbt_subscribe(
+                        req_id, con_id, id, tbt_type, number_of_ticks, ignore_size,
+                        &sec_type, &exchange, mts,
+                        &mut self.hmds_conn, &mut self.hb,
+                    );
                 }
                 ControlCommand::UnsubscribeTbt { req_id, instrument } => {
                     // As above: records already queued under this request are
@@ -1887,16 +1860,15 @@ impl HotLoop {
                     // type in that slot instead, it was recorded as where the
                     // contract trades, and every order on the contract went
                     // out routed to a destination of that name.
-                    if let Some(id) = self.register_or_reject(con_id, symbol, &sec_type, "", "", "", &reply_tx) {
-                        // Allocate req_id from farm's counter (shared ID space)
-                        let req_id = self.farm.next_md_req_id;
-                        self.farm.next_md_req_id += 1;
-                        // Recorded where the acknowledgement arrives, or the
-                        // tag is never filed and no headline is delivered.
-                        self.farm.send_news_subscribe(
-                            con_id, id, &sec_type, &providers, req_id, &mut self.farm_conn, &mut self.hb,
-                        );
-                    }
+                    let id = self.register_contract(con_id, symbol, &sec_type, "", "", "", &reply_tx);
+                    // Allocate req_id from farm's counter (shared ID space)
+                    let req_id = self.farm.next_md_req_id;
+                    self.farm.next_md_req_id += 1;
+                    // Recorded where the acknowledgement arrives, or the tag is
+                    // never filed and no headline is delivered.
+                    self.farm.send_news_subscribe(
+                        con_id, id, &sec_type, &providers, req_id, &mut self.farm_conn, &mut self.hb,
+                    );
                 }
                 ControlCommand::UnsubscribeNews { subject } => {
                     // Named by contract where the caller holds no slot, which
@@ -1940,7 +1912,7 @@ impl HotLoop {
                 }
                 ControlCommand::RegisterInstrument { contract, identity, reply_tx } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
-                    self.register_or_reject(con_id, symbol, &sec_type, &exchange, &identity, "", &reply_tx);
+                    self.register_contract(con_id, symbol, &sec_type, &exchange, &identity, "", &reply_tx);
                 }
                 ControlCommand::FetchHistorical { contract, req_id, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
@@ -2113,19 +2085,12 @@ impl HotLoop {
                         self.hmds.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth, include_expired, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
-                ControlCommand::FetchContractDetails { contract, req_id, filters } => {
+                ControlCommand::FetchContractDetails { contract, req_id, include_expired, filters } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, currency, .. } = contract;
                     if con_id > 0 {
-                        self.ccp.send_secdef_request(req_id, con_id, &mut self.ccp_conn, &mut self.hb, &self.shared);
-                    } else if let Err(reason) = self.ccp.send_secdef_request_by_symbol(req_id, &symbol, &sec_type, &exchange, &currency, &filters, &mut self.ccp_conn, &mut self.hb, &self.shared) {
-                        // A lookup this client cannot ask is refused rather
-                        // than made: ended like a definition the venue did
-                        // not hold, so no caller waits on rows that nothing
-                        // will send.
-                        self.shared.reference.push_historical_error(
-                            req_id, crate::error_codes::Refusal::VALIDATION, reason,
-                        );
-                        self.shared.reference.push_contract_details_end(req_id);
+                        self.ccp.send_secdef_request(req_id, con_id, &mut self.ccp_conn, &mut self.hb, &self.shared, &self.event_tx);
+                    } else {
+                        self.ccp.send_contract_details_lookup(req_id, &symbol, &sec_type, &exchange, &currency, &filters, include_expired, &mut self.ccp_conn, &mut self.hb, &self.shared, &self.event_tx);
                     }
                 }
                 ControlCommand::CancelHeadTimestamp { req_id } => {
@@ -2324,7 +2289,7 @@ impl HotLoop {
                         );
                     }
                 }
-                ControlCommand::FetchHistoricalTicks { contract, req_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth, include_expired, .. } => {
+                ControlCommand::FetchHistoricalTicks { contract, req_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth, ignore_size, include_expired, .. } => {
                     let ContractRef { con_id, sec_type, exchange, .. } = contract;
                     // The engine-side reading of the name, for a caller that
                     // reached this loop by the control channel rather than
@@ -2342,7 +2307,7 @@ impl HotLoop {
                     } else if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_historical_ticks_request(req_id, con_id, &sec_type, &exchange, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, include_expired, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_historical_ticks_request(req_id, con_id, &sec_type, &exchange, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, include_expired, ignore_size, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::SubscribeRealTimeBar { contract, req_id, what_to_show, use_rth, .. } => {
@@ -4994,6 +4959,51 @@ mod tests {
         }
     }
 
+    /// What a caller meets is the venue's allowance of quote lines, and never
+    /// the size the slot tables are made with. With every slot they are made
+    /// with held by something other than quotes — orders, fills, holdings —
+    /// the next subscription was refused "instrument table full" while the
+    /// venue's allowance had every line free.
+    #[test]
+    fn subscriptions_past_the_size_the_tables_are_made_with_stop_at_the_allowance() {
+        let allowance = 3;
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (mut conn, _peer) = Connection::for_test();
+        conn.market_data_allowance = allowance;
+        hl.ccp_conn = Some(conn);
+        let (tx, rx) = sync_channel(4);
+        hl.set_control_rx(rx);
+        // Every slot the tables are made with, held for something other than
+        // quotes, which spends no line.
+        for con_id in 1..=crate::types::MAX_INSTRUMENTS as i64 {
+            hl.context.market.register(1_000_000 + con_id);
+        }
+        let mut subscribe = |con_id| {
+            let (reply_tx, reply_rx) = sync_channel(1);
+            tx.send(ControlCommand::Subscribe {
+                filters: Default::default(),
+                contract: ContractRef { con_id, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
+                mode_9887: 0,
+                regulatory_snapshot: false,
+                generic_ticks: Vec::new(),
+                reply_tx: Some(reply_tx),
+                issued: 0,
+            }).unwrap();
+            hl.poll_control_commands();
+            reply_rx.try_recv().expect("the subscriber is answered")
+        };
+        for con_id in 1..=allowance as i64 {
+            let slot = subscribe(con_id).unwrap_or_else(|why| panic!("{con_id} is inside the allowance: {why:?}"));
+            assert!(slot as usize >= crate::types::MAX_INSTRUMENTS, "{con_id} took slot {slot}");
+        }
+        let refused = subscribe(allowance as i64 + 1).expect_err("past the allowance");
+        assert_eq!((refused.code, refused.message.as_str()), (101, "Max number of tickers has been reached"));
+        let last = (crate::types::MAX_INSTRUMENTS + allowance - 1) as InstrumentId;
+        shared.market.push_quote(last, &crate::types::Quote { bid: 7, ..Default::default() });
+        assert_eq!(shared.market.try_quote(last).map(|q| q.bid), Some(7), "a caller reads the slot past them");
+    }
+
     /// The calendar's connection is watched like the other three.
     ///
     /// Its send and receive timestamps drive the same liveness check: a socket
@@ -5161,6 +5171,40 @@ mod tests {
         assert!(
             !hl.hmds.forming_bars.iter().any(|f| f.req_id == req_id),
             "and so does the bar it was part way through",
+        );
+    }
+
+    /// A request for historical ticks that asks to leave out size-only
+    /// changes reaches the venue with the query's size filter. The flag was
+    /// taken at both surfaces and dropped before the query was written.
+    #[test]
+    fn a_tick_request_asking_to_leave_out_size_changes_reaches_the_venue_filtered() {
+        use std::io::Read;
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        hl.hmds_conn = Some(conn);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::FetchHistoricalTicks {
+            contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
+            req_id: 5,
+            start_date_time: String::new(),
+            end_date_time: "20260101-16:00:00".into(),
+            number_of_ticks: 100,
+            what_to_show: "BID_ASK".into(),
+            use_rth: true,
+            ignore_size: true,
+            include_expired: false,
+            filters: Default::default(),
+        }).unwrap();
+        hl.poll_control_commands();
+
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            sent.contains("<delay>auto</delay><filter><ignoreSize>true</ignoreSize></filter>"),
+            "the query went out without the filter the caller asked for: {sent}",
         );
     }
 
@@ -5805,6 +5849,7 @@ mod tests {
                 number_of_ticks: 10,
                 what_to_show: "NOT_A_SERIES".into(),
                 use_rth: true,
+                ignore_size: false,
                 include_expired: false,
                 filters: Default::default(),
             },
@@ -7750,11 +7795,10 @@ mod tests {
     fn a_registration_naming_no_symbol_keeps_the_one_the_slot_has() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let id = hl
-            .register_or_reject(756733, "SPY".into(), "STK", "SMART", "", "", &None)
-            .expect("registered under its name");
+            .register_contract(756733, "SPY".into(), "STK", "SMART", "", "", &None);
         assert_eq!(
-            hl.register_or_reject(756733, String::new(), "", "", "", "", &None),
-            Some(id),
+            hl.register_contract(756733, String::new(), "", "", "", "", &None),
+            id,
             "the same contract is the same slot",
         );
         assert_eq!(
@@ -7779,8 +7823,7 @@ mod tests {
         let by_name = hl
             .context
             .market
-            .try_register_contract(0, "SPY", "STK", "SMART", "")
-            .expect("a slot for the contract named by symbol");
+            .register_contract(0, "SPY", "STK", "SMART", "");
         assert_ne!(by_id, by_name, "two callers, two slots, one contract");
 
         hl.ccp.resolved_md_subscribe.push((
@@ -7823,8 +7866,7 @@ mod tests {
         let by_name = hl
             .context
             .market
-            .try_register_contract(0, "SPY", "STK", "SMART", "")
-            .expect("a slot for the contract named by symbol");
+            .register_contract(0, "SPY", "STK", "SMART", "");
 
         // The caller named by symbol asked for a series, recorded against the
         // slot it was given.
@@ -8003,16 +8045,16 @@ mod tests {
     #[test]
     fn two_conid_less_options_on_one_underlying_do_not_share_a_slot() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let call = hl.register_or_reject(
-            0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None).expect("call");
-        let put = hl.register_or_reject(
-            0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "", &None).expect("put");
+        let call = hl.register_contract(
+            0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None);
+        let put = hl.register_contract(
+            0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "", &None);
         assert_ne!(call, put, "the call and the put must not resolve to one slot");
 
         // The same option still resolves to its own slot rather than a third.
         assert_eq!(
-            hl.register_or_reject(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None),
-            Some(call), "the same contract keeps its slot",
+            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None),
+            call, "the same contract keeps its slot",
         );
     }
 
@@ -8023,23 +8065,23 @@ mod tests {
     #[test]
     fn a_slot_with_no_identity_is_adopted_by_the_first_that_states_one() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let pre = hl.register_or_reject(0, "AAPL".into(), "OPT", "SMART", "", "", &None).expect("pre");
+        let pre = hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "", "", &None);
         assert_eq!(
-            hl.register_or_reject(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None),
-            Some(pre), "the identity-less slot is adopted, not stranded",
+            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None),
+            pre, "the identity-less slot is adopted, not stranded",
         );
         // And once adopted it belongs to that contract alone.
         assert_ne!(
-            hl.register_or_reject(0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "", &None),
-            Some(pre), "a different contract does not inherit it",
+            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "", &None),
+            pre, "a different contract does not inherit it",
         );
     }
 
     #[test]
     fn con_id_less_contracts_do_not_share_one_slot() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let aapl = hl.register_or_reject(0, "AAPL".into(), "STK", "SMART", "", "", &None).expect("AAPL");
-        let qqq = hl.register_or_reject(0, "QQQ".into(), "STK", "SMART", "", "", &None).expect("QQQ");
+        let aapl = hl.register_contract(0, "AAPL".into(), "STK", "SMART", "", "", &None);
+        let qqq = hl.register_contract(0, "QQQ".into(), "STK", "SMART", "", "", &None);
 
         assert_ne!(aapl, qqq, "two symbols must not resolve to one instrument");
         assert_eq!(hl.context.market.symbol(aapl), "AAPL");
@@ -8047,10 +8089,10 @@ mod tests {
 
         // The same contract again is the same slot, or every re-registration
         // burns another one.
-        assert_eq!(hl.register_or_reject(0, "AAPL".into(), "STK", "SMART", "", "", &None), Some(aapl));
+        assert_eq!(hl.register_contract(0, "AAPL".into(), "STK", "SMART", "", "", &None), aapl);
         // Tick-by-tick and news register with neither secType nor exchange,
         // and must land on the slot the L1 subscription already has.
-        assert_eq!(hl.register_or_reject(0, "QQQ".into(), "", "", "", "", &None), Some(qqq));
+        assert_eq!(hl.register_contract(0, "QQQ".into(), "", "", "", "", &None), qqq);
     }
 
     // F64::from_str accepts "nan"/"inf", so a not-available sentinel
@@ -8964,7 +9006,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
         tx.send(ControlCommand::FetchContractDetails {
-            req_id: 7, contract: stock(1 << 32, "SPY"), filters: Default::default(),
+            req_id: 7, contract: stock(1 << 32, "SPY"), include_expired: false, filters: Default::default(),
         })
         .unwrap();
         hl.poll_control_commands();
@@ -9273,8 +9315,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
         let instrument = hl.context.market
-            .try_register_contract(0, "SPY", "STK", "SMART", "")
-            .expect("a slot for the contract named by symbol");
+            .register_contract(0, "SPY", "STK", "SMART", "");
         hl.ccp.resolved_md_subscribe.push((756733, crate::engine::hot_loop::ccp::PendingSubscribe {
             issued: 0,
             filters: Default::default(),
