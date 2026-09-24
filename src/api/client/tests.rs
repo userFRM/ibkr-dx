@@ -1692,7 +1692,8 @@ fn req_mkt_data_ex_propagates_mode_9887() {
         let (client, rx, _shared) = test_client();
         let _ = client.try_req_mkt_data_ex(1, &spy(), "", false, false, mode, &[]);
         match rx.try_recv().unwrap() {
-            ControlCommand::Subscribe { contract: ContractRef { con_id, .. }, mode_9887, .. } => {
+            ControlCommand::Subscribe { contract: ContractRef { con_id, .. }, mode_9887, delayed_mode, .. } => {
+                assert_eq!(delayed_mode, None);
                 assert_eq!(mode_9887, mode);
                 assert_eq!(con_id, 756733);
             }
@@ -2472,9 +2473,12 @@ fn an_exercise_and_a_bracket_are_refused_once_the_trading_connection_has_stopped
     };
     shared.reference.set_trading_over("the trading connection");
 
-    let err = crate::api::client::tests::reported(&client, || client.exercise_options(1, &opt, 1, 1, "DU123", false, Default::default()))
-        .expect_err("an exercise is refused");
-    assert!(err.message.contains("never sent"), "{err}");
+    for expiry in ["20260619", "20260230"] {
+        let opt = Contract { last_trade_date_or_contract_month: expiry.into(), ..opt.clone() };
+        let err = crate::api::client::tests::reported(&client, || client.exercise_options(1, &opt, 1, 1, "DU123", false, Default::default()))
+            .expect_err("an exercise is refused");
+        assert!(err.message.contains("never sent"), "{err}");
+    }
 
     let err = client.place_bracket(&spy(), "BUY", 1.0, 100.0, 110.0, 90.0)
         .expect_err("and so is a bracket");
@@ -12165,4 +12169,175 @@ fn an_orders_option_list_is_checked_before_its_destination() {
     };
     assert_eq!(client.try_place_order(9812, &Contract::default(), &order).unwrap_err().code, 10337);
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn malformed_contract_expiry_is_refused_before_any_request_is_sent() {
+    type Ask = fn(&EClient, &Contract);
+    let requests: &[(&str, Ask)] = &[
+        ("market data", |c, ct| c.req_mkt_data(71, ct, "", false, false)),
+        ("market data with explicit mode", |c, ct| c.req_mkt_data_ex(71, ct, "", false, false, 1, &[])),
+        ("market data with news", |c, ct| c.req_mkt_data(71, ct, "292", false, false)),
+        ("depth", |c, ct| c.req_mkt_depth(71, ct, 5, false)),
+        ("tick by tick", |c, ct| c.req_tick_by_tick_data(71, ct, "Last", 0, false)),
+        ("real time bars", |c, ct| c.req_real_time_bars(71, ct, 5, "TRADES", true)),
+        ("contract details", |c, ct| c.req_contract_details(71, ct)),
+        ("historical bars", |c, ct| c.req_historical_data(71, ct, "", "1 D", "1 hour", "TRADES", true, 1, false)),
+        ("historical schedule", |c, ct| c.req_historical_schedule(71, ct, "", "1 D", true)),
+        ("schedule through historical bars", |c, ct| c.req_historical_data(71, ct, "", "1 D", "1 day", "SCHEDULE", true, 1, false)),
+        ("head timestamp", |c, ct| c.req_head_time_stamp(71, ct, "TRADES", true, 1)),
+        ("histogram", |c, ct| c.req_histogram_data(71, ct, true, "1 D")),
+        ("historical ticks", |c, ct| c.req_historical_ticks(71, ct, "20260923 10:00:00", "", 10, "TRADES", true, false)),
+        ("exercise", |c, ct| c.exercise_options(71, ct, 1, 1, "DU123", true, Default::default())),
+    ];
+    for (name, request) in requests {
+        for con_id in [0, 756733] {
+            let (client, rx, _shared) = test_client();
+            let contract = Contract { con_id, last_trade_date_or_contract_month: "20260230".into(), ..spy() };
+            let why = reported(&client, || request(&client, &contract)).expect_err(name);
+            assert_eq!(why.code, 10372, "{name}: {why:?}");
+            assert!(next_command(&rx).is_none(), "{name} sent a request");
+            assert!(client.core.req_to_instrument.lock().unwrap().is_empty(), "{name} kept a subscription");
+        }
+    }
+}
+
+#[test]
+fn malformed_contract_expiry_answers_option_calculations_under_the_request_id() {
+    let (client, rx, _shared) = test_client();
+    let contract = Contract { last_trade_date_or_contract_month: "20260230".into(), ..spy() };
+    client.calculate_implied_volatility(71, &contract, 1.0, 100.0);
+    client.calculate_option_price(72, &contract, 0.2, 100.0);
+    let mut wrapper = RecordingWrapper::default();
+    client.process_msgs(&mut wrapper);
+    for req_id in [71, 72] {
+        assert!(wrapper.events.iter().any(|e| e == &format!("error:{req_id}:10372:lastTradeDateOrContractMonth: The date entered is invalid. The correct format is yyyyMM for a contract month or yyyyMMdd for a date. E.g.: 202607 or 20260724.")), "{:?}", wrapper.events);
+    }
+    assert!(next_command(&rx).is_none());
+}
+
+#[test]
+fn contract_expiry_keeps_accepted_values_and_is_not_checked_on_fundamentals() {
+    let (client, rx, _shared) = test_client();
+    for expiry in ["", "noexp", "197801", "30001231", "20240229"] {
+        let contract = Contract { last_trade_date_or_contract_month: expiry.into(), ..spy() };
+        client.req_contract_details(71, &contract);
+        match next_command(&rx).unwrap() {
+            ControlCommand::FetchContractDetails { filters, .. } => {
+                assert_eq!(filters.last_trade_date_or_contract_month, expiry);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let contract = Contract { last_trade_date_or_contract_month: "20260230".into(), ..spy() };
+    client.req_fundamental_data(71, &contract, "ReportSnapshot");
+    assert!(matches!(next_command(&rx), Some(ControlCommand::FetchFundamentalData { .. })));
+}
+
+#[test]
+fn daily_history_and_updates_keep_dates_in_both_formats() {
+    let (client, _rx, shared) = test_client();
+    for format in [1, 2] {
+        for (offset, size, stated, end, day) in [
+            (0, "1 day", "20260924-13:30:00", "20260924-20:00:00", "20260924"),
+            (1, "1 week", "20260921", "20260926", "20260921"),
+            (2, "1 month", "20260901", "20261001", "20260901"),
+            (3, "1 day", "20260923-22:00:00", "20260924-21:00:00", "20260924"),
+            (4, "1 day", "20260924-00:00:00", "20260925-01:00:00", "20260924"),
+        ] {
+            let req_id = (format * 10 + offset) as u32;
+            client.req_historical_data(i64::from(req_id), &spy(), "", "1 Y", size,
+                "TRADES", true, format, true);
+            shared.reference.push_historical_data(req_id, HistoricalResponse {
+                query_id: String::new(), timezone: "US/Eastern".into(), is_complete: true,
+                bars: vec![HistoricalBar {
+                    time: stated.into(), open: 1.0, high: 2.0, low: 0.5, close: 1.5,
+                    volume: 10, wap: 1.2, count: 3, end: end.into(),
+                }],
+            });
+            let mut heard = RecordingWrapper::default();
+            client.process_msgs(&mut heard);
+            assert!(heard.events.contains(&format!("historical_data:{req_id}:{day}")),
+                "{size}, format {format}: {:?}", heard.events);
+            let midnight = crate::protocol::datetime::ib_datetime_to_unix(stated)
+                .unwrap_or_else(|| crate::protocol::datetime::ib_datetime_to_unix(&format!("{day}-00:00:00")).unwrap());
+            shared.market.push_real_time_bar(req_id, crate::types::RealTimeBar {
+                timestamp: midnight as u32, open: 1.0, high: 2.0, low: 0.5, close: 1.5,
+                volume: 10.0, wap: 1.2, count: 3,
+            });
+            client.process_msgs(&mut heard);
+            assert!(heard.events.contains(&format!("historical_data_update:{req_id}:{day}")),
+                "{size}, format {format}: {:?}", heard.events);
+        }
+    }
+}
+
+#[test]
+fn depth_requires_an_exchange_before_checking_expiry() {
+    let (client, rx, _) = test_client();
+    let contract = Contract {
+        exchange: String::new(), last_trade_date_or_contract_month: "20260230".into(), ..spy()
+    };
+    let why = reported(&client, || client.req_mkt_depth(71, &contract, 5, false)).unwrap_err();
+    assert_eq!((why.code, why.message.as_str()), (321, "Please enter exchange."));
+    assert!(next_command(&rx).is_none());
+}
+
+#[test]
+fn order_fields_are_checked_before_contract_expiry() {
+    let (client, rx, _) = test_client();
+    let contract = Contract { last_trade_date_or_contract_month: "20260230".into(), ..spy() };
+    let why = reported(&client, || client.place_order(71, &contract, &Order::default())).unwrap_err();
+    assert_eq!(why.code, 321);
+    assert!(next_command(&rx).is_none());
+}
+
+#[test]
+fn delayed_allowed_starts_live_on_the_rust_surface() {
+    for (data_type, fallback) in [(3, 1), (4, 3)] {
+        let (client, rx, _shared) = test_client();
+        client.req_market_data_type(data_type);
+        client.req_mkt_data(1, &spy(), "", false, false);
+        match rx.try_recv().unwrap() {
+            ControlCommand::Subscribe { mode_9887, delayed_mode, .. } => {
+                assert_eq!(mode_9887, 0);
+                assert_eq!(delayed_mode, Some(fallback));
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn feed_changes_reach_watchers_in_record_order() {
+    let (client, _rx, shared) = test_client();
+    let taken = |req_id, generation, data_type| crate::bridge::Record::MarketDataTaken(Box::new(crate::bridge::MarketDataTaken {
+        asked_at: std::time::Instant::now(), req_id, slot: 0, generation,
+        con_id: 756733, series: Vec::new(), snapshot: false, one_shot: false,
+        data_type, marked: false,
+    }));
+    shared.market.set_generation(0, 11);
+    shared.push_call_record(crate::bridge::Record::SlotTaken { slot: 0, generation: 11 });
+    shared.push_call_record(taken(1, 11, 1));
+    shared.market.push_market_data_type(0, 4);
+    shared.push_call_record(taken(2, 11, 4));
+    let mut heard = RecordingWrapper::default();
+    client.process_msgs(&mut heard);
+    for req_id in [1, 2] {
+        assert_eq!(client.core.check_mdt_needed(req_id, true), Some(4));
+        assert_eq!(client.core.check_mdt_needed(req_id, true), None);
+    }
+    assert!(client.core.feed_is_delayed(0));
+    shared.market.push_market_data_type(0, 1);
+    assert!(client.core.feed_is_delayed(0), "an unread record does not change the feed");
+    client.process_msgs(&mut heard);
+    for req_id in [1, 2] {
+        assert_eq!(client.core.check_mdt_needed(req_id, true), Some(1));
+    }
+    shared.market.set_generation(0, 10);
+    shared.market.push_market_data_type(0, 3);
+    shared.market.push_subscription_notice(0, Refusal::stated(10167, "stale"));
+    client.process_msgs(&mut heard);
+    assert!(!client.core.feed_is_delayed(0), "an earlier occupancy cannot change this feed");
+    assert!(!heard.events.iter().any(|e| e.contains("stale")));
 }

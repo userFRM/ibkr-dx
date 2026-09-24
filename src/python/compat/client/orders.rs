@@ -300,6 +300,9 @@ impl EClient {
         // to send, and the caller is told that rather than told about its
         // account.
         let Some(tx) = self.tx_or_report_for_trading(exercising)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal_as(py, exercising, why);
+        }
         let (action, qty, account) = match ClientCore::validate_exercise(
             exercise_action, exercise_quantity, account, &self.order_session(),
         ) {

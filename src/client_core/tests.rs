@@ -2181,7 +2181,7 @@ fn news_is_asked_for_from_the_providers_the_logon_named() {
         next.set(con_id + 1);
         let _ = core.register_mkt_data(
             &shared, &tx, con_id, con_id, "SPY", "SMART", "STK", "USD", &Default::default(),
-            false, false, tick_list, 0, None, None,
+            false, false, tick_list, 0, None, None, false,
         );
         let mut named = None;
         while let Ok(cmd) = rx.try_recv() {
@@ -3372,7 +3372,7 @@ fn a_forgotten_baseline_states_the_quote_as_it_stands() {
     core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
         asked_at: std::time::Instant::now(),
         req_id: 2, slot: iid, generation: 2, con_id: 756733, series: Vec::new(),
-        snapshot: false, one_shot: false, mode_9887: 0, marked: false,
+        snapshot: false, one_shot: false, data_type: data_type_for_mode(0), marked: false,
     });
     assert_eq!(core.followers_of(iid), [2], "the same contract, so it followed rather than took one");
     assert!(
@@ -3409,7 +3409,7 @@ fn registering_a_joiner_leaves_its_refusal_to_the_engine() {
     core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
         asked_at: std::time::Instant::now(),
         req_id: 2, slot: iid, generation: 2, con_id: 756733, series: Vec::new(),
-        snapshot: false, one_shot: false, mode_9887: 0, marked: false,
+        snapshot: false, one_shot: false, data_type: data_type_for_mode(0), marked: false,
     });
     assert!(shared.market.drain_subscription_failures_direct().is_empty());
     assert_eq!(shared.market.failure_for_follower(iid).as_deref(), Some("no entitlement"));
@@ -3517,13 +3517,13 @@ fn no_subscription_is_taken_on_a_feed_that_is_over_for_the_session() {
 
     let joining = core.register_mkt_data(
         &shared, &tx, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0, None, None,
+        false, false, "", 0, None, None, false,
     );
     assert!(joining.is_err(), "the joiner is refused: {joining:?}");
 
     let fresh = core.register_mkt_data(
         &shared, &tx, 3, 272093, "MSFT", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0, None, None,
+        false, false, "", 0, None, None, false,
     );
     assert!(fresh.is_err(), "and so is a contract nobody is watching: {fresh:?}");
 }
@@ -3610,7 +3610,7 @@ fn registering_a_named_joiner_resets_its_baseline_without_pushing_records() {
     core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
         asked_at: std::time::Instant::now(),
         req_id: 2, slot: iid, generation: 2, con_id: 0, series: Vec::new(),
-        snapshot: false, one_shot: false, mode_9887: 0, marked: false,
+        snapshot: false, one_shot: false, data_type: data_type_for_mode(0), marked: false,
     });
 
     assert!(shared.market.drain_tick_req_params_direct().is_empty());
@@ -3667,7 +3667,7 @@ fn followers_keep_the_subscriptions_market_data_type() {
     let subscribe = |req_id| core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
         asked_at: std::time::Instant::now(),
         req_id, slot: 0, generation: req_id as u64, con_id: 756733, series: Vec::new(),
-        snapshot: false, one_shot: false, mode_9887: core.subscription_mode(), marked: false,
+        snapshot: false, one_shot: false, data_type: data_type_for_mode(core.subscription_mode()), marked: false,
     });
 
     core.set_market_data_type(MDT_DELAYED);
@@ -4503,8 +4503,29 @@ fn a_snapshot_keeps_its_deadline_while_its_registration_waits_to_be_read() {
     let core = ClientCore::new();
     core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
         req_id: 5, slot: 0, generation: 1, con_id: 756733, series: Vec::new(),
-        snapshot: true, one_shot: false, mode_9887: 0, marked: false,
+        snapshot: true, one_shot: false, data_type: data_type_for_mode(0), marked: false,
         asked_at: std::time::Instant::now() - std::time::Duration::from_secs(12),
     });
     assert!(core.check_snapshot_done(5), "a late read does not restart the wait");
+}
+
+#[test]
+fn contract_expiry_accepts_the_months_dates_and_empty_values_a_gateway_takes() {
+    for expiry in [
+        "", "NOEXP", "noexp", "NoExP", "197801", "300012", "19780101", "30001231",
+        "202602", "20260228", "20240229", "20000229", "20260430", "20260731",
+    ] {
+        assert!(ClientCore::validate_contract_expiry(expiry).is_ok(), "{expiry:?}");
+    }
+    for expiry in [
+        " ", " NOEXP", "NOEXP ", "EXP", "00000000", "197712", "300101", "202600",
+        "202613", "20260900", "20260931", "20260229", "21000229", "20260431",
+        "202601011", "2026", "2026-09", "2026/09/01", "20260901 12:00:00",
+        "20260901-12:00:00", "20260901 UTC", "202609 ", "+02609", "2026+9",
+        "２０２６０９", "2026é", "202609\0", "202609\n",
+    ] {
+        let why = ClientCore::validate_contract_expiry(expiry).unwrap_err();
+        assert_eq!(why.code, 10372, "{expiry:?}");
+        assert_eq!(why.message, "lastTradeDateOrContractMonth: The date entered is invalid. The correct format is yyyyMM for a contract month or yyyyMMdd for a date. E.g.: 202607 or 20260724.");
+    }
 }

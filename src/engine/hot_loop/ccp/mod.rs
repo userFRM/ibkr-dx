@@ -557,7 +557,7 @@ pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::
 /// instead, a future or an option went out as a smart-routed US stock. The
 /// requests a caller's call named this way before sending; a book and live
 /// bars never were, and a book with no exchange is refused before any lookup.
-pub(crate) fn named_by_id_alone(cmd: &crate::types::ControlCommand) -> Option<i64> {
+pub(crate) fn named_by_id_alone(cmd: &crate::types::ControlCommand) -> Option<(i64, &str)> {
     use crate::types::ControlCommand as C;
     let (con_id, sec_type, exchange) = match cmd {
         C::Subscribe { contract, .. } =>
@@ -572,7 +572,7 @@ pub(crate) fn named_by_id_alone(cmd: &crate::types::ControlCommand) -> Option<i6
         | C::SubscribeTbt { contract, .. } => (contract.con_id, &contract.sec_type, &contract.exchange),
         _ => return None,
     };
-    (con_id != 0 && (sec_type.is_empty() || exchange.is_empty())).then_some(con_id)
+    (con_id != 0 && (sec_type.is_empty() || exchange.is_empty())).then_some((con_id, exchange.as_str()))
 }
 
 /// The filters that go with that contract.
@@ -885,12 +885,10 @@ pub(crate) struct CcpState {
     pub(crate) pnl_subscriptions: Vec<(i64, bool, String)>,
     /// Counter for internal schedule subscribe req IDs.
     pub(crate) next_schedule_sub_id: u32,
-    /// Fan-out state for by-symbol secdef requests. Each entry tracks the
-    /// per-exchange `35=c` requests issued in response to the master
-    /// `35=d|320={api_req_id}|6046={list}` reply, and counts the per-exchange
-    /// `35=d` replies as they arrive. `contract_details_end` fires for
-    /// `api_req_id` once `received >= fanout_req_ids.len()`.
+    /// Exchange-definition requests still needed to complete a lookup.
     pub(crate) pending_fanout: Vec<PendingFanout>,
+    /// Contract and exchange pairs with a known market-rule scope.
+    contract_rule_scopes: HashSet<(u32, String)>,
     /// Contracts already handed to each caller's request. A lookup on a
     /// smart-routed symbol is answered once by the request itself and again by
     /// every venue it fans out to, and every one of those answers describes the
@@ -1080,6 +1078,7 @@ impl CcpState {
             pnl_subscriptions: Vec::new(),
             next_schedule_sub_id: 1,
             pending_fanout: Vec::new(),
+            contract_rule_scopes: HashSet::new(),
             details_delivered: std::collections::HashMap::new(),
             continuous_lookups: std::collections::HashMap::new(),
             next_fanout_id: 1,
@@ -1606,6 +1605,13 @@ impl CcpState {
                         );
                     }
                     let all = crate::control::contracts::parse_secdef_responses(msg, shared.island_for_nasdaq());
+                    for def in &all {
+                        if def.con_id != 0 && def.sec_type != crate::control::contracts::SecurityType::News && !def.exchange.is_empty() {
+                            self.contract_rule_scopes.insert((
+                                def.con_id, crate::control::contracts::exchange_to_fix(&def.exchange).to_string(),
+                            ));
+                        }
+                    }
                     let listings = all.len();
                     // Only while the number is still waiting, as a single
                     // listing's row goes out: the caller's own number is the
@@ -1774,14 +1780,14 @@ impl CcpState {
                     let is_by_symbol = matched_idx
                         .map(|i| !self.pending_secdef[i].1).unwrap_or(false);
                     let is_last = is_last_wire || single_shot;
-                    // Fan-out detection: by-symbol master reply carries the full
-                    // exchange list in tag 6046. Drop SMART/BEST and dispatch
-                    // one per-exchange `35=c` per remaining entry. The per-
-                    // exchange replies arrive on new req_ids and route through
-                    // the `pending_fanout` branch above.
+                    // Ask for the rule scopes still missing from the definition
+                    // cache. CORPACT does not name a trading venue.
                     let fanout_exchanges: Vec<String> = if is_by_symbol && !is_last_wire {
                         def.valid_exchanges.iter()
-                            .filter(|e| !matches!(e.as_str(), "" | "SMART" | "BEST"))
+                            .filter(|e| !matches!(e.as_str(), "" | "CORPACT"))
+                            .filter(|e| !self.contract_rule_scopes.contains(&(
+                                def.con_id, crate::control::contracts::exchange_to_fix(e).to_string(),
+                            )))
                             .cloned()
                             .collect()
                     } else {
@@ -2087,7 +2093,7 @@ impl CcpState {
     /// contract described, which is what the code says word for word.
     fn abandon_named(cmd: &crate::types::ControlCommand, listings: usize, shared: &SharedState) {
         // Given by id alone, the id is all it states to name it by.
-        let reason = if let Some(con_id) = named_by_id_alone(cmd) {
+        let reason = if let Some((con_id, _)) = named_by_id_alone(cmd) {
             format!("no security definition has been found for contract {con_id}, so the request could not be sent")
         } else {
             let Some(named) = contract_named(cmd) else { return };
@@ -2571,7 +2577,7 @@ impl CcpState {
     ///
     /// `event_tx` is where a caller's lookup that cannot be sent is told it
     /// ended; a lookup of the engine's own passes none.
-    pub(crate) fn send_secdef_request(&mut self, req_id: u32, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, event_tx: &Option<EventSink>) {
+    pub(crate) fn send_secdef_request(&mut self, req_id: u32, con_id: i64, exchange: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, event_tx: &Option<EventSink>) {
         // A lookup sent afresh under a number forgets what that number was
         // handed before, as the lookup by symbol does.
         self.details_delivered.remove(&req_id);
@@ -2586,8 +2592,10 @@ impl CcpState {
                     (fix::TAG_SENDING_TIME, &ts),
                     (crate::control::contracts::TAG_SECURITY_REQ_ID, &req_id_str),
                     (crate::control::contracts::TAG_SECURITY_REQ_TYPE, "2"),
-                    (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
                     (crate::control::contracts::TAG_IB_SOURCE, "Socket"),
+                    (146, "1"),
+                    (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
+                    (6004, if exchange.is_empty() { "ANYEXCH" } else { crate::control::contracts::exchange_to_fix(exchange) }),
                 ])
                 .map_err(|e| e.to_string())
             }
@@ -2772,10 +2780,10 @@ impl CcpState {
         shared: &SharedState,
     ) -> Option<crate::types::ControlCommand> {
         // Given by id alone, it is asked for by that id.
-        if let Some(con_id) = named_by_id_alone(&cmd) {
+        if let Some((con_id, exchange)) = named_by_id_alone(&cmd) {
             let req_id = self.next_internal_secdef_id;
             self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
-            self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
+            self.send_secdef_request(req_id, con_id, exchange, ccp_conn, hb, shared, &None);
             self.pending_named.push((req_id, cmd, Instant::now()));
             return None;
         }
@@ -2818,7 +2826,7 @@ impl CcpState {
         let req_id = self.next_internal_secdef_id;
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
         if contract.con_id != 0 {
-            self.send_secdef_request(req_id, contract.con_id, ccp_conn, hb, shared, &None);
+            self.send_secdef_request(req_id, contract.con_id, &contract.exchange, ccp_conn, hb, shared, &None);
         } else {
             // The caller's description narrows the lookup, including an
             // identifier where one was stated.
@@ -4163,7 +4171,7 @@ impl CcpState {
         let req_id = self.next_internal_secdef_id;
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
         self.auto_fetched_conids.insert(con_id, req_id);
-        self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
+        self.send_secdef_request(req_id, con_id, "", ccp_conn, hb, shared, &None);
     }
 
     /// Park a scanner result and dispatch concurrent secdef requests for every cache-
@@ -4206,7 +4214,7 @@ impl CcpState {
                 let req_id = self.next_internal_secdef_id;
                 self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
                 self.auto_fetched_conids.insert(con_id, req_id);
-                self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
+                self.send_secdef_request(req_id, con_id, "", ccp_conn, hb, shared, &None);
             }
         }
         self.pending_scanner_enrichment.push(PendingScannerEnrichment {

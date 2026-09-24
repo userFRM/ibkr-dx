@@ -34,6 +34,17 @@ let one  = client.qualify_contract(&aapl)?;   // the single match
 whichever the venue listed first, which would be a different contract from the
 one you asked about.
 
+## Lookups by contract id
+
+A lookup by `con_id` includes the requested exchange. Leaving the exchange
+empty asks for the preferred definition. The same rule applies when a market
+data request needs to name a contract given only by id.
+
+Contract details reuse exchange rule scopes already returned during the
+session. A first lookup can still need a separate request for each missing
+exchange; later lookups reuse those answers. CORPACT is excluded because it
+does not name a trading venue.
+
 ## Run it
 
 ```bash

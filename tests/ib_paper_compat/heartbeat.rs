@@ -12,7 +12,7 @@ pub(super) fn phase_heartbeat_keepalive(conns: Conns) -> Conns {
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared, Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
-    control_tx.send(ControlCommand::Subscribe { req_id: 90013, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90013, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false, snapshot: false,
         generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);

@@ -66,6 +66,7 @@ impl HotLoop {
             contract,
             filters,
             mode_9887,
+            delayed_mode,
             regulatory_snapshot,
             snapshot,
             generic_ticks,
@@ -136,6 +137,7 @@ impl HotLoop {
                 contract,
                 filters,
                 mode_9887,
+                delayed_mode,
                 regulatory_snapshot,
                 snapshot,
                 generic_ticks,
@@ -281,6 +283,9 @@ impl HotLoop {
                 return;
             }
         }
+        if !joins && !regulatory_snapshot {
+            self.farm.note_data_type(id, mode_9887, delayed_mode, &self.shared);
+        }
         // Taken: the record that says so stands ahead of everything the
         // subscription brings under this slot.
         self.md_requests.insert(
@@ -307,7 +312,8 @@ impl HotLoop {
                 snapshot,
                 asked_at: std::time::Instant::now(),
                 one_shot: regulatory_snapshot,
-                mode_9887,
+                data_type: self.shared.market.subscription_data_type(id, crate::client_core::data_type_for_mode(mode_9887))
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 marked: crate::client_core::marked_as_option(&stated_type),
             })));
         }

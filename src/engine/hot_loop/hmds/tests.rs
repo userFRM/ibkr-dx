@@ -104,6 +104,7 @@ fn a_reconnect_asks_for_the_five_second_bars_again() {
         req_id: 9,
         seconds: 60,
         opened_at: 0,
+        daily_session: None,
         bar: Default::default(),
         weighted: 0.0,
     });
@@ -690,6 +691,7 @@ fn a_kept_up_to_date_request_refused_on_its_actions_takes_its_stream_with_it() {
     hmds.rtbar_subs.push(("rt_1".to_string(), 42, Some(9001), 0.01, 1.0));
     hmds.forming_bars.push(FormingBar {
         req_id: 42, seconds: 300, opened_at: 0,
+        daily_session: None,
         bar: crate::types::RealTimeBar::default(), weighted: 0.0,
     });
 
@@ -1312,7 +1314,7 @@ mod withdrawing_one_stream_tests {
             hmds.send_tbt_unsubscribe(1, 7, &mut conn, &mut hb);
             if deferred {
                 let by_name = super::read_frame(&mut peer);
-                assert!(String::from_utf8_lossy(&by_name).contains("ticker:tbt_1"));
+                assert!(String::from_utf8_lossy(&by_name).contains("<id>tbt_1</id>"));
                 let ack = b"35=W\x016118=<ResultSetTickerId><id>tbt_1</id><rtTickerId>41</rtTickerId>\
                     <minTick>0.01</minTick><sizeMinTick>1</sizeMinTick></ResultSetTickerId>\x01";
                 hmds.process_hmds_message(ack, &mut conn, &shared, &None, &mut hb);
@@ -1323,7 +1325,7 @@ mod withdrawing_one_stream_tests {
                 assert!(withdrawal.is_empty(), "the sibling is still waiting for the shared number");
                 assert!(!hmds.tbt_withdrawn.contains(&41));
             } else {
-                assert!(String::from_utf8_lossy(&withdrawal).contains("ticker:41"),
+                assert!(String::from_utf8_lossy(&withdrawal).contains("<id>rtTicker:41</id>"),
                     "another contract or wire kind does not hold this stream");
                 assert!(hmds.tbt_withdrawn.contains(&41));
             }
@@ -1335,7 +1337,7 @@ mod withdrawing_one_stream_tests {
             assert_eq!(hmds.tbt_subscriptions[0].venue_id, number);
             hmds.send_tbt_unsubscribe(2, kept_instrument, &mut conn, &mut hb);
             let final_withdrawal = super::read_frame(&mut peer);
-            assert!(String::from_utf8_lossy(&final_withdrawal).contains(&format!("ticker:{number}")),
+            assert!(String::from_utf8_lossy(&final_withdrawal).contains(&format!("<id>rtTicker:{number}</id>")),
                 "the last caller's withdrawal reaches the venue");
             assert!(hmds.tbt_subscriptions.is_empty());
         }
@@ -1356,10 +1358,7 @@ mod withdrawing_one_stream_tests {
     }
 
     /// A stream withdrawn before the venue has numbered it is withdrawn by
-    /// that number when the acknowledgement arrives. Withdrawn by name alone,
-    /// the form the venue accepts and does nothing with, its number was never
-    /// learned, no second withdrawal was possible, and its ticks arrived until
-    /// the session ended.
+    /// that number when the acknowledgement arrives.
     #[test]
     fn a_stream_withdrawn_before_its_acknowledgement_is_withdrawn_at_it() {
         let mut hmds = HmdsState::new();
@@ -1374,13 +1373,13 @@ mod withdrawing_one_stream_tests {
 
         hmds.send_tbt_unsubscribe(1, 7, &mut conn, &mut hb);
         let by_name = String::from_utf8_lossy(&super::read_frame(&mut peer)).into_owned();
-        assert!(by_name.contains("ticker:tbt_1"), "withdrawn by name for now: {by_name}");
+        assert!(by_name.contains("<id>tbt_1</id>"), "withdrawn by name for now: {by_name}");
 
         let ack = b"35=W\x016118=<ResultSetTickerId><id>tbt_1</id><rtTickerId>41</rtTickerId>\
                     <minTick>0.01</minTick><sizeMinTick>1</sizeMinTick></ResultSetTickerId>\x01";
         hmds.process_hmds_message(ack, &mut conn, &shared, &None, &mut hb);
         let by_number = String::from_utf8_lossy(&super::read_frame(&mut peer)).into_owned();
-        assert!(by_number.contains("ticker:41"), "withdrawn by the venue's number: {by_number:?}");
+        assert!(by_number.contains("<id>rtTicker:41</id>"), "withdrawn by the venue's number: {by_number:?}");
         assert!(hmds.tbt_withdrawn.contains(&41), "and its ticks are known as withdrawn");
         assert!(hmds.tbt_subscriptions.is_empty(), "nothing is reopened by the acknowledgement");
     }
@@ -1423,7 +1422,7 @@ mod withdrawing_one_stream_tests {
         assert!(!hmds.tbt_withdrawn.contains(&number), "and is not marked withdrawn");
         hmds.send_tbt_unsubscribe(2, 7, &mut conn, &mut hb);
         let withdrawn = String::from_utf8_lossy(&super::read_frame(&mut peer)).into_owned();
-        assert!(withdrawn.contains(&format!("ticker:{number}")), "the last to leave withdraws it: {withdrawn:?}");
+        assert!(withdrawn.contains(&format!("<id>rtTicker:{number}</id>")), "the last to leave withdraws it: {withdrawn:?}");
         assert!(hmds.tbt_withdrawn.contains(&number));
     }
 
@@ -1514,6 +1513,7 @@ mod forming_bar_tests {
     fn the_forming_bar_is_folded_from_what_the_venue_streams() {
         let mut forming = FormingBar {
             req_id: 1, seconds: 300, opened_at: 0,
+            daily_session: None,
             bar: Default::default(), weighted: 0.0,
         };
         // 14:35:00, then two more within the same five minutes.
@@ -1546,7 +1546,7 @@ mod forming_bar_tests {
         let week = crate::control::historical::BarSize::Week1.seconds();
         let month = crate::control::historical::BarSize::Month1.seconds();
         let mut weekly = FormingBar {
-            req_id: 1, seconds: week, opened_at: 0, bar: Default::default(), weighted: 0.0,
+            req_id: 1, seconds: week, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
         };
         // Sunday 20 September 2026 23:59:55, then Monday 21 September 00:00.
         let sunday = weekly.fold(&five(1_789_948_795, 10.0, 10.0, 10.0, 10.0, 5.0));
@@ -1556,7 +1556,7 @@ mod forming_bar_tests {
         assert_eq!((monday.open, monday.volume), (11.0, 7.0), "nothing carried over");
 
         let mut monthly = FormingBar {
-            req_id: 2, seconds: month, opened_at: 0, bar: Default::default(), weighted: 0.0,
+            req_id: 2, seconds: month, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
         };
         // Saturday 31 January 2026 23:59:55, then Sunday 1 February 00:00.
         let january = monthly.fold(&five(1_769_903_995, 10.0, 10.0, 10.0, 10.0, 5.0));
@@ -1570,7 +1570,7 @@ mod forming_bar_tests {
         // A stamp in the epoch's first days, before any Monday: the week opens
         // at the epoch rather than counting back past it.
         let mut early = FormingBar {
-            req_id: 3, seconds: week, opened_at: 1, bar: Default::default(), weighted: 0.0,
+            req_id: 3, seconds: week, opened_at: 1, daily_session: None, bar: Default::default(), weighted: 0.0,
         };
         assert_eq!(early.fold(&five(86_400, 1.0, 1.0, 1.0, 1.0, 1.0)).timestamp, 0);
     }
@@ -1586,6 +1586,7 @@ mod forming_bar_tests {
     fn a_forming_bar_holds_a_trade_count_the_wire_states_at_the_edge() {
         let mut forming = FormingBar {
             req_id: 1, seconds: 300, opened_at: 0,
+            daily_session: None,
             bar: Default::default(), weighted: 0.0,
         };
         let mut near_the_top = five(1_786_456_500, 10.0, 10.5, 9.5, 10.2, 100.0);
@@ -2100,7 +2101,7 @@ fn a_refused_stream_half_frees_the_number_it_was_kept_up_to_date_under() {
     hmds.keep_up_to_date_reqs.insert(9);
     hmds.rtbar_subs.push(("rt_4002".to_string(), 9, None, 0.01, 1.0));
     hmds.forming_bars.push(FormingBar {
-        req_id: 9, seconds: 60, opened_at: 0, bar: Default::default(), weighted: 0.0,
+        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
     });
     let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<QueryError>\n\t<id>rt_4002</id>\n\t<error>no</error>\n</QueryError>\n";
     let mut msg = Vec::new();
@@ -2567,7 +2568,7 @@ fn a_refused_batch_takes_the_kept_up_to_date_stream_with_it() {
         what_to_show: "TRADES".into(), use_rth: true,
     });
     hmds.forming_bars.push(FormingBar {
-        req_id: 7, seconds: 60, opened_at: 0, bar: Default::default(), weighted: 0.0,
+        req_id: 7, seconds: 60, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
     });
 
     hmds.process_hmds_message(
@@ -2612,7 +2613,7 @@ fn a_disconnect_does_not_resurrect_a_failed_request_s_stream() {
         what_to_show: "TRADES".into(), use_rth: true,
     });
     hmds.forming_bars.push(FormingBar {
-        req_id: 9, seconds: 60, opened_at: 0, bar: Default::default(), weighted: 0.0,
+        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
     });
     hmds.rtbar_subs.push(("rt_4003".to_string(), 10, None, 0.01, 1.0));
     hmds.rtbar_resub.push(RtBarRequest {
@@ -2895,4 +2896,35 @@ fn an_unreadable_scan_batch_does_not_end_the_scan() {
         })
         .collect();
     assert_eq!(said, [(crate::types::model::ErrorOrigin::Request { id: 9, ends: false }, 162)]);
+}
+
+#[test]
+fn a_daily_update_keeps_the_session_bounds_across_midnight() {
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    hmds.pending_historical.push(("daily".into(), 21));
+    hmds.keep_up_to_date_reqs.insert(21);
+    hmds.forming_bars.push(FormingBar {
+        req_id: 21, seconds: 86_400, opened_at: 0, daily_session: None,
+        bar: Default::default(), weighted: 0.0,
+    });
+    let frame = String::from_utf8(make_bar_msg("daily", true)).unwrap()
+        .replace("20260714-13:30:00</time>", "20260923-22:00:00</time><endTime>20260924-21:00:00</endTime>");
+    hmds.process_hmds_message(frame.as_bytes(), &mut None, &shared, &None, &mut HeartbeatState::new());
+    let start = crate::protocol::datetime::ib_datetime_to_unix("20260923-22:00:00").unwrap() as u32;
+    let end = crate::protocol::datetime::ib_datetime_to_unix("20260924-21:00:00").unwrap() as u32;
+    assert_eq!(hmds.forming_bars[0].daily_session, Some((start, end)));
+    // A page arriving afterwards can describe an earlier session.
+    let older = frame.replace("20260923", "20260922").replace("20260924", "20260923");
+    hmds.process_hmds_message(older.as_bytes(), &mut None, &shared, &None, &mut HeartbeatState::new());
+    let forming = &mut hmds.forming_bars[0];
+    assert_eq!(forming.daily_session, Some((start, end)));
+    for timestamp in [start, start + 3 * 3600, end - 5] {
+        let bar = forming.fold(&crate::types::RealTimeBar {
+            timestamp, open: 1.0, high: 2.0, low: 0.5, close: 1.5,
+            volume: 10.0, wap: 1.0, count: 1,
+        });
+        assert_eq!(bar.timestamp, start);
+    }
+    assert_eq!(forming.bar.volume, 30.0);
 }

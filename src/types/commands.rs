@@ -300,6 +300,8 @@ pub enum ControlCommand {
         filters: SecDefFilters,
         /// Which feed to serve the subscription from: live, delayed or frozen.
         mode_9887: i32,
+        /// The delayed feed to request after a live refusal states it is available.
+        delayed_mode: Option<i32>,
         /// Ask for the venue's chargeable one-shot snapshot rather than a
         /// stream. It is a request type of its own, asked for under the
         /// snapshot action and never with a feed named beside it, and the

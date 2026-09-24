@@ -1500,6 +1500,7 @@ impl HotLoop {
                                 req_id,
                                 seconds: size.seconds(),
                                 opened_at: 0,
+                                daily_session: None,
                                 bar: Default::default(),
                                 weighted: 0.0,
                             });
@@ -1618,7 +1619,7 @@ impl HotLoop {
                 ControlCommand::FetchContractDetails { contract, req_id, include_expired, filters } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, currency, .. } = contract;
                     if con_id > 0 {
-                        self.ccp.send_secdef_request(req_id, con_id, &mut self.ccp_conn, &mut self.hb, &self.shared, &self.event_tx);
+                        self.ccp.send_secdef_request(req_id, con_id, &exchange, &mut self.ccp_conn, &mut self.hb, &self.shared, &self.event_tx);
                     } else {
                         self.ccp.send_contract_details_lookup(req_id, &symbol, &sec_type, &exchange, &currency, &filters, include_expired, &mut self.ccp_conn, &mut self.hb, &self.shared, &self.event_tx);
                     }
@@ -1932,7 +1933,7 @@ impl HotLoop {
                     // reaching this loop by the control channel goes past the
                     // surfaces, so it is refused here in the same words.
                     if let Err(why) = crate::client_core::ClientCore::validate_depth_request(
-                        &exchange, &sec_type, num_rows,
+                        &exchange, &sec_type, num_rows, &filters.last_trade_date_or_contract_month,
                     ) {
                         self.shared.reference.push_historical_error(req_id, why.code, why.message);
                         continue;
@@ -4313,6 +4314,7 @@ mod tests {
     pub(super) fn subscription(req_id: i64, contract: ContractRef) -> ControlCommand {
         ControlCommand::Subscribe {
             req_id, contract, filters: Default::default(), mode_9887: 0,
+            delayed_mode: None,
             regulatory_snapshot: false, snapshot: false, generic_ticks: Vec::new(),
             news: None, spread_scan: None, calculation: None,
         }
@@ -4857,6 +4859,7 @@ mod tests {
             req_id,
             seconds: 60,
             opened_at: 0,
+            daily_session: None,
             bar: Default::default(),
             weighted: 0.0,
         });
@@ -9794,7 +9797,7 @@ mod admission_tests {
                     symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
                     currency: "USD".into(), ..Default::default()
                 },
-                req_id: 1, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false,
+                req_id: 1, filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false,
                 snapshot: false, generic_ticks: Vec::new(), news: None, spread_scan: None,
                 calculation: None,
             })

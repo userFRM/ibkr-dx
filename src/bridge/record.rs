@@ -307,8 +307,8 @@ pub struct MarketDataTaken {
     pub asked_at: std::time::Instant,
     /// Whether it asked for the venue's chargeable one-shot.
     pub one_shot: bool,
-    /// Which feed it asked to be served from.
-    pub mode_9887: i32,
+    /// The feed serving this subscription when the request joined it.
+    pub data_type: i32,
     /// Whether its contract is of a type a gateway marks as an option, whose
     /// snapshot also waits for the option model.
     pub marked: bool,
@@ -497,6 +497,10 @@ pub enum Record {
     /// A subscription the venue could not be asked for: slot, generation,
     /// reason.
     SubscriptionFailure((InstrumentId, u64, String)),
+    /// A notice that leaves the subscription running.
+    SubscriptionNotice((InstrumentId, u64, crate::error_codes::Refusal)),
+    /// The feed the venue accepted for a subscription.
+    MarketDataType((InstrumentId, u64, i32)),
     /// A companion request refused: slot, generation, series, reason.
     CompanionRefusal((InstrumentId, u64, u32, String)),
     /// A broadcast notice.
@@ -790,6 +794,8 @@ impl super::SharedState {
             &mut out,
         );
         m.venue_errors.take_below(cut, |_| kept_back(None, None), Record::VenueError, &mut out);
+        m.subscription_notices.take_below(cut, |_| kept_back(None, None), Record::SubscriptionNotice, &mut out);
+        m.market_data_types.take_below(cut, |_| kept_back(None, None), Record::MarketDataType, &mut out);
         m.subscription_failures.take_below(
             cut,
             |_| kept_back(None, None),

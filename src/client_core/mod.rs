@@ -41,6 +41,16 @@ const MDT_FROZEN: i32 = 2;
 const MDT_DELAYED: i32 = 3;
 const MDT_DELAYED_FROZEN: i32 = 4;
 
+/// The callback type for a subscription feed.
+pub(crate) fn data_type_for_mode(mode: i32) -> i32 {
+    match mode {
+        1 => MDT_DELAYED,
+        2 => MDT_FROZEN,
+        3 => MDT_DELAYED_FROZEN,
+        _ => MDT_REALTIME,
+    }
+}
+
 // ── Tick type constants matching ibapi ──
 
 /// Tick type 1: the bid.
@@ -961,6 +971,8 @@ pub struct HistoricalAsk {
     pub zone: String,
     /// Whether its bars are a day long or longer, and so dated by the day.
     pub by_day: bool,
+    /// The latest timed daily session supplied with the history.
+    pub daily_session: Option<(i64, i64)>,
 }
 
 /// What a market-data request's generic tick list asks for.
@@ -1302,7 +1314,7 @@ pub struct ClientCore {
     /// Which feed subscriptions default to.
     pub market_data_type: AtomicI32,
     /// Which requests have already been told which feed they are on.
-    pub mdt_sent: Mutex<HashSet<i64>>,
+    pub mdt_sent: Mutex<HashMap<i64, i32>>,
     /// Requests already told the parameters of their market-data subscription.
     tick_req_params_sent: Mutex<HashSet<i64>>,
     /// The type sent with each instrument's subscription. Every watcher reads
@@ -1535,7 +1547,7 @@ impl ClientCore {
             spent_order_ids: Mutex::new(HashSet::new()),
             depth_reqs: std::sync::Arc::new(Mutex::new(HashSet::new())),
             market_data_type: AtomicI32::new(1),
-            mdt_sent: Mutex::new(HashSet::new()),
+            mdt_sent: Mutex::new(HashMap::new()),
             tick_req_params_sent: Mutex::new(HashSet::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
@@ -1923,7 +1935,9 @@ impl ClientCore {
         mode_9887: i32,
         spread_scan: Option<String>,
         calculation: Option<Box<crate::types::Calculation>>,
+        delayed_allowed: bool,
     ) -> Result<(), Refusal> {
+        Self::validate_contract_expiry(&filters.last_trade_date_or_contract_month)?;
         // A quote feed the engine has given up on serves nothing more this
         // session: there is no connection to write the request to and no
         // reconnect coming to replay it, and a caller told it had a
@@ -1973,6 +1987,9 @@ impl ClientCore {
                 named
             }
         });
+        let delayed_mode = (delayed_allowed && matches!(mode_9887, 1 | 3) && !regulatory_snapshot)
+            .then_some(mode_9887);
+        let mode_9887 = if delayed_mode.is_some() { 0 } else { mode_9887 };
         shared.admit(control_tx, ControlCommand::Subscribe {
             req_id,
             contract: ContractRef {
@@ -1984,6 +2001,7 @@ impl ClientCore {
             },
             filters: filters.clone(),
             mode_9887,
+            delayed_mode,
             regulatory_snapshot,
             snapshot,
             generic_ticks: asked.series,
@@ -2002,7 +2020,7 @@ impl ClientCore {
     /// withdrawn before this is read is withdrawn in the same order.
     pub fn note_mkt_data_taken(&self, _shared: &SharedState, taken: &crate::bridge::MarketDataTaken) {
         let crate::bridge::MarketDataTaken {
-            req_id, slot, generation, con_id, ref series, snapshot, asked_at, one_shot, mode_9887, marked,
+            req_id, slot, generation, con_id, ref series, snapshot, asked_at, one_shot, data_type, marked,
         } = *taken;
         self.cache_instrument(con_id, slot);
         // Written down before it can be followed: what it asked for decides
@@ -2031,14 +2049,7 @@ impl ClientCore {
         self.stamp_registration(req_id);
         // A request beside it may already hold the subscription. Its mode
         // still describes the feed everyone on this instrument receives.
-        self.mdt_by_instrument.lock().unwrap().entry(slot).or_insert(
-            match mode_9887 {
-                1 => MDT_DELAYED,
-                2 => MDT_FROZEN,
-                3 => MDT_DELAYED_FROZEN,
-                _ => self.market_data_type.load(Ordering::Relaxed),
-            },
-        );
+        self.mdt_by_instrument.lock().unwrap().entry(slot).or_insert(data_type);
     }
 
     /// Take a request number for a book, or say it already holds one.
@@ -2061,6 +2072,28 @@ impl ClientCore {
         Ok(())
     }
 
+    /// Check the contract month or date before requesting the contract.
+    pub fn validate_contract_expiry(expiry: &str) -> Result<(), Refusal> {
+        if expiry.is_empty() || expiry.eq_ignore_ascii_case("NOEXP") {
+            return Ok(());
+        }
+        let valid = matches!(expiry.len(), 6 | 8)
+            && expiry.bytes().all(|b| b.is_ascii_digit())
+            && expiry[..4].parse::<i16>().ok().is_some_and(|year| {
+                if !(1978..=3000).contains(&year) { return false; }
+                let month = expiry[4..6].parse::<i8>().unwrap();
+                let day = if expiry.len() == 8 { expiry[6..8].parse().unwrap() } else { 1 };
+                jiff::civil::Date::new(year, month, day).is_ok()
+            });
+        if valid {
+            Ok(())
+        } else {
+            Err(Refusal::stated(10372,
+                "lastTradeDateOrContractMonth: The date entered is invalid. The correct format is yyyyMM for a contract month or yyyyMMdd for a date. E.g.: 202607 or 20260724.",
+            ))
+        }
+    }
+
     /// What a gateway refuses in a request for a book before it looks the
     /// contract up: no exchange named, a combination, or no rows.
     ///
@@ -2068,11 +2101,12 @@ impl ClientCore {
     /// exchange is not read as the smart destination: a gateway asks the
     /// caller to name one.
     pub fn validate_depth_request(
-        exchange: &str, sec_type: &str, num_rows: i32,
+        exchange: &str, sec_type: &str, num_rows: i32, expiry: &str,
     ) -> Result<(), Refusal> {
         if exchange.trim().is_empty() {
             return Err(Refusal::validation("Please enter exchange."));
         }
+        Self::validate_contract_expiry(expiry)?;
         if sec_type.trim().eq_ignore_ascii_case("BAG") {
             return Err(Refusal::validation("Market depth does not support combos."));
         }
@@ -2792,22 +2826,20 @@ impl ClientCore {
 
     /// Check if the `market_data_type` callback should fire for this req_id.
     /// Returns `Some(type)` on the first call per req_id that has data, `None`
-    /// thereafter. Every watcher is told the type sent with the subscription
+    /// until the feed changes. Every watcher is told the type accepted for the subscription
     /// it follows, because joining it sends no request to change the feed.
     pub fn check_mdt_needed(&self, req_id: i64, has_data: bool) -> Option<i32> {
-        if has_data && self.mdt_sent.lock().unwrap().insert(req_id) {
-            // The type this subscription was made under, which is the type
-            // transmitted with it and therefore the type of the data.
-            Some(
-                self.watching(req_id)
-                    .and_then(|instrument| {
-                        self.mdt_by_instrument.lock().unwrap().get(&instrument).copied()
-                    })
-                    .unwrap_or_else(|| self.market_data_type.load(Ordering::Relaxed)),
-            )
-        } else {
-            None
-        }
+        if !has_data { return None; }
+        let data_type = self.watching(req_id)
+            .and_then(|instrument| self.mdt_by_instrument.lock().unwrap().get(&instrument).copied())
+            .unwrap_or_else(|| self.market_data_type.load(Ordering::Relaxed));
+        let previous = self.mdt_sent.lock().unwrap().insert(req_id, data_type);
+        (previous != Some(data_type)).then_some(data_type)
+    }
+
+    /// Record the feed accepted by the venue, in delivery order.
+    pub fn note_mkt_data_type(&self, instrument: InstrumentId, data_type: i32) {
+        self.mdt_by_instrument.lock().unwrap().insert(instrument, data_type);
     }
 
     // ── Bulletin subscription management ──
@@ -5404,6 +5436,7 @@ impl ClientCore {
         let ask = asks.entry(req_id).or_default();
         ask.end_date_time = end_date_time.to_string();
         ask.duration = duration.to_string();
+        ask.daily_session = None;
         ask.by_day = BarSize::from_api_str(bar_size)
             .is_ok_and(|size| size.seconds() >= BarSize::Day1.seconds());
     }
@@ -5440,6 +5473,28 @@ impl ClientCore {
         crate::protocol::datetime::bar_date_as_asked(stated, format_date, zone)
     }
 
+    /// Date a daily bar by the supplied session end on the series clock.
+    pub fn historical_bar_time_for(
+        &self, req_id: i64, bar: &crate::control::historical::HistoricalBar, zone: &str,
+    ) -> String {
+        let mut asks = self.historical_asks.lock().unwrap();
+        if let Some(ask) = asks.get_mut(&req_id)
+            && ask.by_day
+            && let (Some(start), Some(end)) = (
+                crate::protocol::datetime::ib_datetime_to_unix(&bar.time),
+                crate::protocol::datetime::ib_datetime_to_unix(&bar.end),
+            )
+        {
+            if start < end && ask.daily_session.is_none_or(|(held, _)| start >= held) {
+                ask.daily_session = Some((start, end));
+            }
+            let dated = crate::protocol::datetime::bar_date_as_asked(&bar.end, 1, zone);
+            return dated[..8].to_string();
+        }
+        drop(asks);
+        self.bar_time_for(req_id, &bar.time, zone)
+    }
+
     /// Forget what each caller was last told of every quote.
     ///
     /// At a market-data drop the engine zeroes every quote, so nothing reads a
@@ -5467,7 +5522,9 @@ impl ClientCore {
         let (format_date, zone, by_day) = asks
             .get(&req_id)
             .map_or((1, "", false), |ask| (ask.format_date, ask.zone.as_str(), ask.by_day));
-        crate::protocol::datetime::bar_epoch_as_asked(secs, format_date, zone, by_day)
+        let end = asks.get(&req_id).and_then(|ask| ask.daily_session)
+            .filter(|(start, end)| *start <= secs && secs < *end).map(|(_, end)| end);
+        crate::protocol::datetime::bar_epoch_as_asked(secs, end, format_date, zone, by_day)
     }
 
     /// Validate historical-request arguments before anything reaches the

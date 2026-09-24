@@ -5066,6 +5066,55 @@ mod depth_position_tests {
 
 
 
+    #[test]
+    fn a_grouped_refusal_reaches_each_subscription_once() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let first = context.market.register(756733);
+        let second = context.market.register(265598);
+        farm.md_req_to_instrument.extend([(13, first), (14, first), (15, second)]);
+        let refused = crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "3"),
+            (262, "13;14;15"),
+            (9887, "1;1;1"),
+            (58, "Error&BEST/STK/Top&BEST/STK/Top&BEST/STK/Top"),
+        ], 1);
+
+        farm.handle_subscription_reject(&refused, &context, &shared);
+
+        let failures = shared.market.drain_subscription_failures();
+        assert_eq!(failures.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [first, second]);
+        assert!(failures.iter().all(|(_, reason)| reason.contains("BEST/STK/Top")));
+    }
+
+    #[test]
+    fn a_grouped_refusal_keeps_companions_and_depth_separate() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(756733);
+        farm.md_req_to_instrument.extend([(13, instrument), (14, instrument)]);
+        farm.generic_tick_reqs.push((13, TRADING_STATUS_REQUEST_TYPE));
+        farm.depth_fanout_map.extend([(15, 90), (16, 90)]);
+        farm.depth_subs.extend([(15, true), (16, true)]);
+        let refused = crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "3"),
+            (262, "13;14;15;16"),
+            (58, "Error&BEST/STK/Top"),
+        ], 1);
+
+        farm.handle_subscription_reject(&refused, &context, &shared);
+
+        assert_eq!(shared.market.drain_companion_refusals().len(), 1);
+        assert_eq!(shared.market.drain_subscription_failures().len(), 1);
+        let depth = shared.reference.drain_historical_errors();
+        assert_eq!(depth.len(), 1);
+        assert_eq!((depth[0].0, depth[0].1), (90, DEPTH_VENUE_REFUSED));
+        assert!(farm.depth_fanout_map.is_empty());
+        assert!(farm.depth_subs.is_empty());
+    }
+
     /// A refusal of a request riding beside the quote — the trading status,
     /// the exchange map, the option model — is the venue refusing that
     /// request, not the quote. Reported as the quote's, the caller was told
@@ -6240,5 +6289,218 @@ fn a_stream_beside_snapshots_is_withdrawn_with_its_own_selector() {
             withdrawn.get(&9887), Some(&mode.to_string()),
             "the quote withdrawal keeps its selector",
         );
+    }
+}
+
+mod delayed_request_tests {
+    use super::super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn delayed_allowed_keeps_live_data_and_retries_a_refused_top() {
+        for (fallback, data_type) in [(1, 3), (3, 4)] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(12087792);
+            let mode = shared.market.subscription_data_type(instrument, 1);
+            farm.note_data_type(instrument, 0, Some(fallback), &shared);
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).unwrap();
+            farm.send_mktdata_subscribe(
+                12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
+                false, &mut conn, &mut hb,
+            );
+            let sent = super::drain_inner(&mut peer);
+            assert!(sent.iter().all(|message| !fix::fix_parse(message).contains_key(&9887)));
+            let quotes: Vec<_> = farm.instrument_md_reqs[0].1.entries.iter()
+                .filter(|entry| matches!(entry.request_type, REALTIME_BID_ASK_REQUEST_TYPE | REALTIME_LAST_REQUEST_TYPE))
+                .map(|entry| entry.req_id).collect();
+            let companions = farm.generic_tick_reqs.clone();
+            farm.handle_subscription_ack(
+                format!("35=Q\x01666,{},0.00005,0,1,ffffffff,,1,1", quotes[1]).as_bytes(),
+                &mut context, &shared,
+            );
+            context.market.quote_mut(instrument).last = 1_250_000_000;
+
+            let refused = fix::fix_build(&[
+                (fix::TAG_MSG_TYPE, "3"),
+                (262, &format!("{};{}", quotes[0], quotes[1])),
+                (58, "Error&IDEALPRO/CASH/Top&IDEALPRO/CASH/Top"),
+                (9887, "1;1"),
+            ], 1);
+            farm.process_farm_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb);
+            assert!(shared.market.drain_subscription_failures().is_empty());
+            assert_eq!(farm.generic_tick_reqs, companions);
+            let sent = super::drain_inner(&mut peer);
+            assert_eq!(sent.len(), 2);
+            let withdrawn = fix::fix_parse(&sent[0]);
+            assert_eq!(withdrawn[&263], "2");
+            assert_eq!(withdrawn[&262], quotes[1].to_string());
+            assert_eq!(withdrawn[&264], "443");
+            assert!(!withdrawn.contains_key(&9887));
+            assert_eq!(context.market.instrument_by_server_tag(666), None);
+            assert_eq!(context.market.quote(instrument).last, 0);
+            let notices = shared.market.drain_subscription_notices();
+            assert_eq!(notices.len(), 1);
+            assert_eq!((notices[0].0, notices[0].1.code), (instrument, 10167));
+            assert_eq!(notices[0].1.message, "Requested market data is not subscribed. Displaying delayed market data...");
+            let entries = fix::fix_parse_repeating(&sent[1], 262);
+            assert_eq!(entries.len(), 2);
+            assert!(entries.iter().all(|entry| entry.get(&9887).map(String::as_str) == Some(fallback.to_string().as_str())));
+            assert_eq!(mode.load(Ordering::Relaxed), 1, "the delayed feed is not yet acknowledged");
+            let delayed = farm.delayed_subscriptions[&instrument].requests.unwrap();
+            farm.handle_subscription_ack(
+                format!("35=Q\x01777,{},0.00005,1,1,ffffffff,,0,1", delayed[0]).as_bytes(),
+                &mut context, &shared,
+            );
+            assert_eq!(mode.load(Ordering::Relaxed), data_type);
+            assert_eq!(context.market.instrument_by_server_tag(777), Some(instrument));
+            for (request, _) in companions {
+                farm.handle_subscription_ack(
+                    format!("35=Q\x01888,{request},0.00005,0,1,ffffffff,,1,1").as_bytes(),
+                    &mut context, &shared,
+                );
+                assert_eq!(mode.load(Ordering::Relaxed), data_type);
+            }
+            let snapshot = farm.next_md_req_id;
+            farm.md_req_to_instrument.push((snapshot, instrument));
+            farm.instrument_md_reqs[0].1.entries.push(MdReqEntry {
+                req_id: snapshot, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "IDEALPRO".into(),
+            });
+            farm.handle_subscription_ack(
+                format!("35=Q\x01999,{snapshot},0.00005,0,1,ffffffff,,1,1").as_bytes(),
+                &mut context, &shared,
+            );
+            assert_eq!(mode.load(Ordering::Relaxed), data_type);
+            farm.send_mktdata_unsubscribe(instrument, 12087792, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+            for message in super::drain_inner(&mut peer) {
+                let tags = fix::fix_parse(&message);
+                let req_id: u32 = tags[&262].parse().unwrap();
+                assert_eq!(tags.get(&9887).map(String::as_str), delayed.contains(&req_id).then_some(fallback.to_string().as_str()));
+            }
+            assert!(!farm.delayed_subscriptions.contains_key(&instrument));
+        }
+    }
+
+    #[test]
+    fn delayed_fallback_is_available_again_after_reconnect_replay() {
+        for fallback in [1, 3] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(12087792);
+            farm.note_data_type(instrument, 0, Some(fallback), &shared);
+            let (conn, _) = Connection::for_test();
+            let mut conn = Some(conn);
+            farm.send_mktdata_subscribe(
+                12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
+                false, &mut conn, &mut hb,
+            );
+            let bid = farm.instrument_md_reqs[0].1.entries[0].req_id;
+            let refusal = fix::fix_build(&[(35, "3"), (262, &bid.to_string()),
+                (9887, "1"), (58, "Error&IDEALPRO/CASH/Top")], 1);
+            farm.process_farm_message(&refusal, &mut conn, &mut context, &shared, &None, &mut hb);
+            let before = farm.delayed_subscriptions[&instrument].requests.unwrap();
+            farm.handle_subscription_ack(
+                format!("35=Q\x01777,{},0.00005,1,1,ffffffff,,0,1", before[0]).as_bytes(),
+                &mut context, &shared,
+            );
+            farm.handle_disconnect(&mut conn, &mut context, &None, &shared);
+            let (connection, peer) = Connection::for_test();
+            let mut peer = Connection::new_raw(peer).unwrap();
+            farm.reconnect(connection, &mut conn, &mut context, &mut hb, crate::engine::hot_loop::ReplayPacing::default(), &shared);
+            let sent = super::drain_inner(&mut peer);
+            assert!(!sent.is_empty());
+            assert!(sent.iter().all(|message| !fix::fix_parse(message).contains_key(&9887)));
+            let bid = farm.instrument_md_reqs[0].1.entries[0].req_id;
+            let refusal = fix::fix_build(&[(35, "3"), (262, &bid.to_string()),
+                (9887, "1"), (58, "Error&IDEALPRO/CASH/Top")], 1);
+            farm.process_farm_message(&refusal, &mut conn, &mut context, &shared, &None, &mut hb);
+            assert!(shared.market.drain_subscription_failures().is_empty());
+            let after = farm.delayed_subscriptions[&instrument].requests.unwrap();
+            assert_ne!(before, after);
+            let sent = super::drain_inner(&mut peer);
+            let retry = sent.iter().find(|message| fix::fix_parse(message).get(&263).map(String::as_str) != Some("2")).unwrap();
+            assert_eq!(fix::fix_parse(retry).get(&9887), Some(&fallback.to_string()));
+        }
+    }
+
+    #[test]
+    fn delayed_retry_without_a_quote_route_reports_a_failure() {
+        for missing_record in [false, true] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let instrument = context.market.register(12087792);
+            farm.note_data_type(instrument, 0, Some(1), &shared);
+            farm.delayed_subscriptions.get_mut(&instrument).unwrap().retry = true;
+            if !missing_record {
+                farm.instrument_md_reqs.push((instrument, MdReqRecord {
+                    con_id: 12087792, sec_type: "CASH".into(), mode_9887: 0, entries: Vec::new(),
+                }));
+            }
+            farm.send_delayed_top(instrument, &mut None, &mut context, &shared, &mut HeartbeatState::new());
+            let failures = shared.market.drain_subscription_failures();
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].0, instrument);
+            assert!(!farm.delayed_subscriptions[&instrument].retry);
+        }
+    }
+
+    #[test]
+    fn delayed_allowed_needs_a_bid_ask_refusal_with_delayed_available() {
+        for (last_only, availability) in [(false, "0"), (false, ""), (true, "1")] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(12087792);
+            farm.note_data_type(instrument, 0, Some(1), &shared);
+            farm.send_mktdata_subscribe(
+                12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
+                false, &mut None, &mut hb,
+            );
+            let refused_id = farm.instrument_md_reqs[0].1.entries[usize::from(last_only)].req_id;
+            let refused = fix::fix_build(&[
+                (fix::TAG_MSG_TYPE, "3"), (262, &refused_id.to_string()),
+                (9887, availability), (58, "Error&IDEALPRO/CASH/Top"),
+            ], 1);
+            farm.handle_subscription_reject(&refused, &context, &shared);
+            assert!(!farm.delayed_subscriptions[&instrument].retry);
+            assert_eq!(shared.market.drain_subscription_failures().len(), usize::from(!last_only));
+        }
+    }
+
+    #[test]
+    fn delayed_allowed_accepts_live_without_another_subscription() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(12087792);
+        let mode = shared.market.subscription_data_type(instrument, 1);
+        farm.note_data_type(instrument, 0, Some(1), &shared);
+        let (conn, peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).unwrap();
+        farm.send_mktdata_subscribe(
+            12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
+            false, &mut conn, &mut hb,
+        );
+        let _ = super::drain_inner(&mut peer);
+        let quote = farm.instrument_md_reqs[0].1.entries[0].req_id;
+        mode.store(4, Ordering::Relaxed);
+        farm.handle_subscription_ack(
+            format!("35=Q\x01777,{quote},0.00005,0,1,ffffffff,,1,1").as_bytes(),
+            &mut context, &shared,
+        );
+        assert_eq!(mode.load(Ordering::Relaxed), 1);
+        assert!(farm.delayed_subscriptions[&instrument].requests.is_none());
+        assert_eq!(context.market.instrument_by_server_tag(777), Some(instrument));
+        assert!(super::drain_inner(&mut peer).is_empty());
     }
 }

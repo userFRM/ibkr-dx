@@ -57,8 +57,7 @@ def test_an_options_snapshot_waits_for_the_model():
 
 def test_a_delayed_snapshot_waits_for_the_time():
     client, heard = _session()
-    client.reqMarketDataType(3)
-    client.reqMktData(2, Contract(conId=756733, secType="STK", exchange="SMART"), "", True, False, [])
+    client.req_mkt_data_ex(2, Contract(conId=756733, secType="STK", exchange="SMART"), "", True, False, 1)
     client._test_dispatch_once()
     slot = client._test_watching(2)
     assert slot is not None, "the engine took the request"

@@ -195,6 +195,10 @@ impl EClient {
         &self, req_id: i64, contract: &super::Contract,
         wants_volatility: bool, asked: f64, under_price: f64,
     ) {
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            self.report_reason(req_id, &why);
+            return;
+        }
         let solved = self.solve_option(contract, None, |terms, model, schedule| {
             if wants_volatility {
                 crate::control::option_model::implied_volatility(
@@ -252,7 +256,7 @@ impl EClient {
             req_id, contract, "", false, false, mode, None,
             Some(Box::new(crate::types::Calculation {
                 contract: contract.clone(), wants_volatility, option_price, under_price,
-            })),
+            })), false,
         )
     }
 

@@ -695,8 +695,10 @@ pub fn build_secdef_request_by_conid(req_id: &str, con_id: u32, seq: u32) -> Vec
             (TAG_MSG_TYPE, "c"),
             (TAG_SECURITY_REQ_ID, req_id),
             (TAG_SECURITY_REQ_TYPE, "2"),
-            (TAG_IB_CON_ID, &con_id_str),
             (TAG_IB_SOURCE, "Socket"),
+            (146, "1"),
+            (TAG_IB_CON_ID, &con_id_str),
+            (6004, "ANYEXCH"),
         ],
         seq,
     )

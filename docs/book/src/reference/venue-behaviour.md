@@ -233,3 +233,19 @@ The logon runs beside the channel rather than inside it, so the protocol does
 not bind the party holding the channel keys to the party that answered the
 logon. That is a property of the venue's protocol, and a gateway's connections
 are opened the same way.
+
+## Contract expiry validation
+
+Malformed `lastTradeDateOrContractMonth` is refused with code 10372 before
+contract lookup or subscription state changes. Both surfaces check contract
+details, market data, depth, tick-by-tick data, real-time bars, historical
+bars and schedules, historical ticks, head timestamps, histograms, option
+calculations and option exercise. Depth reports an empty exchange first.
+Fundamental reports do not apply this check.
+
+Accepted values are empty, case-insensitive `NOEXP`, `yyyyMM`, or a valid
+calendar `yyyyMMdd`, with years 1978 through 3000 inclusive. Accepted text is
+sent unchanged. Callback errors retain the caller's request id. The error
+message is:
+
+> lastTradeDateOrContractMonth: The date entered is invalid. The correct format is yyyyMM for a contract month or yyyyMMdd for a date. E.g.: 202607 or 20260724.

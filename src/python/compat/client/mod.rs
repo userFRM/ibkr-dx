@@ -3337,6 +3337,109 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
+    #[test]
+    fn delayed_allowed_notice_reaches_python_watchers_without_ending_them() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, wrapper) = wired_client(py);
+            client.get().core.instrument_to_req.lock().unwrap().insert(0, 7);
+            client.get().core.instrument_followers.lock().unwrap().insert(0, vec![8]);
+            client.get().core.req_to_instrument.lock().unwrap().insert(7, 0);
+            client.get().core.req_to_instrument.lock().unwrap().insert(8, 0);
+            shared.market.push_subscription_notice(0, crate::error_codes::Refusal::stated(
+                10167, "Requested market data is not subscribed. Displaying delayed market data...",
+            ));
+            shared.market.push_market_data_type(0, 4);
+            client.get().dispatch_once(py, &shared).unwrap();
+            let globals = pyo3::types::PyDict::new(py);
+            globals.set_item("w", &wrapper).unwrap();
+            let heard: Vec<(i64, i64)> = py.eval(
+                c"sorted((c[1], c[3]) for c in w.calls if c[0] == 'error')", Some(&globals), None,
+            ).unwrap().extract().unwrap();
+            assert_eq!(heard, [(7, 10167), (8, 10167)]);
+            assert_eq!(client.get().core.watching(7), Some(0));
+            assert_eq!(client.get().core.watching(8), Some(0));
+            assert!(client.get().core.feed_is_delayed(0));
+            for req_id in [7, 8] {
+                assert_eq!(client.get().core.check_mdt_needed(req_id, true), Some(4));
+            }
+            shared.market.push_market_data_type(0, 1);
+            assert!(client.get().core.feed_is_delayed(0));
+            client.get().dispatch_once(py, &shared).unwrap();
+            for req_id in [7, 8] {
+                assert_eq!(client.get().core.check_mdt_needed(req_id, true), Some(1));
+            }
+        });
+    }
+
+    #[test]
+    fn delayed_mode_starts_live_on_the_python_surface() {
+        Python::initialize();
+        Python::attach(|py| {
+            for (data_type, fallback) in [(3, 1), (4, 3)] {
+                for direct in [false, true] {
+                    let (client, rx, _shared, _w) = wired_client(py);
+                    client.get().core.set_market_data_type(data_type);
+                    let contract = Py::new(py, Contract {
+                        con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+                        exchange: "IDEALPRO".into(), ..Default::default()
+                    }).unwrap();
+                    if direct {
+                        let _ = client.call_method1(py, "req_mkt_data_ex", (1i64, &contract, "", false, false, fallback));
+                    } else {
+                        let _ = client.call_method1(py, "req_mkt_data", (1i64, &contract));
+                    }
+                    let commands: Vec<_> = rx.try_iter().collect();
+                    let (mode, delayed) = commands.iter().find_map(|command| match command {
+                        ControlCommand::Subscribe { mode_9887, delayed_mode, .. } => {
+                            Some((*mode_9887, *delayed_mode))
+                        }
+                        _ => None,
+                    }).unwrap();
+                    assert_eq!((mode, delayed), if direct { (fallback, None) } else { (0, Some(fallback)) });
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn daily_updates_use_the_session_end_on_the_python_surface() {
+        Python::initialize();
+        Python::attach(|py| {
+            for format in [1, 2] {
+                for (start, end) in [
+                    ("20260923-22:00:00", "20260924-21:00:00"),
+                    ("20260924-00:00:00", "20260925-01:00:00"),
+                ] {
+                    let (client, _rx, shared, wrapper) = wired_client(py);
+                    client.get().core.note_date_format(21, format);
+                    client.get().core.note_historical_span(21, "", "1 D", "1 day");
+                    shared.reference.push_historical_data(21, crate::control::historical::HistoricalResponse {
+                        query_id: String::new(), timezone: "US/Eastern".into(), is_complete: true,
+                        bars: vec![crate::control::historical::HistoricalBar {
+                            time: start.into(), end: end.into(), open: 1.0, high: 2.0, low: 0.5,
+                            close: 1.5, volume: 10, wap: 1.2, count: 3,
+                        }],
+                    });
+                    client.get().dispatch_once(py, &shared).unwrap();
+                    client.get().core.hist_initial_complete.lock().unwrap().insert(21);
+                    shared.market.push_real_time_bar(21, crate::types::RealTimeBar {
+                        timestamp: crate::protocol::datetime::ib_datetime_to_unix(start).unwrap() as u32,
+                        open: 1.0, high: 2.0, low: 0.5, close: 1.5, volume: 10.0, wap: 1.2, count: 3,
+                    });
+                    client.get().dispatch_once(py, &shared).unwrap();
+                    let globals = pyo3::types::PyDict::new(py);
+                    globals.set_item("w", &wrapper).unwrap();
+                    let dates: Vec<String> = py.eval(
+                        c"[c[2].date for c in w.calls if c[0] in ('historical_data_update', 'historicalDataUpdate')]",
+                        Some(&globals), None,
+                    ).unwrap().extract().unwrap();
+                    assert_eq!(dates, ["20260924"], "format {format}, {start} to {end}");
+                }
+            }
+        });
+    }
+
     /// Both are read off the same logon push the Rust surface exposes; a webapp
     /// REST call from Python needs them.
     #[test]

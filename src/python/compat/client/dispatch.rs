@@ -588,6 +588,19 @@ impl EClient {
             Record::MarketDataTaken(taken) => self.core.note_mkt_data_taken(shared, &taken),
             Record::MarketDataWithdrawn(req_id) => self.core.unregister_mkt_data(req_id),
             // Everyone watching the contract that held the slot.
+            Record::MarketDataType((instrument, generation, data_type)) => {
+                if generation == self.core.generation_held(instrument) {
+                    self.core.note_mkt_data_type(instrument, data_type);
+                }
+            }
+            Record::SubscriptionNotice((instrument, generation, notice)) => {
+                if generation == self.core.generation_held(instrument) {
+                    for req_id in self.core.watchers_of(instrument) {
+                        let origin = crate::types::model::ErrorOrigin::Request { id: req_id, ends: false };
+                        say_error!(self, py, shared, origin, 0, i64::from(notice.code), &notice.message);
+                    }
+                }
+            }
             Record::SubscriptionFailure((instrument, generation, reason)) => {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
@@ -642,7 +655,7 @@ impl EClient {
                 self.core.note_historical_zone(req_id as i64, &response.timezone);
                 for bar in &response.bars {
                     let bar_obj = BarData::new(
-                        self.core.bar_time_for(req_id as i64, &bar.time, &response.timezone),
+                        self.core.historical_bar_time_for(req_id as i64, bar, &response.timezone),
                         bar.open, bar.high, bar.low, bar.close,
                         bar.volume, bar.wap, bar.count,
                         response.timezone.clone(),

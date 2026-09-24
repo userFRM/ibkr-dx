@@ -155,6 +155,9 @@ pub struct MarketDataState {
     last_option_model: Mutex<std::collections::HashMap<crate::types::InstrumentId, crate::types::OptionComputation>>,
     /// Subscriptions the venue was never able to be asked for, the occupancy
     /// of the slot, and why.
+    pub(super) subscription_notices: Queue<(InstrumentId, u64, crate::error_codes::Refusal)>,
+    pub(super) market_data_types: Queue<(InstrumentId, u64, i32)>,
+    subscription_data_types: Mutex<std::collections::HashMap<InstrumentId, std::sync::Arc<std::sync::atomic::AtomicI32>>>,
     pub(super) subscription_failures: Queue<(crate::types::InstrumentId, u64, String)>,
     /// Refusals of the requests that ride beside a quote: the contract, which
     /// companion was refused, and the venue's own reason.
@@ -287,6 +290,9 @@ impl MarketDataState {
             kept_calculations: Mutex::new(std::collections::HashMap::new()),
             calculations_waiting: std::sync::atomic::AtomicUsize::new(0),
             subscription_failures: Queue::new(stamps),
+            subscription_notices: Queue::new(stamps),
+            market_data_types: Queue::new(stamps),
+            subscription_data_types: Mutex::new(std::collections::HashMap::new()),
             companion_refusals: Queue::new(stamps),
             tick_req_params: Queue::new(stamps),
             last_tick_req_params: Mutex::new(std::collections::HashMap::new()),
@@ -373,6 +379,9 @@ impl MarketDataState {
         // session's order, and a reader moves the callers before it reads the
         // slot as given back.
         self.tick_req_params.retain(|(at, ..)| *at != instrument);
+        self.subscription_notices.retain(|(at, ..)| *at != instrument);
+        self.market_data_types.retain(|(at, ..)| *at != instrument);
+        self.subscription_data_types.lock().unwrap().remove(&instrument);
         // And the two streams that carry a slot of their own. A headline is
         // about the contract that was named when it arrived, and a model was
         // solved against that contract's volatility and price: delivered after
@@ -1317,6 +1326,19 @@ impl MarketDataState {
         self.companion_refusals.push((instrument, self.generation_of(instrument), kind, reason));
     }
 
+    #[doc(hidden)] pub fn subscription_data_type(&self, instrument: InstrumentId, requested: i32) -> std::sync::Arc<std::sync::atomic::AtomicI32> {
+        self.subscription_data_types.lock().unwrap().entry(instrument)
+            .or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicI32::new(requested))).clone()
+    }
+    #[doc(hidden)] pub fn push_subscription_notice(&self, instrument: InstrumentId, notice: crate::error_codes::Refusal) {
+        self.subscription_notices.push((instrument, self.generation_of(instrument), notice));
+    }
+    #[doc(hidden)] pub fn push_market_data_type(&self, instrument: InstrumentId, data_type: i32) {
+        self.market_data_types.push((instrument, self.generation_of(instrument), data_type));
+    }
+    #[cfg(test)] pub(crate) fn drain_subscription_notices(&self) -> Vec<(InstrumentId, crate::error_codes::Refusal)> {
+        self.subscription_notices.drain().into_iter().map(|(id, _, notice)| (id, notice)).collect()
+    }
     #[doc(hidden)] pub fn push_subscription_failure(&self, instrument: crate::types::InstrumentId, reason: String) {
         self.last_subscription_failure.lock().unwrap()
             .insert(instrument, reason.clone());

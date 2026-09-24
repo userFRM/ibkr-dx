@@ -943,6 +943,7 @@ impl HotLoop {
             contract: (&e.contract).into(),
             filters: e.contract.lookup_filters(),
             mode_9887: 0,
+            delayed_mode: None,
             regulatory_snapshot: false,
             snapshot: false,
             generic_ticks: vec![IN_THE_MONEY],

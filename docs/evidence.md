@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 158. 123 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,105 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,177 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,9 +72,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,002 | No |
+| Rust unit and integration | 3,026 | No |
 | Rust, live | 9 | Yes |
-| Python | 1,103 | No |
+| Python | 1,151 | No |
 | Python, live | 131 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -214,8 +214,10 @@ client's own allocation; what a gateway answers the same way is on
   satisfy this, and the interface this client mirrors encourages one counter
   for both.
 - **`keepUpToDate` queries are closed on first response.** Continuation is
-  provided by folding the 5-second bar stream into the requested bar size. A
-  week and a month are folded on the calendar, opening on the Monday and on
+  provided by folding the 5-second bar stream into the requested bar size.
+  Daily updates retain the session bounds supplied with the history and use
+  its end date in the series' timezone. Later daily sessions without supplied
+  bounds still use UTC calendar boundaries. A week and a month are folded on the calendar, opening on the Monday and on
   the 1st at midnight UTC, and start from the stream rather than from the
   venue's current bar.
 - **The option-exercise interest rate series is not served.**

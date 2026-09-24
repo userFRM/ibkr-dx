@@ -34,6 +34,9 @@ impl EClient {
         chart_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         // Before anything is noted, so a refused request leaves nothing behind.
         if let Some(why) = self.options_refused(py, &crate::client_core::CHART_OPTIONS, chart_options)? {
             return self.report_refusal(py, req_id, why);
@@ -112,6 +115,9 @@ impl EClient {
         format_date: i32,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
@@ -144,6 +150,9 @@ impl EClient {
     /// Request contract details.
     pub(crate) fn req_contract_details(&self, py: Python<'_>, req_id: i64, contract: &Contract) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = self.send_control(&tx, ControlCommand::FetchContractDetails {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
@@ -570,6 +579,9 @@ impl EClient {
         misc_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Some(why) = self.options_refused(py, &crate::client_core::HISTORICAL_TICKS_OPTIONS, misc_options)? {
             return self.report_refusal(py, req_id, why);
         }
@@ -661,6 +673,9 @@ impl EClient {
     #[pyo3(signature = (req_id, contract, use_rth, time_period))]
     pub(crate) fn req_histogram_data(&self, py: Python<'_>, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
@@ -693,6 +708,9 @@ impl EClient {
         end_date_time: &str, duration_str: &str, use_rth: bool,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.

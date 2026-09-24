@@ -465,14 +465,19 @@ pub fn bar_date_as_asked(stated: &str, format_date: i32, zone: &str) -> String {
 /// seconds stand.
 ///
 /// A bar a day long or longer is dated by its day alone, as the venue dates
-/// those bars and as a gateway dates the one still forming: the day its
-/// stamp falls on, which is where such a bar opens.
-pub fn bar_epoch_as_asked(secs: i64, format_date: i32, zone: &str, by_day: bool) -> String {
-    if format_date == 2 {
-        return secs.to_string();
+/// those bars. A stated session end dates a daily update on the series' zone.
+/// Without a session bound, the existing calendar date remains.
+pub fn bar_epoch_as_asked(secs: i64, end: Option<i64>, format_date: i32, zone: &str, by_day: bool) -> String {
+    if by_day && let Some(end) = end
+        && let (Some(clock), Ok(at)) = (clock_named(zone), jiff::Timestamp::from_second(end))
+    {
+        return at.to_zoned(clock).strftime("%Y%m%d").to_string();
     }
     if by_day && let Ok(at) = jiff::Timestamp::from_second(secs) {
         return at.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d").to_string();
+    }
+    if format_date == 2 {
+        return secs.to_string();
     }
     if zone.is_empty() {
         return secs.to_string();

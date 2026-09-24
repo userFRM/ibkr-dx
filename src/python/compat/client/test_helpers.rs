@@ -789,16 +789,16 @@ impl EClient {
 
     /// Push historical data into SharedState.
     #[doc(hidden)]
-    #[pyo3(signature = (req_id, bars, is_complete, timezone = ""))]
+    #[pyo3(signature = (req_id, bars, is_complete, timezone = "", ends = None))]
     fn _test_push_historical_data(
         &self, req_id: u32, bars: Vec<(String, f64, f64, f64, f64, i64)>, is_complete: bool,
-        timezone: &str,
+        timezone: &str, ends: Option<Vec<String>>,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
-        let bar_list: Vec<HistoricalBar> = bars.into_iter().map(|(time, o, h, l, c, v)| {
+        let bar_list: Vec<HistoricalBar> = bars.into_iter().enumerate().map(|(index, (time, o, h, l, c, v))| {
             HistoricalBar {
                 time, open: o, high: h, low: l, close: c, volume: v, wap: 0.0, count: 0,
-                end: String::new(),
+                end: ends.as_ref().and_then(|values| values.get(index)).cloned().unwrap_or_default(),
             }
         }).collect();
         shared.reference.push_historical_data(req_id, HistoricalResponse {

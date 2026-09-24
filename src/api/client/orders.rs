@@ -273,6 +273,7 @@ impl EClient {
         if let Err(why) = (|| -> Result<(), Refusal> {
             self.refuse_if_trading_is_over("an exercise")?;
             self.core.refuse_if_readonly("an exercise").map_err(Refusal::validation)?;
+            crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
             let (action, qty, account) = ClientCore::validate_exercise(
                 exercise_action, exercise_quantity, account, &self.order_session(),
             )?;

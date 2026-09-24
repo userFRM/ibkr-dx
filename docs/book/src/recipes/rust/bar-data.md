@@ -23,14 +23,18 @@ One `historical_data` callback per bar, in time order, then one
 `historical_data_end` carrying the first and last timestamps of the range that
 was served.
 
-With `keep_up_to_date: true` the bar still forming is folded in from the live
-stream and keeps arriving. Up to a day, that bar opens on a whole multiple of
-its own length counted from the epoch. Up to an hour that is the clock boundary
-you expect. At `1 day` it is midnight UTC, so a US listing's forming daily bar
-opens in its after-hours session and spans two of them. A week opens on its
-Monday and a month on its first day, both at midnight UTC, as a gateway folds
-them. An update to a bar a day long or longer is dated as the history's bars
-are: by its day alone (`YYYYMMDD`) where the date is written out.
+With `keep_up_to_date: true` the bar still forming is folded from the live
+five-second stream. A daily session supplied with the history keeps its
+opening and end across UTC midnight. Its updates use the session end's date
+on the series' timezone, as the history does, under both date-format settings.
+Timed daily history is returned as `yyyyMMdd`; explicit weekly and monthly
+date strings are preserved.
+
+Continuation beyond the last supplied daily session still uses UTC calendar
+boundaries because it has no later session schedule. Intraday bars open on
+whole multiples of their length from the epoch; a week opens on Monday and a
+month on its first day at midnight UTC. Updates to these calendar bars remain
+dates under both date-format settings.
 
 **The bar still forming starts from the five-second bars the stream sends after
 the request, not from the venue's own current bar.** Until the next bar opens —

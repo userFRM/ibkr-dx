@@ -33,7 +33,7 @@ impl EClient {
             // The scan rides its own request, so two scans of one contract each
             // state their own; the engine sends one at a time.
             let mode = self.core.subscription_mode();
-            self.ask_for_mkt_data(req_id, contract, "481", false, false, mode, Some(scan.stated()), None)
+            self.ask_for_mkt_data(req_id, contract, "481", false, false, mode, Some(scan.stated()), None, true)
         })() {
             self.refuse_request(req_id, &why);
         }
@@ -117,11 +117,10 @@ impl EClient {
     /// `tick_generic` also fires for the halt the venue states on its own tick:
     /// tick 49, 0 while a contract is trading and 1 once it has stopped.
     ///
-    /// Delayed and frozen data are requested, contrary to what this said: name
-    /// the type on [`req_market_data_type`](EClient::req_market_data_type) and
-    /// every subscription after it carries the mode, or state it per request
-    /// with [`req_mkt_data_ex`](EClient::req_mkt_data_ex). The table there
-    /// gives the wire shape of each.
+    /// Types 3 and 4 start live and switch to delayed or delayed-frozen data
+    /// only after a bid/ask refusal says delayed data is available. The switch
+    /// reports 10167 without ending the request. `market_data_type` names the
+    /// accepted feed. `req_mkt_data_ex` selects its feed directly.
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
@@ -141,7 +140,8 @@ impl EClient {
         // the type once for every subscription that follows. `req_mkt_data_ex`
         // states it per request instead.
         let mode = self.core.subscription_mode();
-        self.try_req_mkt_data_ex(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode, &[])
+        if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
+        self.ask_for_mkt_data(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode, None, None, true)
     }
 
     /// Like [`req_mkt_data`](EClient::req_mkt_data), but names the market-data
@@ -201,7 +201,7 @@ impl EClient {
                 &self.shared.reference.enabled_features(),
             )?;
         }
-        self.ask_for_mkt_data(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode_9887, None, None)
+        self.ask_for_mkt_data(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode_9887, None, None, false)
     }
 
     /// Hand a market-data request to the engine, which names the contract
@@ -214,13 +214,14 @@ impl EClient {
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
         mode_9887: i32, spread_scan: Option<String>,
         calculation: Option<Box<crate::types::Calculation>>,
+        delayed_allowed: bool,
     ) -> Result<(), Refusal> {
         self.core.register_mkt_data(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
             &contract.currency, &contract.lookup_filters(),
             snapshot, regulatory_snapshot, generic_tick_list, mode_9887,
-            spread_scan, calculation,
+            spread_scan, calculation, delayed_allowed,
         )
     }
 
@@ -270,6 +271,7 @@ impl EClient {
         number_of_ticks: i32, ignore_size: bool,
     ) {
         if let Err(why) = (|| -> Result<(), Refusal> {
+            crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
             // The only request surface that did not check the number it was given.
             // Unchecked, it was narrowed further down instead, so a caller
             // numbering its requests from the order counter — which the venue lets
@@ -337,7 +339,7 @@ impl EClient {
             if self.session_over() {
                 return Err(Refusal::not_connected("Not connected"));
             }
-            crate::client_core::ClientCore::validate_depth_request(&contract.exchange, &contract.sec_type, num_rows)?;
+            crate::client_core::ClientCore::validate_depth_request(&contract.exchange, &contract.sec_type, num_rows, &contract.last_trade_date_or_contract_month)?;
             // A book rides the quote feed, so a feed the engine has given up on
             // serves none. Accepted, the request took a book slot and reached a
             // sender with no connection to write it to, which is silent — and a
@@ -396,6 +398,7 @@ impl EClient {
         _bar_size: i32, what_to_show: &str, use_rth: bool,
     ) {
         if let Err(why) = (|| -> Result<(), Refusal> {
+            crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
             // Refused here rather than turned into trades on the way out: a
             // misspelled "BID" answered with trade bars looks like data.
             crate::control::historical::BarDataType::from_api_str(what_to_show)?;

@@ -45,13 +45,12 @@ impl EClient {
         regulatory_snapshot: bool,
         mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        // The mode set by `req_market_data_type`, which names the type once for
-        // every subscription that follows. Passing zero here subscribes at
-        // realtime regardless, which answers nothing on an account without the
-        // realtime entitlement. `req_mkt_data_ex` states the mode per
-        // request.
-        let mode = self.core.subscription_mode();
-        self.req_mkt_data_ex(py, req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode, mkt_data_options)
+        if self.tx_or_report(req_id)?.is_none() { return Ok(()); }
+        if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
+        self.ask_for_mkt_data(py, req_id, contract, generic_tick_list, snapshot, regulatory_snapshot,
+            self.core.subscription_mode(), None, None, true)
     }
 
     /// Like `req_mkt_data`, but names the market-data mode on the request
@@ -89,7 +88,7 @@ impl EClient {
         }
         self.ask_for_mkt_data(
             py, req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode_9887,
-            None, None,
+            None, None, false,
         )
     }
 
@@ -131,6 +130,9 @@ impl EClient {
         // refusals reported against somebody else's request.
         wire_req_id(req_id)?;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
 
         let tbt_type = match TbtType::named(tick_type) {
             Ok(named) => named,
@@ -240,7 +242,7 @@ impl EClient {
         let wire = wire_req_id(req_id)?;
         // What a gateway refuses before it looks the contract up.
         if let Err(why) = crate::client_core::ClientCore::validate_depth_request(
-            &contract.exchange, &contract.sec_type, num_rows,
+            &contract.exchange, &contract.sec_type, num_rows, &contract.last_trade_date_or_contract_month,
         ) {
             return self.report_refusal(py, req_id, why);
         }
@@ -330,6 +332,9 @@ impl EClient {
         real_time_bars_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         let _ = bar_size;
         if let Some(why) = self.options_refused(py, &crate::client_core::REAL_TIME_BARS_OPTIONS, real_time_bars_options)? {
             return self.report_refusal(py, req_id, why);
@@ -591,7 +596,7 @@ impl EClient {
         // The scan rides its own request, so two scans of one contract each
         // state their own; the engine sends one at a time.
         let mode = self.core.subscription_mode();
-        self.ask_for_mkt_data(py, req_id, contract, "481", false, false, mode, Some(scan.stated()), None)
+        self.ask_for_mkt_data(py, req_id, contract, "481", false, false, mode, Some(scan.stated()), None, true)
     }
 
     /// The strategies a spread scan stated for a request, as the venue stated
@@ -888,6 +893,7 @@ impl EClient {
         mode_9887: i32,
         spread_scan: Option<String>,
         calculation: Option<Box<crate::types::Calculation>>,
+        delayed_allowed: bool,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         let shared = self.shared_state()?;
@@ -903,7 +909,7 @@ impl EClient {
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
             &contract.currency, &filters,
             snapshot, regulatory_snapshot, generic_tick_list, mode_9887,
-            spread_scan, calculation,
+            spread_scan, calculation, delayed_allowed,
         ) {
             return self.report_refusal(py, req_id, why);
         }

@@ -8903,7 +8903,7 @@ fn a_subscription_looks_up_the_listing_the_caller_named() {
             last_trade_date_or_contract_month: "202612".into(), strike: 7700.0,
             right: "C".into(), trading_class: "ES".into(), ..Default::default()
         },
-        mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        mode_9887: 0, delayed_mode: None, regulatory_snapshot: false, snapshot: false,
         generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }, &mut conn, &mut hb, &shared);
 
@@ -8921,7 +8921,7 @@ fn spy_by_symbol(req_id: i64) -> crate::types::ControlCommand {
             symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(), currency: "USD".into(),
             ..Default::default()
         },
-        filters: Default::default(), mode_9887: 0, regulatory_snapshot: false,
+        filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false,
         snapshot: false, generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }
 }
@@ -9050,7 +9050,7 @@ fn a_lookup_that_cannot_reach_the_venue_is_refused_now() {
     let mut hb = HeartbeatState::new();
     let (tx, rx) = std::sync::mpsc::sync_channel(64);
     let sink = Some(crate::engine::hot_loop::EventSink::new(tx, Default::default()));
-    ccp.send_secdef_request(7, 756733, &mut None, &mut hb, &shared, &sink);
+    ccp.send_secdef_request(7, 756733, "", &mut None, &mut hb, &shared, &sink);
     ccp.send_secdef_request_by_symbol(8, "SPY", "STK", "SMART", "USD", &Default::default(), false, &mut None, &mut hb, &shared, &sink);
     // And a caller listening for events hears each end as well.
     let heard: Vec<u32> = std::iter::from_fn(|| rx.try_recv().ok())
@@ -9088,7 +9088,7 @@ fn a_lookup_repeated_under_its_number_is_ended_and_sent_afresh() {
     assert_eq!(shared.reference.drain_contract_details_end(), [7, 7], "and each lookup ends");
 
     let (conn, _peer) = crate::protocol::connection::Connection::for_test();
-    ccp.send_secdef_request(7, 756733, &mut Some(conn), &mut hb, &shared, &None);
+    ccp.send_secdef_request(7, 756733, "", &mut Some(conn), &mut hb, &shared, &None);
     assert!(!ccp.details_delivered.contains_key(&7), "a lookup sent afresh forgets what its number was handed");
 }
 
@@ -10027,18 +10027,18 @@ fn a_continuous_lookup_answered_venue_by_venue_asks_for_the_months_once_whole() 
         (fix::TAG_MSG_TYPE, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, "21"),
         (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
         (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "111"),
-        (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+        (207, "QBALGO"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
         (crate::control::contracts::TAG_IB_VALID_EXCHANGES, "CME,QBALGO"),
         (crate::control::contracts::TAG_SCHEDULE_JOIN_KEY, "ES-hours"),
     ]);
     let venues = ccp.pending_fanout.first().map(|p| p.fanout_req_ids.clone()).unwrap_or_default();
-    assert_eq!(venues.len(), 2, "one lookup per venue");
+    assert_eq!(venues.len(), 1, "only the missing venue needs a lookup");
     for venue in &venues {
         answer(&mut ccp, &[
             (fix::TAG_MSG_TYPE, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, venue.as_str()),
             (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "2"),
             (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "111"),
-            (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+            (207, "QBALGO"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
         ]);
     }
     let _ = sent_since(&mut peer);
@@ -10053,7 +10053,7 @@ fn a_continuous_lookup_answered_venue_by_venue_asks_for_the_months_once_whole() 
         (fix::TAG_MSG_TYPE, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, "21"),
         (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
         (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "222"),
-        (207, "CME"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
+        (207, "QBALGO"), (crate::control::contracts::TAG_MULTIPLIER, "50"),
     ]);
     assert_eq!(
         handed_over(&shared),
@@ -10586,4 +10586,92 @@ fn profit_requests_keep_distinct_wire_keys_and_independent_withdrawals() {
     ccp.withdraw_pnl_subscription(1, false);
     assert_eq!(ccp.pnl_subscriptions, [(1, true, "DU1".into())]);
     assert!(std::sync::Arc::ptr_eq(&shared.portfolio_for_request(keys[0]).unwrap(), &shared.portfolio_for("DU2")), "a late reply keeps its original account");
+}
+
+#[test]
+fn subscription_contract_id_lookups_keep_the_requested_exchange() {
+    let (mut ccp, _context, shared) = u186_test_state();
+    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+    let mut pending = spy_by_symbol(3);
+    if let crate::types::ControlCommand::Subscribe { contract, .. } = &mut pending {
+        contract.con_id = 12087792;
+        contract.symbol.clear();
+        contract.sec_type.clear();
+        contract.exchange = "IDEALPRO".into();
+    }
+    ccp.hold_until_named(pending, &mut Some(conn), &mut HeartbeatState::new(), &shared);
+    let sent = sent_since(&mut peer);
+    assert!(sent.contains("|6088=Socket|146=1|6008=12087792|6004=IDEALPRO|"), "{sent}");
+    assert!(!sent.contains("|55=") && !sent.contains("|167="), "{sent}");
+}
+
+#[test]
+fn identifier_lookups_only_request_missing_exchange_rules() {
+    let (mut ccp, mut context, shared) = u186_test_state();
+    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+    let mut conn = Some(conn);
+    let mut hb = HeartbeatState::new();
+    let filters = crate::types::SecDefFilters {
+        sec_id_type: "FIGI".into(), sec_id: "BBG000B9XRY4".into(), ..Default::default()
+    };
+    for req_id in [202, 203] {
+        ccp.send_secdef_request_by_symbol(
+            req_id, "", "", "SMART", "USD", &filters, false, &mut conn, &mut hb, &shared, &None,
+        );
+        let _ = sent_since(&mut peer);
+        let named = req_id.to_string();
+        let master = fix::fix_build(&[
+            (35, "d"), (320, &named), (323, "4"),
+            (55, "AAPL"), (167, "CS"), (6008, "265598"), (207, "BEST"),
+            (6046, "BEST,NYSE,NASDAQ,CORPACT"),
+        ], 1);
+        ccp.process_ccp_message(&master, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let sent = sent_since(&mut peer);
+        if req_id == 202 {
+            assert_eq!(sent.matches("|35=c|").count(), 2, "one request per missing scope: {sent}");
+            for exchange in ["NYSE", "NASDAQ"] {
+                assert!(sent.contains(&format!("|146=1|6008=265598|6004={exchange}|")), "{sent}");
+            }
+            assert!(!sent.contains("6004=CORPACT") && !sent.contains("6004=BEST"), "{sent}");
+            let requests = ccp.pending_fanout[0].fanout_req_ids.clone();
+            for (under, exchange) in requests.iter().zip(["NYSE", "NASDAQ"]) {
+                assert!(shared.reference.drain_contract_details_end().is_empty());
+                let answer = fix::fix_build(&[
+                    (35, "d"), (320, under), (323, "4"),
+                    (55, "AAPL"), (167, "CS"), (6008, "265598"), (207, exchange),
+                    (6031, if exchange == "NYSE" { "0" } else { "26" }),
+                ], 1);
+                ccp.process_ccp_message(&answer, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+            }
+        } else {
+            assert!(sent.is_empty(), "the venue already stated the rule scopes: {sent}");
+        }
+        assert!(ccp.pending_fanout.is_empty());
+        assert_eq!(shared.reference.drain_contract_details().len(), 1);
+        assert_eq!(shared.reference.drain_contract_details_end(), [req_id]);
+    }
+}
+
+#[test]
+fn identifier_lookups_request_uncached_smart_exchange_rules() {
+    for smart in ["SMART", "BEST"] {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        let mut hb = HeartbeatState::new();
+        ccp.send_secdef_request_by_symbol(
+            204, "", "", "NYSE", "USD", &crate::types::SecDefFilters {
+                sec_id_type: "FIGI".into(), sec_id: "BBG000B9XRY4".into(), ..Default::default()
+            }, false, &mut conn, &mut hb, &shared, &None,
+        );
+        let _ = sent_since(&mut peer);
+        let answer = fix::fix_build(&[
+            (35, "d"), (320, "204"), (323, "4"), (55, "AAPL"), (167, "CS"),
+            (6008, "265598"), (207, "NYSE"), (6046, &format!("NYSE,{smart},CORPACT")),
+        ], 1);
+        ccp.process_ccp_message(&answer, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let sent = sent_since(&mut peer);
+        assert_eq!(sent.matches("|35=c|").count(), 1, "{sent}");
+        assert!(sent.contains("|6004=BEST|"), "{smart}: {sent}");
+    }
 }

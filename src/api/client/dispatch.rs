@@ -449,6 +449,19 @@ impl EClient {
             // refusal is a fact about the contract, and a caller sharing
             // somebody else's subscription holds no request of its own for the
             // venue to refuse. Where nobody holds it, there is nobody to tell.
+            Record::MarketDataType((instrument, generation, data_type)) => {
+                if generation == self.core.generation_held(instrument) {
+                    self.core.note_mkt_data_type(instrument, data_type);
+                }
+            }
+            Record::SubscriptionNotice((instrument, generation, notice)) => {
+                if generation == self.core.generation_held(instrument) {
+                    for req_id in self.core.watchers_of(instrument) {
+                        let origin = ErrorOrigin::Request { id: req_id, ends: false };
+                        wrapper.error_from(origin, i64::from(notice.code), &notice.message, "");
+                    }
+                }
+            }
             Record::SubscriptionFailure((instrument, generation, reason)) => {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
@@ -524,7 +537,7 @@ impl EClient {
                 self.core.note_historical_zone(req_id as i64, &response.timezone);
                 for bar in &response.bars {
                     let bd = BarData {
-                        date: self.core.bar_time_for(req_id as i64, &bar.time, &response.timezone),
+                        date: self.core.historical_bar_time_for(req_id as i64, bar, &response.timezone),
                         open: bar.open,
                         high: bar.high,
                         low: bar.low,

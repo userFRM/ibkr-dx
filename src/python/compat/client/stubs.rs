@@ -129,6 +129,9 @@ impl EClient {
         if let Some(why) = self.options_refused(py, &crate::client_core::IMPL_VOL_OPTIONS, implied_vol_options)? {
             return self.report_refusal(py, req_id, why);
         }
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = self.answer_option_model(req_id, contract, |terms, model, schedule| {
             crate::control::option_model::implied_volatility(
                 terms, model, schedule, option_price, under_price,
@@ -173,6 +176,9 @@ impl EClient {
     ) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         if let Some(why) = self.options_refused(py, &crate::client_core::OPT_PRC_OPTIONS, opt_prc_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
+        if let Err(why) = crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
             return self.report_refusal(py, req_id, why);
         }
         if let Err(why) = self.answer_option_model(req_id, contract, |terms, model, schedule| {
@@ -716,7 +722,7 @@ impl EClient {
             py, req_id, contract, "", false, false, mode, None,
             Some(Box::new(crate::types::Calculation {
                 contract: contract.to_api(), wants_volatility, option_price, under_price,
-            })),
+            })), false,
         )?;
         Ok(true)
     }

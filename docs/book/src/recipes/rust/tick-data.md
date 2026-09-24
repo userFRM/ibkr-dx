@@ -79,15 +79,25 @@ under [Beyond the documented API](../../reference/beyond-the-api.md).
 
 One subscription per contract. To change the mode on a contract, cancel first.
 
-Delayed and frozen data are requested. Name the mode once with
-`req_market_data_type` and every subscription after it carries it, or state it
-per request with `req_mkt_data_ex`, whose `mode_9887` is 0 realtime, 1 delayed,
-2 frozen, 3 delayed-frozen. Frozen keeps thinly traded names quoting after
+Types 3 (delayed) and 4 (delayed-frozen) on `req_market_data_type` enable
+a delayed feed when live data is unavailable. Both start live. A bid/ask
+refusal that states delayed data is available switches to the requested
+delayed feed and reports 10167 without ending the request. `market_data_type`
+reports the feed delivered: 1 while live, then 3 or 4 after the switch.
+
+`req_mkt_data_ex` selects a feed directly: `mode_9887` is 0 realtime, 1 delayed,
+2 frozen, or 3 delayed-frozen. Frozen keeps thinly traded names quoting after
 hours, when the realtime feed is silent.
+
+A refusal naming several requests reaches each affected caller. The bid/ask
+and last entries of one quote produce one subscription error. Cancelling a
+tick-by-tick stream uses its query identifier before acknowledgement and its
+assigned stream identifier afterwards; another caller sharing that stream
+keeps receiving data until it cancels too.
 
 `req_mkt_data_ex` takes `mkt_data_options: &[TagValue]` after `mode_9887`.
 Pass `&[]` when there are no options. `req_mkt_data` keeps its existing
-signature and supplies an empty list. With no session, both calls return
+signature and supplies an empty list. With no session, both calls report
 504, *Not connected*, before checking the request.
 
 The list accepts `manual=0` or `manual=1`. An unknown key is refused under

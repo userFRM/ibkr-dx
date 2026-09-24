@@ -498,6 +498,7 @@ fn scans_given_by_description_keep_their_text_and_their_turn() {
         contract: (&described()).into(),
         filters: Default::default(),
         mode_9887: 0,
+        delayed_mode: None,
         regulatory_snapshot: false,
         snapshot: false,
         generic_ticks: vec![481],
@@ -1222,6 +1223,7 @@ fn a_snapshot_is_registered_after_its_option_is_named() {
                     contract,
                     filters: Default::default(),
                     mode_9887: 0,
+                    delayed_mode: None,
                     regulatory_snapshot: false,
                     snapshot: true,
                     generic_ticks: Vec::new(),
@@ -1285,6 +1287,7 @@ fn subscription_to_name(calculation: bool) -> ControlCommand {
         contract: ContractRef { con_id: 700001, ..Default::default() },
         filters: Default::default(),
         mode_9887: 0,
+        delayed_mode: None,
         regulatory_snapshot: false,
         snapshot: false,
         generic_ticks: Vec::new(),
@@ -1687,4 +1690,32 @@ fn an_automatically_numbered_exercise_holds_later_commands_on_its_number() {
     assert_eq!(shared.backlog(), 2, "both commands wait until the exercise's contract is named");
     assert!(shared.drain_refused().is_empty());
     assert!(shared.orders.drain_order_inactive().is_empty());
+}
+
+#[test]
+fn a_joiner_is_told_the_feed_the_venue_accepted() {
+    let shared = Arc::new(SharedState::new());
+    let mut hl = HotLoop::new(shared.clone(), None, None);
+    let contract = ContractRef {
+        con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+        exchange: "IDEALPRO".into(), currency: "USD".into(), ..Default::default()
+    };
+    let slot = hl.context.market.register_described(12087792, "EUR", "CASH", "IDEALPRO", "", "");
+    let mut first = crate::engine::hot_loop::tests::subscription(1, contract.clone());
+    if let ControlCommand::Subscribe { delayed_mode, .. } = &mut first {
+        *delayed_mode = Some(3);
+    }
+    hl.take_subscription(first);
+    let feed = shared.market.subscription_data_type(slot, 1);
+    assert_eq!(feed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    feed.store(4, std::sync::atomic::Ordering::Relaxed);
+    shared.market.push_market_data_type(slot, 4);
+    hl.take_subscription(crate::engine::hot_loop::tests::subscription(2, contract));
+    assert_eq!(feed.load(std::sync::atomic::Ordering::Relaxed), 4, "joining preserves the accepted feed");
+    let taken: Vec<_> = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+        .into_iter().filter_map(|(_, record)| match record {
+            crate::bridge::Record::MarketDataTaken(taken) => Some((taken.req_id, taken.data_type)),
+            _ => None,
+        }).collect();
+    assert_eq!(taken, [(1, 1), (2, 4)]);
 }

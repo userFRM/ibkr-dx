@@ -78,6 +78,7 @@ impl EClient {
         end_date_time: &str, duration: &str, bar_size: &str,
         what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), Refusal> {
+        crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
@@ -151,6 +152,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool,
         format_date: i32,
     ) -> Result<(), Refusal> {
+        crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
@@ -177,6 +179,7 @@ impl EClient {
     /// [`req_contract_details`](Self::req_contract_details), with its refusal handed back to the
     /// caller rather than pushed into the session's order.
     pub(crate) fn try_req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(), Refusal> {
+        crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
         self.send(ControlCommand::FetchContractDetails {
             contract: contract.into(),
             req_id: wire_req_id(req_id)?,
@@ -663,6 +666,7 @@ impl EClient {
     /// [`req_histogram_data`](Self::req_histogram_data), with its refusal handed back to the
     /// caller rather than pushed into the session's order.
     pub(crate) fn try_req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), Refusal> {
+        crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
@@ -705,6 +709,7 @@ impl EClient {
         number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool,
     ) {
         if let Err(why) = (|| -> Result<(), Refusal> {
+            crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
             // Before anything that reaches the venue, so an id it cannot carry is
             // named as the trouble rather than whatever is checked first.
             let wire_id = wire_req_id(req_id)?;
@@ -776,6 +781,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, use_rth: bool,
     ) -> Result<(), Refusal> {
+        crate::client_core::ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.

@@ -66,9 +66,8 @@ pub(crate) struct HmdsState {
     /// nowhere.
     pub(crate) tbt_withdrawn: std::collections::HashSet<u64>,
     /// Streams withdrawn before the venue had numbered them, by the name this
-    /// client asked under. The withdrawal by name is accepted and does
-    /// nothing, so each is withdrawn again by number when its acknowledgement
-    /// states one.
+    /// client asked under. A late acknowledgement is withdrawn by its
+    /// stream number as well.
     pub(crate) tbt_withdrawn_unnumbered: std::collections::HashMap<String, (InstrumentId, TbtType)>,
     /// Streams already spoken about, so each is spoken about once.
     pub(crate) tbt_reported: std::collections::HashSet<u64>,
@@ -222,6 +221,8 @@ pub(crate) struct FormingBar {
     pub(crate) seconds: u32,
     /// The moment the bar being formed opened.
     pub(crate) opened_at: u32,
+    /// The last timed daily session supplied with the history.
+    pub(crate) daily_session: Option<(u32, u32)>,
     pub(crate) bar: crate::types::RealTimeBar,
     /// Volume-weighted price needs the weights kept as they arrive.
     pub(crate) weighted: f64,
@@ -230,7 +231,9 @@ pub(crate) struct FormingBar {
 impl FormingBar {
     /// Fold a five-second bar in, and answer with the bar as it now stands.
     fn fold(&mut self, five: &crate::types::RealTimeBar) -> crate::types::RealTimeBar {
-        let opened_at = opening(self.seconds, five.timestamp);
+        let opened_at = self.daily_session
+            .filter(|(start, end)| *start <= five.timestamp && five.timestamp < *end)
+            .map_or_else(|| opening(self.seconds, five.timestamp), |(start, _)| start);
         if opened_at != self.opened_at {
             self.opened_at = opened_at;
             self.bar = *five;
@@ -731,10 +734,8 @@ impl HmdsState {
                     // subscription that a caller need not have made, and the
                     // number the venue gave was never learned at all.
                     if let Some(ack) = parse_tick_subscription_ack(xml_tag) {
-                        // Withdrawn before it was numbered: the withdrawal by
-                        // name did nothing, so it is withdrawn by the number
-                        // stated now, and its ticks are known for what they
-                        // are.
+                        // A late acknowledgement of a withdrawn query is
+                        // withdrawn by its stream number as well.
                         if let Some((instrument, kind)) = self.tbt_withdrawn_unnumbered.remove(&ack.query_id) {
                             // The rule the withdrawal below keeps, which this
                             // branch did not: two callers on one contract and
@@ -757,7 +758,7 @@ impl HmdsState {
                                 return;
                             }
                             self.tbt_withdrawn.insert(ack.venue_id);
-                            Self::send_tbt_cancel(&ack.venue_id.to_string(), hmds_conn, hb);
+                            Self::send_tbt_cancel(&format!("rtTicker:{}", ack.venue_id), hmds_conn, hb);
                             return;
                         }
                         if let Some(pos) = self
@@ -808,6 +809,19 @@ impl HmdsState {
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| states(&resp.query_id, qid.as_str())) {
                             let (_, req_id) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
+                            if let Some(forming) = self.forming_bars.iter_mut().find(|f| f.req_id == req_id)
+                                && forming.seconds == crate::control::historical::BarSize::Day1.seconds()
+                            {
+                                for bar in &resp.bars {
+                                    let (Some(start), Some(end)) = (
+                                        crate::protocol::datetime::ib_datetime_to_unix(&bar.time).and_then(|at| u32::try_from(at).ok()),
+                                        crate::protocol::datetime::ib_datetime_to_unix(&bar.end).and_then(|at| u32::try_from(at).ok()),
+                                    ) else { continue };
+                                    if start < end && forming.daily_session.is_none_or(|(held, _)| start >= held) {
+                                        forming.daily_session = Some((start, end));
+                                    }
+                                }
+                            }
                             // Activity on this query — push the idle deadline out.
                             // Bar completion rides <eoq>true> in the final segmented
                             // ResultSetBar; earlier segments carry <eoq>false>. Kept at
@@ -1912,16 +1926,11 @@ fn build_tbt_query(
         if gone.venue_id != 0 {
             self.tbt_withdrawn.insert(gone.venue_id);
         }
-        // By the venue's own number for the stream, not the name this client
-        // gave it when asking. Named the second way the withdrawal is accepted
-        // and does nothing: a live session counted three hundred and forty-four
-        // records after one, and four hundred and sixty-nine after another,
-        // arriving until the session ended. The bar stream beside this already
-        // withdraws by the venue's number. Falls back to the name only where
-        // the subscription was never acknowledged and there is no number yet,
-        // and withdraws again by number when the acknowledgement brings one.
+        // A numbered tick stream is withdrawn in its real-time namespace.
+        // Before acknowledgement, withdraw the query by its original name
+        // and remember it so a late acknowledgement is withdrawn too.
         let ticker_id = if gone.venue_id != 0 {
-            gone.venue_id.to_string()
+            format!("rtTicker:{}", gone.venue_id)
         } else {
             self.tbt_withdrawn_unnumbered.insert(gone.query_id.clone(), (gone.instrument, gone.kind));
             gone.query_id
@@ -1938,7 +1947,7 @@ fn build_tbt_query(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListOfCancelQueries>\
              <CancelQuery>\
-             <id>ticker:{ticker_id}</id>\
+             <id>{ticker_id}</id>\
              </CancelQuery>\
              </ListOfCancelQueries>",
         );

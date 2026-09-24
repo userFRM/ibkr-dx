@@ -39,6 +39,17 @@ of their own. Do not run both styles on one client: `run()` drains every queue
 rather than only its own, so a dispatch loop beside a blocking call competes
 with it for the answer. Pick the callbacks or pick these.
 
+## Lookups by contract id
+
+A lookup by `con_id` includes the requested exchange. Leaving the exchange
+empty asks for the preferred definition. The same rule applies when a market
+data request needs to name a contract given only by id.
+
+Contract details reuse exchange rule scopes already returned during the
+session. A first lookup can still need a separate request for each missing
+exchange; later lookups reuse those answers. CORPACT is excluded because it
+does not name a trading venue.
+
 ## Run it
 
 ```bash

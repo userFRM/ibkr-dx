@@ -933,6 +933,13 @@ pub(crate) struct MdReqRecord {
     pub(crate) entries: Vec<MdReqEntry>,
 }
 
+struct DelayedSubscription {
+    mode: i32,
+    data_type: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    requests: Option<[u32; 2]>,
+    retry: bool,
+}
+
 /// A cursor over a book frame's bits, most significant bit first.
 struct BookBits<'a> {
     bytes: &'a [u8],
@@ -1036,6 +1043,7 @@ pub(crate) struct FarmState {
     /// sec_type, num_rows, is_smart_depth).
     depth_resub_info: Vec<(u32, i64, String, String, String, i32, bool)>,
     md_resub_info: Vec<MdResubInfo>,
+    delayed_subscriptions: std::collections::HashMap<InstrumentId, DelayedSubscription>,
     /// The option-model subscriptions and what they were taken out on, so one
     /// can be withdrawn the same way it was asked for.
     greeks_subs: Vec<(u32, i64, String)>,
@@ -2283,6 +2291,7 @@ impl FarmState {
             depth_fanout_exchange: Vec::new(),
             depth_resub_info: Vec::new(),
             md_resub_info: Vec::new(),
+            delayed_subscriptions: std::collections::HashMap::new(),
             greeks_subs: Vec::new(),
             generic_tick_reqs: Vec::new(),
             asked_generic_ticks: std::collections::HashMap::new(),
@@ -2445,7 +2454,14 @@ impl FarmState {
             // request that asked. Dropped, a caller that asked for depth on a
             // venue this account cannot see waits for data that was refused
             // before it started.
-            b"3" => self.handle_subscription_reject(msg, context, shared),
+            b"3" => {
+                self.handle_subscription_reject(msg, context, shared);
+                let retry: Vec<_> = self.delayed_subscriptions.iter()
+                    .filter_map(|(instrument, state)| state.retry.then_some(*instrument)).collect();
+                for instrument in retry {
+                    self.send_delayed_top(instrument, farm_conn, context, shared, hb);
+                }
+            },
             b"Y" => self.handle_depth_35y(msg, shared),
             b"G" => self.handle_generic_tick(msg, context, shared, event_tx),
             // Named once, the first time each arrives, the way the trading
@@ -2874,6 +2890,17 @@ impl FarmState {
             return;
         }
 
+        let acknowledges_bid_ask = self.instrument_md_reqs.iter().any(|(id, record)| {
+            *id == instrument && record.entries.iter().any(|entry| {
+                entry.req_id == req_id && entry.request_type == REALTIME_BID_ASK_REQUEST_TYPE
+            })
+        });
+        if acknowledges_bid_ask && let Some(state) = self.delayed_subscriptions.get(&instrument) {
+            let delayed = state.requests.is_some_and(|requests| requests.contains(&req_id));
+            let data_type = crate::client_core::data_type_for_mode(if delayed { state.mode } else { 0 });
+            state.data_type.store(data_type, std::sync::atomic::Ordering::Relaxed);
+            shared.market.push_market_data_type(instrument, data_type);
+        }
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
         shared.market.push_tick_req_params(instrument, crate::bridge::TickReqParams {
@@ -2926,134 +2953,166 @@ impl FarmState {
         // The venue writes these as "Error&VENUE/TYPE/WHAT". The lead-in says
         // only that it is one, which the caller already knows from being told.
         let reason = said.strip_prefix("Error&").unwrap_or(said);
-        let req_id = parsed.get(&262).and_then(|s| s.parse::<u32>().ok());
-        let instrument = req_id.and_then(|rid| {
-            self.md_req_to_instrument.iter().find(|(id, _)| *id == rid).map(|(_, i)| *i)
-        });
-        match instrument {
-            Some(instrument) => {
-                let named = context.market.symbol(instrument);
-                // A request riding beside the quote — the trading status, the
-                // exchange map, the option model — is refused on its own. The
-                // quote it rides beside is not, and its prices go on arriving;
-                // told the quote was refused, a caller withdrew it.
-                if let Some(rid) = req_id
-                    && let Some(&(_, kind)) = self.generic_tick_reqs.iter().find(|(id, _)| *id == rid)
-                {
-                    // The news beside the quote is refused on its own. Left in
-                    // place, the entry the rebuild reads re-sends it on the
-                    // next reconnect — the venue refuses it again — and a
-                    // headline that never comes is waited on; so it is
-                    // released, the request and its filing both. The other
-                    // companions — the trading status, the exchange map, the
-                    // option model — carry no such standing state to release.
-                    if kind == NEWS_REQUEST_TYPE
-                        && let Some(pos) = self.news_subscriptions.iter().position(|(_, id, ..)| *id == rid)
+        // One refusal can name both quote entries, or requests for several
+        // contracts. Each entry is routed separately; the quote's two halves
+        // report the subscription refusal once.
+        let Some(requests) = parsed.get(&262) else {
+            log::warn!("market data refusal names no request: {reason}");
+            return;
+        };
+        let mut refused_quotes = Vec::new();
+        let delayed_available: Vec<_> = parsed.get(&9887)
+            .map(|flags| flags.split(';').filter(|flag| !flag.is_empty()).collect()).unwrap_or_default();
+        for (index, id) in requests.split(';').filter(|id| !id.is_empty()).enumerate() {
+            let Ok(rid) = id.parse::<u32>() else { continue };
+            let instrument = self.md_req_to_instrument.iter()
+                .find(|(id, _)| *id == rid).map(|(_, i)| *i);
+            match instrument {
+                Some(instrument) => {
+                    let named = context.market.symbol(instrument);
+                    // A request riding beside the quote — the trading status, the
+                    // exchange map, the option model — is refused on its own. The
+                    // quote it rides beside is not, and its prices go on arriving;
+                    // told the quote was refused, a caller withdrew it.
+                    if let Some(&(_, kind)) = self.generic_tick_reqs.iter().find(|(id, _)| *id == rid)
                     {
-                        self.news_subscriptions.remove(pos);
-                        // Released, so a request that asks again is asked
-                        // anew rather than held against a subscription the
-                        // venue already refused.
-                        self.forget_news(rid, instrument);
+                        // The news beside the quote is refused on its own. Left in
+                        // place, the entry the rebuild reads re-sends it on the
+                        // next reconnect — the venue refuses it again — and a
+                        // headline that never comes is waited on; so it is
+                        // released, the request and its filing both. The other
+                        // companions — the trading status, the exchange map, the
+                        // option model — carry no such standing state to release.
+                        if kind == NEWS_REQUEST_TYPE
+                            && let Some(pos) = self.news_subscriptions.iter().position(|(_, id, ..)| *id == rid)
+                        {
+                            self.news_subscriptions.remove(pos);
+                            self.forget_news(rid, instrument);
+                        }
+                        // Told, not only logged. The venue names the request it is
+                        // refusing and says why — the one refusal channel on this
+                        // wire that does — and a caller that asked for the option
+                        // model on a class the venue has no model for watched an
+                        // acknowledged subscription that could never produce a
+                        // computation, with the reason sitting in a log line.
+                        shared.market.push_companion_refusal(
+                            instrument,
+                            kind,
+                            format!("the venue refused {} on {named}: {reason}", companion_named(kind)),
+                        );
+                        log::warn!("The venue refused a request beside the quote on {named}: {reason}");
+                        continue;
                     }
-                    // Told, not only logged. The venue names the request it is
-                    // refusing and says why — the one refusal channel on this
-                    // wire that does — and a caller that asked for the option
-                    // model on a class the venue has no model for watched an
-                    // acknowledged subscription that could never produce a
-                    // computation, with the reason sitting in a log line.
-                    shared.market.push_companion_refusal(
-                        instrument,
-                        kind,
-                        format!("the venue refused {} on {named}: {reason}", companion_named(kind)),
+                    // The bid/ask request controls the quote subscription.
+                    if self.instrument_md_reqs.iter().any(|(id, record)| {
+                        *id == instrument && record.entries.iter().any(|entry| {
+                            entry.req_id == rid && entry.request_type == REALTIME_LAST_REQUEST_TYPE
+                        })
+                    }) {
+                        continue;
+                    }
+                    // The chargeable snapshot is refused on its own as well, and
+                    // the acknowledgement path already says why: it is a request
+                    // of its own, nothing joins it, and what the venue says about
+                    // it says nothing about the stream on the same contract. The
+                    // refusal side had no such reading, so a snapshot declined for
+                    // want of the entitlement — the documented outcome — was
+                    // recorded against the contract: every caller watching a
+                    // healthy, ticking stream was told their quote had been
+                    // refused, and every later joiner was handed that reason
+                    // beside the quote it contradicts. Nothing cleared it either,
+                    // because only a fresh acknowledgement does and a subscribe
+                    // that joins an existing subscription never draws one.
+                    //
+                    // Where there is no stream to protect, the refusal is the
+                    // contract's: the snapshot's caller is the only one watching,
+                    // and it is who the reason is for.
+                    let refuses_a_snapshot = self.instrument_md_reqs.iter().any(|(id, record)| {
+                            *id == instrument
+                                && record.entries.iter().any(|e| {
+                                    e.req_id == rid
+                                        && e.request_type == REGULATORY_SNAPSHOT_REQUEST_TYPE
+                                })
+                    });
+                    if refuses_a_snapshot && self.holds_a_stream(instrument) {
+                        log::warn!("The venue refused the snapshot on {named}: {reason}");
+                        continue;
+                    }
+                    let refuses_bid_ask = self.instrument_md_reqs.iter().any(|(id, record)| {
+                        *id == instrument && record.entries.iter().any(|entry| {
+                            entry.req_id == rid && entry.request_type == REALTIME_BID_ASK_REQUEST_TYPE
+                        })
+                    });
+                    if refuses_bid_ask
+                        && delayed_available.get(index) == Some(&"1")
+                        && let Some(state) = self.delayed_subscriptions.get_mut(&instrument)
+                        && state.requests.is_none()
+                    {
+                        state.retry = true;
+                        continue;
+                    }
+                    if self.delayed_subscriptions.get(&instrument).is_some_and(|state| state.retry) {
+                        continue;
+                    }
+                    if refused_quotes.contains(&instrument) {
+                        continue;
+                    }
+                    refused_quotes.push(instrument);
+                    log::warn!("The venue refused a subscription on {named}: {reason}");
+                    shared.market.push_subscription_failure(
+                        instrument, format!("the venue refused this subscription: {reason}"),
                     );
-                    log::warn!("The venue refused a request beside the quote on {named}: {reason}");
-                    return;
                 }
-                // The chargeable snapshot is refused on its own as well, and
-                // the acknowledgement path already says why: it is a request
-                // of its own, nothing joins it, and what the venue says about
-                // it says nothing about the stream on the same contract. The
-                // refusal side had no such reading, so a snapshot declined for
-                // want of the entitlement — the documented outcome — was
-                // recorded against the contract: every caller watching a
-                // healthy, ticking stream was told their quote had been
-                // refused, and every later joiner was handed that reason
-                // beside the quote it contradicts. Nothing cleared it either,
-                // because only a fresh acknowledgement does and a subscribe
-                // that joins an existing subscription never draws one.
-                //
-                // Where there is no stream to protect, the refusal is the
-                // contract's: the snapshot's caller is the only one watching,
-                // and it is who the reason is for.
-                let refuses_a_snapshot = req_id.is_some_and(|rid| {
-                    self.instrument_md_reqs.iter().any(|(id, record)| {
-                        *id == instrument
-                            && record.entries.iter().any(|e| {
-                                e.req_id == rid
-                                    && e.request_type == REGULATORY_SNAPSHOT_REQUEST_TYPE
-                            })
-                    })
-                });
-                if refuses_a_snapshot && self.holds_a_stream(instrument) {
-                    log::warn!("The venue refused the snapshot on {named}: {reason}");
-                    return;
+                // A depth subscription asks under an id of its own, and one venue's
+                // refusal does not end the caller's request: one book is asked for
+                // at several venues and the others may answer. The caller asked
+                // once, so they are told once — when the last venue has refused
+                // and there is no book coming.
+                None => {
+                    log::warn!("The venue refused a subscription: {reason}");
+                    let fanned_out = self.depth_fanout_map.iter()
+                        .find(|(sub, _)| *sub == rid)
+                        .map(|(_, user)| *user);
+                    // Naming nothing this client still asks under, the book was
+                    // withdrawn or refused before this arrived, and there is no
+                    // caller to tell. Handed on as it stood, the wire number was
+                    // published as though it were a caller's request number, and
+                    // whoever held that number was told a book had been refused.
+                    let Some(asked_for) = fanned_out else {
+                        log::info!("the refusal names {rid}, which no book here asks under any more");
+                        continue;
+                    };
+                    // Every record of the refused book. The two beside the map
+                    // stayed for the life of the connection, scanned on every
+                    // acknowledgement and every subscribe, and a later
+                    // acknowledgement of the wire id would have filed the book
+                    // under the wire number as though a caller held it.
+                    self.depth_fanout_map.retain(|(sub, _)| *sub != rid);
+                    self.depth_subs.retain(|(sub, _)| *sub != rid);
+                    self.depth_fanout_exchange.retain(|(sub, _)| *sub != rid);
+                    if self.depth_fanout_map.iter().any(|(_, u)| *u == asked_for) {
+                        continue;
+                    }
+                    // No venue is going to answer, so the book is over — and what
+                    // the withdrawal drops has to go the same way. The record the
+                    // reconnect rebuilds from stayed, so every reconnect asked for
+                    // the refused book again, told the caller its book had been
+                    // emptied before doing so, and drew the same refusal: two
+                    // messages a reconnect, for the rest of the session, on a
+                    // request already answered once. The routing stayed with it,
+                    // so a refusal arriving after an acknowledgement went on
+                    // handing levels to a number that had been told there was no
+                    // book. The headlines beside this release their own replay
+                    // record for exactly this reason.
+                    self.depth_resub_info.retain(|(id, ..)| *id != asked_for);
+                    self.depth_tag_to_req.retain(|(_, rid, ..)| *rid != asked_for);
+                    self.depth_rows.retain(|(id, _)| *id != asked_for);
+                    shared.reference.push_historical_error(
+                        asked_for,
+                        DEPTH_VENUE_REFUSED,
+                        format!("the venue refused depth here: {reason}"),
+                    );
                 }
-                log::warn!("The venue refused a subscription on {named}: {reason}");
-                shared.market.push_subscription_failure(
-                    instrument, format!("the venue refused this subscription: {reason}"),
-                );
-            }
-            // A depth subscription asks under an id of its own, and one venue's
-            // refusal does not end the caller's request: one book is asked for
-            // at several venues and the others may answer. The caller asked
-            // once, so they are told once — when the last venue has refused
-            // and there is no book coming.
-            None => {
-                log::warn!("The venue refused a subscription: {reason}");
-                let Some(rid) = req_id else { return };
-                let fanned_out = self.depth_fanout_map.iter()
-                    .find(|(sub, _)| *sub == rid)
-                    .map(|(_, user)| *user);
-                // Naming nothing this client still asks under, the book was
-                // withdrawn or refused before this arrived, and there is no
-                // caller to tell. Handed on as it stood, the wire number was
-                // published as though it were a caller's request number, and
-                // whoever held that number was told a book had been refused.
-                let Some(asked_for) = fanned_out else {
-                    log::info!("the refusal names {rid}, which no book here asks under any more");
-                    return;
-                };
-                // Every record of the refused book. The two beside the map
-                // stayed for the life of the connection, scanned on every
-                // acknowledgement and every subscribe, and a later
-                // acknowledgement of the wire id would have filed the book
-                // under the wire number as though a caller held it.
-                self.depth_fanout_map.retain(|(sub, _)| *sub != rid);
-                self.depth_subs.retain(|(sub, _)| *sub != rid);
-                self.depth_fanout_exchange.retain(|(sub, _)| *sub != rid);
-                if self.depth_fanout_map.iter().any(|(_, u)| *u == asked_for) {
-                    return;
-                }
-                // No venue is going to answer, so the book is over — and what
-                // the withdrawal drops has to go the same way. The record the
-                // reconnect rebuilds from stayed, so every reconnect asked for
-                // the refused book again, told the caller its book had been
-                // emptied before doing so, and drew the same refusal: two
-                // messages a reconnect, for the rest of the session, on a
-                // request already answered once. The routing stayed with it,
-                // so a refusal arriving after an acknowledgement went on
-                // handing levels to a number that had been told there was no
-                // book. The headlines beside this release their own replay
-                // record for exactly this reason.
-                self.depth_resub_info.retain(|(id, ..)| *id != asked_for);
-                self.depth_tag_to_req.retain(|(_, rid, ..)| *rid != asked_for);
-                self.depth_rows.retain(|(id, _)| *id != asked_for);
-                shared.reference.push_historical_error(
-                    asked_for,
-                    DEPTH_VENUE_REFUSED,
-                    format!("the venue refused depth here: {reason}"),
-                );
             }
         }
     }
@@ -3214,6 +3273,83 @@ impl FarmState {
             .retain(|(_, tick, i)| !(*tick == NEWS_REQUEST_TYPE && *i == instrument));
     }
 
+    pub(crate) fn note_data_type(
+        &mut self, instrument: InstrumentId, mode: i32, delayed_mode: Option<i32>,
+        shared: &SharedState,
+    ) {
+        let requested = crate::client_core::data_type_for_mode(mode);
+        let data_type = shared.market.subscription_data_type(instrument, requested);
+        data_type.store(requested, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mode) = delayed_mode {
+            self.delayed_subscriptions.insert(instrument, DelayedSubscription {
+                mode, data_type, requests: None, retry: false,
+            });
+        } else {
+            self.delayed_subscriptions.remove(&instrument);
+        }
+    }
+
+    fn send_delayed_top(
+        &mut self, instrument: InstrumentId,
+        farm_conn: &mut Option<Connection>, context: &mut Context,
+        shared: &SharedState, hb: &mut HeartbeatState,
+    ) {
+        let Some(state) = self.delayed_subscriptions.get_mut(&instrument) else { return };
+        state.retry = false;
+        let Some((_, record)) = self.instrument_md_reqs.iter_mut()
+            .find(|(id, _)| *id == instrument) else {
+                shared.market.push_subscription_failure(instrument, "the refused subscription has no record for delayed data".into());
+                return;
+            };
+        let Some(venue) = record.entries.iter()
+            .find(|entry| entry.request_type == REALTIME_BID_ASK_REQUEST_TYPE)
+            .map(|entry| entry.venue.clone()) else {
+                shared.market.push_subscription_failure(instrument, "the refused subscription has no bid/ask venue for delayed data".into());
+                return;
+            };
+        let requests = [self.next_md_req_id, self.next_md_req_id + 1];
+        self.next_md_req_id += 2;
+        let old: Vec<_> = record.entries.iter()
+            .filter(|entry| matches!(entry.request_type, REALTIME_BID_ASK_REQUEST_TYPE | REALTIME_LAST_REQUEST_TYPE))
+            .map(|entry| entry.req_id).collect();
+        if let Some(conn) = farm_conn.as_mut() {
+            for entry in record.entries.iter().filter(|entry| entry.request_type == REALTIME_LAST_REQUEST_TYPE) {
+                let _ = conn.send_fixcomp(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ), (263, "2"), (146, "1"),
+                    (262, &entry.req_id.to_string()), (6008, &record.con_id.to_string()),
+                    (207, &entry.venue), (167, &record.sec_type), (264, &REALTIME_LAST_REQUEST_TYPE.to_string()),
+                    (6088, "Socket"), (9830, "1"), (9839, "1"),
+                ]);
+            }
+        }
+        self.md_req_to_instrument.retain(|(id, _)| !old.contains(id));
+        context.market.clear_server_tags_for(instrument);
+        let (quote, clock) = context.market.quote_and_clock_mut(instrument);
+        *quote = Default::default();
+        *clock = Default::default();
+        shared.market.push_quote(instrument, quote);
+        record.entries.retain(|entry| !old.contains(&entry.req_id));
+        for (req_id, request_type) in requests.into_iter().zip([
+            REALTIME_BID_ASK_REQUEST_TYPE, REALTIME_LAST_REQUEST_TYPE,
+        ]) {
+            self.md_req_to_instrument.push((req_id, instrument));
+            record.entries.push(MdReqEntry { req_id, request_type, venue: venue.clone() });
+        }
+        state.requests = Some(requests);
+        shared.market.push_subscription_notice(instrument, crate::error_codes::Refusal::stated(
+            10167, "Requested market data is not subscribed. Displaying delayed market data...",
+        ));
+        if let Some(conn) = farm_conn.as_mut() {
+            let tags = build_conid_subscribe_tags(
+                false, false, requests[0], requests[1], record.con_id, &venue,
+                &record.sec_type, state.mode, &chrono_free_timestamp(), &[],
+            );
+            let tags: Vec<_> = tags.iter().map(|(tag, value)| (*tag, value.as_str())).collect();
+            let _ = conn.send_fixcomp(&tags);
+            hb.last_farm_sent = Instant::now();
+        }
+    }
+
     pub(crate) fn send_mktdata_subscribe(
         &mut self,
         con_id: i64,
@@ -3230,6 +3366,12 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        // A reconnect starts live again; a refusal may select delayed data
+        // once more under the new request numbers.
+        if !regulatory_snapshot && let Some(state) = self.delayed_subscriptions.get_mut(&instrument) {
+            state.requests = None;
+            state.retry = false;
+        }
         // A stream is the pair BID_ASK + LAST on every feed; a delayed or
         // frozen one names the feed beside them on 9887 and asks for the same
         // two. The chargeable snapshot is one entry whatever the feed, so it
@@ -3546,6 +3688,7 @@ impl FarmState {
             return;
         }
         self.subscription_asked_on.remove(&instrument);
+        let delayed = self.delayed_subscriptions.remove(&instrument);
         // The occupancy stays until the slot itself goes back: the release that
         // follows names it, and cleared here that release named nothing —
         // which the client reads as "forget whatever is on that slot now",
@@ -3644,9 +3787,10 @@ impl FarmState {
             // with, and a withdrawal short of the subscription's fields is one
             // the venue leaves being served. The chargeable snapshot is served
             // from no feed and is asked for without it.
-            let mode_str = record.mode_9887.to_string();
-            if record.mode_9887 != 0
-                && entry.request_type != REGULATORY_SNAPSHOT_REQUEST_TYPE
+            let mode = delayed.as_ref().filter(|state| state.requests.is_some_and(|requests| requests.contains(&entry.req_id)))
+                .map_or(record.mode_9887, |state| state.mode);
+            let mode_str = mode.to_string();
+            if mode != 0 && entry.request_type != REGULATORY_SNAPSHOT_REQUEST_TYPE
             {
                 tags.push((9887, &mode_str));
             }

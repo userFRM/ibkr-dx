@@ -118,11 +118,14 @@ fn sec_type_wire_mapping() {
 #[test]
 fn build_secdef_by_conid() {
     let msg = build_secdef_request_by_conid("R1", 265598, 1);
+    assert!(String::from_utf8_lossy(&msg).contains("6088=Socket\x01146=1\x01"));
     let tags = fix::fix_parse(&msg);
     assert_eq!(tags[&TAG_MSG_TYPE], "c");
     assert_eq!(tags[&TAG_SECURITY_REQ_ID], "R1");
     assert_eq!(tags[&TAG_SECURITY_REQ_TYPE], "2");
+    assert_eq!(tags[&146], "1");
     assert_eq!(tags[&TAG_IB_CON_ID], "265598");
+    assert_eq!(tags[&6004], "ANYEXCH");
     assert_eq!(tags[&TAG_IB_SOURCE], "Socket");
 }
 
