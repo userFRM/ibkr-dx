@@ -40,7 +40,9 @@ impl ControlCommand {
     /// The numbers this command acts on.
     fn own(&self) -> impl Iterator<Item = u64> {
         let ids = match self {
-            Self::Place(p) => [Some(p.order_id), None, None],
+            Self::Place(p) => [Some(p.order_id),
+                (p.order.pt_order_id != i32::MAX).then_some(p.order.pt_order_id as u64),
+                (p.order.sl_order_id != i32::MAX).then_some(p.order.sl_order_id as u64)],
             Self::CancelOrder { order_id, .. } => [Some(*order_id), None, None],
             Self::Exercise(e) => [e.allocator.is_none().then_some(e.order_id), None, None],
             Self::Bracket(b) => [Some(b.parent_id), Some(b.parent_id + 1), Some(b.parent_id + 2)],
@@ -87,6 +89,7 @@ impl Kept {
 struct Placed {
     order: api::Order,
     instrument: InstrumentId,
+    contract: api::Contract,
 }
 
 /// An order command not yet taken, and the lookup naming its contract, once
@@ -98,11 +101,15 @@ struct Pending {
     /// The watch an exercise opened on its option's in-the-money figure, by
     /// the engine's own number for it, while it waits for one.
     watch: Option<i64>,
+    loading: Option<super::attachments::Loading>,
+    wire_id: Option<u64>,
+    deadline: std::time::Instant,
 }
 
 impl Pending {
     fn new(cmd: ControlCommand) -> Self {
-        Self { cmd, lookup: None, watch: None }
+        Self { cmd, lookup: None, watch: None, loading: None, wire_id: None,
+            deadline: std::time::Instant::now() + super::ccp::CcpState::NAMING_TIMEOUT }
     }
 }
 
@@ -156,6 +163,9 @@ enum Step {
 /// The engine's side of the orders its callers place.
 #[derive(Default)]
 pub(crate) struct Intake {
+    attached: crate::client_core::attached_orders::AttachedState,
+    /// Generated members share the placement that admitted their parent.
+    generated: HashMap<u64, u64>,
     /// Commands not yet taken, in the order they were admitted.
     waiting: VecDeque<Pending>,
     /// Waiting commands per order number.
@@ -189,11 +199,6 @@ impl Intake {
         self.waiting.len()
     }
 
-    /// Commands kept unsent until a later order transmits them.
-    pub(crate) fn kept_count(&self) -> usize {
-        self.kept.len()
-    }
-
     /// Whether what is kept under this number would place the order.
     fn keeps_a_placement(&self, order_id: u64) -> bool {
         self.kept.iter().any(|k| k.order_id == order_id && k.places_the_order())
@@ -201,8 +206,12 @@ impl Intake {
 
     /// Keep an order back until one that transmits releases it.
     fn keep(&mut self, order_id: u64, parent_id: i64, command: OrderRequest) {
-        self.kept.retain(|k| k.order_id != order_id);
-        self.kept.push(Kept { order_id, parent_id, command });
+        if let Some(held) = self.kept.iter_mut().find(|k| k.order_id == order_id) {
+            held.parent_id = parent_id;
+            held.command = command;
+        } else {
+            self.kept.push(Kept { order_id, parent_id, command });
+        }
     }
 
     /// Take out what is kept under a number.
@@ -242,7 +251,7 @@ impl Intake {
         order: api::Order,
         instrument: InstrumentId,
     ) {
-        self.placed.insert(order_id, Placed { order, instrument });
+        self.placed.insert(order_id, Placed { order, instrument, contract: api::Contract::default() });
     }
 }
 
@@ -260,10 +269,39 @@ impl Intake {
 }
 
 impl HotLoop {
+    /// Count a placement once while any of the children it generated remain
+    /// unsent. A later explicit amendment is an admission of its own.
+    pub(super) fn built_order_commands_held(&self) -> usize {
+        let requests = || self.intake.kept.iter().map(|k| &k.command)
+            .chain(self.context.pending_orders.iter())
+            .chain(self.attached_quote_orders.iter().flat_map(|f| f.orders.iter()));
+        let parents: HashSet<_> = requests()
+            .filter_map(|request| self.intake.generated.get(&request.order_id()).copied()).collect();
+        let mut families = HashSet::new();
+        let mut count = 0;
+        for request in requests() {
+            let id = request.order_id();
+            if matches!(request, OrderRequest::SubmitEx { .. })
+                && (self.intake.generated.contains_key(&id) || parents.contains(&id))
+            {
+                families.insert(self.intake.generated.get(&id).copied().unwrap_or(id));
+            } else { count += 1; }
+        }
+        count + families.len()
+    }
+
+    pub(super) fn forget_waiting_attachment(&mut self, order_id: u64) {
+        self.intake.placed.remove(&order_id);
+        self.intake.attached.discard_local_order(order_id);
+        self.shared.orders.forget_local_api_order(order_id);
+    }
+
     /// Take an order command a caller admitted.
     pub(crate) fn take_order_command(&mut self, cmd: ControlCommand) {
         let cmd = match cmd {
             ControlCommand::CancelOrder { order_id, stated } => {
+                let order_id = self.shared.orders.wire_order_id(order_id as i64).unwrap_or(order_id);
+                if self.cancel_waiting_attached(Some(order_id), None) { return; }
                 let withdrawn = self.withdraw_waiting_placement(order_id)
                     || self.withdraw_kept_placement(order_id);
                 self.intake.recount_waiting();
@@ -274,6 +312,7 @@ impl HotLoop {
                 ControlCommand::CancelOrder { order_id, stated }
             }
             ControlCommand::GlobalCancel { stated } => {
+                self.cancel_waiting_attached(None, None);
                 self.withdraw_everything_held();
                 self.intake.recount_waiting();
                 ControlCommand::GlobalCancel { stated }
@@ -328,7 +367,7 @@ impl HotLoop {
 
     fn take_one(&mut self, pending: &mut Pending) -> Step {
         match &mut pending.cmd {
-            ControlCommand::Place(p) => self.take_placement(p, &mut pending.lookup),
+            ControlCommand::Place(p) => self.take_placement(p, &mut pending.lookup, &mut pending.loading, &mut pending.wire_id, pending.deadline),
             ControlCommand::CancelOrder { order_id, stated } => {
                 let (order_id, stated) = (*order_id, stated.clone());
                 self.take_cancel(order_id, &stated)
@@ -382,7 +421,7 @@ impl HotLoop {
 
     /// Name a contract before an order or exercise registers it. The lookup
     /// is kept with the instruction so a later lap can finish it.
-    fn name_order_contract(
+    pub(super) fn name_order_contract(
         &mut self,
         contract: &mut api::Contract,
         lookup: &mut Option<u32>,
@@ -456,44 +495,86 @@ impl HotLoop {
         Ok(true)
     }
 
-    fn take_placement(&mut self, p: &mut Placement, lookup: &mut Option<u32>) -> Step {
-        let order_id = p.order_id;
-        let op = if self.working(order_id) { OrderOp::Modify } else { OrderOp::Place };
-        if p.contract.con_id == 0 && !p.contract.symbol.is_empty() {
+    fn take_placement(&mut self, p: &mut Placement, lookup: &mut Option<u32>, loading: &mut Option<super::attachments::Loading>, wire_id: &mut Option<u64>, deadline: std::time::Instant) -> Step {
+        use crate::client_core::{attached_checks, attached_orders};
+        let api_id = p.order_id as i64;
+        p.order.order_id = api_id;
+        p.order.client_id = self.shared.orders.api_client_id();
+        let order_id = self.shared.orders.wire_order_id(api_id).unwrap_or(p.order_id);
+        self.intake.attached.learn(&self.shared, order_id, p.order.client_id);
+        let existing = self.intake.keeps_a_placement(order_id) || self.working(order_id);
+        let op = if existing { OrderOp::Modify } else { OrderOp::Place };
+        let order_id = if let Some(wire) = *wire_id { wire } else {
+        let reusable = std::cell::Cell::new(false);
+        if let Err(why) = attached_checks::check_ids(
+            api_id, &p.order, self.intake.attached.highest,
+            |id| self.shared.orders.wire_order_id(id).is_some_and(|wire| {
+                self.intake.keeps_a_placement(wire) || self.working(wire)
+            }),
+            |id| self.intake.attached.wire_order_id(id).is_some_and(|wire| {
+                let allowed = self.shared.orders.take_order_id_reuse(wire);
+                if id == api_id { reusable.set(allowed); }
+                allowed
+            }),
+        ) {
+            self.refuse_order(api_id, op, why);
+            return Step::Done;
+        }
+        if !existing && self.shared.orders.number_finished(order_id) && !reusable.get() {
+            self.refuse_order(api_id, op, Refusal::stated(DUPLICATE_ORDER_ID, format!("Duplicate order id: {api_id}")));
+            return Step::Done;
+        }
+        if order_id > crate::bridge::MAX_ORDER_ID {
+            self.refuse_order(api_id, op, Refusal::validation(format!("place_order: order_id {api_id} is past the highest this client can carry an order under ({})", crate::bridge::MAX_ORDER_ID)));
+            return Step::Done;
+        }
+        let order_id = match self.intake.attached.place_order_id(&self.shared, api_id, &p.allocator) {
+            Some(wire) => wire,
+            None => { self.refuse_order(api_id, op, Refusal::validation("No venue order identifier is available")); return Step::Done; }
+        };
+        *wire_id = Some(order_id);
+        order_id
+        };
+        let attaching = attached_checks::requested(&p.order);
+        let smart_combo = (attaching || self.intake.attached.family_keys.contains_key(&order_id)) && p.contract.exchange == "SMART"
+            && matches!(p.contract.sec_type.as_str(), "BAG" | "COMB" | "COMBO");
+        if p.contract.con_id == 0 && !p.contract.symbol.is_empty() && !smart_combo {
             match self.name_order_contract(&mut p.contract, lookup) {
                 Ok(true) => {}
                 Ok(false) => return Step::Waits,
                 Err(why) => {
-                    self.refuse_order(order_id as i64, op, why);
+                    self.refuse_order(api_id, op, why);
                     return Step::Done;
                 }
             }
         }
+        let loaded = if attaching && !existing {
+            if loading.is_none() {
+                let (logon_accounts, advisor) = self.shared.reference.login();
+                *loading = Some(super::attachments::Loading::new(self.shared.clone(), p.contract.clone(), crate::client_core::OrderSession {
+                    account: self.account_id.clone(), accounts: logon_accounts.clone(), logon_accounts,
+                    advisor, features: self.shared.reference.enabled_features(),
+                }, deadline));
+            }
+            match loading.as_mut().unwrap().poll(self) {
+                std::task::Poll::Pending => return Step::Waits,
+                std::task::Poll::Ready(Err(why)) => {
+                    self.refuse_order(api_id, op, why);
+                    return Step::Done;
+                }
+                std::task::Poll::Ready(Ok(loaded)) => {
+                    *loading = None;
+                    p.order.total_quantity = ClientCore::attached_creation_quantity(&self.shared, &p.contract, &p.order, true);
+                    Some(loaded)
+                }
+            }
+        } else { None };
         if let Some(why) = Self::beyond_the_wire(p.contract.con_id) {
-            self.refuse_order(order_id as i64, op, why);
+            self.refuse_order(api_id, op, why);
             return Step::Done;
         }
 
-        let replacing = op == OrderOp::Modify;
-        // A number the venue has already worked an order under names nothing
-        // now, so this placement is not a revision — and the venue refuses a
-        // repeated number only while it is still working one, so after a fill
-        // it takes it as a new order. A caller retrying what it believed had
-        // failed was given a second live order.
-        if !replacing && self.shared.orders.number_finished(order_id) {
-            self.refuse_order(
-                order_id as i64,
-                OrderOp::Place,
-                Refusal::stated(
-                    DUPLICATE_ORDER_ID,
-                    format!(
-                        "order {order_id} has already been worked and finished: place a new \
-                     order under a number of its own",
-                    ),
-                ),
-            );
-            return Step::Done;
-        }
+        let replacing = self.working(order_id) && !self.shared.orders.is_waiting_attached(order_id);
         // A replace names the order and not the contract, so the order stays
         // on the slot it was placed on and one naming another contract is
         // refused rather than recorded against it — settled before anything
@@ -510,18 +591,12 @@ impl HotLoop {
                 ),
             )
         };
-        let identity = api::contract_identity(
-            &p.contract.last_trade_date_or_contract_month,
-            p.contract.strike,
-            &p.contract.right,
-            &p.contract.multiplier,
-            &p.contract.currency,
-        );
+        let identity = crate::client_core::attached_combos::registration_identity(&p.contract);
         let instrument = match placed_on {
-            Some(placed_on) if p.contract.con_id != 0 => {
+            Some(placed_on) if p.contract.con_id != 0 && !matches!(p.contract.sec_type.as_str(), "BAG" | "COMB" | "COMBO") => {
                 if self.context.market.instrument_by_con_id(p.contract.con_id) != Some(placed_on) {
                     self.refuse_order(
-                        order_id as i64,
+                        api_id,
                         OrderOp::Modify,
                         wrong_contract(&p.contract.symbol),
                     );
@@ -537,14 +612,14 @@ impl HotLoop {
                     && !ClientCore::names_the_same_contract(&known.contract, &p.contract)
                 {
                     self.refuse_order(
-                        order_id as i64,
+                        api_id,
                         OrderOp::Modify,
                         wrong_contract(&p.contract.symbol),
                     );
                     return Step::Done;
                 }
                 self.register_contract(
-                    p.contract.con_id,
+                    if matches!(p.contract.sec_type.as_str(), "BAG" | "COMB" | "COMBO") { 0 } else { p.contract.con_id },
                     p.contract.symbol.clone(),
                     &p.contract.sec_type,
                     &p.contract.exchange,
@@ -554,10 +629,10 @@ impl HotLoop {
             }
         };
 
-        let command = if replacing {
+        let mut command = if replacing {
             if placed_on.is_some_and(|placed_on| placed_on != instrument) {
                 self.refuse_order(
-                    order_id as i64,
+                    api_id,
                     OrderOp::Modify,
                     wrong_contract(&p.contract.symbol),
                 );
@@ -574,7 +649,7 @@ impl HotLoop {
             if let Some(refusal) =
                 ClientCore::modify_refusal_of(resting, &p.order, Some(&self.shared))
             {
-                self.refuse_order(order_id as i64, OrderOp::Modify, refusal);
+                self.refuse_order(api_id, OrderOp::Modify, refusal);
                 return Step::Done;
             }
             // The statement rides on the replace, built with it, so a
@@ -591,7 +666,7 @@ impl HotLoop {
                 }
                 Ok(_) => None,
                 Err(why) => {
-                    self.refuse_order(order_id as i64, OrderOp::Modify, why);
+                    self.refuse_order(api_id, OrderOp::Modify, why);
                     return Step::Done;
                 }
             };
@@ -614,12 +689,55 @@ impl HotLoop {
                     return Step::Done;
                 }
                 Err(why) => {
-                    self.refuse_order(order_id as i64, OrderOp::Place, why);
+                    self.refuse_order(api_id, OrderOp::Place, why);
                     return Step::Done;
                 }
             }
         };
 
+        let mut prepared = match loaded {
+            Some((preset, regular)) => {
+                let parent_is_scale_child = self.intake.attached.wire_order_id(p.order.parent_id)
+                    .and_then(|id| self.intake.placed.get(&id))
+                    .is_some_and(|p| crate::client_core::attached_children::is_scale_order(&p.order));
+                match self.intake.attached.build(&self.shared, &preset, order_id, &p.contract, &p.order,
+                    instrument, &p.allocator, regular, parent_is_scale_child) {
+                    Ok(prepared) => prepared,
+                    Err(why) => { self.refuse_order(api_id, op, why); return Step::Done; }
+                }
+            }
+            None => None,
+        };
+        // A held member retains the family's terms and its original position.
+        if let Some(before) = self.intake.kept.iter().find(|k| k.order_id == order_id)
+            && let (Some(old), Some(attrs)) = (before.command.attrs(), command.attrs_mut())
+        {
+            attrs.attached.clone_from(&old.attached);
+            attrs.parent_id = old.parent_id;
+        }
+        if prepared.is_some() || self.intake.attached.family_keys.contains_key(&order_id) {
+            let definition = attached_orders::contract_definition(&self.shared, &p.contract);
+            let legs = attached_orders::confirmed_legs(&self.shared, &p.contract);
+            let combo = crate::client_core::attached_combos::attached_combo(&self.shared, &p.contract).and_then(|combo| combo.frame);
+            let decorate = |request: &mut OrderRequest, api_id: i64| {
+                if let Some(attrs) = request.attrs_mut() {
+                    if let Some(legs) = &legs { attrs.combo_legs.clone_from(legs); }
+                    let attached = attrs.attached_mut();
+                    attached.contract_id = definition.as_ref().map(|d| i64::from(d.con_id));
+                    attached.combo.clone_from(&combo);
+                    attached.api_identity = Some((api_id, p.order.client_id));
+                }
+            };
+            decorate(&mut command, api_id);
+            if let (Some(prepared), Some(attrs)) = (&prepared, command.attrs_mut()) {
+                attrs.attached_mut().family_key.clone_from(&prepared.parent_family_key);
+            }
+        }
+        if let Some(attrs) = command.attrs_mut() {
+            attrs.parent_id = self.intake.attached.wire_order_id(p.order.parent_id).unwrap_or(p.order.parent_id as u64);
+            if api_id != order_id as i64 { attrs.attached_mut().api_identity = Some((api_id, p.order.client_id)); }
+        }
+        self.remember_attachment(order_id, api_id, p.order.client_id, &command, p.order.what_if);
         // The caller's side records the order before anything the venue says
         // about it: the record stands ahead of the order in the session's
         // order, and the venue's answer to it after.
@@ -644,31 +762,48 @@ impl HotLoop {
                 order.oca_group = before.order.oca_group.clone();
                 order.oca_type = before.order.oca_type;
             }
-            self.intake.placed.insert(order_id, Placed { order, instrument });
+            self.intake.placed.insert(order_id, Placed { order, instrument, contract: p.contract.clone() });
         }
 
-        // An order that does not transmit is built and kept, not sent and not
-        // refused. One that does sends whatever of its family was kept, in the
-        // order it was placed, and then itself. A replace states new terms for
-        // an order the venue is already working, so nothing is waiting on it.
-        if p.order.transmit {
-            // The transmitting order leaves the hold whatever it replaces.
-            self.intake.release(order_id);
-            let family = if replacing {
-                Vec::new()
-            } else {
-                self.intake.family_of(order_id, p.order.parent_id)
-            };
-            for member in family {
-                if !member.places_the_order() && !self.working(member.order_id) {
-                    continue;
-                }
-                self.context.pending_orders.push(member.command);
+        if self.shared.orders.is_waiting_attached(order_id) {
+            if let OrderRequest::SubmitEx { kind, attrs, .. } = command {
+                let change = OrderRequest::Modify {
+                    order_id, price: ClientCore::replace_price(&p.order),
+                    qty: crate::types::qty_from_f64(p.order.total_quantity), outside_rth: p.order.outside_rth,
+                    ord_type: p.order.ord_type_byte(), tif: p.order.tif_byte(), stop_price: ClientCore::replace_trigger(&p.order),
+                    spec: Some(Box::new(crate::types::OrderSpec { kind, attrs })),
+                };
+                self.shared.orders.amend_waiting_attached(&change, &[]);
             }
-            self.context.pending_orders.push(command);
-        } else {
-            self.intake.keep(order_id, p.order.parent_id, command);
+            return Step::Done;
         }
+        self.intake.generated.remove(&order_id);
+        // Keep every member before releasing the family, so a parent restated
+        // after its children still occupies the first position.
+        let parent_id = self.intake.attached.wire_order_id(p.order.parent_id).unwrap_or(p.order.parent_id as u64) as i64;
+        self.intake.keep(order_id, parent_id, command);
+        if let Some(prepared) = prepared.take() {
+            for child in prepared.children {
+                let ControlCommand::Order(mut request) = child.command else { unreachable!() };
+                if self.intake.attached.sent_api_ids.contains(&child.order.order_id) { continue; }
+                if let Some(attrs) = request.attrs_mut() {
+                    if let Some(legs) = attached_orders::confirmed_legs(&self.shared, &p.contract) { attrs.combo_legs = legs; }
+                    let attached = attrs.attached_mut();
+                    attached.contract_id = attached_orders::contract_definition(&self.shared, &p.contract).map(|d| i64::from(d.con_id));
+                    attached.combo = crate::client_core::attached_combos::attached_combo(&self.shared, &p.contract).and_then(|combo| combo.frame);
+                }
+                self.intake.generated.insert(child.wire_id, order_id);
+                self.remember_attachment(child.wire_id, child.order.order_id, p.order.client_id, &request, p.order.what_if);
+                self.shared.orders.number_placed_again(child.wire_id);
+                self.shared.push_call_record(Record::OrderBook(OrderBook::Taken(Box::new(TakenOrder {
+                    order_id: child.wire_id, contract: p.contract.clone(), order: child.order.clone(), instrument, restated: false,
+                }))));
+                self.intake.placed.insert(child.wire_id, Placed { order: child.order, instrument, contract: p.contract.clone() });
+                self.intake.keep(child.wire_id, order_id as i64, request);
+            }
+        }
+        if !p.order.what_if { self.intake.attached.highest = self.intake.attached.highest.max(api_id); }
+        if p.order.transmit { self.transmit_order_family(order_id, parent_id, replacing); }
         // What a gateway says about an order it places anyway, on the order's
         // number, as it says it: once the order has gone or is kept.
         for warning in &p.warnings {
@@ -682,11 +817,79 @@ impl HotLoop {
         Step::Done
     }
 
+    fn remember_attachment(&mut self, wire: u64, api: i64, client_id: i32, request: &OrderRequest, preview: bool) {
+        self.intake.attached.place(wire, api);
+        let attached = request.attrs().and_then(|attrs| attrs.attached.as_ref());
+        let key = attached.map(|attrs| attrs.family_key.clone()).filter(|key| !key.is_empty());
+        if let Some(key) = &key { self.intake.attached.family_keys.insert(wire, key.clone()); }
+        self.shared.orders.note_attached_order_metadata(wire, crate::bridge::AttachedOrderMetadata {
+            family_key: key, api_order_id: Some(api), api_client_id: Some(client_id),
+            ..Default::default()
+        });
+        if !preview {
+            self.intake.attached.highest = self.intake.attached.highest.max(api);
+        }
+    }
+
+    fn transmit_order_family(&mut self, order_id: u64, parent_id: i64, replacing: bool) {
+        let own_at = self.intake.kept.iter().position(|k| k.order_id == order_id).unwrap();
+        let before: HashSet<_> = self.intake.kept[..own_at].iter().map(|k| k.order_id).collect();
+        let own = self.intake.release(order_id).unwrap();
+        let mut family = if replacing { Vec::new() } else { self.intake.family_of(order_id, parent_id) };
+        let at = family.iter().position(|k| !before.contains(&k.order_id)).unwrap_or(family.len());
+        family.insert(at, own);
+        let root = family[0].order_id;
+        let attached = family.iter().any(|k| self.intake.attached.family_keys.contains_key(&k.order_id));
+        let mut ids = HashSet::new();
+        let mut dropped = Vec::new();
+        family.retain(|member| {
+            let api = self.intake.attached.api_order_id(member.order_id);
+            let keep = !member.places_the_order() || (ids.insert(api)
+                && (member.order_id == order_id || !self.intake.attached.sent_api_ids.contains(&api)));
+            if !keep { dropped.push(member.order_id); }
+            keep
+        });
+        for wire in dropped {
+            self.forget_waiting_attachment(wire);
+            self.shared.push_call_record(Record::OrderBook(OrderBook::Forgotten(wire)));
+        }
+        for member in &family {
+            if member.places_the_order() {
+                self.intake.attached.sent_api_ids.insert(self.intake.attached.api_order_id(member.order_id));
+            }
+        }
+        if attached {
+            let placed = &self.intake.placed[&root];
+            let (contract, parent, instrument) = (placed.contract.clone(), placed.order.clone(), placed.instrument);
+            let mut orders: Vec<_> = family.into_iter().map(|k| k.command).collect();
+            if let Some(factor) = crate::client_core::attached_combos::attached_combo(&self.shared, &contract)
+                .and_then(|c| c.legs).map(|(_, factor)| factor).filter(|factor| *factor > 1.0)
+            {
+                for request in &mut orders {
+                    if (request.order_id() == root || request.order_id() == order_id)
+                        && let Some(attrs) = request.attrs_mut()
+                    { attrs.attached_mut().ratio_factor = Some(factor); }
+                }
+            }
+            self.shared.orders.stage_waiting_attached(&orders);
+            self.accept_attached_orders(orders, contract, parent, instrument);
+        } else {
+            for member in family { self.queue_order_during_quote_wait(member.command); }
+        }
+    }
+
     fn take_cancel(&mut self, order_id: u64, stated: &api::OrderCancel) -> Step {
+        if self.cancel_waiting_attached(Some(order_id), None) { return Step::Done; }
+        if self.withdraw_kept_placement(order_id) {
+            self.say_the_time_did_not_travel(order_id, stated);
+            return Step::Done;
+        }
+        let api_id = self.shared.orders.attached_order_metadata(order_id)
+            .and_then(|held| held.api_order_id).unwrap_or(order_id as i64);
         // An order this session saw finish is not one it has never heard of:
         // the venue's own answer for it is that it is no longer cancellable.
         if self.shared.orders.number_finished(order_id) {
-            self.refuse_order(order_id as i64, OrderOp::Cancel, Refusal::stated(
+            self.refuse_order(api_id, OrderOp::Cancel, Refusal::stated(
                 NOT_CANCELLABLE,
                 format!(
                     "Cancel attempted when order is not in a cancellable state. Order permId = {}",
@@ -703,9 +906,9 @@ impl HotLoop {
         let Some(named) = self.shared.orders.replay_settled() else { return Step::Waits };
         if named && !self.working(order_id) {
             self.refuse_order(
-                order_id as i64,
+                api_id,
                 OrderOp::Cancel,
-                Refusal::stated(NO_SUCH_ORDER, format!("no order is working under {order_id}")),
+                Refusal::stated(NO_SUCH_ORDER, format!("no order is working under {api_id}")),
             );
             return Step::Done;
         }
@@ -1041,7 +1244,7 @@ impl HotLoop {
                     restated: false,
                 },
             ))));
-            self.intake.placed.insert(order_id, Placed { order, instrument });
+            self.intake.placed.insert(order_id, Placed { order, instrument, contract: c.clone() });
         }
         let scaled = crate::types::price_from_f64;
         self.context.pending_orders.push(OrderRequest::SubmitBracket {
@@ -1111,6 +1314,8 @@ impl HotLoop {
         let mut parents = vec![order_id];
         while let Some(parent) = parents.pop() {
             self.intake.placed.remove(&parent);
+            self.intake.attached.discard_local_order(parent);
+            self.shared.orders.forget_local_api_order(parent);
             self.shared.push_call_record(Record::OrderBook(OrderBook::Forgotten(parent)));
             let children: Vec<u64> = self
                 .intake
@@ -1134,6 +1339,8 @@ impl HotLoop {
         for kept in std::mem::take(&mut self.intake.kept) {
             let entry = if kept.places_the_order() {
                 self.intake.placed.remove(&kept.order_id);
+                self.intake.attached.discard_local_order(kept.order_id);
+                self.shared.orders.forget_local_api_order(kept.order_id);
                 OrderBook::Forgotten(kept.order_id)
             } else {
                 OrderBook::RevisionForgotten(kept.order_id)

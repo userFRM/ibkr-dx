@@ -235,6 +235,10 @@ impl EClient {
     #[doc(hidden)]
     fn _test_set_client_id(&self, client_id: i32) {
         self.client_id.store(client_id, Ordering::Release);
+        self.core.set_api_client_id(client_id);
+        if let Some(shared) = self.shared.lock().unwrap().as_ref() {
+            shared.orders.set_api_client_id(client_id);
+        }
     }
 
     /// Create a fake "connected" EClient backed by a SharedState + channel.
@@ -255,6 +259,7 @@ impl EClient {
             return Err(PyRuntimeError::new_err("Already connected"));
         }
         let shared = Arc::new(SharedState::new());
+        shared.orders.set_api_client_id(self.client_id.load(Ordering::Acquire));
         shared.set_session_account(&account_id);
         // No venue behind a test session, so the replay of what the account
         // already has on is over before it starts. Left unsaid, every request

@@ -22,7 +22,7 @@ fn only_a_stock_leaves_the_contract_unnamed() {
             .register_contract(1, "X", sec_type, "SMART", key);
         context.set_symbol(instrument, "X".to_string());
         let mut fields: Vec<(u32, String)> = Vec::new();
-        push_contract_identity(&mut fields, &context, instrument);
+        push_contract_identity(&mut fields, &context, instrument, None);
         let named = fields.iter().any(|(t, _)| *t == 48);
         assert_eq!(named, wants_id, "{sec_type} names the contract: {fields:?}");
         assert!(
@@ -3205,8 +3205,7 @@ fn a_delayed_activation_is_written_the_way_it_is_read() {
     let mut fields: Vec<(u32, String)> = Vec::new();
     push_order_attrs(
         &mut fields, &attrs, &crate::types::OrderKind::Limit { price: 100_0000_0000 },
-        Side::Buy, String::new(),
-    );
+        Side::Buy, String::new(), None);
     let stated = fields.iter().find(|(t, _)| *t == 168).map(|(_, v)| v.as_str());
     assert_eq!(stated, Some("20260311-09:30:00"), "sent on 168: {fields:?}");
 }
@@ -3242,8 +3241,7 @@ fn what_this_client_writes_about_an_order_it_reads_back() {
     let mut fields: Vec<(u32, String)> = Vec::new();
     super::push_order_attrs(
         &mut fields, &attrs, &crate::types::OrderKind::Limit { price: 100_0000_0000 },
-        Side::Buy, String::new(),
-    );
+        Side::Buy, String::new(), None);
     let on_the_wire: std::collections::HashMap<u32, String> = fields.into_iter().collect();
 
     let mut read = crate::types::model::Order::default();
@@ -3278,8 +3276,7 @@ fn a_block_order_states_the_character_the_protocol_defines() {
             &attrs,
             &crate::types::OrderKind::Market,
             Side::Buy,
-            String::new(),
-        );
+            String::new(), None);
         fields
     };
     let on = stated(true);
@@ -3313,8 +3310,7 @@ fn a_manual_order_states_the_character_the_protocol_defines() {
             &attrs,
             &crate::types::OrderKind::Market,
             Side::Buy,
-            String::new(),
-        );
+            String::new(), None);
         fields.iter().find(|(t, _)| *t == 1028).map(|(_, v)| v.clone())
     };
     assert_eq!(stated(1).as_deref(), Some("Y"), "entered by hand");
@@ -4016,8 +4012,7 @@ fn an_advisor_allocation_rides_the_order_and_its_replacement() {
     // sent as an empty one.
     let mut fields: Vec<(u32, String)> = Vec::new();
     push_order_attrs(
-        &mut fields, &allocation(""), &K::Limit { price: 100 * P }, Side::Buy, String::new(),
-    );
+        &mut fields, &allocation(""), &K::Limit { price: 100 * P }, Side::Buy, String::new(), None);
     assert!(
         !fields.iter().any(|(t, _)| *t == 6164),
         "a blank share is left off, not written blank: {fields:?}",

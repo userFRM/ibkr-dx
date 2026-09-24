@@ -3,6 +3,7 @@
 //! Key tag mappings: STK→CS (SecurityType), SMART→BEST (Exchange).
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 
 use crate::protocol::fix::{self, TAG_MSG_TYPE};
 
@@ -56,6 +57,10 @@ pub const TAG_IB_SOURCE: u32 = 6088;
 pub const TAG_IB_PRIMARY_EXCHANGE: u32 = 6470;
 /// FIX tag 6431: the order types.
 pub const TAG_IB_ORDER_TYPES: u32 = 6431;
+/// FIX tag 6430: the key selecting an order-type table.
+pub const TAG_IB_ORDER_TYPE_KEY: u32 = 6430;
+/// FIX tag 6523: the contract's market classification.
+pub const TAG_IB_MARKET_CLASSIFICATION: u32 = 6523;
 /// FIX tag 6031: the market rule id.
 pub const TAG_IB_MARKET_RULE_ID: u32 = 6031;
 /// What the venue suggests this contract is dealt in, stated for the contract
@@ -386,10 +391,18 @@ pub struct ContractDefinition {
     pub min_tick: f64,
     /// How many units one contract is worth.
     pub multiplier: f64,
+    /// Whether the contract definition explicitly supplied its multiplier.
+    pub multiplier_stated: bool,
     /// Every venue it can be routed to.
     pub valid_exchanges: Vec<String>,
     /// Which order types the venue takes for it.
     pub order_types: Vec<String>,
+    /// The key selecting this contract's order-type table.
+    pub order_type_key: String,
+    /// Order-type names and their stated simulation codes.
+    pub order_type_rules: Vec<(String, i32)>,
+    /// The market classification supplied in the contract-details table.
+    pub market_classification: String,
     /// Which price ladder it trades on.
     pub market_rule_id: Option<u32>,
     /// The rule ids as the venue stated them, in the order its venues are
@@ -587,8 +600,12 @@ impl Default for ContractDefinition {
             // figure the venue gave.
             min_tick: 0.0,
             multiplier: 1.0,
+            multiplier_stated: false,
             valid_exchanges: Vec::new(),
             order_types: Vec::new(),
+            order_type_key: String::new(),
+            order_type_rules: Vec::new(),
+            market_classification: String::new(),
             market_rule_id: None,
             market_rule_ids: String::new(),
             last_trade_date: String::new(),
@@ -849,6 +866,12 @@ pub fn parse_secdef_responses(
             return parse_secdef_response(data, island_for_nasdaq).into_iter().collect();
         }
     }
+    let classifications = parse_market_classifications(data);
+    let order_type_tables = parse_order_type_tables(data);
+    for definition in &mut out {
+        apply_order_type_table(definition, &order_type_tables);
+        definition.market_classification = classifications.get(&definition.con_id).cloned().unwrap_or_default();
+    }
     out
 }
 
@@ -925,17 +948,22 @@ static READ_FROM_A_DEFINITION: std::sync::LazyLock<std::collections::HashSet<u32
     // the gap this is here to measure, and put fields already parsed into
     // named slots into the list of what this client could not name.
     //
-    // Read out of the three that read a definition, and not out of the file.
+    // Read from the functions that consume a definition, not the whole file.
     // Its neighbours walk their own replies the same way, and a matching
     // symbol's or a schedule's tag counted here is a definition's field
     // reported as read and then dropped from the very list that exists to
     // catch it.
     let walked = format!(
-        "{}{}{}",
+        "{}{}{}{}{}",
         what_a_function_reads(source, "pub fn parse_secdef_response("),
         what_a_function_reads(source, "pub fn parse_market_rules("),
         what_a_function_reads(source, "fn ineligibility_descriptions("),
+        what_a_function_reads(source, "fn parse_order_type_tables("),
+        what_a_function_reads(source, "fn parse_market_classifications("),
     );
+    for cap in walked.split("*tag == ").skip(1) {
+        note(&cap.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<String>());
+    }
     for cap in walked.split("b\"").skip(1) {
         note(&cap.chars().take_while(|c| *c != '=').collect::<String>());
     }
@@ -1006,7 +1034,10 @@ pub fn parse_secdef_response(
 
     let mut def = ContractDefinition::default();
 
-    if let Some(v) = tags.get(&TAG_IB_CON_ID) {
+    if let Some((_, v)) = tag_sequence(data).into_iter()
+        .take_while(|(tag, _)| !matches!(*tag, 6019 | 6344 | 6432 | 6622 | 6766))
+        .filter(|(tag, _)| *tag == TAG_IB_CON_ID).last()
+    {
         // An id that does not read is not the id zero: zero states there is
         // no definition on this exchange, and a definition that stated one
         // and sent it unreadably would be answered to a caller as a contract
@@ -1122,6 +1153,7 @@ pub fn parse_secdef_response(
             return None;
         };
         def.multiplier = m;
+        def.multiplier_stated = true;
     }
     if let Some(v) = tags.get(&TAG_IB_VALID_EXCHANGES) {
         def.valid_exchanges = v.split(',').map(|s| exchange_from_fix(s).to_string()).collect();
@@ -1129,7 +1161,18 @@ pub fn parse_secdef_response(
     if let Some(v) = tags.get(&TAG_IB_ORDER_TYPES) {
         def.order_types = v.split(',').map(|s| s.to_string()).collect();
     }
-    if let Some(v) = tags.get(&TAG_IB_MARKET_RULE_ID) {
+    if let Some((_, key)) = tag_sequence(data).into_iter()
+        .take_while(|(tag, _)| !matches!(*tag, 6019 | 6344 | 6432 | 6622 | 6766))
+        .filter(|(tag, _)| *tag == TAG_IB_ORDER_TYPE_KEY).last()
+    {
+        def.order_type_key = key;
+    }
+    apply_order_type_table(&mut def, &parse_order_type_tables(data));
+    def.market_classification = parse_market_classifications(data).remove(&def.con_id).unwrap_or_default();
+    if let Some((_, v)) = tag_sequence(data).into_iter()
+        .take_while(|(tag, _)| *tag != TAG_MARKET_RULE_START)
+        .filter(|(tag, _)| *tag == TAG_IB_MARKET_RULE_ID).last()
+    {
         // Kept as stated, and also as a number where it is one: a contract on
         // a single venue states a single id, and the rule lookup takes a
         // number.
@@ -1455,6 +1498,10 @@ pub struct PriceIncrement {
 pub struct MarketRule {
     /// Which ladder this is.
     pub rule_id: i32,
+    /// Whether zero and negative prices are permitted by this rule (6020).
+    pub negative_prices: bool,
+    /// The price magnifier in this rule (6021).
+    pub price_magnifier: i32,
     /// Each step of it.
     pub price_increments: Vec<PriceIncrement>,
     /// The size a contract may be dealt in, per size band.
@@ -1463,6 +1510,56 @@ pub struct MarketRule {
     /// count that opens a second table. Reading stopped at that count, so this
     /// was empty for every contract.
     pub size_increments: Vec<PriceIncrement>,
+}
+
+fn parse_market_classifications(data: &[u8]) -> HashMap<u32, String> {
+    let mut classifications = HashMap::new();
+    let mut in_details = false;
+    let mut con_id = None;
+    for (tag, value) in tag_sequence(data) {
+        match tag {
+            6344 => in_details = true,
+            55 | 6019 | 6432 | 6622 | 6766 => in_details = false,
+            6008 if in_details => con_id = value.parse::<u32>().ok(),
+            TAG_IB_MARKET_CLASSIFICATION if in_details => {
+                if let Some(con_id) = con_id { classifications.insert(con_id, value); }
+            }
+            _ => {},
+        }
+    }
+    classifications
+}
+
+fn parse_order_type_tables(data: &[u8]) -> HashMap<String, Vec<(String, i32)>> {
+    let mut tables = HashMap::new();
+    let mut in_table = false;
+    let mut key = None;
+    for (tag, value) in tag_sequence(data) {
+        match tag {
+            6432 => in_table = true,
+            55 | 6019 | 6344 | 6622 | 6766 => in_table = false,
+            TAG_IB_ORDER_TYPE_KEY if in_table => key = Some(value),
+            TAG_IB_ORDER_TYPES if in_table => {
+                if let Some(key) = key.as_ref() {
+                    let entries = value.split(',').filter(|token| !token.is_empty()).map(|token| {
+                        let mut parts = token.split('/').filter(|part| !part.is_empty());
+                        let name = parts.next().unwrap_or_default().to_string();
+                        let simulation = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+                        (name, simulation)
+                    }).collect();
+                    tables.insert(key.clone(), entries);
+                }
+            }
+            _ => {},
+        }
+    }
+    tables
+}
+
+fn apply_order_type_table(definition: &mut ContractDefinition, tables: &HashMap<String, Vec<(String, i32)>>) {
+    if definition.order_type_key.is_empty() && tables.is_empty() { return; }
+    definition.order_type_rules = tables.get(&definition.order_type_key).cloned().unwrap_or_default();
+    definition.order_types = definition.order_type_rules.iter().map(|(name, _)| name.clone()).collect();
 }
 
 /// Parse market rules from a raw message.
@@ -1490,25 +1587,44 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
     let mut current: Option<MarketRule> = None;
     let mut pending_low_edge: Option<f64> = None;
     let mut filling = Table::Price;
+    let mut in_rules = false;
 
     for (tag, val) in &tags {
         match *tag {
-            TAG_MARKET_RULE_START if val == "1" => {
-                // Flush previous rule if any
-                if let Some(rule) = current.take() {
-                    rules.push(rule);
-                }
-                current = Some(MarketRule {
-                    rule_id: 0,
+            TAG_MARKET_RULE_START => {
+                in_rules = true;
+                if let Some(rule) = current.take() { rules.push(rule); }
+            }
+            TAG_MARKET_RULE_ID if in_rules => {
+                let mut next = current.clone().unwrap_or_else(|| MarketRule {
+                    rule_id: -1,
+                    negative_prices: false,
+                    price_magnifier: 0,
                     price_increments: Vec::new(),
                     size_increments: Vec::new(),
                 });
+                if let Some(rule) = current.take() {
+                    rules.push(rule);
+                }
+                next.rule_id = val.parse().unwrap_or(-1);
+                current = Some(next);
                 pending_low_edge = None;
                 filling = Table::Price;
             }
-            TAG_MARKET_RULE_ID => {
+            55 | 6344 | 6432 | 6622 | 6766 => {
+                in_rules = false;
+                if let Some(rule) = current.take() {
+                    rules.push(rule);
+                }
+            }
+            6020 => {
                 if let Some(ref mut rule) = current {
-                    rule.rule_id = val.parse().unwrap_or(0);
+                    rule.negative_prices = val == "1";
+                }
+            }
+            6021 => {
+                if let Some(ref mut rule) = current {
+                    rule.price_magnifier = val.parse().unwrap_or(0);
                 }
             }
             TAG_LOW_EDGE => {
@@ -1530,12 +1646,14 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
             TAG_PRICE_INCREMENT_COUNT => {
                 filling = Table::Price;
                 pending_low_edge = None;
+                if let Some(rule) = &mut current { rule.price_increments.clear(); }
             }
             // Opens the size table rather than ending the rule: the sizes a
             // contract may be dealt in are stated after this count.
             TAG_SIZE_INCREMENT_COUNT => {
                 filling = Table::Size;
                 pending_low_edge = None;
+                if let Some(rule) = &mut current { rule.size_increments.clear(); }
             }
             _ => {}
         }

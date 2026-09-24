@@ -6504,3 +6504,6 @@ mod delayed_request_tests {
         assert!(super::drain_inner(&mut peer).is_empty());
     }
 }
+
+#[path = "attached_pricing_tests.rs"]
+mod attached_pricing_tests;

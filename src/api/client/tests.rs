@@ -794,39 +794,6 @@ fn the_allocator_stops_at_the_last_id_a_report_can_name() {
     );
 }
 
-/// Withdrawing a held order frees the id it was placed under.
-///
-/// The venue was never given the order, so the id is not spent there — but
-/// the client's own record of it stood, and placing under the id again was
-/// read as a modify of an order nothing had ever submitted: answered Ok,
-/// and nothing went out.
-#[test]
-fn withdrawing_a_held_order_frees_its_id_to_place_again() {
-    let (client, rx, _shared) = test_client();
-    let leg = |id: i64, parent: i64, transmit: bool| Order {
-        order_id: id,
-        parent_id: parent,
-        transmit,
-        action: if parent == 0 { "BUY".into() } else { "SELL".into() },
-        total_quantity: 100.0,
-        order_type: "LMT".into(),
-        lmt_price: 100.0,
-        tif: "DAY".into(),
-        ..Default::default()
-    };
-
-    client.try_place_order(82, &spy(), &leg(82, 0, false)).expect("held");
-    crate::api::client::tests::reported(&client, || client.cancel_order(82, "")).expect("withdrawn");
-
-    client.try_place_order(82, &spy(), &leg(82, 0, true)).expect("placed again under the same id");
-    match rx.try_recv().expect("the order goes out") {
-        ControlCommand::Order(OrderRequest::SubmitEx { order_id, .. }) => {
-            assert_eq!(order_id, 82, "the id places a new order");
-        }
-        other => panic!("expected a fresh submit, got {other:?}"),
-    }
-}
-
 /// A parent placed again to transmit sends the children held under it.
 #[test]
 fn transmitting_a_parent_releases_what_hangs_from_it() {
@@ -1134,8 +1101,8 @@ fn an_order_that_cannot_be_placed_as_asked_is_refused() {
         // One of the fields this client does not carry. Stated by a caller,
         // the order would otherwise be placed with the instruction missing
         // and nothing to say it had been.
-        ("an attached order this client cannot build",
-         |o| o.pt_order_id = 5, "pt_order_id"),
+        ("an attachment without its order type",
+         |o| o.pt_order_id = 5, "Invalid value for Profit Taker order-id or order-type"),
         ("a combination routing parameter this client does not check",
          |o| o.smart_combo_routing_params.push(crate::types::model::TagValue {
              tag: "NonGuaranteed".into(), value: "1".into(),
@@ -3718,26 +3685,16 @@ fn replacing_an_order_keeps_what_it_has_already_filled() {
     assert_eq!(tracked.order.lmt_price, 101.0);
 }
 
-/// An order number is the caller's, or it is a refusal.
-///
-/// An id at or below zero names no order the venue will hold. One handed out in
-/// its place put the order on the market under a number the caller had never
-/// seen: every status about it arrived under an id they were not watching, and
-/// their own cancel named nothing. The other surface has always refused it.
+/// Unassigned numbers are refused by the engine under the number stated.
 #[test]
 fn an_order_numbered_at_or_below_zero_is_refused_not_renumbered() {
-    let (client, rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default()
-    };
-    for stated in [0i64, -5] {
-        let why = client
-            .try_place_order(stated, &spy(), &order)
-            .expect_err("a number at or below zero names no order");
-        assert!(why.message.contains(&format!("order_id {stated}")), "{why}");
+    let (client, rx, _) = test_client();
+    let order = Order::market("BUY", 100.0);
+    for (stated, code) in [(0i64, 10149), (-5, 103)] {
+        let why = place(&client, &rx, stated, &spy(), &order).expect_err("not assigned");
+        assert_eq!(why.code, code, "{why}");
     }
-    assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]
@@ -3760,11 +3717,12 @@ fn cancel_order_sends_cancel_command() {
 /// zero, it fired as an error on an order that does not exist.
 #[test]
 fn a_cancel_time_note_names_the_order_it_belongs_to() {
-    let (client, _rx, shared) = test_client();
-    assert!(
-        crate::api::client::tests::reported(&client, || client.cancel_order(0, "20260904 12:00:00")).is_err(),
-        "zero is not an order number",
-    );
+    let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
+    client.cancel_order(0, "20260904 12:00:00");
+    rx.pump();
+    let refused = shared.drain_refused();
+    assert!(matches!(refused.as_slice(), [(0, 135, _)]), "{refused:?}");
     assert!(
         shared.orders.drain_order_inactive().is_empty(),
         "nothing may be recorded against an order that does not exist",
@@ -3971,42 +3929,6 @@ fn req_global_cancel_no_instruments_no_commands() {
     shared.orders.set_replay_done();
     crate::api::client::tests::reported(&client, || client.req_global_cancel("")).unwrap();
     assert!(rx.try_recv().is_err());
-}
-
-/// A withdrawal of everything covers what was never sent as well as what is
-/// working.
-///
-/// The held orders are forgotten, record and all: left tracked, their ids
-/// could never place again — a placement under one was read as a modify of
-/// an order nothing had ever submitted.
-#[test]
-fn a_global_cancel_frees_the_ids_of_orders_never_sent() {
-    let (client, rx, shared) = test_client();
-    let held = Order {
-        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
-        lmt_price: 100.0, tif: "DAY".into(), transmit: false, ..Default::default()
-    };
-    client.try_place_order(84, &spy(), &held).expect("held");
-    assert!(rx.try_recv().is_err(), "nothing was sent for it");
-
-    shared.orders.set_replay_done();
-    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).expect("everything withdrawn");
-    let sent: Vec<ControlCommand> = rx.try_iter().collect();
-    assert!(
-        sent.iter().all(|c| matches!(c, ControlCommand::Order(OrderRequest::GlobalCancel { .. }))),
-        "only the withdrawals of what is working go: {sent:?}",
-    );
-    settled(&client, &rx);
-    assert!(!client.core.is_order_tracked(84), "the record goes with the command");
-
-    let order = Order { transmit: true, ..held };
-    client.try_place_order(84, &spy(), &order).expect("placed again under the same id");
-    match rx.try_recv().expect("the order goes out") {
-        ControlCommand::Order(OrderRequest::SubmitEx { order_id, .. }) => {
-            assert_eq!(order_id, 84, "the id places a new order");
-        }
-        other => panic!("expected a fresh submit, got {other:?}"),
-    }
 }
 
 /// A withdrawal of everything forgets what was never sent, and only that.
@@ -10165,9 +10087,11 @@ fn a_fill_whose_report_names_no_client_is_filed_under_the_placing_client() {
         }
     }
     let (client, rx, shared) = test_client();
+    client.core.set_api_client_id(5);
+    shared.orders.set_api_client_id(5);
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 100.0, tif: "DAY".into(), client_id: 5, ..Default::default()
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
     client.try_place_order(86, &spy(), &order).expect("placed");
     rx.try_recv().expect("the order goes out");
@@ -10966,9 +10890,11 @@ fn asking_for_the_api_orders_alone_leaves_out_the_ones_typed_in() {
 #[test]
 fn a_completed_order_names_the_client_that_placed_it() {
     let (client, rx, shared) = test_client();
+    client.core.set_api_client_id(5);
+    shared.orders.set_api_client_id(5);
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 100.0, tif: "DAY".into(), client_id: 5, ..Default::default()
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
     client.try_place_order(86, &spy(), &order).expect("placed");
     rx.try_recv().expect("the order goes out");
@@ -12331,4 +12257,449 @@ fn feed_changes_reach_watchers_in_record_order() {
     client.process_msgs(&mut heard);
     assert!(!client.core.feed_is_delayed(0), "an earlier occupancy cannot change this feed");
     assert!(!heard.events.iter().any(|e| e.contains("stale")));
+}
+
+/// Place through the engine, then read the refusal and tracking records it produced.
+fn place(client: &EClient, engine: &Engine, id: i64, contract: &Contract, order: &Order) -> Result<(), crate::error_codes::Refusal> {
+    client.try_place_order(id, contract, order)?;
+    engine.pump();
+    let refused = client.shared.drain_refused().pop();
+    client.process_msgs(&mut RecordingWrapper::default());
+    match refused {
+        Some((_, code, message)) => Err(crate::error_codes::Refusal::stated(code as i32, message)),
+        None => Ok(()),
+    }
+}
+
+#[test]
+fn withdrawing_a_held_order_keeps_its_id_in_the_sequence() {
+    let (client, rx, _shared) = test_client();
+    let leg = |id: i64, parent: i64, transmit: bool| Order {
+        order_id: id,
+        parent_id: parent,
+        transmit,
+        action: if parent == 0 { "BUY".into() } else { "SELL".into() },
+        total_quantity: 100.0,
+        order_type: "LMT".into(),
+        lmt_price: 100.0,
+        tif: "DAY".into(),
+        ..Default::default()
+    };
+
+    place(&client, &rx, 82, &spy(), &leg(82, 0, false)).expect("held");
+    crate::api::client::tests::reported(&client, || client.cancel_order(82, "")).expect("withdrawn");
+
+    assert_eq!(place(&client, &rx, 82, &spy(), &leg(82, 0, true)).unwrap_err().code, 103);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn a_held_leg_changed_before_it_goes_keeps_its_place_in_the_family() {
+    let (client, rx, _shared) = test_client();
+    let held = |parent: i64, transmit: bool, price: f64| Order {
+        parent_id: parent,
+        transmit,
+        action: if parent == 0 { "BUY".into() } else { "SELL".into() },
+        total_quantity: 100.0,
+        order_type: "LMT".into(),
+        lmt_price: price,
+        tif: "DAY".into(),
+        ..Default::default()
+    };
+    place(&client, &rx, 70, &spy(), &held(0, false, 100.0)).unwrap();
+    place(&client, &rx, 71, &spy(), &held(70, false, 101.0)).unwrap();
+    place(&client, &rx, 72, &spy(), &held(70, false, 102.0)).unwrap();
+    place(&client, &rx, 71, &spy(), &held(70, false, 103.0)).unwrap();
+    place(&client, &rx, 70, &spy(), &held(0, false, 99.0)).unwrap();
+    place(&client, &rx, 73, &spy(), &held(70, true, 104.0)).unwrap();
+    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|command| match command {
+            ControlCommand::Order(request) => Some(request.order_id()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, [70, 71, 72, 73]);
+    assert_eq!(client.core.tracked_order(70).unwrap().lmt_price, 99.0);
+    assert_eq!(client.core.tracked_order(71).unwrap().lmt_price, 103.0);
+}
+
+#[test]
+fn attached_validation_precedence_is_applied_before_loading_configuration() {
+    let (client, rx, shared) = test_client();
+    let mut order = Order {
+        action: "invalid".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, pt_order_id: 0, ..Default::default()
+    };
+    let mut dated = spy();
+    dated.last_trade_date_or_contract_month = "202613".into();
+    let refusal = place(&client, &rx, 0, &dated, &order).unwrap_err();
+    assert_eq!(
+        (refusal.code, refusal.message.as_str()),
+        (320, "Error reading request: Invalid value for Profit Taker order-id or order-type")
+    );
+    shared.reference.set_enabled_features(vec!["NOAPISLPTSGL".into()]);
+    let refusal = place(&client, &rx, 0, &dated, &order).unwrap_err();
+    assert_eq!(refusal.code, 320);
+    assert!(refusal.message.starts_with("Error reading request: Attaching stop-loss"), "{refusal:?}");
+    shared.reference.set_enabled_features(Vec::new());
+    order.pt_order_type = "PRESET".into();
+    let parent_refusal = ClientCore::validate_order(&order, &client.order_session()).unwrap_err();
+    assert_eq!(place(&client, &rx, 0, &dated, &order).unwrap_err(), parent_refusal);
+    order.action = "BUY".into();
+    assert_eq!(place(&client, &rx, 0, &dated, &order).unwrap_err().code, 10372);
+    let refusal = place(&client, &rx, 9401, &spy(), &order).unwrap_err();
+    assert_eq!((refusal.code, refusal.message.as_str()), (10149, "Invalid order id: 0"));
+    assert!(rx.try_recv().is_err());
+    assert!(!client.core.is_order_tracked(9401));
+}
+
+#[test]
+fn an_empty_attached_message_is_denied_before_the_parent_id_is_checked() {
+    let (client, rx, shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, ..Default::default()
+    };
+    for id in [0, i64::from(i32::MIN), i64::from(i32::MAX)] {
+        shared.reference.set_enabled_features(vec!["NOAPISLPTSGL".into()]);
+        assert_eq!(place(&client, &rx, id, &spy(), &order).unwrap_err().code, 320);
+        shared.reference.set_enabled_features(Vec::new());
+        let refusal = place(&client, &rx, id, &spy(), &order).unwrap_err();
+        assert_eq!((refusal.code, refusal.message), (10149, format!("Invalid order id: {id}")));
+    }
+    place(&client, &rx, 9402, &spy(), &order).unwrap();
+    while rx.try_recv().is_ok() {}
+    let refusal = place(&client, &rx, 9401, &spy(), &order).unwrap_err();
+    assert_eq!((refusal.code, refusal.message.as_str()), (103, "Duplicate order id: 9401"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn attached_api_identity_reaches_callbacks() {
+    let (client, _rx, shared) = test_client();
+    client.core.track_order(9402, spy(), Order {
+        order_id: 0, action: "SELL".into(), total_quantity: 1.0,
+        order_type: "LMT".into(), lmt_price: 101.0, parent_id: 9401,
+        ..Default::default()
+    }, 0);
+    shared.orders.note_attached_order_metadata(9402, crate::bridge::AttachedOrderMetadata { api_order_id: Some(0), api_client_id: Some(0), ..Default::default() });
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 9402, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0.0, remaining_qty: 1.0, avg_price: 0,
+        perm_id: 0, parent_id: 9401, timestamp_ns: 0,
+    });
+    let mut wrapper = RecordingWrapper::default();
+    client.process_msgs(&mut wrapper);
+    assert!(wrapper.events.iter().any(|event| event.starts_with("open_order:0:")), "{:?}", wrapper.events);
+    assert!(wrapper.events.iter().any(|event| event.starts_with("order_status:0:")), "{:?}", wrapper.events);
+    assert!(wrapper.parent_ids.iter().all(|id| *id == 9401));
+}
+
+#[test]
+fn a_global_cancel_keeps_unsent_ids_in_the_sequence() {
+    let (client, rx, shared) = test_client();
+    let held = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), transmit: false, ..Default::default()
+    };
+    client.try_place_order(84, &spy(), &held).expect("held");
+    assert!(rx.try_recv().is_err(), "nothing was sent for it");
+
+    shared.orders.set_replay_done();
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).expect("everything withdrawn");
+    let sent: Vec<ControlCommand> = rx.try_iter().collect();
+    assert!(
+        sent.iter().all(|c| matches!(c, ControlCommand::Order(OrderRequest::GlobalCancel { .. }))),
+        "only the withdrawals of what is working go: {sent:?}",
+    );
+    settled(&client, &rx);
+    assert!(!client.core.is_order_tracked(84), "the record goes with the command");
+
+    let order = Order { transmit: true, ..held };
+    assert_eq!(place(&client, &rx, 84, &spy(), &order).unwrap_err().code, 103);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn a_preview_of_ours_leaves_the_callers_sequence_alone() {
+    let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
+    {
+        let _answering = super::Answering::begin();
+        let asked = i64::from(crate::bridge::ReferenceState::ASK_ID_BASE) + 7;
+        let preview = Order { what_if: true, ..Order::limit("BUY", 1.0, 1.0) };
+        place(&client, &rx, asked, &spy(), &preview).unwrap();
+    }
+    while rx.try_recv().is_ok() {}
+    place(&client, &rx, 5, &spy(), &Order::limit("BUY", 1.0, 1.0))
+        .expect("a caller's own number after a preview of ours");
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { order_id: 5, .. }))));
+}
+
+#[test]
+fn a_fresh_api_id_does_not_modify_another_orders_venue_id() {
+    let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
+    let mut original = Order::limit("BUY", 1.0, 10.0);
+    original.order_id = 0;
+    shared.orders.push_order_info(9402, crate::bridge::RichOrderInfo {
+        contract: spy(), order: original.clone(),
+        order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
+        last_exec: Default::default(),
+    });
+    client.core.track_order(9402, spy(), original, 0);
+    shared.orders.note_attached_order_metadata(9402, crate::bridge::AttachedOrderMetadata { api_order_id: Some(0), api_client_id: Some(0), ..Default::default() });
+    client.core.learn_order_identity(&shared, 9402);
+    client.next_order_id.store(9403, Ordering::Release);
+    let order = Order::limit("BUY", 2.0, 10.0);
+    place(&client, &rx, 9402, &spy(), &order).unwrap();
+    let command = rx.try_recv().unwrap();
+    let ControlCommand::Order(OrderRequest::SubmitEx { order_id, attrs, .. }) = command
+        else { panic!("a new API id must submit a new order: {command:?}") };
+    assert_ne!(order_id, 9402);
+    assert_eq!(attrs.attached.as_ref().and_then(|held| held.api_identity), Some((9402, 0)));
+    assert_eq!(client.core.tracked_order(9402).unwrap().total_quantity, 1.0);
+    assert_eq!(client.core.tracked_order(order_id).unwrap().total_quantity, 2.0);
+    client.cancel_order(0, crate::types::model::OrderCancel::default());
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::Cancel { order_id: 9402, .. })));
+    client.cancel_order(9402, crate::types::model::OrderCancel::default());
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::Cancel { order_id: sent, .. }) if sent == order_id));
+}
+
+fn attached_preset_client() -> (EClient, Engine, Arc<SharedState>) {
+    let (client, rx, shared) = test_client();
+    shared.reference.cache_contract_definition(ContractDefinition {
+        con_id: 756733, exchange: "SMART".into(), order_type_key: "STK".into(),
+        order_type_rules: vec![("STP".into(), 1), ("LMT".into(), 1), ("OCA".into(), 1)],
+        order_types: vec!["STP".into(), "LMT".into(), "OCA".into()], ..Default::default()
+    });
+    shared.reference.set_order_presets(vec![("s=STK".into(), "a=1".into(), "1".into())]);
+    let (request_key, _) = shared.reference.expect_order_preset_values("s=STK");
+    shared.reference.set_order_preset_values(crate::control::order_presets::PresetValues {
+        request_key, key: "s=STK".into(), attributes: "a=1".into(), error: None,
+        fields: vec![(4074, "1".into()), (4075, "1".into()), (4076, "7".into()), (4083, "2".into())],
+    });
+    (client, rx, shared)
+}
+
+#[test]
+fn a_held_child_revision_survives_the_parent_transmitting() {
+    let (client, rx, _shared) = attached_preset_client();
+    let mut order = Order {
+        override_percentage_constraints: true,
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 100.0, transmit: false, sl_order_id: 9402, sl_order_type: "PRESET".into(),
+        pt_order_id: 9403, pt_order_type: "PRESET".into(), ..Default::default()
+    };
+    place(&client, &rx, 9401, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err());
+    let mut stop = client.core.tracked_order(9402).unwrap();
+    assert_eq!(stop.aux_price, 99.0);
+    stop.aux_price = 95.0;
+    stop.transmit = false;
+    place(&client, &rx, 9402, &spy(), &stop).unwrap();
+    order.transmit = true;
+    place(&client, &rx, 9401, &spy(), &order).unwrap();
+    let orders: Vec<_> = rx.try_iter().map(|c| match c { ControlCommand::Order(r) => r, _ => panic!("order") }).collect();
+    assert_eq!(orders.iter().map(OrderRequest::order_id).collect::<Vec<_>>(), [9401, 9402, 9403]);
+    let OrderRequest::SubmitEx { attrs, kind, .. } = &orders[1] else { panic!("a submission") };
+    assert!(matches!(kind, crate::types::OrderKind::Stop { stop_price } if *stop_price == crate::types::price_from_f64(95.0)), "{kind:?}");
+    let family_key = &attrs.attached.as_ref().expect("the family terms are kept").family_key;
+    assert_eq!(family_key.split('/').nth(1), Some("1"), "{family_key}");
+    assert_eq!(client.core.tracked_order(9402).unwrap().aux_price, 95.0);
+}
+
+#[test]
+fn a_working_parent_replaced_with_its_attached_fields_is_a_change_not_a_creation() {
+    let (client, rx, shared) = attached_preset_client();
+    let mut order = Order {
+        override_percentage_constraints: true,
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 100.0, transmit: true, sl_order_id: 9402, sl_order_type: "PRESET".into(),
+        ..Default::default()
+    };
+    place(&client, &rx, 9401, &spy(), &order).unwrap();
+    assert_eq!(rx.try_iter().count(), 2);
+    client.core.update_order_status(&shared, 9401, crate::types::OrderStatus::Submitted, 0.0, 100.0, 0);
+    // The account turns the stop-loss auto-attach off; nothing is cached.
+    shared.reference.set_order_presets(vec![("s=STK".into(), "a=1".into(), "2".into())]);
+    order.lmt_price = 100.5;
+    place(&client, &rx, 9401, &spy(), &order).unwrap();
+    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::Modify { order_id: 9401, .. })]), "{sent:?}");
+}
+
+#[test]
+fn another_clients_api_number_does_not_address_this_clients_orders() {
+    for stated_client in [None, Some(7)] {
+        let (client, rx, shared) = test_client();
+        let order = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, transmit: true, ..Default::default()
+        };
+        place(&client, &rx, 9500, &spy(), &order).unwrap();
+        while rx.try_recv().is_ok() {}
+        for (wire, api) in [(9000, 9500), (9001, 9501)] {
+            shared.orders.note_attached_order_metadata(wire, crate::bridge::AttachedOrderMetadata {
+                api_order_id: Some(api), api_client_id: stated_client, ..Default::default()
+            });
+            client.core.update_order_status(&shared, wire, crate::types::OrderStatus::Submitted, 0.0, 1.0, 0);
+        }
+        assert_eq!(client.core.api_order_id(9000), 9500, "reported under the number it states");
+        client.cancel_order(9500, "");
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(sent.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Cancel { order_id: 9500, .. }))), "{sent:?}");
+        assert!(!sent.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Cancel { order_id: 9000, .. }))), "{sent:?}");
+        place(&client, &rx, 9501, &spy(), &order).unwrap();
+        let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(!sent.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Modify { order_id: 9001, .. }))), "{sent:?}");
+        assert!(sent.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitEx { .. }))), "{sent:?}");
+    }
+}
+
+#[test]
+fn this_clients_recovered_api_number_addresses_its_order() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.note_attached_order_metadata(9000, crate::bridge::AttachedOrderMetadata {
+        api_order_id: Some(9500), api_client_id: Some(0), ..Default::default()
+    });
+    client.core.update_order_status(&shared, 9000, crate::types::OrderStatus::Submitted, 0.0, 1.0, 0);
+    assert_eq!(client.core.wire_order_id(9500), Some(9000));
+    client.core.set_api_client_id(3);
+    client.core.learn_order_identity(&shared, 9000);
+    assert_eq!(client.core.wire_order_id(9500), Some(9000), "a mapping once learned stays");
+    let (other, _rx, shared) = test_client();
+    other.core.set_api_client_id(3);
+    shared.orders.note_attached_order_metadata(9000, crate::bridge::AttachedOrderMetadata {
+        api_order_id: Some(9500), api_client_id: Some(0), ..Default::default()
+    });
+    other.core.learn_order_identity(&shared, 9000);
+    assert_eq!(other.core.wire_order_id(9500), Some(9500));
+}
+
+#[test]
+fn attached_combo_registration_separates_family_quotes_and_replacements() {
+
+    for con_id in [0, 700] {
+        let (client, rx, shared) = test_client();
+        let contracts: Vec<_> = [17, 18].into_iter().map(|leg| crate::types::model::Contract {
+            con_id, symbol: "ABC".into(), sec_type: "BAG".into(), exchange: "SMART".into(), currency: "USD".into(),
+            combo_legs: vec![crate::types::model::ComboLeg {
+                con_id: leg, ratio: 1, action: "BUY".into(), exchange: "SMART".into(), ..Default::default()
+            }], ..Default::default()
+        }).collect();
+        for contract in &contracts {
+            let key = format!("{contract:?}");
+            let definition = crate::control::contracts::ContractDefinition {
+                con_id: 700, symbol: "ABC".into(), sec_type: crate::control::contracts::SecurityType::Combo,
+                exchange: "SMART".into(), currency: "USD".into(), order_type_key: "COMB".into(),
+                order_type_rules: vec![("STP".into(), 1), ("LMT".into(), 1), ("OCA".into(), 1)],
+                order_types: vec!["STP".into(), "LMT".into(), "OCA".into()], ..Default::default()
+            };
+            shared.reference.cache_contract_definition(definition.clone());
+            shared.reference.update_attached_combo(&key, |combo| combo.definition = Some(definition));
+            shared.reference.update_attached_combo(&key, |combo| combo.regular_hours = Some(true));
+            shared.reference.update_attached_combo(&key, |combo| combo.legs = Some((contract.combo_legs.clone(), 1.0)));
+        }
+        shared.reference.set_order_presets(vec![("s=COMB".into(), "a=1".into(), "1".into())]);
+        let (request_key, _) = shared.reference.expect_order_preset_values("s=COMB");
+        shared.reference.set_order_preset_values(crate::control::order_presets::PresetValues {
+            request_key, key: "s=COMB".into(), attributes: "a=1".into(), error: None,
+            fields: vec![(4074, "1".into()), (4075, "1".into()), (4076, "7".into()), (4083, "2".into())],
+        });
+        let mut families = Vec::new();
+        for (index, contract) in contracts.iter().enumerate() {
+            let order = crate::types::model::Order {
+                override_percentage_constraints: true, action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
+                sl_order_id: 9402 + index as i32 * 10, sl_order_type: "PRESET".into(),
+                ..Default::default()
+            };
+            let id = 9401 + index as i64 * 10;
+            place(&client, &rx, id, contract, &order).unwrap();
+            let sent: Vec<_> = rx.try_iter().collect();
+            assert_eq!(sent.len(), 2);
+            let instrument = client.core.tracked_instrument(id as u64).unwrap();
+            for command in sent {
+                let ControlCommand::Order(OrderRequest::SubmitEx { instrument: placed, attrs, .. }) = command else { panic!("a submission") };
+                assert_eq!(placed, instrument);
+                assert_eq!(attrs.attached.as_ref().and_then(|held| held.contract_id), Some(700));
+            }
+            families.push(instrument);
+        }
+        let order = crate::types::model::Order::limit("BUY", 2.0, 101.0);
+        let contract = &contracts[0];
+        let id = 9401;
+        place(&client, &rx, id, contract, &order).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::Modify { order_id: 9401, .. })));
+        assert_ne!(families[0], families[1]);
+        assert_eq!(client.core.tracked_instrument(9401), Some(families[0]));
+        assert_eq!(client.core.tracked_instrument(9402), Some(families[0]));
+        assert_eq!(client.core.tracked_instrument(9411), Some(families[1]));
+        assert_eq!(client.core.tracked_instrument(9412), Some(families[1]));
+
+    }
+}
+
+#[test]
+fn attached_smart_combo_uses_its_confirmed_definition_and_legs() {
+    for (transmit, con_id) in [(true, 0), (false, 0), (true, 700), (false, 700)] {
+        let (client, rx, shared) = test_client();
+        let contract = crate::types::model::Contract {
+            con_id, symbol: "ABC".into(), sec_type: "BAG".into(), exchange: "SMART".into(), currency: "USD".into(),
+            combo_legs: vec![crate::types::model::ComboLeg {
+                con_id: 17, ratio: 2, action: "BUY".into(), exchange: "SMART".into(), ..Default::default()
+            }], ..Default::default()
+        };
+        let key = format!("{contract:?}");
+        shared.reference.update_attached_combo(&key, |combo| combo.definition = Some(crate::control::contracts::ContractDefinition {
+            con_id: 700, symbol: "ABC".into(), sec_type: crate::control::contracts::SecurityType::Combo,
+            exchange: "SMART".into(), currency: "USD".into(), order_type_key: "COMB".into(),
+            order_type_rules: vec![("STP".into(), 1), ("LMT".into(), 1), ("OCA".into(), 1)],
+            order_types: vec!["STP".into(), "LMT".into(), "OCA".into()], ..Default::default()
+        }));
+        shared.reference.cache_contract_definition(shared.reference.attached_combo(&key).and_then(|combo| combo.definition).unwrap());
+        shared.reference.update_attached_combo(&key, |combo| combo.regular_hours = Some(true));
+        shared.reference.update_attached_combo(&key, |combo| combo.legs = Some((vec![crate::types::model::ComboLeg {
+            ratio: 1, ..contract.combo_legs[0].clone()
+        }], 2.0)));
+        shared.reference.set_order_presets(vec![("s=COMB".into(), "a=1".into(), "1".into())]);
+        let (request_key, _) = shared.reference.expect_order_preset_values("s=COMB");
+        shared.reference.set_order_preset_values(crate::control::order_presets::PresetValues {
+            request_key, key: "s=COMB".into(), attributes: "a=1".into(), error: None,
+            fields: vec![(4074, "1".into()), (4075, "1".into()), (4076, "7".into()), (4083, "2".into())],
+        });
+        let order = crate::types::model::Order {
+            action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 100.0,
+            sl_order_id: 9402, sl_order_type: "PRESET".into(), pt_order_id: 9403, pt_order_type: "PRESET".into(),
+            transmit, override_percentage_constraints: true,
+            ..Default::default()
+        };
+        place(&client, &rx, 9401, &contract, &order).unwrap();
+        assert_eq!(client.core.tracked_order(9401).unwrap().total_quantity, 200.0);
+        if !transmit {
+            let mut release = order.clone();
+            release.transmit = true;
+            place(&client, &rx, 9401, &contract, &release).unwrap();
+        }
+        let instrument = client.core.tracked_instrument(9401).unwrap();
+        let orders: Vec<_> = rx.try_iter().map(|command| {
+            let ControlCommand::Order(request) = command else { panic!("an order") };
+            request
+        }).collect();
+        assert_eq!(orders.len(), 3);
+        // Children are built once, when the parent is created, at the scaled
+        // size. The release restates the parent at what it states, unscaled,
+        // and leaves its family as built.
+        for order in orders {
+            let OrderRequest::SubmitEx { order_id, attrs, instrument: placed, qty, .. } = order else { panic!("expected a submission") };
+            assert_eq!(placed, instrument);
+            assert_eq!(crate::types::qty_to_f64(qty), if transmit || order_id != 9401 { 200.0 } else { 100.0 });
+            assert_eq!(attrs.attached.as_ref().and_then(|held| held.contract_id), Some(700));
+            assert_eq!(attrs.combo_legs.len(), 1);
+            assert_eq!(attrs.combo_legs[0].ratio, 1);
+        }
+        for id in [9401, 9402, 9403] {
+            assert_eq!(client.core.tracked_order(id).unwrap().total_quantity, if transmit || id != 9401 { 200.0 } else { 100.0 });
+        }
+    }
 }

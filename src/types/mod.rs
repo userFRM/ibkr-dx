@@ -1122,6 +1122,8 @@ pub struct PositionInfo {
     // Set only by the portfolio-value message, not the lean position feed.
     /// What it is worth now, each.
     pub market_price: Price,     // per-share mark * PRICE_SCALE
+    /// Whether the venue has stated a market price, including zero.
+    pub market_price_stated: bool,
     /// What the holding is worth.
     pub market_value: Price,     // position mark * PRICE_SCALE
     /// What it has made and not realised.

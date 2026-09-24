@@ -131,6 +131,16 @@ impl EClient {
     /// gateway refuses — builds it, and sends it or keeps it, and refuses it
     /// under its own number where it will not. A change of an order the
     /// engine has not sent yet goes after it, and its withdrawal withdraws it.
+    ///
+    /// `sl_order_id` / `sl_order_type` and `pt_order_id` / `pt_order_type`
+    /// construct stop-loss and profit-taking children from the selected account
+    /// preset. State the child id with `PRESET` (case-insensitive). The engine
+    /// loads the preset, builds the children once and sends the parent, stop
+    /// loss and profit taker in that order. `transmit = false` holds the family
+    /// until a parent or child transmits it. Replacing a parent changes that
+    /// order and preserves its existing children. Percentage-allocation
+    /// sizing from group or model holdings is not carried; use explicitly
+    /// sized parent and child orders where their quantities depend on it.
     pub fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) {
         if let Err(why) = self.try_place_order(order_id, contract, order) {
             self.refuse_placement(order_id, &why);
@@ -159,7 +169,9 @@ impl EClient {
 
         // Validate order params and contract before the engine takes it.
         let (warnings, refused) = ClientCore::retired_instructions(order, &session);
-        if let Err(why) = ClientCore::validate_order(order, &session) {
+        let validation = ClientCore::validate_order(order, &session);
+        crate::client_core::attached_checks::check_selectors(order, session.enables("NOAPISLPTSGL"))?;
+        if let Err(why) = validation {
             if refused.is_some_and(|r| r.code == why.code)
                 && u64::try_from(order_id).is_ok()
             {
@@ -169,6 +181,7 @@ impl EClient {
             }
             return Err(why);
         }
+        ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month)?;
         // From here on, the order as this session sends it.
         let sent = ClientCore::as_sent(order, &session);
         let order: &Order = &sent;
@@ -187,32 +200,10 @@ impl EClient {
         )?;
         self.check_sec_type_permitted(&contract.sec_type)?;
 
-        // An id at or below zero names no order the venue will hold. One handed
-        // out in its place put the order on the market under a number the
-        // caller had never seen: every status about it arrived under an id they
-        // were not watching, and their own cancel named nothing. Refused, as
-        // the other surface refuses it.
-        let Some(oid) = u64::try_from(order_id).ok().filter(|id| *id > 0) else {
-            return Err(Refusal::validation(format!(
-                "place_order: order_id {order_id} is not an order number; \
-                 ask for one with next_order_id()",
-            )));
-        };
-        // And within the range this client can carry one in, which is where
-        // the reader of the venue's reports stops. Past it, the order goes to
-        // the venue and every report about it — the acknowledgement, the
-        // fills, the withdrawal — fails to parse back to a number, so the
-        // order is live and invisible here. The mark below is spent whatever
-        // happens to the placement, so one such call also left the allocator
-        // counting from past the end and every later request for a number
-        // answered with none, for the rest of the session.
-        if oid > crate::bridge::MAX_ORDER_ID {
-            return Err(Refusal::validation(format!(
-                "place_order: order_id {order_id} is past the highest this client can \
-                 carry an order under ({}); ask for one with next_order_id()",
-                crate::bridge::MAX_ORDER_ID,
-            )));
+        if order_id > crate::bridge::MAX_ORDER_ID as i64 {
+            return Err(Refusal::validation(format!("place_order: order_id {order_id} is past the highest this client can carry an order under ({}); ask for one with next_order_id()", crate::bridge::MAX_ORDER_ID)));
         }
+        let oid = order_id as u64;
         // Said once, as the paths that hand out numbers say it: a program
         // numbering its orders and its requests out of one counter has a
         // number here that a request cannot carry.
@@ -224,7 +215,7 @@ impl EClient {
         // off `next_valid_id`, which is the reference client's own idiom, then
         // asked for one and was given a number it had put on the market
         // moments before. A preview's own number is not one of those.
-        if !super::a_question_of_ours(oid) {
+        if order_id > 0 && oid < crate::bridge::MAX_ORDER_ID && !super::a_question_of_ours(oid) {
             self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
         }
 
@@ -234,6 +225,7 @@ impl EClient {
         let mut placed = order.clone();
         placed.order_id = oid as i64;
         self.send(ControlCommand::Place(Box::new(Placement {
+            allocator: self.next_order_id.clone(),
             order_id: oid,
             contract: contract.clone(),
             order: placed,
@@ -349,11 +341,7 @@ impl EClient {
             self.core.refuse_if_readonly("a cancel").map_err(Refusal::validation)?;
             // Tag 11 order ids start at 1. A negative id cast unchecked becomes a
             // large unsigned one, which the venue answers "no such order".
-            let order_id = u64::try_from(order_id).ok().filter(|id| *id > 0).ok_or_else(|| {
-                Refusal::validation(format!(
-                    "order_id {order_id} is not an order number: they start at one",
-                ))
-            })?;
+            let order_id = order_id as u64;
             ClientCore::check_cancel_time(&order_cancel.manual_order_cancel_time)?;
             super::wire_text("a withdrawal's operator", &order_cancel.ext_operator)?;
             // The engine withdraws a placement it has not sent by forgetting it,

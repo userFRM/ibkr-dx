@@ -1,6 +1,6 @@
 """An order number is the caller's, or it is a refusal.
 
-An id at or below zero names no order the venue will hold. One was handed out
+A new order with zero or a stale negative id is refused. One was handed out
 in its place, so the order reached the market under a number the caller had
 never seen: every status about it arrived under an id they were not watching,
 and their own cancel named nothing. A negative id on a cancel was read as
@@ -44,21 +44,21 @@ def test_an_order_numbered_zero_is_refused_not_renumbered():
     c.poll()
     assert w.errors, "an order number of zero must be reported, not replaced"
     assert w.errors[-1][0] == 0
-    assert "order_id 0" in w.errors[-1][2]
+    assert w.errors[-1] == (0, 10149, "Invalid order id: 0")
 
 
 def test_an_order_numbered_below_zero_is_refused():
     w, c = _client()
     c.place_order(-5, _spy(), _market_order())
     c.poll()
-    assert w.errors and "order_id -5" in w.errors[-1][2]
+    assert w.errors[-1] == (-5, 103, "Duplicate order id: -5")
 
 
 def test_a_cancel_numbered_below_zero_is_refused():
     w, c = _client()
     c.cancel_order(-5, "")
     c.poll()
-    assert w.errors and "order_id -5" in w.errors[-1][2]
+    assert w.errors[-1] == (-5, 135, "no order is working under -5")
 
 
 def test_a_contract_id_below_zero_does_not_wrap():

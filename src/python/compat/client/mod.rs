@@ -487,6 +487,7 @@ impl EClient {
         // Stated before the logon rather than after it, so a caller reading it
         // during `connect` reads this session's number and not the last one's.
         self.client_id.store(client_id, Ordering::Release);
+        self.core.set_api_client_id(client_id);
 
         // Set before anything is sent, so there is no window in which the
         // session is open and the refusal is not yet in force.
@@ -567,6 +568,7 @@ impl EClient {
         *self.logged_in_at.lock().unwrap() =
             Some(gw.logged_in_at.clone()).filter(|stamp| !stamp.is_empty());
         let shared = Arc::new(SharedState::new());
+        shared.orders.set_api_client_id(client_id);
         shared.set_settings(config.settings.clone());
         gw.populate_init_data(&shared);
 
@@ -809,16 +811,18 @@ impl EClient {
     /// client, so the number is a statement about this client and not a
     /// reading off the venue, whose logon names no such level.
     ///
-    /// 217 is the newest gate whose feature is carried here. Above it,
-    /// attached orders (218) are refused by name — a gateway builds them from
-    /// the account's order preset, which this client does not hold — and the
-    /// configuration requests (219, 221) and the last price and size stated
-    /// to their precision (222, 224) are absent. `hedgeMaxSize` (223) is
-    /// taken and sent on a beta hedge, as a gateway sends it, and odd-lot
+    /// Attached orders (218) load the selected account preset and construct
+    /// the parent and children. Percentage allocations still need positions
+    /// by account and model and the applicable allocation-group state, so
+    /// the level remains 217. A percentage allocation cannot yet determine
+    /// the quantities of its attached children here; supply explicitly sized
+    /// parent and child orders when those quantities depend on group or model
+    /// holdings. Configuration requests (219, 221) and the last
+    /// price and size stated to their precision (222, 224) are absent.
+    /// `hedgeMaxSize` (223) is sent on a beta hedge, and odd-lot
     /// quotes (225) are served: generic tick 787 is asked for and its prices,
-    /// sizes and venues delivered. The number stays at 217 because a level
-    /// claims every one below it, and 218 is not carried. 225 is the highest
-    /// level a gateway announces.
+    /// sizes and venues delivered. `conditionsIncludeOvernight` (226) is
+    /// absent. 226 is the highest level a gateway announces.
     ///
     /// Below it, a program that believes the number is wrong about the
     /// following, and each is said on use rather than passed over:
@@ -1312,8 +1316,8 @@ impl EClient {
     /// venue is working the order, a new order otherwise.
     pub(crate) fn placement_origin(&self, order_id: i64) -> crate::types::model::ErrorOrigin {
         let shared = self.shared.lock().unwrap().clone();
-        let replacing = u64::try_from(order_id)
-            .is_ok_and(|oid| self.core.is_working_at_the_venue(oid, shared.as_deref()));
+        let replacing = shared.as_ref().and_then(|shared| shared.orders.wire_order_id(order_id))
+            .is_some_and(|oid| self.core.is_working_at_the_venue(oid, shared.as_deref()));
         let op = if replacing {
             crate::types::model::OrderOp::Modify
         } else {
@@ -2137,6 +2141,7 @@ w = W()",
             py.run(c"def closed(): w.calls.append(('closed', w.wire_done))\nw.connectionClosed = closed", Some(&g), None).unwrap();
             let tx = client.get().tx().unwrap();
             shared.admit(&tx, ControlCommand::Place(Box::new(crate::types::Placement {
+            allocator: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
                 order_id: 7,
                 warnings: Vec::new(),
                 contract: crate::api::Contract { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },

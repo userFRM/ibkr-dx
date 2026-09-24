@@ -38,6 +38,46 @@ pub struct TickReqParams {
     pub snapshot_permissions: i64,
 }
 
+pub(crate) const PRICING_BID: u8 = 1;
+pub(crate) const PRICING_ASK: u8 = 2;
+pub(crate) const PRICING_LAST: u8 = 4;
+pub(crate) const PRICING_CLOSE: u8 = 8;
+pub(crate) const PRICING_BID_SIZE: u8 = 16;
+pub(crate) const PRICING_ASK_SIZE: u8 = 32;
+pub(crate) const PRICING_LAST_SIZE: u8 = 64;
+pub(crate) const PRICING_STATE: u8 = 128;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PricingQuote {
+    pub bid: Option<Price>,
+    pub ask: Option<Price>,
+    pub last: Option<Price>,
+    pub close: Option<Price>,
+    pub bid_size: Option<Qty>,
+    pub ask_size: Option<Qty>,
+    pub last_size: Option<Qty>,
+    pub state_mask: i64,
+    pub close_attributes: i32,
+    pub close_date: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PricingQuoteViews {
+    pub mode: i32,
+    pub confirmed: bool,
+    pub mark_price: Option<f64>,
+    pub mark_rejected: bool,
+    /// Real-time, delayed, frozen, and delayed-frozen records.
+    pub records: [PricingQuote; 4],
+    pub vwap: Option<f64>,
+    pub auction_price: Option<f64>,
+    pub auction_volume: i32,
+    pub auction_borrow: Option<f64>,
+    pub auction_borrow_volume: i32,
+    pub auction_lend: Option<f64>,
+    pub auction_lend_volume: i32,
+}
+
 /// This machine's clock, in unix milliseconds.
 fn local_millis() -> i64 {
     std::time::SystemTime::now()
@@ -97,6 +137,8 @@ pub struct MarketDataState {
     /// onto every record queued under the slot, so a reader can tell the
     /// contract that left a slot from the one that took it.
     generations: super::slot_table::SlotTable<AtomicU64>,
+    pricing_quotes: Mutex<std::collections::HashMap<InstrumentId, PricingQuoteViews>>,
+    attached_quote_instruments: Mutex<std::collections::HashMap<(i64, String), InstrumentId>>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
     instrument_count: AtomicU64,
     /// Slots that have been given back, for the surfaces to forget.
@@ -310,6 +352,8 @@ impl MarketDataState {
             stated_rows: Mutex::new(std::collections::HashMap::new()),
             chain_model_parameters: Mutex::new(std::collections::HashMap::new()),
             snapshot_answers: Mutex::new(std::collections::HashMap::new()),
+            pricing_quotes: Mutex::new(std::collections::HashMap::new()),
+            attached_quote_instruments: Mutex::new(std::collections::HashMap::new()),
             scanned_strategies: Mutex::new(std::collections::HashMap::new()),
             closing_option_model: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
@@ -651,6 +695,102 @@ impl MarketDataState {
         self.stamps.note_written();
     }
 
+    pub(crate) fn push_pricing_quote(
+        &self, id: InstrumentId, mode: i32, quote: &Quote, present: u8, state_mask: i64,
+    ) {
+        let Ok(index) = usize::try_from(mode) else { return };
+        if index >= 4 { return; }
+        let mut held = self.pricing_quotes.lock().unwrap();
+        let views = held.entry(id).or_default();
+        views.mode = mode;
+        let record = &mut views.records[index];
+        for (flag, destination, value) in [
+            (PRICING_BID, &mut record.bid, quote.bid),
+            (PRICING_ASK, &mut record.ask, quote.ask),
+            (PRICING_LAST, &mut record.last, quote.last),
+            (PRICING_CLOSE, &mut record.close, quote.close),
+        ] {
+            if present & flag != 0 { *destination = Some(value); }
+        }
+        for (flag, destination, value) in [
+            (PRICING_BID_SIZE, &mut record.bid_size, quote.bid_size),
+            (PRICING_ASK_SIZE, &mut record.ask_size, quote.ask_size),
+            (PRICING_LAST_SIZE, &mut record.last_size, quote.last_size),
+        ] {
+            if present & flag != 0 { *destination = Some(value); }
+        }
+        if present & PRICING_STATE != 0 { record.state_mask = state_mask; }
+    }
+
+    pub(crate) fn pricing_quote_views(&self, id: InstrumentId) -> PricingQuoteViews {
+        self.pricing_quotes.lock().unwrap().get(&id).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn attached_quote_instrument(&self, con_id: i64, exchange: &str) -> Option<InstrumentId> {
+        self.attached_quote_instruments.lock().unwrap().get(&(con_id, exchange.into())).copied()
+    }
+
+    pub(crate) fn note_attached_quote_instrument(&self, con_id: i64, exchange: &str, instrument: InstrumentId) {
+        self.attached_quote_instruments.lock().unwrap().insert((con_id, exchange.into()), instrument);
+    }
+
+    pub(crate) fn note_pricing_subscription(&self, id: InstrumentId, mode: i32, confirmed: bool) {
+        let mut held = self.pricing_quotes.lock().unwrap();
+        let views = held.entry(id).or_default();
+        views.mode = mode;
+        views.confirmed = confirmed;
+    }
+
+    pub(crate) fn note_pricing_mark_rejected(&self, id: InstrumentId, rejected: bool) {
+        self.pricing_quotes.lock().unwrap().entry(id).or_default().mark_rejected = rejected;
+    }
+
+    pub(crate) fn note_pricing_mark(&self, id: InstrumentId, price: Option<f64>) {
+        self.pricing_quotes.lock().unwrap().entry(id).or_default().mark_price = price;
+    }
+
+    pub(crate) fn note_pricing_close_metadata(
+        &self, id: InstrumentId, mode: i32, attributes: Option<i32>, date: Option<i32>,
+    ) {
+        let Ok(index) = usize::try_from(mode) else { return };
+        if index >= 4 { return; }
+        let mut held = self.pricing_quotes.lock().unwrap();
+        let record = &mut held.entry(id).or_default().records[index];
+        if let Some(attributes) = attributes.filter(|value| *value != -1) {
+            record.close_attributes = attributes;
+        }
+        if let Some(date) = date { record.close_date = Some(date); }
+    }
+
+    pub(crate) fn note_pricing_vwap(&self, id: InstrumentId, vwap: Option<f64>) {
+        self.pricing_quotes.lock().unwrap().entry(id).or_default().vwap = vwap;
+    }
+
+    pub(crate) fn note_pricing_auction(
+        &self, id: InstrumentId, mode: i32, price: Option<f64>, volume: i32,
+        borrow: Option<f64>, borrow_volume: i32, lend: Option<f64>, lend_volume: i32,
+    ) {
+        let mut held = self.pricing_quotes.lock().unwrap();
+        let views = held.entry(id).or_default();
+        if mode == 0 {
+            views.auction_price = price;
+            views.auction_volume = volume;
+        }
+        views.auction_borrow = borrow;
+        views.auction_borrow_volume = borrow_volume;
+        views.auction_lend = lend;
+        views.auction_lend_volume = lend_volume;
+    }
+
+    pub(crate) fn pricing_loan_sides(&self, id: InstrumentId) -> (Option<f64>, Option<f64>) {
+        let held = self.pricing_quote_views(id);
+        let fallback = held.auction_price.filter(|_| held.auction_volume != 0);
+        (
+            held.auction_borrow.filter(|_| held.auction_borrow_volume != 0).or(fallback),
+            held.auction_lend.filter(|_| held.auction_lend_volume != 0).or(fallback),
+        )
+    }
+
     /// Zero every quote a caller can read, as the engine zeroes its own copy at
     /// the same moment.
     ///
@@ -669,6 +809,7 @@ impl MarketDataState {
             slot.write(&blank, generation);
         }
         self.stamps.note_written();
+        self.pricing_quotes.lock().unwrap().clear();
     }
 
     #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
@@ -899,6 +1040,8 @@ impl MarketDataState {
         self.series_ticks.lock().unwrap().remove(&instrument);
         self.snapshot_answers.lock().unwrap().remove(&instrument);
         self.quote_attribute_masks.lock().unwrap().remove(&instrument);
+        self.pricing_quotes.lock().unwrap().remove(&instrument);
+        self.attached_quote_instruments.lock().unwrap().retain(|_, slot| *slot != instrument);
     }
 
     /// A broadcast notice, kept until someone reads it.

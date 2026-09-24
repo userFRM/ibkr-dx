@@ -69,6 +69,16 @@ impl EClient {
     /// raises there. A send the engine can no longer take is reported the
     /// same way, stating what has already reached the engine and what has
     /// not.
+    ///
+    /// `slOrderId` / `slOrderType` and `ptOrderId` / `ptOrderType` construct
+    /// children from the selected account preset. State each child id with
+    /// `PRESET` (case-insensitive). Preset loading and any quote wait run in
+    /// the engine; the call returns without waiting. The parent goes first,
+    /// then stop loss and profit taker. `transmit=False` holds the family
+    /// until a parent or child transmits it. Replacing the parent preserves
+    /// its existing children. Percentage-allocation sizing from group or
+    /// model holdings is not carried; use explicitly sized parent and child
+    /// orders where their quantities depend on it.
     pub(crate) fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if let Err(why) = self.core.refuse_if_readonly("an order") {
             return self.refuse_placement(py, order_id, Refusal::validation(why));
@@ -157,12 +167,19 @@ impl EClient {
         // Checked against the session as a gateway checks it: which accounts
         // the login holds and what the venue enabled.
         let (warnings, refused) = ClientCore::retired_instructions(&api_order, &session);
-        if let Err(why) = ClientCore::validate_order(&api_order, &session) {
+        let validation = ClientCore::validate_order(&api_order, &session);
+        if let Err(why) = crate::client_core::attached_checks::check_selectors(&api_order, session.enables("NOAPISLPTSGL")) {
+            return self.refuse_placement(py, order_id, why);
+        }
+        if let Err(why) = validation {
             if refused.is_some_and(|r| r.code == why.code) {
                 for warning in warnings {
                     self.refuse_placement(py, order_id, warning)?;
                 }
             }
+            return self.refuse_placement(py, order_id, why);
+        }
+        if let Err(why) = ClientCore::validate_contract_expiry(&contract.last_trade_date_or_contract_month) {
             return self.refuse_placement(py, order_id, why);
         }
         // From here on, the order as this session sends it.
@@ -212,29 +229,13 @@ impl EClient {
             ..contract.to_api()
         };
 
-        // The number the caller stated, or a refusal. An id at or below zero
-        // names no order the venue will hold, and one was handed out in its
-        // place: the order went to the market under a number the caller had
-        // never seen, so every status about it arrived under an id they were
-        // not watching and their own cancel named nothing. The reference
-        // client sends what it is given and the venue answers for it.
-        let Some(oid) = u64::try_from(order_id).ok().filter(|id| *id > 0) else {
-            return self.refuse_placement(py, order_id, Refusal::validation(format!(
-                "place_order: order_id {order_id} is not an order number; \
-                 ask for one with next_order_id() or reqIds()",
-            )));
-        };
-
-        // The number this call is spending, so the allocator does not hand it
-        // out again. It counts from the highest the venue has named, and the
-        // venue has not named this one yet — a program keeping its own numbers
-        // off `next_valid_id`, which is the reference client's own idiom, then
-        // asked for one and was given a number it had put on the market
-        // moments before. A preview's own number is not one of those.
-        if !crate::api::client::a_question_of_ours(oid) {
+        if order_id > crate::bridge::MAX_ORDER_ID as i64 {
+            return self.refuse_placement(py, order_id, Refusal::validation(format!("place_order: order_id {order_id} is past the highest this client can carry an order under ({})", crate::bridge::MAX_ORDER_ID)));
+        }
+        let oid = order_id as u64;
+        if order_id > 0 && oid < crate::bridge::MAX_ORDER_ID && !crate::api::client::a_question_of_ours(oid) {
             self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
         }
-
         // The order as it goes, under its number and the client it goes out
         // under. Left at nought, the order read back could not be told from
         // one placed under client zero, and restating one as the other
@@ -248,6 +249,7 @@ impl EClient {
         // keeps it for a later transmit — refusing it under its own number
         // where it will not. Nothing waits here.
         let placement = crate::types::Placement {
+            allocator: self.next_order_id.clone(),
             order_id: oid,
             contract: api_contract,
             order: tracked_order,
@@ -255,7 +257,7 @@ impl EClient {
             // order's number, once the order has gone or is kept.
             warnings,
         };
-        if let Err(why) = self.send_control(&tx, ControlCommand::Place(Box::new(placement))) {
+        if let Err(why) = py.detach(|| self.send_control(&tx, ControlCommand::Place(Box::new(placement)))) {
             return self.refuse_placement(py, order_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -373,13 +375,7 @@ impl EClient {
             return self.report_refusal_as(py, cancelling, Refusal::validation(why));
         }
         let Some(tx) = self.tx_or_report_for_trading(cancelling)? else { return Ok(()) };
-        // As `place_order`. A negative id read as unsigned is a number above
-        // nine quintillion, and the cancel names it.
-        let Some(oid) = u64::try_from(order_id).ok().filter(|id| *id > 0) else {
-            return self.report_refusal_as(py, cancelling, Refusal::validation(format!(
-                "cancel_order: order_id {order_id} is not an order number",
-            )));
-        };
+        let oid = order_id as u64;
         let stated = match withdrawal_states(py, order_cancel.as_ref())?.and_then(|stated| {
             ClientCore::check_cancel_time(&stated.manual_order_cancel_time)?;
             crate::api::client::wire_text("a withdrawal's operator", &stated.ext_operator)?;
@@ -958,6 +954,8 @@ w = W()",
             let (client, rx, shared, wrapper) = wired_client(py);
             shared.orders.set_replay_done();
             client.client_id.store(7, Ordering::Release);
+            client.core.set_api_client_id(7);
+            shared.orders.set_api_client_id(7);
             client.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
             // Placed by this session, held back from the venue.
             client.place_order(py, 3, &bracket_contract(), &bracket_order(false, 0)).unwrap();

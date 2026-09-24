@@ -454,6 +454,7 @@ fn placement(
     transmit: bool,
 ) -> ControlCommand {
     ControlCommand::Place(Box::new(crate::types::Placement {
+            allocator: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         order_id,
         contract,
         order: crate::types::model::Order {
@@ -486,6 +487,33 @@ fn spy() -> crate::types::model::Contract {
 /// SPY as a caller describes it, with no number for the venue to go on.
 fn described() -> crate::types::model::Contract {
     crate::types::model::Contract { con_id: 0, ..spy() }
+}
+
+#[test]
+fn an_orders_client_id_does_not_change_the_session_identity() {
+    use crate::types::OrderRequest;
+    for session_client in [0, 7] {
+        let (mut hl, shared, _, _peer) = with_trading();
+        shared.orders.set_replay_done();
+        shared.orders.set_api_client_id(session_client);
+        for (id, client_id) in [(10, 0), (11, 0), (10, 7)] {
+            let ControlCommand::Place(mut p) = placement(id, spy(), 0, true) else { unreachable!() };
+            p.order.client_id = client_id;
+            if client_id == 7 { p.order.total_quantity = 2.0; }
+            hl.take_order_command(ControlCommand::Place(p));
+        }
+        let refused = shared.drain_refused();
+        assert!(refused.is_empty(), "{refused:?}");
+        for id in [10, 11] {
+            assert_eq!(shared.orders.attached_order_metadata(id).unwrap().api_client_id, Some(session_client));
+        }
+        let orders: Vec<_> = hl.context.pending_orders.drain().collect();
+        assert!(matches!(&orders[..], [
+            OrderRequest::SubmitEx { order_id: 10, .. },
+            OrderRequest::SubmitEx { order_id: 11, .. },
+            OrderRequest::Modify { order_id: 10, qty, .. },
+        ] if *qty == crate::types::qty_from_f64(2.0)), "{orders:?}");
+    }
 }
 
 /// A scan's text remains on its request while the venue names the contract,

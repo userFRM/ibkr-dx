@@ -10,6 +10,8 @@ pub(crate) mod market_requests;
 #[cfg(test)]
 #[path = "held/tests.rs"]
 mod held_tests;
+mod attached_quotes;
+mod attachments;
 pub use crate::reliability::retry;
 
 /// How fast a reconnect may put its subscriptions back.
@@ -96,6 +98,8 @@ struct Finishing {
 
 /// The pinned-core hot loop. Pushes events to SharedState + optional event channel.
 pub struct HotLoop {
+    attached_quote_orders: Vec<attached_quotes::WaitingFamily>,
+    attached_quote_lookups: Vec<attached_quotes::QuoteLookup>,
     shared: Arc<SharedState>,
     event_tx: Option<EventSink>,
     pub(crate) context: Context,
@@ -467,6 +471,8 @@ impl HotLoop {
 
     pub fn new(shared: Arc<SharedState>, event_tx: Option<EventSink>, core_id: Option<usize>) -> Self {
         Self {
+            attached_quote_orders: Vec::new(),
+            attached_quote_lookups: Vec::new(),
             shared,
             event_tx,
             context: Context::new(),
@@ -552,6 +558,7 @@ impl HotLoop {
     /// Process pending control commands once. For testing.
     pub fn poll_once(&mut self) {
         self.poll_control_commands();
+        self.poll_attached_quotes(Instant::now());
     }
 
     /// Whether the hot loop is still running. For testing.
@@ -666,7 +673,10 @@ impl HotLoop {
         // accepted: a withdrawal drained in the same pass found the slot
         // unheld, gave it back, and the order went out on whichever contract
         // took it next.
-        if self.context.pending_orders.holds(instrument) {
+        if self.context.pending_orders.holds(instrument)
+            || self.attached_quote_orders.iter().any(|family| family.instrument == instrument
+                || family.orders.iter().any(|order| order.instrument() == Some(instrument)))
+        {
             return;
         }
         // Market data was missing from this list. Cancelling tick-by-tick or
@@ -899,6 +909,7 @@ impl HotLoop {
 
             // 4. Check control_plane_rx (SPSC) for commands
             self.poll_control_commands();
+            self.poll_attached_quotes(Instant::now());
 
             // After the commands, not before them. A request a caller has sent
             // is only in the buffer once the drain above has taken it in, so a
@@ -1409,7 +1420,7 @@ impl HotLoop {
                         }
                 }
                 ControlCommand::Order(req) => {
-                    self.context.pending_orders.push(req);
+                    self.queue_order_during_quote_wait(req);
                 }
                 // Taken by the order intake above.
                 ControlCommand::Place(_)
@@ -2086,6 +2097,7 @@ impl HotLoop {
     /// Stop the loop: what a `Shutdown` does, once any finishing phase is
     /// over.
     fn stop(&mut self) {
+        self.stop_attached_quotes();
         // Read here, so a worker sees it while the rest of this
         // withdraws what the session holds — a subscription
         // apiece, and an account that carries many. Raised only
@@ -2223,7 +2235,7 @@ impl HotLoop {
         // recovery that would have given it one was taken back as the phase
         // began — or is held for a reconnect's settling, which ends on its own.
         let unsendable = self.ccp.disconnected || self.ccp_conn.is_none();
-        if self.intake.waiting() > 0 || (!self.context.pending_orders.is_empty() && !unsendable) {
+        if self.intake.waiting() > 0 || !self.attached_quote_orders.is_empty() || (!self.context.pending_orders.is_empty() && !unsendable) {
             return;
         }
         self.finishing = None;
@@ -2261,14 +2273,13 @@ impl HotLoop {
         }
         let held = self.ccp.pending_named.len()
             + self.ccp.resolved_named.len()
-            + self.context.pending_orders.len()
+            + self.built_order_commands_held()
             + self.ccp.queued_matching_symbols.len()
             + self.ccp.queued_option_params.len()
             + self.secdef.calendar_requests_held()
             + self.hmds.scanner_params_queued
             + self.asks.len()
             + self.intake.waiting()
-            + self.intake.kept_count()
             + self.shared.market.calculations_waiting_for_model()
             + self.held_scans.len()
             + self.ccp.completed_orders_questions_held();
@@ -2755,6 +2766,7 @@ impl HotLoop {
         // them, every other held request is withdrawn with the loop in
         // silence, and the session's last record follows.
         self.refuse_held_order_commands("the engine stopped");
+        self.stop_attached_quotes();
         self.withdraw_the_rest();
         order_builder::refuse_what_is_left(&mut self.context, &self.shared, "the engine stopped");
         self.finishing = None;

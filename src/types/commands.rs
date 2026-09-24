@@ -161,6 +161,8 @@ pub struct Calculation {
 /// order, and sends it or keeps it: none of that waits on the caller's thread.
 #[derive(Debug, Clone)]
 pub struct Placement {
+    /// The allocator also used for children whose API and venue numbers differ.
+    pub(crate) allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The number it is placed under.
     pub order_id: OrderId,
     /// The contract as the caller stated it, legs and hedge included.

@@ -409,11 +409,11 @@ def main() -> int:
     have = [len(fields), len(carried), len(unsent), len(says_so), len(echoed)]
     for pattern, want in (
         (r"\| Order fields \| ([\d,]+)\. ([\d,]+) are sent; ([\d,]+) are taken and not sent"
-         r".*?; ([\d,]+) are not carried .*?; ([\d,]+) are what", have),
+         r".*?; ([\d,]+) (?:is|are) not carried .*?; ([\d,]+) are what", have),
         (r"An order has ([\d,]+) fields\. ([\d,]+) are sent\. ([\d,]+) are taken and not sent"
-         r".*?\. ([\d,]+) are not carried .*?\. ([\d,]+) more are", have),
+         r".*?\. ([\d,]+) (?:is|are) not carried .*?\. ([\d,]+) more are", have),
         (r"\| ([\d,]+) order fields, none dropped \|", [len(fields)]),
-        (r"\*\*([\d,]+) order fields are not carried by this client\.\*\*", [len(says_so)]),
+        (r"\*\*([\d,]+) order fields? (?:is|are) not carried by this client\.\*\*", [len(says_so)]),
     ):
         for stated in published(pattern):
             if stated != want:

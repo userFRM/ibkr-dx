@@ -220,6 +220,7 @@ impl PortfolioState {
                 // nothing is not a figure.
                 info.avg_cost = 0;
                 info.market_price = 0;
+                info.market_price_stated = false;
                 info.market_value = 0;
                 info.unrealized_pnl = 0;
                 info.unrealized_stated = false;
@@ -273,6 +274,7 @@ impl PortfolioState {
         // stands: that is a fact about the day, not about the connection.
         for info in self.position_infos.lock().unwrap().values_mut() {
             info.market_price = 0;
+            info.market_price_stated = false;
             info.market_value = 0;
             info.unrealized_pnl = 0;
             info.unrealized_stated = false;
@@ -350,6 +352,7 @@ impl PortfolioState {
                 // are applied after this, by the writer that owns them.
                 if info.position == 0.0 {
                     existing.market_price = 0;
+                    existing.market_price_stated = false;
                     existing.market_value = 0;
                     existing.unrealized_pnl = 0;
                     existing.unrealized_stated = false;
@@ -386,7 +389,7 @@ impl PortfolioState {
     #[doc(hidden)] pub fn set_position_marks(&self, con_id: i64, market_price: Option<Price>, market_value: Option<Price>, unrealized_pnl: Option<Price>, realized_pnl: Option<Price>) {
         let mut map = self.position_infos.lock().unwrap();
         let entry = map.entry(con_id).or_insert_with(|| PositionInfo { con_id, ..Default::default() });
-        if let Some(v) = market_price { entry.market_price = v; }
+        if let Some(v) = market_price { entry.market_price = v; entry.market_price_stated = true; }
         if let Some(v) = market_value { entry.market_value = v; }
         if let Some(v) = unrealized_pnl { entry.unrealized_pnl = v; entry.unrealized_stated = true; }
         if let Some(v) = realized_pnl { entry.realized_pnl = v; }

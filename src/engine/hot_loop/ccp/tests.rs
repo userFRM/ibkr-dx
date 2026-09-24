@@ -4330,6 +4330,135 @@ fn an_execution_rejection_with_empty_text_stays_out_of_open_orders() {
     assert_eq!(completed[0].status, crate::types::OrderStatus::Rejected);
 }
 
+#[test]
+fn an_unstated_api_id_does_not_create_an_identity_mapping() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let frame = exec_report_frame(&[(11, "42.0"), (39, "0"), (150, "0")]);
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert_eq!(shared.orders.attached_order_metadata(42).and_then(|stated| stated.api_order_id), None);
+    let frame = exec_report_frame(&[(11, "42.0"), (39, "0"), (150, "0"), (6121, "unreadable")]);
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert_eq!(shared.orders.attached_order_metadata(42).and_then(|stated| stated.api_order_id), None);
+}
+
+#[test]
+fn a_known_wire_order_keeps_an_explicit_zero_api_id_on_acknowledgement() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let frame = exec_report_frame(&[
+        (11, "42.0"), (39, "0"), (150, "0"), (6121, "0"), (6119, "7"),
+        (6008, "756733"), (38, "1"), (54, "1"), (40, "2"), (44, "100"),
+    ]);
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert!(context.order(42).is_some());
+    assert!(context.order(0).is_none());
+    let information = shared.orders.get_order_info(42).unwrap();
+    assert_eq!(information.order.order_id, 0);
+    assert_eq!(shared.orders.attached_order_metadata(42).and_then(|stated| stated.api_order_id), Some(0));
+    assert_eq!(information.order.client_id, 7);
+    assert!(shared.orders.get_order_info(0).is_none());
+}
+
+#[test]
+fn a_known_wire_order_takes_precedence_over_a_different_api_id() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let frame = exec_report_frame(&[
+        (11, "42.0"), (39, "0"), (150, "0"), (6121, "17"),
+        (6008, "756733"), (38, "1"), (54, "1"), (40, "2"), (44, "100"),
+    ]);
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert!(context.order(42).is_some());
+    assert!(context.order(17).is_none());
+    assert_eq!(shared.orders.get_order_info(42).unwrap().order.order_id, 17);
+    assert_eq!(shared.orders.attached_order_metadata(42).and_then(|stated| stated.api_order_id), Some(17));
+}
+
+#[test]
+fn recovered_attachment_metadata_retains_unstated_fields_and_explicit_zeroes() {
+    let mut ccp = CcpState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    let first = exec_report_frame(&[
+        (11, "42.0"), (39, "0"), (150, "0"), (6121, "0"), (6119, "7"),
+        (6008, "756733"), (38, "1"), (54, "1"), (40, "2"), (44, "100"),
+        (6531, "group.2"), (6107, "10.7"), (6704, "1"), (6446, "2.5"),
+    ]);
+    ccp.handle_exec_report(&first, b"", &mut context, &shared, &None, "");
+    assert!(!context.submitted.contains_key(&42));
+    assert_eq!(shared.orders.attached_order_metadata(42), Some(crate::bridge::AttachedOrderMetadata {
+        family_key: Some("group.2".into()), parent: Some("10.7".into()),
+        use_parent_price: Some(true), profit_offset: Some(2.5),
+        api_order_id: Some(0), api_client_id: Some(7),
+    }));
+    let update = exec_report_frame(&[
+        (11, "42.1"), (39, "0"), (150, "5"), (6704, "0"), (6446, "0"),
+    ]);
+    ccp.handle_exec_report(&update, b"", &mut context, &shared, &None, "");
+    let expected = crate::bridge::AttachedOrderMetadata {
+        family_key: Some("group.2".into()), parent: Some("10.7".into()),
+        use_parent_price: Some(false), profit_offset: Some(0.0),
+        api_order_id: Some(0), api_client_id: Some(7),
+    };
+    assert_eq!(shared.orders.attached_order_metadata(42), Some(expected.clone()));
+    let sparse = exec_report_frame(&[(11, "42.1"), (39, "0"), (150, "0")]);
+    ccp.handle_exec_report(&sparse, b"", &mut context, &shared, &None, "");
+    assert_eq!(shared.orders.attached_order_metadata(42), Some(expected));
+    assert!(shared.orders.attached_order_metadata(0).is_none());
+    assert!(shared.orders.attached_order_metadata(99).is_none());
+}
+
+#[test]
+fn an_initial_advanced_rejection_allows_one_reuse_of_that_order_id() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    shared.reference.add_enabled_features(vec!["ADVREJECT".into()]);
+    let frame = exec_report_frame(&[
+        (11, "42.0"), (39, "8"), (150, "8"), (6121, "42"),
+        (8230, r#"{"rejects":[{"errorMessage":"Confirmation is required"}]}"#),
+    ]);
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert!(shared.orders.take_order_id_reuse(42));
+    assert!(!shared.orders.take_order_id_reuse(42));
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert!(!shared.orders.take_order_id_reuse(42));
+}
+
+#[test]
+fn price_cap_rejections_allow_reuse_but_other_reports_do_not() {
+    for (enabled, kind, payload, api_id, preview, expected) in [
+        (true, "PRICECAP", "", "42", "0", true),
+        (true, "LGSZ", r#"{"rejects":[{}]}"#, "42", "0", false),
+        (true, "", "", "42", "0", false),
+        (true, "", r#"{"rejects":[]}"#, "42", "0", false),
+        (true, "", "invalid", "42", "0", false),
+        (false, "PRICECAP", "", "42", "0", false),
+        (true, "PRICECAP", "", "0", "0", false),
+        (true, "PRICECAP", "", "2147483647", "0", false),
+        (true, "PRICECAP", "", "42", "1", false),
+    ] {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        if enabled { shared.reference.add_enabled_features(vec!["ADVREJECT".into()]); }
+        let frame = exec_report_frame(&[
+            (11, "42.0"), (39, "8"), (150, "8"), (6121, api_id),
+            (8229, kind), (8230, payload), (6091, preview),
+        ]);
+        ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.take_order_id_reuse(42), expected, "{enabled} {kind} {payload} {api_id} {preview}");
+    }
+}
+
+#[test]
+fn advanced_rejection_of_a_revision_does_not_allow_a_fresh_order() {
+    for (current, reported) in [("42.1", "42.1"), ("42.1", "42.0"), ("42.0", "42.1")] {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        shared.reference.add_enabled_features(vec!["ADVREJECT".into()]);
+        context.last_clord.insert(42, current.into());
+        let frame = exec_report_frame(&[
+            (11, reported), (39, "8"), (150, "8"), (6121, "42"), (8229, "PRICECAP"),
+        ]);
+        ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+        assert!(!shared.orders.take_order_id_reuse(42), "{current} {reported}");
+    }
+}
+
 /// `completed_status` carries the reject text alone, so a caller reading it
 /// cannot tell a venue refusing an order type from a malformed request when
 /// the text is generic. The reason code (tag 103) is what separates them.
@@ -6662,6 +6791,93 @@ fn lookup_sent(
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
     (String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|"), ccp)
+}
+
+#[test]
+fn preset_values_are_requested_as_a_get_with_the_set_key() {
+    use std::io::Read;
+    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+    let mut ccp = CcpState::new();
+    let mut heartbeat = HeartbeatState::new();
+    let mut conn = Some(conn);
+    ccp.send_user_message(crate::control::order_presets::values_request("OPR.3", "s=STK&tc=ABC"), &mut conn, &mut heartbeat).unwrap();
+    let mut bytes = [0; 4096];
+    let n = peer.read(&mut bytes).unwrap();
+    let fields = crate::control::contracts::tag_sequence(&bytes[..n]);
+    assert!(fields.contains(&(35, "U".into())));
+    let from = fields.iter().position(|(tag, _)| *tag == 6556).unwrap();
+    assert_eq!(&fields[from..from + 5], &[
+        (6556, "OPR.3".into()), (6040, "193".into()), (8166, "G".into()),
+        (8176, "1".into()), (8168, "s=STK&tc=ABC".into()),
+    ]);
+    assert!(!fields.iter().any(|(tag, _)| *tag == 8167));
+}
+
+#[test]
+fn an_escaped_preset_key_selects_and_correlates_from_list_through_get() {
+    use std::io::Read;
+    use std::sync::mpsc::channel;
+
+    for listed_key in ["s=STK&tc=A%20B%26C%3DD%25", "s=STK&tc=A B%26C%3DD%25"] {
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let contract = api::Contract {
+            sec_type: "STK".into(), symbol: "A B&C=D%".into(), currency: "USD".into(),
+            ..api::Contract::default()
+        };
+        let list = format!("6040=194\x018166=L\x018167=2\x018168=s=STK\x018169=a=1\x018170=1\x018168={listed_key}\x018169=a=1\x018170=1\x01");
+        ccp.handle_order_preset_answer(list.as_bytes(), &shared);
+        let expected_key = "s=STK&tc=A%20B%26C%3DD%25";
+        assert_eq!(shared.reference.order_presets()[1].0, listed_key, "the list keeps the key as listed");
+        let (send, receive) = channel();
+        std::thread::scope(|scope| {
+            let loader = scope.spawn(|| crate::client_core::attached_loading::tests::block_on(crate::client_core::attached_loading::load_attached_preset(&shared, &send, &contract, "", Instant::now() + Duration::from_secs(2))));
+            let crate::client_core::attached_loading::Request::FetchOrderPresetValues { request_key, key } = receive.recv_timeout(Duration::from_secs(2)).unwrap() else {
+                panic!("Expected a preset values request");
+            };
+            assert_eq!(key, expected_key);
+            let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+            ccp.send_user_message(crate::control::order_presets::values_request(&request_key, &key), &mut Some(conn), &mut HeartbeatState::new()).unwrap();
+            let mut bytes = [0; 4096];
+            let n = peer.read(&mut bytes).unwrap();
+            assert!(crate::control::contracts::tag_sequence(&bytes[..n]).contains(&(8168, expected_key.into())));
+            let answer = format!("6040=194\x018166=G\x016556={request_key}\x018168={expected_key}\x018169=a=1\x018170=1\x014075=1\x014083=2\x01");
+            ccp.handle_order_preset_answer(answer.as_bytes(), &shared);
+            let preset = loader.join().unwrap().unwrap();
+            assert!(preset.auto_attach_profit_taker);
+            assert_eq!(preset.profit_order_type, "2");
+            assert!(shared.reference.current_order_preset_values(expected_key).is_some());
+            assert!(receive.try_recv().is_err());
+        });
+    }
+}
+
+#[test]
+fn preset_values_do_not_replace_the_account_list() {
+    let ccp = CcpState::new();
+    let shared = SharedState::new();
+    let list = vec![("s=STK".into(), "v=1&a=1".into(), "42".into())];
+    shared.reference.set_order_presets(list.clone());
+    let message = b"35=U\x016040=194\x018166=G\x016556=OPR.3\x018168=s=STK\x018169=v=1&a=1\x014084=4077\x014085=2\x014084=4078\x014085=-1\x01";
+    ccp.handle_order_preset_answer(message, &shared);
+    assert_eq!(shared.reference.order_presets(), list);
+    ccp.handle_order_preset_answer(b"6040=194\x018166=G\x016556=OPR.4\x018168=s=STK\x0158=Not found\x01", &shared);
+    assert_eq!(shared.reference.order_presets(), list);
+}
+
+#[test]
+fn only_a_list_answer_can_clear_the_preset_list() {
+    let ccp = CcpState::new();
+    let shared = SharedState::new();
+    let list = vec![("s=STK".into(), "v=1".into(), "42".into())];
+    for operation in ["G", "S", "D", ""] {
+        shared.reference.set_order_presets(list.clone());
+        let message = format!("6040=194\x018166={operation}\x016556=OPR.4\x018167=0\x01");
+        ccp.handle_order_preset_answer(message.as_bytes(), &shared);
+        assert_eq!(shared.reference.order_presets(), list, "operation {operation}");
+    }
+    ccp.handle_order_preset_answer(b"6040=194\x018166=L\x018167=0\x01", &shared);
+    assert!(shared.reference.order_presets().is_empty());
 }
 
 /// Each public identifier rides the tags the venue reads it on: `22`/`48`,
@@ -10674,4 +10890,52 @@ fn identifier_lookups_request_uncached_smart_exchange_rules() {
         assert_eq!(sent.matches("|35=c|").count(), 1, "{sent}");
         assert!(sent.contains("|6004=BEST|"), "{smart}: {sent}");
     }
+
+}
+
+#[test]
+fn internal_definition_answers_keep_each_contracts_full_pricing_fields() {
+    let mut ccp = CcpState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    let frame = b"35=d\x01320=4026531840\x0155=AAA\x01167=CFD\x016008=41\x01207=BEST\x016031=26\x016577=CASH\x016431=LMT,STP\x0155=BBB\x01167=CS\x016008=42\x01207=NASDAQ\x016031=27\x016431=LMT,TRAIL\x016019=1\x016031=26\x016020=0\x016021=1\x016026=1\x016023=0\x016027=0.01\x016031=27\x016020=1\x016021=100\x016026=1\x016023=0\x016027=0.25\x01";
+    ccp.process_ccp_message(frame, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "");
+    let first = shared.reference.contract_definition(41, "SMART").unwrap();
+    let second = shared.reference.contract_definition(42, "NASDAQ").unwrap();
+    assert_eq!((first.market_rule_id, second.market_rule_id), (Some(26), Some(27)));
+    assert_eq!(first.under_sec_type, "CASH");
+    assert_eq!(second.order_types, ["LMT", "TRAIL"]);
+    assert!(shared.reference.market_rule(27).unwrap().negative_prices);
+    assert_eq!(shared.reference.market_rule(27).unwrap().price_magnifier, 100);
+    assert!(shared.reference.drain_contract_details().is_empty());
+}
+
+#[test]
+fn attached_combo_requests_and_answers_keep_their_control_envelope() {
+    use std::io::Read;
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    let answer = shared.reference.expect_attached_combo_confirmation("AC.10".into());
+    let (connection, mut peer) = crate::protocol::connection::Connection::for_test();
+    let mut connection = Some(connection);
+    ccp.send_user_message(crate::control::attached_combos::rules_request("SMART"),
+        &mut connection, &mut HeartbeatState::new()).unwrap();
+    let mut bytes = [0; 4096];
+    let n = peer.read(&mut bytes).unwrap();
+    let fields = crate::control::contracts::tag_sequence(&bytes[..n]);
+    for field in [(35, "U"), (6040, "153"), (8066, "1"), (6004, "IBCX")] {
+        assert!(fields.contains(&(field.0, field.1.into())));
+    }
+    let multiplier = shared.reference.expect_attached_combo_confirmation("AC.11".into());
+    ccp.handle_attached_combo_answer(b"35=U\x016040=36\x01320=AC.11\x01231=50\x01", &shared);
+    assert!(crate::control::contracts::tag_sequence(&multiplier.recv_timeout(Duration::from_secs(1)).unwrap()).contains(&(231, "50".into())));
+    ccp.handle_attached_combo_answer(b"35=U\x016040=7\x01320=other\x016085=wrong\x01", &shared);
+    assert!(answer.try_recv().is_err());
+    ccp.handle_attached_combo_answer(b"35=U\x016040=7\x01320=AC.10\x016085=1/1,2/-1\x016019=1\x016031=47\x016021=100\x016026=1\x016023=0\x016027=0.05\x01", &shared);
+    assert!(crate::control::contracts::tag_sequence(&answer.recv_timeout(Duration::from_secs(1)).unwrap()).contains(&(6085, "1/1,2/-1".into())));
+    assert_eq!(shared.reference.market_rule(47).unwrap().price_magnifier, 100);
+    ccp.handle_attached_combo_answer(b"35=U\x016040=154\x018066=1\x016004=CME\x018067=f\x018068=dnonly=o\x01", &shared);
+    let rules = shared.reference.attached_combo_rules("CME").unwrap();
+    assert_eq!(rules.allowed, "f");
+    assert_eq!(rules.dn_only, "o");
 }

@@ -110,8 +110,10 @@ A user message carries what it is for on tag 6040.
 
 | Subtype |
 | --- |
+| `7` |
 | `18` |
 | `20` |
+| `36` |
 | `42` |
 | `60` |
 | `75` |
@@ -123,6 +125,7 @@ A user message carries what it is for on tag 6040.
 | `139` |
 | `143` |
 | `152` |
+| `154` |
 | `186` |
 | `192` |
 | `194` |

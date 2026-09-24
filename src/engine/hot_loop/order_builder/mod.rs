@@ -9,6 +9,7 @@ use crate::protocol::fix;
 use crate::types::{AlgoParams, OrderCondition, OrderRequest, OrderStatus, OrderUpdate, RiskAversion, Side, qty_to_f64};
 
 use super::{HeartbeatState, format_price, format_qty, format_uint};
+use crate::client_core::attached_children::wire_number;
 
 /// Keep an outbound order frame beside the inbound ones, under the same
 /// switch, so a live reading shows what went out as well as what came back.
@@ -55,6 +56,7 @@ fn merge_statement(resting: &mut crate::types::OrderSpec, stated: crate::types::
     let keep_parent = resting.attrs.parent_id;
     let keep_outside_rth = resting.attrs.outside_rth;
     let keep_allow_pre_open = resting.attrs.allow_pre_open;
+    let keep_attached = resting.attrs.attached.take();
     // Absence is not a value on these: the caller stating nothing leaves what
     // the order already carries.
     let kept_where_unstated = [
@@ -75,6 +77,7 @@ fn merge_statement(resting: &mut crate::types::OrderSpec, stated: crate::types::
     resting.attrs.parent_id = keep_parent;
     resting.attrs.outside_rth = keep_outside_rth;
     resting.attrs.allow_pre_open = keep_allow_pre_open;
+    resting.attrs.keep_attached(keep_attached.as_deref());
     let [order_ref, algo_id, decision_maker, decision_algo, execution_trader, execution_algo] =
         kept_where_unstated;
     resting.attrs.order_ref = order_ref;
@@ -334,7 +337,7 @@ pub(crate) fn drain_and_send_orders(
                 // context mutably, then appended to each leg.
                 let identity: Vec<(u32, String)> = {
                     let mut f = Vec::new();
-                    push_contract_identity(&mut f, context, instrument);
+                    push_contract_identity(&mut f, context, instrument, None);
                     f
                 };
                 let identity: Vec<(u32, &str)> =
@@ -560,7 +563,20 @@ pub(crate) fn drain_and_send_orders(
                 if let Some(stated) = stated {
                     match context.submitted.get_mut(&order_id) {
                         Some(resting) => merge_statement(resting, *stated),
-                        None => { context.submitted.insert(order_id, stated); }
+                        None => {
+                            let mut stated = stated;
+                            if let Some(held) = shared.orders.attached_order_metadata(order_id) {
+                                stated.attrs.keep_attached(Some(&crate::types::AttachedAttrs {
+                                    family_key: held.family_key.unwrap_or_default(),
+                                    parent: held.parent.unwrap_or_default(),
+                                    use_parent_price: held.use_parent_price.unwrap_or(false),
+                                    profit_offset: held.profit_offset,
+                                    api_identity: held.api_order_id.zip(held.api_client_id),
+                                    ..Default::default()
+                                }));
+                            }
+                            context.submitted.insert(order_id, stated);
+                        }
                     }
                 }
                 let spec = context.submitted.get(&order_id).cloned();
@@ -786,9 +802,9 @@ pub(crate) fn drain_and_send_orders(
                 // guess here would change what the venue holds. Omitted
                 // instead, leaving the resting order's value in force.
                 let tif_str = std::str::from_utf8(&[tif]).unwrap_or("0").to_string();
-                let con_id_str = context
-                    .market
-                    .con_id(orig.instrument)
+                let con_id_str = spec.as_ref()
+                    .and_then(|placed| placed.attrs.attached.as_ref()?.contract_id)
+                    .or_else(|| context.market.con_id(orig.instrument))
                     .map(|c| c.to_string())
                     .unwrap_or_default();
 
@@ -940,6 +956,7 @@ pub(crate) fn drain_and_send_orders(
                         &restated,
                         orig.side,
                         exec_inst_for(&spec.kind, trail_as_t),
+                        parent_clord(context, &spec.attrs),
                     );
                     // Stated once. The lean message already names these, and the
                     // gateway reads a repeated tag as a second statement of it.
@@ -1068,8 +1085,9 @@ fn send_cancel(
     // whose quantity is not tracked omits tag 38 rather than sending `38=0`,
     // which claims a cancel of nothing.
     let qty_str = tracked.filter(|o| o.qty > 0).map(|o| format_qty(o.qty).to_string());
-    let con_id_str = tracked
-        .and_then(|o| context.market.con_id(o.instrument))
+    let con_id_str = context.submitted.get(&order_id)
+        .and_then(|placed| placed.attrs.attached.as_ref()?.contract_id)
+        .or_else(|| tracked.and_then(|o| context.market.con_id(o.instrument)))
         .filter(|c| *c != 0)
         .map(|c| c.to_string());
     // The model the order was placed against, restated here. The account
@@ -1390,6 +1408,7 @@ fn push_contract_identity(
     fields: &mut Vec<(u32, String)>,
     context: &Context,
     instrument: crate::types::InstrumentId,
+    attached_contract_id: Option<i64>,
 ) {
     // Name the contract by its id where one is known — before anything else,
     // and for every kind of contract including a stock, which has no other
@@ -1398,7 +1417,7 @@ fn push_contract_identity(
     // and leave the venue to match, which is how a description that matches
     // nothing becomes "Unknown contract" and one that matches several becomes
     // "Ambiguous".
-    if let Some(con_id) = context.market.con_id(instrument)
+    if let Some(con_id) = attached_contract_id.or_else(|| context.market.con_id(instrument))
         && con_id != 0
     {
         fields.push((6008, con_id.to_string()));
@@ -1548,7 +1567,13 @@ fn send_order_ex(
     fields.push((59, tif_str.to_string()));
     fields.push((60, now));
     fields.push((167, sec_type_str.clone()));
-    push_contract_identity(&mut fields, context, instrument);
+    let attached = attrs.attached.as_deref();
+    push_contract_identity(&mut fields, context, instrument, attached.and_then(|held| held.contract_id));
+    if attached.is_some_and(|held| held.combo.is_some()) { fields.retain(|(tag, _)| *tag != 231); }
+    if let Some((order_id, client_id)) = attached.and_then(|held| held.api_identity) {
+        fields.push((6121, order_id.to_string()));
+        fields.push((6119, client_id.to_string()));
+    }
     // Who placed the order. Every order states it, and a cancel and a market
     // data subscription already did; a new order was the one message that left
     // it out.
@@ -1578,7 +1603,8 @@ fn send_order_ex(
     // rather than defaulting to USD.
     fields.push((15, currency_for(context, shared, instrument)));
 
-    if let Some(stated) = push_order_attrs(&mut fields, attrs, &kind, side, exec_inst) {
+    let parent = parent_clord(context, attrs);
+    if let Some(stated) = push_order_attrs(&mut fields, attrs, &kind, side, exec_inst, parent) {
         for (tag, value) in fields.iter_mut() {
             if *tag == 40 {
                 *value = stated.to_string();
@@ -1636,6 +1662,7 @@ fn account_for<'a>(attrs: &'a crate::types::OrderAttrs, session: &'a str) -> &'a
 fn exec_inst_for(kind: &crate::types::OrderKind, trail_as_t: bool) -> String {
     use crate::types::OrderKind as K;
     match kind {
+        K::Attached { exec_inst, .. } => exec_inst.as_str(),
         K::TrailingStop { .. } | K::TrailPct { .. } if !trail_as_t => "a",
         K::PegMkt { .. } => "P",
         K::PegMid { .. } => "M",
@@ -1761,6 +1788,12 @@ fn restate_with(kind: &crate::types::OrderKind, price: i64, stop_price: i64) -> 
 fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
     use crate::types::OrderKind as K;
     match kind {
+        K::Attached { ord_type, exec_inst, prices } => {
+            let price = |tag| prices.iter().find(|(key, _)| *key == tag)
+                .and_then(|(_, value)| value.parse::<f64>().ok())
+                .map(crate::types::price_from_f64).unwrap_or(0);
+            (crate::types::ord_type_from_fix(ord_type, exec_inst), price(44), price(99))
+        }
         K::Market => (b'1', 0, 0),
         K::Limit { price } => (b'2', *price, 0),
         K::Stop { stop_price } => (b'3', *stop_price, *stop_price),
@@ -1815,6 +1848,10 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
     use crate::types::OrderKind as K;
     let trailing = if trail_as_t { "T" } else { "P" };
     match kind {
+        K::Attached { ord_type, prices, .. } => {
+            fields.push((40, ord_type.clone()));
+            fields.extend(prices.iter().cloned());
+        }
         K::Market => fields.push((40, "1".to_string())),
         K::Limit { price } => {
             fields.push((40, "2".to_string()));
@@ -1987,6 +2024,21 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
     }
 }
 
+/// A parent's full venue name, revision and all, as a child states it on
+/// 6107: as a report of the child stated it, else the name the venue last
+/// took the parent under, else its newest revision.
+fn parent_clord(context: &Context, attrs: &crate::types::OrderAttrs) -> Option<String> {
+    if let Some(stated) = attrs.attached.as_deref().map(|held| &held.parent).filter(|p| !p.is_empty()) {
+        return Some(stated.clone());
+    }
+    let parent = attrs.parent_id;
+    (parent > 0).then(|| {
+        context.last_clord.get(&parent).cloned().unwrap_or_else(|| {
+            format!("{parent}.{}", context.modify_versions.get(&parent).unwrap_or(&0))
+        })
+    })
+}
+
 /// Everything an order states beyond its identity, contract and price, in the
 /// tag order the reference encoder uses. A replace restates all of it, so this
 /// is shared rather than spelled out twice.
@@ -2001,6 +2053,8 @@ fn push_order_attrs(
     // reached: the pegged, relative and trailing types each contribute one,
     // and the instructions below follow it on the same field.
     exec_inst: String,
+    // The parent's full venue name, where the order has one.
+    parent: Option<String>,
 ) -> Option<&'static str> {
     use crate::types::OrderKind as K;
     // A midpoint peg stated in two parts is a type of its own, whose name
@@ -2064,10 +2118,23 @@ fn push_order_attrs(
         fields.push((583, oca_str));
         fields.push((6209, oca_type_str(attrs.oca_type).to_string()));
     }
-    if attrs.parent_id > 0 {
-        // Match parent ClOrdID format: "{order_id}.{ver}" — assume ver=0
-        // for initial submission.
-        fields.push((6107, format!("{}.0", attrs.parent_id)));
+    let attached = attrs.attached.as_deref();
+    if let Some(held) = attached {
+        if !held.family_key.is_empty() {
+            fields.push((6531, held.family_key.clone()));
+        }
+        if let Some(factor) = held.ratio_factor {
+            fields.push((6724, wire_number(factor)));
+        }
+        if held.use_parent_price {
+            fields.push((6704, "1".into()));
+            if let Some(offset) = held.profit_offset {
+                fields.push((6446, wire_number(offset)));
+            }
+        }
+    }
+    if let Some(parent) = parent {
+        fields.push((6107, parent));
     }
     if attrs.discretionary_amt > 0 {
         fields.push((9813, format_price(attrs.discretionary_amt).to_string()));
@@ -2262,6 +2329,9 @@ fn push_order_attrs(
     // position effect and short-sale slot after. The side is a flag, not the
     // letter the rest of the message uses.
     if !attrs.combo_legs.is_empty() {
+        if let Some(multiplier) = attached.and_then(|held| held.combo.as_ref()?.multiplier) {
+            fields.push((231, wire_number(multiplier)));
+        }
         fields.push((6079, format_uint(attrs.combo_legs.len() as u64).to_string()));
         for leg in &attrs.combo_legs {
             fields.push((6080, leg.con_id.to_string()));
@@ -2275,7 +2345,9 @@ fn push_order_attrs(
             fields.push((6082, if leg.is_sell { "0" } else { "1" }.to_string()));
             // Empty where the leg routes with the combination rather than on a
             // venue of its own, which is what the terminal writes for SMART.
-            fields.push((616, leg.exchange.clone()));
+            if attached.and_then(|held| held.combo.as_ref()).is_none_or(|combo| combo.include_leg_exchanges) {
+                fields.push((616, leg.exchange.clone()));
+            }
             // The position effect rides on 6087, and on every leg. Stated on
             // 654, which is where the venue counts a leg's place within the
             // short-sale group and not a position at all, the instruction was
@@ -2286,6 +2358,12 @@ fn push_order_attrs(
             // attach to each of them — nought is a stated effect there, not
             // an absence.
             fields.push((6087, leg.open_close.to_string()));
+        }
+        if let Some(combo) = attached.and_then(|held| held.combo.as_ref()) {
+            let mode = if matches!(combo.price_mode, 1 | 2) { 2 } else { combo.price_mode };
+            fields.push((6175, mode.to_string()));
+            fields.push((6134, combo.combo_type.to_string()));
+            if combo.separate_delta_neutral { fields.push((6147, "1".into())); }
         }
         // Whether the combination is a short sale at all: stated once, and as
         // the one value the venue reads on it. Written per leg and carrying
@@ -2436,14 +2514,17 @@ fn push_order_attrs(
     // order, and a caller written against the reference client sets both. A
     // repeated tag reads as a second statement of the same field, so it is
     // stated once, from the contract.
-    let hedge_con_id = attrs.delta_neutral_contract.as_deref()
+    let delta_neutral_contract = attached.and_then(|held| held.combo.as_ref())
+        .map(|combo| combo.delta_neutral_contract.as_ref())
+        .unwrap_or(attrs.delta_neutral_contract.as_deref());
+    let hedge_con_id = delta_neutral_contract
         .map(|dnc| dnc.con_id)
         .filter(|id| *id != 0)
         .or_else(|| attrs.delta_neutral.as_deref().map(|dn| dn.con_id).filter(|id| *id != 0));
     if let Some(con_id) = hedge_con_id {
         fields.push((6150, con_id.to_string()));
     }
-    if let Some(dnc) = attrs.delta_neutral_contract.as_deref() {
+    if let Some(dnc) = delta_neutral_contract {
         fields.push((6148, format!("{:.6}", dnc.delta)));
         fields.push((6149, format!("{:.6}", dnc.price)));
     }
@@ -2463,7 +2544,9 @@ fn push_order_attrs(
         if scale.price_increment > 0 {
             fields.push((6405, format_price(scale.price_increment).to_string()));
         }
-        if scale.profit_offset > 0 {
+        if scale.profit_offset > 0
+            && !attached.is_some_and(|held| held.use_parent_price && held.profit_offset.is_some())
+        {
             fields.push((6446, format_price(scale.profit_offset).to_string()));
         }
         if scale.price_adjust_value != 0 {
@@ -2955,3 +3038,5 @@ fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod attached_tests;

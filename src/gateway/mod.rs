@@ -292,6 +292,14 @@ pub struct Gateway {
     pub raw_news_providers: String,
     /// Raw per-security-type order permissions from CCP logon tag 6652.
     pub raw_order_permissions: String,
+    /// Exchange and security-type pairs excluded from combo quote destinations, tag 8342.
+    pub raw_combo_excluded_exchanges: String,
+    /// Aggregate destinations and their components, logon tag 6174.
+    pub raw_aggregate_exchanges: String,
+    /// The generic USD combination contract, logon tag 6586.
+    pub smart_combo_usd: Option<i32>,
+    /// Currency-specific combination contracts, logon tag 6611.
+    pub raw_smart_combo_currencies: Option<String>,
     /// What the venue says it has turned on for this session, as it states
     /// them at logon (tag 6542).
     ///
@@ -2343,6 +2351,10 @@ impl Gateway {
             raw_family_codes,
             raw_news_providers,
             raw_order_permissions,
+            raw_combo_excluded_exchanges,
+            raw_aggregate_exchanges,
+            smart_combo_usd,
+            raw_smart_combo_currencies,
             enabled_features,
             raw_enabled_features,
             all_non_prop_leaves_out,
@@ -2520,6 +2532,10 @@ impl Gateway {
             raw_family_codes,
             raw_news_providers,
             raw_order_permissions,
+            raw_combo_excluded_exchanges,
+            raw_aggregate_exchanges,
+            smart_combo_usd,
+            raw_smart_combo_currencies,
             enabled_features,
             raw_enabled_features,
             all_non_prop_leaves_out,
@@ -2664,6 +2680,9 @@ impl Gateway {
             log::info!("Order permissions: {}", named.join(" "));
         }
         shared.reference.set_order_permissions(perms);
+        shared.reference.set_combo_excluded_exchanges(self.raw_combo_excluded_exchanges.clone());
+        shared.reference.set_aggregate_exchanges(self.raw_aggregate_exchanges.clone());
+        shared.reference.set_smart_combo_contracts(self.smart_combo_usd.unwrap_or(0), self.raw_smart_combo_currencies.as_deref());
 
         // What an order is checked against: the login's own accounts and
         // whether it is an advisor's.

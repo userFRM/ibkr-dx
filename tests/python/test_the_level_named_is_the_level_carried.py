@@ -41,11 +41,11 @@ def test_the_level_is_the_newest_gate_carried_and_none_before_a_session():
 
 
 def test_the_levels_named_above_it_are_levels_a_gateway_has():
-    """A gateway announces nothing above 225, so a feature said to be absent
+    """A gateway announces nothing above 226, so a feature said to be absent
     at a level above that names a level there is not."""
     doc = ibkr_dx.EClient.server_version.__doc__
-    assert "(226)" not in doc, doc
-    assert "225 is the highest level a gateway announces" in " ".join(doc.split()), doc
+    assert "(227)" not in doc, doc
+    assert "226 is the highest level a gateway announces" in " ".join(doc.split()), doc
 
 
 class _Seen(_Recorder):

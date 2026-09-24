@@ -572,19 +572,13 @@ pub struct Order {
     pub professional_customer: bool,
     /// The profit-taking leg's id.
     ///
-    /// **Not carried by this client.** A gateway builds the attached order
-    /// itself, from the order preset the account holds at the venue for that
-    /// instrument. This client holds no presets, so an order naming one is
-    /// refused rather than answered the way a gateway without that preset
-    /// would answer it.
+    /// Assigned to the child created from the selected order preset. A stated
+    /// id requires the `PRESET` type; `i32::MAX` leaves the id unstated.
     pub pt_order_id: i32,
     /// The profit-taking leg's type.
     ///
-    /// **Not carried by this client.** A gateway builds the attached order
-    /// itself, from the order preset the account holds at the venue for that
-    /// instrument. This client holds no presets, so an order naming one is
-    /// refused rather than answered the way a gateway without that preset
-    /// would answer it.
+    /// `PRESET` uses the account's selected order preset and requires a child
+    /// id. An empty string leaves the selector unstated.
     pub pt_order_type: String,
     /// Whether a volatility order's price is varied.
     ///
@@ -670,19 +664,13 @@ pub struct Order {
     pub short_sale_slot: i32,
     /// The stop-loss leg's id.
     ///
-    /// **Not carried by this client.** A gateway builds the attached order
-    /// itself, from the order preset the account holds at the venue for that
-    /// instrument. This client holds no presets, so an order naming one is
-    /// refused rather than answered the way a gateway without that preset
-    /// would answer it.
+    /// Assigned to the child created from the selected order preset. A stated
+    /// id requires the `PRESET` type; `i32::MAX` leaves the id unstated.
     pub sl_order_id: i32,
     /// The stop-loss leg's type.
     ///
-    /// **Not carried by this client.** A gateway builds the attached order
-    /// itself, from the order preset the account holds at the venue for that
-    /// instrument. This client holds no presets, so an order naming one is
-    /// refused rather than answered the way a gateway without that preset
-    /// would answer it.
+    /// `PRESET` uses the account's selected order preset and requires a child
+    /// id. An empty string leaves the selector unstated.
     pub sl_order_type: String,
     /// Routing parameters for a smart-routed combination.
     ///
@@ -1084,6 +1072,12 @@ impl Order {
                 }
             };
         OrderAttrs {
+            attached: (self.scale_profit_offset != f64::MAX).then(|| {
+                Box::new(crate::types::AttachedAttrs {
+                    profit_offset: Some(self.scale_profit_offset),
+                    ..Default::default()
+                })
+            }),
             soft_dollar_tier_name: self.soft_dollar_tier_name.clone(),
             soft_dollar_tier_val: self.soft_dollar_tier_val.clone(),
             algo_id: self.algo_id.clone(),
@@ -2539,6 +2533,7 @@ mod tests {
         // field to `OrderAttrs` stops compiling here until it is accounted for
         // both in the predicate and in the list above.
         let crate::types::OrderAttrs {
+            attached: _,
             display_size: _, min_qty: _, hidden: _, outside_rth: _,
             good_after: _, good_till: _, good_till_date_ymd: _, oca_group: _, oca_group_str: _,
             oca_type: _, parent_id: _, discretionary_amt: _, sweep_to_fill: _,

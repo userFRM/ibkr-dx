@@ -408,7 +408,7 @@ impl EClient {
 
             // What was said about an order that went anyway, on its number.
             Record::OrderNotice((order_id, code, msg, op)) => {
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: order_id as i64, op }, 0, i64::from(code), &msg);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, 0, i64::from(code), &msg);
             }
             Record::Fill(fill) => self.deliver_fill(py, shared, fill)?,
             Record::OrderUpdate(update) => self.deliver_update(py, shared, update)?,
@@ -438,7 +438,7 @@ impl EClient {
             Record::ReplacementTaken(order_id) => self.core.settle_replacement(order_id),
             Record::CancelReject(reject) => {
                 let (code, msg) = self.core.retire_rejected(&reject);
-                let origin = crate::types::model::ErrorOrigin::Order { id: reject.order_id as i64, op: reject.refuses() };
+                let origin = crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
                 say_error!(self, py, shared, origin, 0, code, &msg);
             }
             Record::OrderInactive((order_id, code, msg, op)) => {
@@ -447,7 +447,7 @@ impl EClient {
                 if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
                     self.core.untrack_order(order_id);
                 }
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: order_id as i64, op }, 0, i64::from(code), &msg);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, 0, i64::from(code), &msg);
             }
             // A preview and nothing else, answered on the order itself.
             Record::WhatIf(wi) => {
@@ -465,7 +465,7 @@ impl EClient {
                 };
                 let state_py = Py::new(py, state)?.into_any();
                 call_wrapper!(self, py, shared, "open_order",
-                    (wi.order_id as i64, &contract_py, &order_py, &state_py));
+                    (self.core.api_order_id(wi.order_id), &contract_py, &order_py, &state_py));
             }
 
             // What each subscription was acknowledged with, to whoever joined
@@ -943,6 +943,7 @@ impl EClient {
                 shared, u.order_id, u.status, u.filled_qty, u.remaining_qty, u.instrument,
             );
         }
+        self.core.learn_order_identity(shared, fill.order_id);
         let (perm_id, parent_id) = self.core.perm_and_parent_stated(
             fill.order_id, rich_info.as_deref(), with_it.as_ref(),
         );
@@ -985,7 +986,7 @@ impl EClient {
             side: side_str.to_string(),
             shares: qty_to_f64(fill.qty),
             price,
-            order_id: fill.order_id as i64,
+            order_id: self.core.api_order_id(fill.order_id),
             perm_id,
             // The report's own where it names one, and the client that placed
             // the order where it names none.
@@ -1008,7 +1009,7 @@ impl EClient {
         self.core.push_execution(api_contract, api_exec, api_commission);
         // `filled` and `avgFillPrice` describe the order so far;
         // `lastFillPrice` describes this print.
-        call_wrapper!(self, py, shared, "order_status", (fill.order_id as i64, status, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
+        call_wrapper!(self, py, shared, "order_status", (self.core.api_order_id(fill.order_id), status, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
              fill.avg_price as f64 / PRICE_SCALE_F, perm_id, parent_id, price,
              i64::from(client), "", 0.0f64));
         call_wrapper!(self, py, shared, "exec_details", (req_id, &c_py, &exec_py));
@@ -1046,9 +1047,9 @@ impl EClient {
             };
             let state_py = Py::new(py, OrderState::from_api(&stated))?.into_any();
             call_wrapper!(self, py, shared, "open_order",
-                (update.order_id as i64, &contract_py, &order_py, &state_py));
+                (self.core.api_order_id(update.order_id), &contract_py, &order_py, &state_py));
         }
-        call_wrapper!(self, py, shared, "order_status", (update.order_id as i64, status, update.filled_qty,
+        call_wrapper!(self, py, shared, "order_status", (self.core.api_order_id(update.order_id), status, update.filled_qty,
              update.remaining_qty, avg, update.perm_id, parent_id, 0.0f64,
              i64::from(client), "", 0.0f64));
         self.core.update_order_status(shared, update.order_id, update.status, update.filled_qty, update.remaining_qty, update.instrument);
@@ -1198,9 +1199,9 @@ impl EClient {
                         ..Default::default()
                     };
                     let state_py = Py::new(py, state)?.into_any();
-                    owed!(out, py, "open_order", (*order_id as i64, &c_py, &o_py, &state_py));
+                    owed!(out, py, "open_order", (self.core.api_order_id(*order_id), &c_py, &o_py, &state_py));
                     owed!(out, py, "order_status",
-                        (*order_id as i64, tracked.status.as_str(), tracked.filled, tracked.remaining,
+                        (self.core.api_order_id(*order_id), tracked.status.as_str(), tracked.filled, tracked.remaining,
                          // What the venue said the fills went at.
                          tracked.avg_fill_price, tracked.order.perm_id, tracked.order.parent_id,
                          tracked.last_fill_price,

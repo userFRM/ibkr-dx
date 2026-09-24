@@ -57,6 +57,10 @@ pub(super) struct LogonAck {
     pub raw_family_codes: String,
     pub raw_news_providers: String,
     pub raw_order_permissions: String,
+    pub raw_combo_excluded_exchanges: String,
+    pub raw_aggregate_exchanges: String,
+    pub smart_combo_usd: Option<i32>,
+    pub raw_smart_combo_currencies: Option<String>,
     pub enabled_features: String,
     pub raw_enabled_features: String,
     /// Whether the logon names accounts `AllNonProp` leaves out, tag 8056, a
@@ -329,6 +333,10 @@ impl LogonAck {
             if let Some(v) = fields.get(&6823) { keep_first(&mut ack.raw_family_codes, v, "6823"); }
             if let Some(v) = fields.get(&6830) { keep_first(&mut ack.raw_news_providers, v, "6830"); }
             if let Some(v) = fields.get(&6652) { keep_first(&mut ack.raw_order_permissions, v, "6652"); }
+            if let Some(v) = fields.get(&8342) { keep_first(&mut ack.raw_combo_excluded_exchanges, v, "8342"); }
+            if let Some(v) = fields.get(&6174) { keep_first(&mut ack.raw_aggregate_exchanges, v, "6174"); }
+            if let Some(v) = fields.get(&6586) { ack.smart_combo_usd.get_or_insert(v.parse().unwrap_or(0)); }
+            if let Some(v) = fields.get(&6611) { ack.raw_smart_combo_currencies.get_or_insert_with(|| v.clone()); }
             if let Some(v) = fields.get(&6542) {
                 keep_first(&mut ack.enabled_features, v, "6542");
                 log::info!("Enabled features: {v}");
@@ -456,6 +464,14 @@ impl LogonAck {
             } else if part.starts_with("6571=") && self.white_branding_id.is_empty() {
                 self.white_branding_id = part[5..].to_string();
                 log::info!("Found white branding ID from init response");
+            } else if let Some(value) = part.strip_prefix("8342=") {
+                keep_first(&mut self.raw_combo_excluded_exchanges, value, "8342");
+            } else if let Some(value) = part.strip_prefix("6174=") {
+                keep_first(&mut self.raw_aggregate_exchanges, value, "6174");
+            } else if let Some(value) = part.strip_prefix("6586=") {
+                self.smart_combo_usd.get_or_insert(value.parse().unwrap_or(0));
+            } else if let Some(value) = part.strip_prefix("6611=") {
+                self.raw_smart_combo_currencies.get_or_insert_with(|| value.to_string());
             } else if part.starts_with("6321=") && self.raw_misc_urls.is_empty() {
                 self.raw_misc_urls = part[5..].to_string();
                 log::info!("Found misc URLs from init response ({} bytes)", self.raw_misc_urls.len());
@@ -1344,6 +1360,32 @@ mod tests {
 
     fn a_minute_from_now() -> Instant {
         Instant::now() + std::time::Duration::from_secs(60)
+    }
+
+    #[test]
+    fn combination_settings_keep_the_first_logon_statement() {
+        for (tag, first, later) in [
+            (8342, "ARCA/STK,BOX/*", "OTHER/OPT"),
+            (6174, "1,SMART,STK,ARCA", "2,SMART,OPT,BOX"),
+            (6586, "17", "18"),
+            (6611, "", "EUR:9"),
+        ] {
+            let read = |ack: &LogonAck| match tag {
+                8342 => ack.raw_combo_excluded_exchanges.clone(),
+                6174 => ack.raw_aggregate_exchanges.clone(),
+                6586 => ack.smart_combo_usd.unwrap().to_string(),
+                6611 => ack.raw_smart_combo_currencies.clone().unwrap(),
+                _ => unreachable!(),
+            };
+            let mut wire = answered_with(&[&[(35, "A"), (tag, first)]]);
+            let mut ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
+            let init = format!("\x01{tag}={later}\x01");
+            ack.scan_init(init.as_bytes(), "someone");
+            assert_eq!(read(&ack), first, "{tag}");
+            let mut ack = LogonAck::default();
+            ack.scan_init(init.as_bytes(), "someone");
+            assert_eq!(read(&ack), later, "{tag}");
+        }
     }
 
     #[test]

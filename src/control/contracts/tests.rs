@@ -1041,6 +1041,81 @@ fn parse_market_rules_single_rule() {
 }
 
 #[test]
+fn market_classification_is_associated_by_contract_in_the_details_table() {
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x0155=XYZ\x01167=OPT\x016008=43\x016344=2\x016008=43\x016523=USOPT\x016008=42\x016523=USSTK\x01";
+    let definitions = parse_secdef_responses(data, false);
+    assert_eq!(definitions.len(), 2);
+    assert_eq!(definitions[0].market_classification, "USSTK");
+    assert_eq!(definitions[1].market_classification, "USOPT");
+}
+
+#[test]
+fn each_definition_selects_its_own_order_type_table() {
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x01207=BEST\x016430=stock\x0155=XYZ\x01167=FUT\x016008=43\x01207=NYSE\x016430=future\x016432=2\x016430=stock\x016431=LMT/1,STP/2,TRAILLMT/4\x016430=future\x016431=MKT/5,STPLMT/3,TRAIL/0\x01";
+    let definitions = parse_secdef_responses(data, false);
+    assert_eq!(definitions.len(), 2);
+    assert_eq!(definitions[0].order_type_key, "stock");
+    assert_eq!(definitions[0].order_types, ["LMT", "STP", "TRAILLMT"]);
+    assert_eq!(definitions[0].order_type_rules[2], ("TRAILLMT".into(), 4));
+    assert_eq!(definitions[1].order_type_key, "future");
+    assert_eq!(definitions[1].order_types, ["MKT", "STPLMT", "TRAIL"]);
+    assert_eq!(definitions[1].order_type_rules[1], ("STPLMT".into(), 3));
+}
+
+#[test]
+fn an_unmatched_type_key_takes_no_other_definitions_table() {
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x016430=missing\x016432=1\x016430=other\x016431=STP/1\x01";
+    let definition = super::parse_secdef_response(data, false).unwrap();
+    assert_eq!(definition.order_type_key, "missing");
+    assert!(definition.order_types.is_empty());
+    assert!(definition.order_type_rules.is_empty());
+}
+
+#[test]
+fn simulation_tokens_keep_the_first_name_and_numeric_fallback() {
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x016430=stock\x016432=1\x016430=stock\x016431=STP/4,STP/1,,TRAIL/unknown,STPLMT//2,TRAILLMT\x01";
+    let definition = super::parse_secdef_response(data, false).unwrap();
+    assert_eq!(definition.order_type_rules, [
+        ("STP".into(), 4), ("STP".into(), 1), ("TRAIL".into(), 0),
+        ("STPLMT".into(), 2), ("TRAILLMT".into(), 0),
+    ]);
+}
+
+#[test]
+fn definition_rule_association_precedes_the_shared_rule_table() {
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x01207=BEST\x016031=26\x016019=1\x016031=26\x016020=0\x016021=1\x016026=1\x016023=0\x016027=0.01\x016031=27\x016020=1\x016021=100\x016026=2\x016023=0\x016027=0.25\x016023=100\x016027=0.5\x01";
+    let definition = super::parse_secdef_response(data, false).unwrap();
+    assert_eq!(definition.market_rule_id, Some(26));
+    assert_eq!(definition.market_rule_ids, "26");
+    let rules = parse_market_rules(data);
+    assert_eq!(rules.len(), 2);
+    assert_eq!((rules[0].rule_id, rules[0].price_increments.len()), (26, 1));
+    assert!(!rules[0].negative_prices);
+    assert_eq!(rules[0].price_magnifier, 1);
+    assert_eq!((rules[1].rule_id, rules[1].price_increments.len()), (27, 2));
+    assert_eq!(rules[1].price_increments[0].increment, 0.25);
+    assert!(rules[1].negative_prices);
+    assert_eq!(rules[1].price_magnifier, 100);
+}
+
+#[test]
+fn a_rule_table_does_not_assign_an_unstated_contract_rule() {
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x016019=1\x016031=26\x016026=1\x016023=0\x016027=0.01\x01";
+    let definition = super::parse_secdef_response(data, false).unwrap();
+    assert_eq!(definition.market_rule_id, None);
+    assert!(definition.market_rule_ids.is_empty());
+    assert_eq!(parse_market_rules(data)[0].rule_id, 26);
+}
+
+#[test]
+fn the_next_definition_is_outside_the_rule_table() {
+    let data = b"35=d\x016019=1\x016031=26\x016026=1\x016023=0\x016027=0.01\x0155=ABC\x01167=CS\x016008=42\x016031=27\x01";
+    let rules = parse_market_rules(data);
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].rule_id, 26);
+}
+
+#[test]
 fn parse_market_rules_multiple_rules() {
     let msg = fix::fix_build(
         &[
@@ -1969,3 +2044,11 @@ fn a_bond_definition_states_its_maturity_and_no_expiry() {
     assert_eq!((details.maturity.as_str(), details.contract.last_trade_date_or_contract_month.as_str()), ("", "20260918"));
 }
 
+#[test]
+fn attached_combo_underlying_distinguishes_a_missing_multiplier_from_one() {
+    let missing = super::parse_secdef_response(b"35=d\x0155=ABC\x01167=CS\x016008=42\x01", false).unwrap();
+    let stated = super::parse_secdef_response(b"35=d\x0155=ABC\x01167=CS\x016008=42\x01231=1\x01", false).unwrap();
+    assert!(!missing.multiplier_stated);
+    assert!(stated.multiplier_stated);
+    assert_eq!(stated.multiplier, 1.0);
+}

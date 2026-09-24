@@ -25,6 +25,17 @@ struct Numbers {
     unknown: std::collections::HashSet<u64>,
 }
 
+/// Attachment fields stated by execution reports, including explicit zeroes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct AttachedOrderMetadata {
+    pub family_key: Option<String>,
+    pub parent: Option<String>,
+    pub use_parent_price: Option<bool>,
+    pub profit_offset: Option<f64>,
+    pub api_order_id: Option<i64>,
+    pub api_client_id: Option<i32>,
+}
+
 /// What a connection has said about the orders it already had working.
 ///
 /// One record rather than three flags. A reconnect has to put all of it back
@@ -85,6 +96,11 @@ pub struct OrderState {
     /// are indistinguishable from outside without this. Only tests keep this
     /// record; ordinary sessions have no reader that needs it.
     orders_sent: Mutex<std::collections::HashSet<u64>>,
+    reusable_order_ids: Mutex<std::collections::HashSet<u64>>,
+    attached_metadata: Mutex<HashMap<u64, AttachedOrderMetadata>>,
+    api_order_ids: Mutex<HashMap<(i32, i64), u64>>,
+    api_client_id: std::sync::atomic::AtomicI32,
+    waiting_attached_orders: Mutex<Vec<OrderRequest>>,
     /// Every finished order the venue stated an API order id for.
     ///
     /// The venue numbers an order placed through an API and does not number
@@ -196,6 +212,20 @@ pub fn say_if_past_a_request_id(order_id: u64) {
     }
 }
 
+fn waiting_family(orders: &[OrderRequest], held: &[OrderRequest]) -> Vec<OrderRequest> {
+    let mut family: Vec<_> = orders.iter().filter_map(|order| held.iter()
+        .find(|latest| latest.order_id() == order.order_id()).cloned()
+        .or_else(|| (!matches!(order, OrderRequest::SubmitEx { .. })).then(|| order.clone()))).collect();
+    for order in held {
+        if let OrderRequest::SubmitEx { attrs, .. } = order
+            && attrs.parent_id != 0
+            && family.iter().any(|parent| parent.order_id() == attrs.parent_id)
+            && !family.iter().any(|known| known.order_id() == order.order_id())
+        { family.push(order.clone()); }
+    }
+    family
+}
+
 impl OrderState {
     /// An empty one, stamping from its own counter.
     #[cfg(test)]
@@ -208,6 +238,11 @@ impl OrderState {
         Self {
             fills: Queue::with_capacity(stamps, 64),
             orders_sent: Mutex::new(std::collections::HashSet::new()),
+            reusable_order_ids: Mutex::new(std::collections::HashSet::new()),
+            attached_metadata: Mutex::new(HashMap::new()),
+            api_order_ids: Mutex::new(HashMap::new()),
+            api_client_id: std::sync::atomic::AtomicI32::new(0),
+            waiting_attached_orders: Mutex::new(Vec::new()),
             api_numbered: Mutex::new(std::collections::HashSet::new()),
             order_updates: Queue::with_capacity(stamps, 64),
             cancel_rejects: Queue::with_capacity(stamps, 16),
@@ -230,6 +265,133 @@ impl OrderState {
             order_notices: Queue::new(stamps),
             replacements_taken: Queue::with_capacity(stamps, 4),
         }
+    }
+
+    pub(crate) fn stage_waiting_attached(&self, orders: &[OrderRequest]) {
+        let mut held = self.waiting_attached_orders.lock().unwrap();
+        for order in orders {
+            if matches!(order, OrderRequest::SubmitEx { .. })
+                && !held.iter().any(|known| known.order_id() == order.order_id())
+            { held.push(order.clone()); }
+        }
+    }
+
+    pub(crate) fn is_waiting_attached(&self, order_id: u64) -> bool {
+        self.waiting_attached_orders.lock().unwrap().iter().any(|order| order.order_id() == order_id)
+    }
+
+    pub(crate) fn amend_waiting_attached(&self, change: &OrderRequest, children: &[OrderRequest]) -> bool {
+        let OrderRequest::Modify { order_id, qty, tif, spec: Some(spec), .. } = change else { return false };
+        let mut held = self.waiting_attached_orders.lock().unwrap();
+        let Some(OrderRequest::SubmitEx { kind, attrs, qty: held_qty, tif: held_tif, .. }) =
+            held.iter_mut().find(|order| order.order_id() == *order_id) else { return false };
+        let mut replacement = spec.attrs.clone();
+        replacement.parent_id = attrs.parent_id;
+        if replacement.oca_group_str.is_empty() && replacement.oca_group == 0 {
+            replacement.oca_group_str = attrs.oca_group_str.clone();
+            replacement.oca_group = attrs.oca_group;
+        }
+        if replacement.oca_type == 0 { replacement.oca_type = attrs.oca_type; }
+        replacement.attached.clone_from(&attrs.attached);
+        if attrs.attached.as_ref().is_some_and(|held| held.contract_id.is_some()) {
+            replacement.combo_legs = attrs.combo_legs.clone();
+        }
+        *kind = spec.kind.clone();
+        *attrs = replacement;
+        *held_qty = *qty;
+        if *tif != 0 { *held_tif = *tif; }
+        for child in children {
+            if !held.iter().any(|known| known.order_id() == child.order_id()) { held.push(child.clone()); }
+        }
+        true
+    }
+
+    pub(crate) fn waiting_attached_family(&self, orders: &[OrderRequest]) -> Vec<OrderRequest> {
+        waiting_family(orders, &self.waiting_attached_orders.lock().unwrap())
+    }
+
+    pub(crate) fn take_waiting_attached_family(&self, orders: &[OrderRequest]) -> Vec<OrderRequest> {
+        let mut held = self.waiting_attached_orders.lock().unwrap();
+        let family = waiting_family(orders, &held);
+        held.retain(|order| !family.iter().any(|taken| taken.order_id() == order.order_id()));
+        family
+    }
+
+    pub(crate) fn take_waiting_attached_order(&self, order_id: u64) -> Option<OrderRequest> {
+        let mut held = self.waiting_attached_orders.lock().unwrap();
+        let at = held.iter().position(|order| order.order_id() == order_id)?;
+        Some(held.remove(at))
+    }
+
+    /// A waiting member discarded before it was sent: finished as cancelled,
+    /// said with 202 and a status. Answers the status, for the event stream.
+    pub(crate) fn discard_waiting(&self, request: &OrderRequest, timestamp_ns: u64) -> Option<crate::types::OrderUpdate> {
+        let OrderRequest::SubmitEx { order_id, instrument, qty, attrs, .. } = request else { return None };
+        let update = crate::types::OrderUpdate {
+            order_id: *order_id,
+            instrument: *instrument,
+            status: crate::types::OrderStatus::Cancelled,
+            filled_qty: 0.0,
+            remaining_qty: crate::types::qty_to_f64(*qty),
+            avg_price: 0,
+            perm_id: 0,
+            parent_id: attrs.parent_id as i64,
+            timestamp_ns,
+        };
+        self.note_order_finished(*order_id, "Cancelled", "");
+        self.push_order_notice(*order_id, api::OrderOp::Cancel, 202, "Order was discarded".into());
+        self.push_order_update(update);
+        Some(update)
+    }
+
+    pub(crate) fn note_attached_order_metadata(&self, wire: u64, update: AttachedOrderMetadata) {
+        if update == AttachedOrderMetadata::default() { return; }
+        let mut all = self.attached_metadata.lock().unwrap();
+        let held = all.entry(wire).or_default();
+        if update.family_key.is_some() { held.family_key = update.family_key; }
+        if update.parent.is_some() { held.parent = update.parent; }
+        if update.use_parent_price.is_some() { held.use_parent_price = update.use_parent_price; }
+        if update.profit_offset.is_some() { held.profit_offset = update.profit_offset; }
+        if update.api_order_id.is_some() { held.api_order_id = update.api_order_id; }
+        if update.api_client_id.is_some() { held.api_client_id = update.api_client_id; }
+        if let (Some(client), Some(api)) = (held.api_client_id, held.api_order_id) {
+            self.api_order_ids.lock().unwrap().entry((client, api)).or_insert(wire);
+        }
+    }
+
+    pub(crate) fn set_api_client_id(&self, client_id: i32) {
+        self.api_client_id.store(client_id, Ordering::Release);
+    }
+
+    pub(crate) fn api_client_id(&self) -> i32 {
+        self.api_client_id.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn wire_order_id(&self, api: i64) -> Option<u64> {
+        let client = self.api_client_id();
+        let placed = self.api_order_ids.lock().unwrap().get(&(client, api)).copied();
+        placed.or_else(|| {
+            let wire = u64::try_from(api).ok().filter(|id| *id != 0)?;
+            let all = self.attached_metadata.lock().unwrap();
+            (!all.get(&wire).is_some_and(|held| held.api_order_id.is_some_and(|id| id != api)
+                || held.api_client_id.is_some_and(|id| id != client))).then_some(wire)
+        })
+    }
+
+    pub(crate) fn forget_local_api_order(&self, wire: u64) {
+        self.api_order_ids.lock().unwrap().retain(|_, value| *value != wire);
+    }
+
+    pub(crate) fn attached_order_metadata(&self, wire: u64) -> Option<AttachedOrderMetadata> {
+        self.attached_metadata.lock().unwrap().get(&wire).cloned()
+    }
+
+    pub(crate) fn allow_order_id_reuse(&self, order_id: u64) {
+        self.reusable_order_ids.lock().unwrap().insert(order_id);
+    }
+
+    pub(crate) fn take_order_id_reuse(&self, order_id: u64) -> bool {
+        self.reusable_order_ids.lock().unwrap().remove(&order_id)
     }
 
     /// Take every fills waiting, leaving none.

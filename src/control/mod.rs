@@ -11,6 +11,7 @@
 //! binaries, benchmarks and integration tests in this repository reach it.
 
 pub mod adjustments;
+pub(crate) mod aggregate_exchanges;
 pub mod calendar;
 pub mod contracts;
 pub mod dividends;
@@ -19,5 +20,8 @@ pub mod histogram;
 pub mod historical;
 pub mod news;
 pub mod option_model;
+pub mod order_presets;
+pub(crate) mod attached_presets;
+pub(crate) mod attached_combos;
 pub mod scanner;
 pub mod xml;

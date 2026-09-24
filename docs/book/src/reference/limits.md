@@ -283,10 +283,10 @@ model arrives or the call is cancelled.
 
 ## Order fields
 
-An order carries 158 fields. 123 go out under a tag. 23 are taken and not
+An order carries 158 fields. 127 go out under a tag. 23 are taken and not
 sent: a gateway reads each and sends nothing for it on the orders this client
-places, and neither does this client. 5 are not carried by this client, and
-each says so on itself rather than being quietly dropped. 6 more are what the
+places, and neither does this client. 1 is not carried by this client, and
+it says so on itself rather than being quietly dropped. 6 more are what the
 venue fills in on the way back, which an order being placed does not carry
 out.
 
@@ -312,10 +312,93 @@ does place, a gateway sends nothing for them either. The hedging leg's short
 sale is refused on an order that is itself a short sale naming a hedging
 order type, where what a gateway makes of it is not established here.
 
-The 5 not carried are the four fields that attach a profit taker or a stop
-loss, which a gateway builds from the order preset the account holds and this
-client holds none of, and a combination's routing parameters, which a gateway
-checks against the combination in ways not all established here.
+A combination's routing parameters are not carried: a gateway checks them
+against the combination in ways not all established here.
+
+### Attached orders
+
+`place_order` constructs stop-loss and profit-taking children from the selected
+account preset. Rust uses `sl_order_id` / `sl_order_type` and `pt_order_id` /
+`pt_order_type`; Python uses `slOrderId` / `slOrderType` and `ptOrderId` /
+`ptOrderType`. State a child id with `PRESET`, compared without case. The default
+integer leaves the id unstated. These are fields of `Order`; the call gains no
+argument.
+
+The engine loads the contract and preset while unrelated requests continue.
+`order_presets()` returns the list's key, attributes and last-change triples;
+it does not return the separately requested values. Answers are correlated to
+their request and selected key, and list changes invalidate older values.
+Missing answers and venue errors are distinct from disabled attachment flags.
+Smart-routing keys (`sr=`) and keys naming no selector are not selected as order
+presets. The values request rebuilds its key in `sr, s, u, tc, m2, f` order and
+escapes its values; the list retains the keys as the venue stated them.
+
+The parent goes first, then stop loss, then profit taker. Children reverse the
+parent's side and receive the applicable quantity, prices, parent link and
+sibling OCA terms. TIF, trailing and adjusted prices, scale terms, RTH flags
+and parent-trade-price offsets follow the preset and contract. A stop child
+does not retain `OPG` unchanged. A contract without OCA support can omit a
+collected multiple-child family while allowing the parent through.
+
+A family with `transmit=false` stays in the engine until a parent or child
+transmits it. It stays unsent at disconnect. A transmitting family finishes its
+waits and goes out in order before logout. Children are built once: placing an
+existing parent again changes that order, preserves changes already made to
+its children and does not reload the preset. API order ids remain the ids for
+callbacks, modification and cancellation even when venue ids differ. An API
+number equal to another order's venue number still identifies its own order;
+another client's API number does not address this client's orders. Parent
+links carry the parent's current venue revision.
+
+Initial child prices use the available order, quote and portfolio information
+with the contract's price rules. There is no extra snapshot wait to choose
+those prices. Transmission can subsequently wait for an ordinary quote or
+mark data without recalculating the children. Changes and cancellation apply
+to the held family; releasing its market-data observer leaves caller
+subscriptions active. Price and trailing units accept `0` (amount), `1`
+(ticks), `100` (percent), or the labels `amt`, `ticks`, `%`. Other numeric units
+are unavailable.
+
+Combination attachments use confirmed contracts, normalized legs and their
+price rules. Distinct combinations retain distinct quote slots. Fresh
+quantity scaling differs from replacement quantity handling: an explicit
+group-allocation total becomes an integer on creation, while a replacement
+preserves the quantity it states. Ratio factors, parent-price offsets and a
+combination's multiplier are written to two through eight decimal places.
+
+Refusals follow this order:
+
+1. Attached fields are read first. `NOAPISLPTSGL` gives 320, `Error reading
+   request: Attaching stop-loss or profit-taker is not allowed as part of a
+   single placeOrder request, please submit such orders separately.` This
+   includes an empty attached message. Otherwise a mismatched id and `PRESET`
+   gives 320, `Error reading request: Invalid value for Stop Loss order-id or
+   order-type`, with Profit Taker checked next. A non-`PRESET` type with no id
+   is not refused merely for that type.
+2. Order-field checks precede the shared contract-expiry check. An invalid
+   expiry gives 10372. Empty, `NOEXP`, a valid `yyyyMM` month or `yyyyMMdd` day
+   in years 1978–3000 are accepted.
+3. Numbers are checked parent, profit taker, stop loss. An unassigned 0,
+   `INT_MAX` or `INT_MIN` gives 10149, `Invalid order id: N`. A number no higher
+   than the last placed gives 103, `Duplicate order id: N`, unless it names an
+   existing order or an advanced rejection allowed reuse. Equal ids within
+   the family give 103, `Duplicate order id`.
+4. A requested attachment disabled in the loaded preset gives 10355,
+   `Cannot auto-attach Profit Taker. Preset is not defined.`, checking Stop
+   Loss next.
+
+The advertised level remains **217**. Attached orders are constructed, but
+level 218 also needs percentage-allocation sizing from positions by account
+and model and the applicable allocation group. The selected account's holdings
+cannot supply those quantities. Requests are not refused locally for this
+limit; callers whose child quantities depend on group or model holdings must
+supply explicitly sized parent and child orders. **226** is the highest level
+a gateway announces; `conditionsIncludeOvernight` at that level is absent.
+
+The complete preset-values answer and an entire attached family still need
+venue confirmation. Offline tests cover the readers, construction, pricing,
+identities and engine holds; they do not establish measured venue acceptance.
+
 
 Two fields a gateway sends are refused by the venue by name, and this client
 sends them the same way so the caller receives that answer: a caller's own

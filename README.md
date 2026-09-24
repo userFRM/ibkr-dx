@@ -970,14 +970,24 @@ and a few are on one side only; the
 each.
 </details>
 
+Attached stop-loss and profit-taking orders are constructed from the selected
+account preset through the existing `Order` fields. The engine loads the
+preset and holds the family until it transmits, sending parent, stop loss and
+profit taker in order. Percentage-allocation sizing from group or model
+holdings is not carried: use explicitly sized parent and child orders when
+those holdings determine their quantities. The advertised level remains 217;
+226 is the highest level a gateway announces. See
+[attached orders](https://userfrm.github.io/ibkr-dx/reference/limits.html#attached-orders)
+for fields, refusals and the remaining venue evidence.
+
 ## Testing
 
 Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,002 | No |
-| Python | 1,103 | No |
+| Rust, unit and integration | 3,257 | No |
+| Python | 1,158 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

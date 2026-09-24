@@ -262,6 +262,21 @@ pub(crate) fn untracked_fill_target(
     Some((instrument, side))
 }
 
+fn advanced_rejection_allows_id_reuse(parsed: &std::collections::HashMap<u32, String>) -> bool {
+    let api_id = parsed.get(&6121).and_then(|value| value.parse::<i32>().ok());
+    if api_id.is_none_or(|id| id == 0 || id == i32::MAX)
+        || parsed.get(&6091).and_then(|value| value.parse::<i32>().ok()).is_some_and(|kind| kind > 0)
+    {
+        return false;
+    }
+    let kind = parsed.get(&8229).map(String::as_str).unwrap_or_default();
+    if kind == "LGSZ" { return false; }
+    if kind == "PRICECAP" { return true; }
+    parsed.get(&8230).and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|value| value.get("rejects").and_then(serde_json::Value::as_array).map(|rejects| !rejects.is_empty()))
+        .unwrap_or(false)
+}
+
 /// Which revision of an order a ClOrdID names.
 ///
 /// A revision is chained on the number: `90`, then `90.1`, then `90.2`. One
@@ -1392,19 +1407,19 @@ impl CcpState {
         // originating orderId directly with `.0` suffix, tags 6119/6121
         // absent — the existing tag-11 split below already gives the right
         // value. The unwrap_or_else fallback handles both.
-        let recovery_origin_order_id: Option<u64> = if parsed.get(&150).map(|s| s.as_str()) == Some("0")
-            && parsed.get(&39).map(|s| s.as_str()) == Some("0")
-            && parsed.contains_key(&6121)
-        {
-            parsed.get(&6121).and_then(|s| stated_order_id(s))
-        } else {
-            None
-        };
-
         let wire_name = parsed.get(&11).and_then(|s| {
             let stripped = s.strip_prefix('C').or_else(|| s.strip_prefix('L')).unwrap_or(s);
             stated_order_id(stripped.split('.').next().unwrap_or(stripped))
         });
+        let recovery_origin_order_id: Option<u64> = if parsed.get(&150).map(|s| s.as_str()) == Some("0")
+            && parsed.get(&39).map(|s| s.as_str()) == Some("0")
+            && !wire_name.is_some_and(|wire| context.order(wire).is_some())
+        {
+            parsed.get(&6121).and_then(|s| stated_order_id(s)).filter(|id| *id != 0)
+        } else {
+            None
+        };
+
         // The recovery report states both names, so it is the one chance to
         // learn that they are the same order. Every later report states only
         // the permanent one.
@@ -1441,6 +1456,28 @@ impl CcpState {
             (None, None) => self.wire_name_to_order.get(&clord_id).copied().unwrap_or(clord_id),
             _ => clord_id,
         };
+
+        if shared.reference.enables("ADVREJECT")
+            && context.order(clord_id).is_some()
+            && context.last_clord.get(&clord_id).map(|name| revision_of(name)).unwrap_or(0) == 0
+            && parsed.get(&11).map(|name| revision_of(name)).unwrap_or(0) == 0
+            && !context.submitted.get(&clord_id).is_some_and(|spec| spec.attrs.what_if)
+            && advanced_rejection_allows_id_reuse(parsed)
+        {
+            shared.orders.allow_order_id_reuse(clord_id);
+        }
+
+        if let Some(key) = parsed.get(&6531) {
+            crate::client_core::attached_orders::note_family_key(key);
+        }
+        shared.orders.note_attached_order_metadata(clord_id, crate::bridge::AttachedOrderMetadata {
+            family_key: parsed.get(&6531).cloned(),
+            parent: parsed.get(&6107).cloned(),
+            use_parent_price: parsed.get(&6704).map(|value| value == "1"),
+            profit_offset: parsed.get(&6446).and_then(|value| value.parse().ok()),
+            api_order_id: parsed.get(&6121).and_then(|value| value.parse().ok()),
+            api_client_id: parsed.get(&6119).and_then(|value| value.parse().ok()),
+        });
 
         // An order placed through an API carries the number that API gave it,
         // and one typed in by hand carries none. That is the whole of what
@@ -2314,7 +2351,12 @@ impl CcpState {
                 .unwrap_or(f64::MAX);
 
             let mut order = api::Order {
-                order_id: clord_id as i64,
+                order_id: shared.orders.attached_order_metadata(clord_id)
+                    .and_then(|stated| stated.api_order_id)
+                    .unwrap_or(clord_id as i64),
+                client_id: parsed.get(&6119).and_then(|value| value.parse().ok())
+                    .or_else(|| shared.orders.get_order_info(clord_id).map(|info| info.order.client_id))
+                    .unwrap_or(0),
                 model_code: stated_model(parsed),
                 // What the venue says the order waits for. Read from the
                 // report rather than left empty, so an order read back and

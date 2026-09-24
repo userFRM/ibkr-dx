@@ -517,8 +517,8 @@ impl EClient {
     /// A placement refused at its call: a new order, or a change to one the
     /// venue is working.
     pub(crate) fn refuse_placement(&self, order_id: i64, why: &Refusal) {
-        let replacing = u64::try_from(order_id)
-            .is_ok_and(|oid| self.core.is_working_at_the_venue(oid, Some(&self.shared)));
+        let replacing = self.shared.orders.wire_order_id(order_id)
+            .is_some_and(|oid| self.core.is_working_at_the_venue(oid, Some(&self.shared)));
         let op = if replacing {
             crate::types::model::OrderOp::Modify
         } else {

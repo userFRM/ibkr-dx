@@ -248,6 +248,54 @@ fn handle_venue_error(parsed: &std::collections::HashMap<u32, String>, shared: &
 /// order already held. The revised order goes back to the caller the way any
 /// other change to it does.
 impl CcpState {
+    fn handle_attached_combo_answer(&self, message: &[u8], shared: &SharedState) {
+        let parsed = crate::control::contracts::tag_sequence(message);
+        let field = |tag| parsed.iter().find(|(key, _)| *key == tag).map(|(_, value)| value.as_str());
+        match field(6040) {
+            Some("7" | "36") => {
+                if let Some(key) = field(320) {
+                    shared.reference.answer_attached_combo_confirmation(key, message.to_vec());
+                }
+                shared.reference.push_market_rules(crate::control::contracts::parse_market_rules(message));
+            }
+            Some("154") => {
+                for (exchange, rules) in crate::control::attached_combos::rules_response(message) {
+                    shared.reference.set_attached_combo_rules(exchange, rules);
+                }
+            }
+            _ => {},
+        }
+    }
+
+    /// Send a user message (35=U) carrying `body`.
+    pub(crate) fn send_user_message(
+        &mut self,
+        body: Vec<(u32, String)>,
+        connection: &mut Option<Connection>,
+        heartbeat: &mut HeartbeatState,
+    ) -> std::io::Result<()> {
+        let connection = connection.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "the trading connection is not open")
+        })?;
+        let mut fields = vec![
+            (fix::TAG_MSG_TYPE, "U".to_string()),
+            (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+        ];
+        fields.extend(body);
+        let fields: Vec<_> = fields.iter().map(|(tag, value)| (*tag, value.as_str())).collect();
+        connection.send_fix(&fields)?;
+        heartbeat.last_ccp_sent = Instant::now();
+        Ok(())
+    }
+
+    fn handle_order_preset_answer(&self, message: &[u8], shared: &SharedState) {
+        if let Some(values) = crate::control::order_presets::parse_values(message) {
+            shared.reference.set_order_preset_values(values);
+        } else if let Some(presets) = parse_order_presets(message) {
+            shared.reference.set_order_presets(presets);
+        }
+    }
+
 fn handle_order_revision(
     &self,
     parsed: &std::collections::HashMap<u32, String>,
@@ -356,6 +404,11 @@ fn known_unread(subtype: &str) -> Option<&'static str> {
 /// beside a number the venue itself said was larger — and one carrying neither
 /// count nor pairs cleared what the account holds.
 fn parse_order_presets(msg: &[u8]) -> Option<Vec<(String, String, String)>> {
+    if !crate::control::contracts::tag_sequence(msg).iter()
+        .any(|(tag, value)| *tag == 8166 && value == "L")
+    {
+        return None;
+    }
     let mut out = Vec::new();
     let mut key: Option<String> = None;
     let mut stated: Option<usize> = None;
@@ -1343,6 +1396,7 @@ impl CcpState {
             "U" => {
                 if let Some(comm) = parsed.get(&6040) {
                     match comm.as_str() {
+                        "7" | "36" | "154" => self.handle_attached_combo_answer(msg, shared),
                         "75" => {
                             // Position + market price feed (init burst + after each
                             // fill). Not the end of the batch: the account's own
@@ -1458,34 +1512,10 @@ impl CcpState {
                         // the query went out with. An option model needs the
                         // dividend schedule this states.
                         "20" => self.handle_dividends_answer(&parsed, shared),
-                        // The order presets this account holds, which this
-                        // session asks for at logon and then threw away. The
-                        // venue keeps a set of order defaults per security
-                        // type and fills parts of an order the caller left
-                        // unstated from them, so what sets exist is a fact
-                        // about every order placed from here.
-                        //
-                        // It states the sets and their attributes rather than
-                        // the values in them: asking for those is a request of
-                        // its own, and nothing on the reference client's
-                        // surface makes it.
-                        "194" => match parse_order_presets(msg) {
-                            // Stored whether or not any came. An account that
-                            // holds none says so, and refusing to store that
-                            // left the last account's sets published for the
-                            // life of the session.
-                            Some(presets) => {
-                                log::info!(
-                                    "the account holds {} sets of order defaults",
-                                    presets.len(),
-                                );
-                                shared.reference.set_order_presets(presets);
-                            }
-                            None => log::debug!(
-                                "the order defaults did not arrive whole, so what was published \
-                                 before them stands",
-                            ),
-                        },
+                        // The operation distinguishes the preset list from
+                        // the values of one preset. Values have repeated price
+                        // fields and no list count.
+                        "194" => self.handle_order_preset_answer(msg, shared),
                         // Something the venue said that nothing here reads.
                         // Dropped in silence it is indistinguishable from the
                         // venue saying nothing, which is how an answer that had
@@ -1606,6 +1636,7 @@ impl CcpState {
                     }
                     let all = crate::control::contracts::parse_secdef_responses(msg, shared.island_for_nasdaq());
                     for def in &all {
+                        shared.reference.cache_contract_definition(def.clone());
                         if def.con_id != 0 && def.sec_type != crate::control::contracts::SecurityType::News && !def.exchange.is_empty() {
                             self.contract_rule_scopes.insert((
                                 def.con_id, crate::control::contracts::exchange_to_fix(&def.exchange).to_string(),
@@ -3074,6 +3105,18 @@ impl CcpState {
         // by counting per-exchange fan-out replies (see `pending_fanout`).
         self.details_delivered.remove(&req_id);
         self.pending_secdef.push((req_id, false, Instant::now() + unanswered_after(req_id)));
+    }
+
+    pub(crate) fn send_attached_quote_definition(
+        &mut self, req_id: u32, con_id: u32, exchange: &str,
+        connection: &mut Option<Connection>, heartbeat: &mut HeartbeatState, shared: &SharedState,
+    ) {
+        if exchange.is_empty() {
+            self.send_secdef_request(req_id, i64::from(con_id), exchange, connection, heartbeat, shared, &None);
+        } else {
+            self.send_fanout_secdef_request(&req_id.to_string(), i64::from(con_id), exchange, connection, heartbeat);
+            self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
+        }
     }
 
     /// Send a per-exchange fan-out request after a by-symbol master reply.

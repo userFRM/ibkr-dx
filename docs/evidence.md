@@ -19,9 +19,9 @@ Verification runs against a paper account on IBKR production servers, and the or
 | | |
 | --- | --- |
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
-| Order fields | 158. 123 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
+| Order fields | 158. 127 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,177 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,415 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,9 +72,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,026 | No |
+| Rust unit and integration | 3,257 | No |
 | Rust, live | 9 | Yes |
-| Python | 1,151 | No |
+| Python | 1,158 | No |
 | Python, live | 131 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -131,7 +131,7 @@ nothing.
 | --- | :---: | --- |
 | 24 order types | ✅ Supported | The check every placement passes accepts 24, each sent as itself: MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MIT, LIT, MTL, MKT PRT, STP PRT, REL, PASSV REL, PEG MKT, PEG MID, PEG BEST, PEG BENCH, MIDPX, SNAP MKT, SNAP MID, SNAP PRI and BOX TOP. Every one but PEG BEST and BOX TOP is placed against the venue by `tests/ib_paper_compat` or the Python live suites |
 | PEG BEST and BOX TOP | 🔬 Implemented | Built and checked by the order builder's offline tests, `src/engine/hot_loop/order_builder/tests.rs`; no suite here places them against the venue |
-| Order fields | ✅ Supported | An order has 158 fields. 123 are sent. 23 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 5 are not carried by this client, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
+| Order fields | ✅ Supported | An order has 158 fields. 127 are sent. 23 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 1 is not carried by this client, and it says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
 | Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn); `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |
@@ -275,11 +275,16 @@ read from here as a stream that did not arrive.
 
 These are this client's own.
 
-- **5 order fields are not carried by this client.** Four ask for an order
-  attached from the account's order preset, which the venue holds and a
-  gateway builds the attached order from; this client holds none. The fifth,
-  a combination's routing parameters, a gateway checks against the
-  combination in ways not all established here. Each is refused when stated.
+- **1 order field is not carried by this client.** Combination routing parameters: A gateway checks them
+  against the combination in ways not all established here; they are refused
+  when stated.
+- **Attached orders are constructed; percentage-allocation sizing is incomplete.**
+  The selected account preset supplies the children. Quantities depending on
+  group or model holdings require explicitly sized parent and child orders.
+  The advertised level stays 217; 226 is the highest a gateway announces.
+  Offline tests cover preset loading, construction and engine holds; a complete
+  preset-values answer and attached family still need venue confirmation.
+  See [attached orders](book/src/reference/limits.md#attached-orders).
 - **An exercise is sent without the moneyness check a gateway makes when
   `override` is false.** A gateway waits for the venue's word on where the
   option stands and refuses an exercise out of the money or a lapse in it.

@@ -5,6 +5,15 @@
 //! intermediate structs. Language-specific EClient adapters convert these into their
 //! respective callback formats (Rust `Wrapper` trait calls or PyO3 `call_method`).
 
+pub(crate) mod attached_checks;
+pub(crate) mod attached_orders;
+pub(crate) mod attached_loading;
+pub(crate) mod attached_prices;
+pub(crate) mod attached_quote_contract;
+pub(crate) mod attached_children;
+pub(crate) mod attached_combos;
+pub(crate) mod attached_combo_rules;
+
 // The order-status vocabulary moved to the types it describes. Public here
 // because that is the path a program written against this client already
 // names, and used here for the same reason it was written.
@@ -1309,6 +1318,7 @@ pub struct ClientCore {
     /// it is still working one, so a caller retrying after a fill was given a
     /// second live order instead of a refusal.
     pub spent_order_ids: Mutex<HashSet<u64>>,
+    attached_orders: Mutex<attached_orders::AttachedState>,
 
     // Market data type callback tracking
     /// Which feed subscriptions default to.
@@ -1545,6 +1555,7 @@ impl ClientCore {
             executions: Mutex::new(ExecutionStore::default()),
             open_orders: Mutex::new(HashMap::new()),
             spent_order_ids: Mutex::new(HashSet::new()),
+            attached_orders: Mutex::new(attached_orders::AttachedState::default()),
             depth_reqs: std::sync::Arc::new(Mutex::new(HashSet::new())),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashMap::new()),
@@ -1627,6 +1638,7 @@ impl ClientCore {
         // A new session draws its numbers from the venue again, so what the
         // last one spent says nothing about this one.
         self.spent_order_ids.lock().unwrap().clear();
+        self.attached_orders.lock().unwrap().reset();
         self.depth_reqs.lock().unwrap().clear();
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
@@ -2904,7 +2916,12 @@ impl ClientCore {
     /// on either surface: a caller that asks is answered, and one that did
     /// not hears nothing.
     pub fn record_restated_executions(&self, shared: &SharedState) {
-        for (contract, execution) in shared.orders.drain_restated_executions() {
+        for (contract, mut execution) in shared.orders.drain_restated_executions() {
+            if execution.order_id >= 0 {
+                let wire = execution.order_id as u64;
+                self.learn_order_identity(shared, wire);
+                execution.order_id = self.api_order_id(wire);
+            }
             // Unsolicited, as a live fill is stored, and costed the same way:
             // what it cost arrives on a record of its own, if it arrives.
             self.push_execution(contract, execution, ApiCommissionAndFeesReport::default());
@@ -3017,10 +3034,11 @@ impl ClientCore {
     /// this client placed its own record is the only source. An order placed
     /// elsewhere keeps whatever the engine reports.
     pub(crate) fn tracked_parent_id(&self, order_id: u64) -> Option<i64> {
-        self.open_orders.lock().unwrap()
+        let parent = self.open_orders.lock().unwrap()
             .get(&order_id)
             .map(|t| t.order.parent_id)
-            .filter(|p| *p > 0)
+            .filter(|p| *p > 0);
+        parent.map(|wire| self.api_order_id(wire as u64))
     }
 
     /// Check if an order with this ID is currently tracked (for modify detection).
@@ -3097,7 +3115,12 @@ impl ClientCore {
 
     /// The order a tracked id was submitted with, if it is tracked.
     pub fn tracked_order(&self, order_id: u64) -> Option<ApiOrder> {
-        self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
+        let order = self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone());
+        order.map(|mut order| {
+            order.order_id = self.api_order_id(order_id);
+            if order.parent_id > 0 { order.parent_id = self.api_order_id(order.parent_id as u64); }
+            order
+        })
     }
 
     /// The price a replace names, read from the field the shape's own submit
@@ -3219,6 +3242,7 @@ impl ClientCore {
         &self, venue: Option<&SharedState>, order_id: u64, contract: ApiContract,
         mut order: ApiOrder, instrument: InstrumentId,
     ) {
+        order.parent_id = self.wire_parent_id(order.parent_id);
         let mut orders = self.open_orders.lock().unwrap();
         match orders.get_mut(&order_id) {
             Some(tracked) => {
@@ -3294,6 +3318,7 @@ impl ClientCore {
         match entry {
             crate::bridge::OrderBook::Taken(taken) => {
                 let crate::bridge::TakenOrder { order_id, contract, order, instrument, restated } = *taken;
+                self.learn_order_identity(shared, order_id);
                 self.cache_contract(contract.con_id, contract.clone());
                 if restated {
                     self.restate_order(Some(shared), order_id, contract, order, instrument);
@@ -3309,7 +3334,8 @@ impl ClientCore {
     }
 
     /// Track a newly placed order.
-    pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
+    pub fn track_order(&self, order_id: u64, contract: ApiContract, mut order: ApiOrder, instrument: InstrumentId) {
+        order.parent_id = self.wire_parent_id(order.parent_id);
         self.open_orders.lock().unwrap()
             .insert(order_id, tracked_as_placed(contract, order, instrument));
     }
@@ -3498,6 +3524,7 @@ impl ClientCore {
     /// entry seeds contract and order from the same enriched
     /// cache `collect_open_orders` reads, rather than leaving them blank.
     pub fn update_order_status(&self, shared: &SharedState, order_id: u64, status: OrderStatus, filled: f64, remaining: f64, instrument: InstrumentId) {
+        self.learn_order_identity(shared, order_id);
         let mut orders = self.open_orders.lock().unwrap();
         let o = orders.entry(order_id).or_insert_with(|| {
             let (contract, order) = match shared.orders.get_order_info(order_id) {
@@ -3540,6 +3567,7 @@ impl ClientCore {
 
         // Drain shared order cache first to enrich local tracking
         let shared_orders = shared.orders.drain_open_orders();
+        for (wire, _) in &shared_orders { self.learn_order_identity(shared, *wire); }
         {
             let mut orders = self.open_orders.lock().unwrap();
             for (oid, info) in &shared_orders {
@@ -3664,6 +3692,10 @@ impl ClientCore {
             }
         }
 
+        for (wire, tracked) in &mut result {
+            tracked.order.order_id = self.api_order_id(*wire);
+            if tracked.order.parent_id > 0 { tracked.order.parent_id = self.api_order_id(tracked.order.parent_id as u64); }
+        }
         result
     }
 
@@ -5072,13 +5104,7 @@ impl ClientCore {
                 })+
             };
         }
-        const PRESET: &str = "is not carried by this client: it asks for an order \
-             attached from the account's order preset, which the venue holds and \
-             this client does not. Leave it at its default and place the attached \
-             order on its own.";
         refuse_if_stated!(
-            pt_order_id: PRESET, pt_order_type: PRESET,
-            sl_order_id: PRESET, sl_order_type: PRESET,
             smart_combo_routing_params: "is not carried by this client: a gateway \
                 sends each after checking its name and value against the \
                 combination, and those checks are not all established here. Sent \
@@ -5878,6 +5904,16 @@ impl ClientCore {
         instrument: InstrumentId,
         contract: Option<&crate::types::model::Contract>,
     ) -> Result<ControlCommand, Refusal> {
+        Self::build_order_request_with_kind(order, order_id, instrument, contract, None)
+    }
+
+    pub(crate) fn build_order_request_with_kind(
+        order: &ApiOrder,
+        order_id: u64,
+        instrument: InstrumentId,
+        contract: Option<&crate::types::model::Contract>,
+        resolved_kind: Option<OrderKind>,
+    ) -> Result<ControlCommand, Refusal> {
         let side = order.side()?;
         let qty = crate::types::qty_from_f64(order.total_quantity);
         let order_type = order.order_type_named();
@@ -5911,25 +5947,7 @@ impl ClientCore {
             )));
         }
         let leg_specs: Vec<crate::types::ComboLegSpec> =
-            contract.map(|c| c.combo_legs.as_slice()).unwrap_or(&[]).iter().map(|l| {
-            crate::types::ComboLegSpec {
-                con_id: l.con_id,
-                ratio: l.ratio.max(0) as u32,
-                is_sell: l.action.eq_ignore_ascii_case("SELL"),
-                exchange: if l.exchange.eq_ignore_ascii_case("SMART") {
-                    String::new()
-                } else {
-                    l.exchange.clone()
-                },
-                open_close: l.open_close.clamp(0, 255) as u8,
-                short_sale_slot: l.shorting_policy.clamp(0, 255) as u8,
-                designated_location: l.designated_location.clone(),
-                exempt_code: l.exempt_code,
-                // No leg's price goes out on an order this client places: see
-                // below.
-                price: None,
-            }
-        }).collect();
+            contract.map(|c| c.combo_legs.as_slice()).unwrap_or(&[]).iter().map(leg_spec).collect();
         // Prices stated for the legs, as a gateway reads them, leg by leg: a
         // priced leg is refused on any order but a limit, and an unpriced one
         // after a priced first leg. A priced first leg then refuses a limit
@@ -5994,6 +6012,10 @@ impl ClientCore {
                 ..order.attrs()
             },
         };
+
+        if let Some(kind) = resolved_kind {
+            return Ok(ControlCommand::Order(ex(kind)));
+        }
 
         // Adaptive orders (special-cased before generic algo)
         if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
@@ -6585,4 +6607,22 @@ pub fn remember_session(
         log::warn!("session not saved to {}: {e}", path.display());
     }
     session
+}
+
+fn leg_spec(leg: &crate::types::model::ComboLeg) -> crate::types::ComboLegSpec {
+    crate::types::ComboLegSpec {
+        con_id: leg.con_id,
+        ratio: leg.ratio.max(0) as u32,
+        is_sell: leg.action.eq_ignore_ascii_case("SELL"),
+        exchange: if leg.exchange.eq_ignore_ascii_case("SMART") {
+            String::new()
+        } else {
+            leg.exchange.clone()
+        },
+        open_close: leg.open_close.clamp(0, 255) as u8,
+        short_sale_slot: leg.shorting_policy.clamp(0, 255) as u8,
+        designated_location: leg.designated_location.clone(),
+        exempt_code: leg.exempt_code,
+        price: None,
+    }
 }

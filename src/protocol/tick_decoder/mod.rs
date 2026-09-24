@@ -299,6 +299,8 @@ pub struct RawTick {
     /// carries several records, each with its own layout, and a reader that
     /// took the last one it saw would read an ordinary record as a sidecar.
     pub layout: RecordLayout,
+    /// Previous field in this record, before any layout translation.
+    pub previous_type: Option<u64>,
 }
 
 /// Decode all ticks from a 35=P binary payload.
@@ -386,6 +388,7 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
             break;
         };
         let layout = RecordLayout::of(&fields);
+        let mut previous_type = None;
         for field in fields {
             ticks.push(RawTick {
                 server_tag,
@@ -393,7 +396,9 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
                 magnitude: field.magnitude,
                 decimal_shift: field.decimal_shift,
                 layout,
+                previous_type,
             });
+            previous_type = Some(field.id);
         }
     }
 }

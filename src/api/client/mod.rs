@@ -780,6 +780,7 @@ impl EClient {
         let session_token_bytes = session.token.clone();
 
         let shared = Arc::new(SharedState::new());
+        shared.orders.set_api_client_id(0);
         // Before the engine's threads exist, so nothing reads a setting that
         // can still change.
         shared.set_settings(gw_config.settings.clone());
@@ -818,6 +819,7 @@ impl EClient {
             })?;
 
         let core = ClientCore::new();
+        core.set_api_client_id(0);
         // Stated before the client is handed back, so a caller cannot place
         // anything between the session opening and the setting taking hold.
         core.set_readonly(config.readonly);
@@ -1000,16 +1002,18 @@ impl EClient {
     /// client, so the number is a statement about this client and not a
     /// reading off the venue, whose logon names no such level.
     ///
-    /// 217 is the newest gate whose feature is carried here. Above it,
-    /// attached orders (218) are refused by name — a gateway builds them from
-    /// the account's order preset, which this client does not hold — and the
-    /// configuration requests (219, 221) and the last price and size stated
-    /// to their precision (222, 224) are absent. `hedgeMaxSize` (223) is
-    /// taken and sent on a beta hedge, as a gateway sends it, and odd-lot
+    /// Attached orders (218) load the selected account preset and construct
+    /// the parent and children. Percentage allocations still need positions
+    /// by account and model and the applicable allocation-group state, so
+    /// the level remains 217. A percentage allocation cannot yet determine
+    /// the quantities of its attached children here; supply explicitly sized
+    /// parent and child orders when those quantities depend on group or model
+    /// holdings. Configuration requests (219, 221) and the last
+    /// price and size stated to their precision (222, 224) are absent.
+    /// `hedgeMaxSize` (223) is sent on a beta hedge, and odd-lot
     /// quotes (225) are served: generic tick 787 is asked for and its prices,
-    /// sizes and venues delivered. The number stays at 217 because a level
-    /// claims every one below it, and 218 is not carried. 225 is the highest
-    /// level a gateway announces.
+    /// sizes and venues delivered. `conditionsIncludeOvernight` (226) is
+    /// absent. 226 is the highest level a gateway announces.
     ///
     /// Below it, a program that believes the number is wrong about the
     /// following, and each is said on use rather than passed over:
@@ -1382,21 +1386,18 @@ mod readonly_tests {
         );
     }
 
-    /// An order is named on the wire by its number, and a cancel that names
-    /// one the venue cannot have holds nothing back: cast unchecked, -1 left
-    /// as a cancel for the largest number there is.
+    /// A cancel addresses an API number through the engine's order identities.
     #[test]
-    fn a_cancel_names_a_number_the_venue_could_have_handed_out() {
-        let (client, _rx, _shared) = crate::api::client::tests::test_client();
-        for absurd in [-1_i64, 0, i64::MIN] {
-            assert!(crate::api::client::tests::reported(&client, || client.cancel_order(absurd, "")).is_err(), "{absurd} was sent");
+    fn a_cancel_of_an_unknown_api_number_is_refused_by_the_engine() {
+        let (client, rx, shared) = crate::api::client::tests::test_client();
+        shared.orders.set_replay_done();
+        for id in [-1_i64, 0, i64::MIN] {
+            client.cancel_order(id, "");
+            assert!(shared.drain_refused().is_empty());
+            rx.pump();
+            assert!(matches!(shared.drain_refused().as_slice(), [(asked, 135, _)] if *asked == id));
         }
-        // A withdrawal names an order this client is working, or it is
-        // answered rather than sent.
-        client.core.track_order(
-            1, crate::types::model::Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }, crate::types::model::Order::default(), 0,
-        );
-        assert!(crate::api::client::tests::reported(&client, || client.cancel_order(1, "")).is_ok(), "an ordinary one still goes");
+        assert!(rx.try_recv().is_err());
     }
 
     /// A session meant only to look refuses to place, change or withdraw an

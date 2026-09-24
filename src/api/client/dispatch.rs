@@ -254,7 +254,7 @@ impl EClient {
             // What was said about an order that went anyway: a warning on its
             // number, and nothing else about it changes.
             Record::OrderNotice((order_id, code, msg, op)) => {
-                wrapper.error_from(ErrorOrigin::Order { id: order_id as i64, op }, code as i64, &msg, "");
+                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, code as i64, &msg, "");
             }
             Record::Fill(fill) => self.deliver_fill(fill, wrapper),
             Record::OrderUpdate(update) => self.deliver_update(update, wrapper),
@@ -277,7 +277,7 @@ impl EClient {
             Record::ReplacementTaken(order_id) => self.core.settle_replacement(order_id),
             Record::CancelReject(reject) => {
                 let (code, msg) = self.core.retire_rejected(&reject);
-                let origin = ErrorOrigin::Order { id: reject.order_id as i64, op: reject.refuses() };
+                let origin = ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
                 wrapper.error_from(origin, code, &msg, "");
             }
             // Why an order stopped working. The status already said Inactive;
@@ -290,7 +290,7 @@ impl EClient {
                 if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
                     self.core.untrack_order(order_id);
                 }
-                wrapper.error_from(ErrorOrigin::Order { id: order_id as i64, op }, code as i64, &msg, "");
+                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, code as i64, &msg, "");
             }
             // A preview and nothing else. The venue answers what an order
             // would cost on the order itself: it states no status for it,
@@ -308,7 +308,7 @@ impl EClient {
                 let (contract, order) = tracked
                     .map(|t| (t.contract, t.order))
                     .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
-                wrapper.open_order(wi.order_id as i64, &contract, &order, &state);
+                wrapper.open_order(self.core.api_order_id(wi.order_id), &contract, &order, &state);
             }
 
             // What a joined subscription was acknowledged with, to the request
@@ -697,6 +697,7 @@ impl EClient {
                 u.instrument,
             );
         }
+        self.core.learn_order_identity(&self.shared, fill.order_id);
         let (perm_id, parent_id) = self.core.perm_and_parent_stated(
             fill.order_id, report.as_deref(), status.as_ref(),
         );
@@ -718,7 +719,7 @@ impl EClient {
             ex.side = side_str.into();
             ex.shares = qty_to_f64(fill.qty);
             ex.price = price_f;
-            ex.order_id = fill.order_id as i64;
+            ex.order_id = self.core.api_order_id(fill.order_id);
             // The client that placed it, where the report names none. The
             // record knows which client the order went out under and the
             // venue's report may carry no client at all; taken as stated, it
@@ -738,7 +739,7 @@ impl EClient {
                 side: side_str.into(),
                 shares: qty_to_f64(fill.qty),
                 price: price_f,
-                order_id: fill.order_id as i64,
+                order_id: self.core.api_order_id(fill.order_id),
                 // The venue stated nothing about this one, so the client that
                 // placed the order is what names it. Left at nought, a request
                 // filtered by client matched none of them.
@@ -754,7 +755,7 @@ impl EClient {
         // than that it was nothing.
         self.core.push_execution(c.clone(), exec.clone(), CommissionAndFeesReport::default());
         wrapper.order_status(
-            fill.order_id as i64, status_str, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
+            self.core.api_order_id(fill.order_id), status_str, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
             avg_price_f, perm_id, parent_id, price_f, i64::from(client), "", 0.0,
         );
         // Unsolicited executions carry request id -1. A market-data
@@ -769,6 +770,7 @@ impl EClient {
     /// order's state as the report stated it, then `order_status`.
     fn deliver_update(&self, record: UpdateRecord, wrapper: &mut impl Wrapper) {
         let UpdateRecord { update, state, client_id } = record;
+        self.core.learn_order_identity(&self.shared, update.order_id);
         let status = order_status_str(update.status);
         // The engine reads no parent from the report, but this client placed
         // the order and was told. Prefer what it recorded; an order it did not
@@ -801,11 +803,11 @@ impl EClient {
                 ..state.map(|stated| stated.order_state.clone()).unwrap_or_default()
             };
             wrapper.open_order(
-                update.order_id as i64, &tracked.contract, &tracked.order, &state,
+                self.core.api_order_id(update.order_id), &tracked.contract, &tracked.order, &state,
             );
         }
         wrapper.order_status(
-            update.order_id as i64, status, update.filled_qty,
+            self.core.api_order_id(update.order_id), status, update.filled_qty,
             update.remaining_qty, avg, update.perm_id, parent_id, 0.0,
             i64::from(client), "", 0.0,
         );
@@ -926,7 +928,7 @@ impl EClient {
             Answer::OpenOrders => {
                 for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
                     let state = OrderState { status: tracked.status, ..Default::default() };
-                    wrapper.open_order(order_id as i64, &tracked.contract, &tracked.order, &state);
+                    wrapper.open_order(self.core.api_order_id(order_id), &tracked.contract, &tracked.order, &state);
                 }
                 wrapper.open_order_end();
             }

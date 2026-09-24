@@ -14,6 +14,15 @@ use crate::control::contracts::MarketRule;
 use crate::types::*;
 use crate::types::model as api;
 
+#[derive(Default)]
+struct PresetState {
+    list: Option<Vec<(String, String, String)>>,
+    generation: u64,
+    sequence: u64,
+    values: HashMap<String, (u64, crate::control::order_presets::PresetValues)>,
+    waiting: HashMap<String, (String, u64, std::sync::mpsc::SyncSender<crate::control::order_presets::PresetValues>)>,
+}
+
 /// A contract's corporate actions as the venue stated them.
 type StatedActions = (
     crate::control::adjustments::AdjustedContract,
@@ -108,6 +117,32 @@ fn split_bbo_exchange(named: &str) -> (&str, Option<u16>) {
 // more contracts' company data held at once.
 const COMPANY_DATA_HELD: usize = 4096;
 
+/// Order types allowed for each contract and exchange.
+type AttachedOrderTypes = HashMap<(u32, String), Vec<(String, i32)>>;
+
+/// The contract selected for an attached parent's indicative quote.
+#[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CachedAttachedQuote {
+    Original,
+    Proxy(api::Contract),
+    Unavailable,
+}
+
+/// What attaching orders to one combination has settled: its confirmed
+/// definition, terms, legs and price rule, and whether it may be restricted
+/// to regular hours or placed natively.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AttachedCombo {
+    pub definition: Option<ContractDefinition>,
+    pub frame: Option<crate::types::AttachedComboFrame>,
+    /// The confirmed legs and the factor their ratios were divided by.
+    pub legs: Option<(Vec<crate::types::model::ComboLeg>, f64)>,
+    pub price_rule: Option<MarketRule>,
+    pub regular_hours: Option<bool>,
+    pub native: Option<bool>,
+}
+
 /// Historical data, contract definitions, scanners, news archives, market rules,
 /// contract cache.
 pub struct ReferenceState {
@@ -198,6 +233,17 @@ pub struct ReferenceState {
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
     /// The entries above that are the venue's own definitions, not seeds.
     defined_contracts: Mutex<std::collections::HashSet<i64>>,
+    contract_definitions: Mutex<HashMap<(u32, String), ContractDefinition>>,
+    attached_order_types: Mutex<AttachedOrderTypes>,
+    combo_definitions: Mutex<HashMap<(String, String, String), ContractDefinition>>,
+    combo_excluded_exchanges: Mutex<String>,
+    aggregate_exchanges: Mutex<String>,
+    smart_combo_contracts: Mutex<HashMap<String, i32>>,
+    attached_quote_contracts: Mutex<HashMap<(u32, u8), CachedAttachedQuote>>,
+    attached_combos: Mutex<HashMap<String, AttachedCombo>>,
+    attached_combo_confirmations: Mutex<HashMap<String, std::sync::mpsc::SyncSender<Vec<u8>>>>,
+    attached_combo_rules: Mutex<HashMap<String, crate::control::attached_combos::ComboRules>>,
+    attached_combo_rules_pending: Mutex<std::collections::HashSet<String>>,
     /// Which venue each bit of a quote's exchange mask refers to, per BBO
     /// exchange and security type: every key an acknowledgement or a map has
     /// named this session, and the map the venue stated for it — `None` where
@@ -247,8 +293,8 @@ pub struct ReferenceState {
     /// Which algorithms the venue offers, by provider and security type.
     algorithms: Mutex<HashMap<String, Vec<String>>>,
     /// The order presets the account holds, by the key the venue names each
-    /// set under, with the version it is on.
-    order_presets: Mutex<Vec<(String, String, String)>>,
+    /// set under, with its attributes and last-change time.
+    order_presets: Mutex<PresetState>,
     /// What a derivative's underlying is, by the venue's id for the
     /// derivative.
     ///
@@ -317,6 +363,17 @@ impl ReferenceState {
             depth_exchanges_answers: Queue::new(stamps),
             contract_cache: Mutex::new(HashMap::new()),
             defined_contracts: Mutex::new(std::collections::HashSet::new()),
+            contract_definitions: Mutex::new(HashMap::new()),
+            attached_order_types: Mutex::new(HashMap::new()),
+            combo_definitions: Mutex::new(HashMap::new()),
+            combo_excluded_exchanges: Mutex::new(String::new()),
+            aggregate_exchanges: Mutex::new(String::new()),
+            smart_combo_contracts: Mutex::new(crate::control::aggregate_exchanges::smart_combo_ids(0, None)),
+            attached_quote_contracts: Mutex::new(HashMap::new()),
+            attached_combos: Mutex::new(HashMap::new()),
+            attached_combo_confirmations: Mutex::new(HashMap::new()),
+            attached_combo_rules: Mutex::new(HashMap::new()),
+            attached_combo_rules_pending: Mutex::new(std::collections::HashSet::new()),
             smart_component_maps: Mutex::new(HashMap::new()),
             bbo_keys: Mutex::new(HashMap::new()),
             smart_component_asks: Mutex::new(Vec::new()),
@@ -337,7 +394,7 @@ impl ReferenceState {
             executions_held_from: Mutex::new(None),
             island_granted: AtomicBool::new(false),
             algorithms: Mutex::new(HashMap::new()),
-            order_presets: Mutex::new(Vec::new()),
+            order_presets: Mutex::new(PresetState { sequence: 2, ..Default::default() }),
             under_con_ids: Mutex::new(std::collections::HashMap::new()),
             dividend_schedules: Mutex::new(std::collections::HashMap::new()),
             company_data: Mutex::new(Default::default()),
@@ -857,6 +914,152 @@ impl ReferenceState {
         self.contract_cache.lock().unwrap().get(&con_id).cloned()
     }
 
+    pub(crate) fn contract_definition(&self, con_id: u32, exchange: &str) -> Option<ContractDefinition> {
+        let exchange = crate::control::contracts::exchange_to_fix(exchange);
+        let definitions = self.contract_definitions.lock().unwrap();
+        definitions.get(&(con_id, exchange.into()))
+            .or_else(|| definitions.get(&(con_id, String::new()))).cloned()
+    }
+
+    pub(crate) fn contract_definition_exact(&self, con_id: u32, exchange: &str) -> Option<ContractDefinition> {
+        self.contract_definitions.lock().unwrap().get(&(
+            con_id, crate::control::contracts::exchange_to_fix(exchange).to_string(),
+        )).cloned()
+    }
+
+    pub(crate) fn attached_quote_contract(&self, key: (u32, u8)) -> Option<CachedAttachedQuote> {
+        self.attached_quote_contracts.lock().unwrap().get(&key).cloned()
+    }
+
+    pub(crate) fn cache_attached_quote_contract(&self, key: (u32, u8), selection: CachedAttachedQuote) {
+        self.attached_quote_contracts.lock().unwrap().insert(key, selection);
+    }
+
+    pub(crate) fn preferred_market(&self, group: i32) -> Option<String> {
+        crate::control::aggregate_exchanges::preferred_market(&self.aggregate_exchanges.lock().unwrap(), group)
+    }
+
+    pub(crate) fn supports_attached_order_type(&self, definition: &ContractDefinition, api_type: &str) -> bool {
+        let name = match api_type {
+            "STP LMT" => "STPLMT",
+            "TRAIL LIMIT" => "TRAILLMT",
+            "STP PRT" => "STPPROT",
+            name => name,
+        };
+        if definition.con_id == 0 && definition.sec_type == crate::control::contracts::SecurityType::Combo {
+            return !definition.order_type_key.is_empty() && definition.order_type_key != "NONE"
+                && definition.order_type_rules.iter().find(|(kind, _)| kind == name)
+                    .is_some_and(|(_, simulation)| *simulation != 4);
+        }
+        let exchange = crate::control::contracts::exchange_to_fix(&definition.exchange);
+        let tables = self.attached_order_types.lock().unwrap();
+        tables.get(&(definition.con_id, exchange.into()))
+            .or_else(|| tables.get(&(definition.con_id, String::new())))
+            .and_then(|types| types.iter().find(|(kind, _)| kind == name))
+            .is_some_and(|(_, simulation)| *simulation != 4)
+    }
+
+    pub(crate) fn cache_contract_definition(&self, definition: ContractDefinition) {
+        if definition.sec_type == crate::control::contracts::SecurityType::Combo {
+            self.combo_definitions.lock().unwrap().entry((
+                definition.symbol.clone(),
+                crate::control::contracts::exchange_to_fix(&definition.exchange).into(),
+                definition.currency.clone(),
+            )).or_insert_with(|| definition.clone());
+        }
+        if definition.con_id == 0 { return; }
+        let exchange = crate::control::contracts::exchange_to_fix(&definition.exchange).to_string();
+        if !definition.order_type_key.is_empty() && definition.order_type_key != "NONE" && !definition.order_type_rules.is_empty() {
+            let mut tables = self.attached_order_types.lock().unwrap();
+            tables.entry((definition.con_id, exchange.clone())).or_insert_with(|| definition.order_type_rules.clone());
+            tables.entry((definition.con_id, String::new())).or_insert_with(|| definition.order_type_rules.clone());
+        }
+        let mut definitions = self.contract_definitions.lock().unwrap();
+        definitions.insert((definition.con_id, String::new()), definition.clone());
+        definitions.insert((definition.con_id, exchange), definition);
+    }
+
+    pub(crate) fn combo_definition(&self, symbol: &str, exchange: &str, currency: &str) -> Option<ContractDefinition> {
+        self.combo_definitions.lock().unwrap().get(&(
+            symbol.into(), crate::control::contracts::exchange_to_fix(exchange).into(), currency.into(),
+        )).cloned()
+    }
+
+    pub(crate) fn combo_excluded_exchanges(&self) -> String {
+        self.combo_excluded_exchanges.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set_combo_excluded_exchanges(&self, value: String) {
+        *self.combo_excluded_exchanges.lock().unwrap() = value;
+    }
+
+    pub(crate) fn set_aggregate_exchanges(&self, value: String) {
+        *self.aggregate_exchanges.lock().unwrap() = value;
+    }
+
+    pub(crate) fn set_smart_combo_contracts(&self, usd: i32, stated: Option<&str>) {
+        *self.smart_combo_contracts.lock().unwrap() = crate::control::aggregate_exchanges::smart_combo_ids(usd, stated);
+    }
+
+    /// The generic SMART combination contract for a currency, where the
+    /// logon named one.
+    pub(crate) fn smart_combo_conid(&self, currency: &str) -> Option<i32> {
+        self.smart_combo_contracts.lock().unwrap().get(currency).copied()
+    }
+
+    pub(crate) fn carries_smart_combo_leg(&self, exchange: &str, security_type: &str) -> bool {
+        crate::control::aggregate_exchanges::carries_smart_leg(
+            &self.aggregate_exchanges.lock().unwrap(), exchange, security_type,
+        )
+    }
+
+    /// What attaching orders to a combination has settled so far, under the
+    /// combination's key.
+    pub(crate) fn attached_combo(&self, key: &str) -> Option<AttachedCombo> {
+        self.attached_combos.lock().unwrap().get(key).cloned()
+    }
+
+    /// Record something attaching orders to a combination settled.
+    pub(crate) fn update_attached_combo(&self, key: &str, update: impl FnOnce(&mut AttachedCombo)) {
+        update(self.attached_combos.lock().unwrap().entry(key.into()).or_default());
+    }
+
+    pub(crate) fn expect_attached_combo_confirmation(&self, key: String) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        self.attached_combo_confirmations.lock().unwrap().insert(key, send);
+        receive
+    }
+
+    pub(crate) fn stop_waiting_for_combo_confirmation(&self, key: &str) {
+        self.attached_combo_confirmations.lock().unwrap().remove(key);
+    }
+
+    pub(crate) fn answer_attached_combo_confirmation(&self, key: &str, answer: Vec<u8>) {
+        if let Some(waiting) = self.attached_combo_confirmations.lock().unwrap().remove(key) {
+            let _ = waiting.send(answer);
+        }
+    }
+
+    pub(crate) fn request_attached_combo_rules(&self, exchange: &str) -> bool {
+        let mut pending = self.attached_combo_rules_pending.lock().unwrap();
+        if self.attached_combo_rules(exchange).is_some() { return false; }
+        pending.insert(exchange.into())
+    }
+
+    pub(crate) fn forget_attached_combo_rule_request(&self, exchange: &str) {
+        self.attached_combo_rules_pending.lock().unwrap().remove(exchange);
+    }
+
+    pub(crate) fn attached_combo_rules(&self, exchange: &str) -> Option<crate::control::attached_combos::ComboRules> {
+        self.attached_combo_rules.lock().unwrap().get(exchange).cloned()
+    }
+
+    pub(crate) fn set_attached_combo_rules(&self, exchange: String, rules: crate::control::attached_combos::ComboRules) {
+        let mut pending = self.attached_combo_rules_pending.lock().unwrap();
+        self.attached_combo_rules.lock().unwrap().insert(exchange.clone(), rules);
+        pending.remove(&exchange);
+    }
+
     // ── Hot-loop-side writers ──
 
     #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
@@ -868,6 +1071,7 @@ impl ReferenceState {
     }
 
     #[doc(hidden)] pub fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
+        self.cache_contract_definition(def.clone());
         self.contract_details.push((req_id, def));
     }
 
@@ -995,7 +1199,9 @@ impl ReferenceState {
     #[doc(hidden)] pub fn push_market_rules(&self, rules: Vec<MarketRule>) {
         let mut lock = self.market_rules.lock().unwrap();
         for rule in rules {
-            if !lock.iter().any(|r| r.rule_id == rule.rule_id) {
+            if let Some(existing) = lock.iter_mut().find(|r| r.rule_id == rule.rule_id) {
+                *existing = rule;
+            } else {
                 lock.push(rule);
             }
         }
@@ -1362,14 +1568,60 @@ impl ReferenceState {
     ///
     /// The key is the venue's own, `s=STK` or `s=CASH&tc=EUR`. The attributes
     /// are as the venue writes them: `v=` the set's variant, `a=1` where it is
-    /// active. The values behind it are asked for separately and are not
-    /// carried here.
+    /// active. The values behind it are asked for separately, when an order
+    /// attaching from the set needs them.
     pub fn order_presets(&self) -> Vec<(String, String, String)> {
-        self.order_presets.lock().unwrap().clone()
+        self.order_presets.lock().unwrap().list.clone().unwrap_or_default()
     }
 
     #[doc(hidden)] pub fn set_order_presets(&self, presets: Vec<(String, String, String)>) {
-        *self.order_presets.lock().unwrap() = presets;
+        let mut state = self.order_presets.lock().unwrap();
+        if state.list.as_ref() != Some(&presets) {
+            state.generation = state.generation.wrapping_add(1);
+        }
+        state.list = Some(presets);
+    }
+
+    /// Keep a values answer under its key. An error remains an error in the
+    /// answer; it does not remove the account's preset list. One that answers
+    /// no request this client is waiting on is kept as out of date.
+    #[doc(hidden)] pub fn set_order_preset_values(&self, values: crate::control::order_presets::PresetValues) {
+        let mut state = self.order_presets.lock().unwrap();
+        let generation = match state.waiting.remove_entry(&values.request_key) {
+            Some((_, (key, generation, answer))) if key == values.key => {
+                let _ = answer.try_send(values.clone());
+                generation
+            }
+            Some((request, waiting)) => {
+                state.waiting.insert(request, waiting);
+                u64::MAX
+            }
+            None => u64::MAX,
+        };
+        state.values.insert(values.key.clone(), (generation, values));
+    }
+
+    pub(crate) fn order_preset_list(&self) -> Option<Vec<(String, String, String)>> {
+        self.order_presets.lock().unwrap().list.clone()
+    }
+
+    pub(crate) fn current_order_preset_values(&self, key: &str) -> Option<crate::control::order_presets::PresetValues> {
+        let state = self.order_presets.lock().unwrap();
+        state.values.get(key).filter(|(generation, _)| *generation == state.generation).map(|(_, values)| values.clone())
+    }
+
+    pub(crate) fn expect_order_preset_values(&self, key: &str) -> (String, std::sync::mpsc::Receiver<crate::control::order_presets::PresetValues>) {
+        let mut state = self.order_presets.lock().unwrap();
+        state.sequence += 1;
+        let request = format!("OPR.{}", state.sequence);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let generation = state.generation;
+        state.waiting.insert(request.clone(), (key.into(), generation, send));
+        (request, receive)
+    }
+
+    pub(crate) fn stop_waiting_for_preset_values(&self, request: &str) {
+        self.order_presets.lock().unwrap().waiting.remove(request);
     }
 
     /// What this derivative is written on, where the venue has said.
@@ -1921,4 +2173,96 @@ mod adjustments_store_tests {
         assert_eq!(state.company_data_series(cap + 1), vec![434, 548]);
         assert_eq!(state.company_data(2, 434).len(), 1, "nothing else made way for it");
     }
+}
+
+#[cfg(test)]
+mod attached_definition_tests {
+    use super::*;
+
+    #[test]
+    fn full_definitions_keep_exchange_specific_rules_and_the_default() {
+        let state = ReferenceState::new();
+        let mut definition = ContractDefinition {
+            con_id: 42, exchange: "SMART".into(), market_rule_id: Some(26),
+            min_tick: 0.25, price_magnifier: 100, under_sec_type: "CASH".into(),
+            order_types: vec!["LMT".into(), "STP".into()], ..Default::default()
+        };
+        state.cache_contract_definition(definition.clone());
+        definition.exchange = "ISLAND".into();
+        definition.market_rule_id = Some(27);
+        state.cache_contract_definition(definition);
+        let smart = state.contract_definition(42, "BEST").unwrap();
+        assert_eq!(smart.market_rule_id, Some(26));
+        assert_eq!((smart.min_tick, smart.price_magnifier), (0.25, 100));
+        assert_eq!(smart.under_sec_type, "CASH");
+        assert_eq!(smart.order_types, ["LMT", "STP"]);
+        assert_eq!(state.contract_definition(42, "NASDAQ").unwrap().market_rule_id, Some(27));
+        assert_eq!(state.contract_definition(42, "NYSE").unwrap().market_rule_id, Some(27));
+        assert!(state.contract_definition(43, "SMART").is_none());
+    }
+
+    #[test]
+    fn dispatched_definition_values_survive_draining_the_callback_queue() {
+        let state = ReferenceState::new();
+        state.push_contract_details(1, ContractDefinition {
+            con_id: 42, exchange: "SMART".into(), market_rule_id: Some(26), ..Default::default()
+        });
+        assert_eq!(state.drain_contract_details().len(), 1);
+        assert_eq!(state.contract_definition(42, "SMART").unwrap().market_rule_id, Some(26));
+        state.cache_contract_definition(ContractDefinition::default());
+        assert!(state.contract_definition(0, "").is_none());
+    }
+
+    #[test]
+    fn attached_types_use_the_associated_names_and_first_simulation_code() {
+        let state = ReferenceState::new();
+        let definition = crate::control::contracts::parse_secdef_response(
+            b"35=d\x0155=ABC\x01167=CS\x016008=42\x01207=BEST\x016430=stock\x016432=1\x016430=stock\x016431=STP/4,STP/1,STPLMT/2,TRAIL/0,TRAILLMT/3,STPPROT/5\x01", false,
+        ).unwrap();
+        state.cache_contract_definition(definition);
+        let definition = state.contract_definition(42, "SMART").unwrap();
+        assert!(!state.supports_attached_order_type(&definition, "STP"));
+        for kind in ["STP LMT", "TRAIL", "TRAIL LIMIT", "STP PRT"] {
+            assert!(state.supports_attached_order_type(&definition, kind), "{kind}");
+        }
+        assert!(!state.supports_attached_order_type(&definition, "MIT"));
+        let mut refreshed = definition.clone();
+        refreshed.order_type_rules = vec![("STP".into(), 1), ("MIT".into(), 1)];
+        state.cache_contract_definition(refreshed);
+        let refreshed = state.contract_definition(42, "SMART").unwrap();
+        assert!(!state.supports_attached_order_type(&refreshed, "STP"));
+        assert!(!state.supports_attached_order_type(&refreshed, "MIT"));
+        assert!(state.supports_attached_order_type(&refreshed, "TRAIL"));
+    }
+
+    #[test]
+    fn a_repeated_rule_id_updates_the_stated_ladder() {
+        let state = ReferenceState::new();
+        state.push_market_rules(crate::control::contracts::parse_market_rules(
+            b"6019=1\x016031=26\x016026=1\x016023=0\x016027=0.01\x01"
+        ));
+        state.push_market_rules(crate::control::contracts::parse_market_rules(
+            b"6019=1\x016031=26\x016026=1\x016023=0\x016027=0.05\x01"
+        ));
+        assert_eq!(state.market_rules().len(), 1);
+        assert_eq!(state.market_rule(26).unwrap().price_increments[0].increment, 0.05);
+    }
+    #[test]
+    fn attached_combo_definitions_without_identifiers_keep_their_type_table() {
+        let state = ReferenceState::new();
+        let definition = ContractDefinition { sec_type: crate::control::contracts::SecurityType::Combo,
+            symbol: "ABC".into(), exchange: "SMART".into(), currency: "USD".into(),
+            order_type_key: "combo".into(), order_type_rules: vec![("STP".into(), 0), ("TRAIL".into(), 4)],
+            ..Default::default()
+        };
+        state.cache_contract_definition(definition.clone());
+        let mut changed = definition;
+        changed.order_type_rules = vec![("TRAIL".into(), 0)];
+        state.cache_contract_definition(changed);
+        let definition = state.combo_definition("ABC", "SMART", "USD").unwrap();
+        assert!(state.supports_attached_order_type(&definition, "STP"));
+        assert!(!state.supports_attached_order_type(&definition, "TRAIL"));
+        assert!(!state.supports_attached_order_type(&definition, "MIT"));
+    }
+
 }

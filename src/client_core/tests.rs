@@ -2140,6 +2140,7 @@ fn a_position_pnl_is_answered_without_a_market_data_subscription() {
         currency: "USD".into(),
         multiplier: String::new(),
         market_price: (105.0 * PRICE_SCALE_F) as i64,
+        market_price_stated: true,
         market_value: (1050.0 * PRICE_SCALE_F) as i64,
         unrealized_pnl: (50.0 * PRICE_SCALE_F) as i64,
         unrealized_stated: true,
@@ -4514,6 +4515,7 @@ fn contract_expiry_accepts_the_months_dates_and_empty_values_a_gateway_takes() {
     for expiry in [
         "", "NOEXP", "noexp", "NoExP", "197801", "300012", "19780101", "30001231",
         "202602", "20260228", "20240229", "20000229", "20260430", "20260731",
+        "noExp", "202607", "20260724",
     ] {
         assert!(ClientCore::validate_contract_expiry(expiry).is_ok(), "{expiry:?}");
     }
@@ -4523,9 +4525,12 @@ fn contract_expiry_accepts_the_months_dates_and_empty_values_a_gateway_takes() {
         "202601011", "2026", "2026-09", "2026/09/01", "20260901 12:00:00",
         "20260901-12:00:00", "20260901 UTC", "202609 ", "+02609", "2026+9",
         "２０２６０９", "2026é", "202609\0", "202609\n",
+        "2026-07", "20260732", "20250229", "19771231", "30010101", "2026072",
+        "202607241", " 202607", "+20607", "２０２６０７",
     ] {
         let why = ClientCore::validate_contract_expiry(expiry).unwrap_err();
         assert_eq!(why.code, 10372, "{expiry:?}");
         assert_eq!(why.message, "lastTradeDateOrContractMonth: The date entered is invalid. The correct format is yyyyMM for a contract month or yyyyMMdd for a date. E.g.: 202607 or 20260724.");
+
     }
 }

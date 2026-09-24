@@ -456,8 +456,6 @@ impl AdaptivePriority {
     }
 }
 
-/// Optional attributes for extended order submissions.
-/// All fields default to "not set" (0/false).
 /// What an order was submitted as, kept so a replace can restate it in full.
 #[derive(Debug, Clone)]
 pub struct OrderSpec {
@@ -467,9 +465,13 @@ pub struct OrderSpec {
     pub attrs: OrderAttrs,
 }
 
+/// Optional attributes for extended order submissions, beyond kind, side and size.
+/// Fields default to their unset values.
 #[derive(Debug, Clone)]
-/// Everything a caller set on an order beyond its kind, side and size.
 pub struct OrderAttrs {
+    /// What an attached family states on its members, where the order is one.
+    #[doc(hidden)]
+    pub attached: Option<Box<AttachedAttrs>>,
     /// Show on book as this many shares (tag 111). 0 = not set (show full qty).
     pub display_size: u32,
     /// Minimum fill quantity (FIX tag 110). 0 = not set.
@@ -747,6 +749,7 @@ impl Default for OrderAttrs {
     /// exemption on every order that never asked for either.
     fn default() -> Self {
         Self {
+            attached: None,
             soft_dollar_tier_name: Default::default(),
             soft_dollar_tier_val: Default::default(),
             algo_id: Default::default(),
@@ -1110,6 +1113,16 @@ pub enum AlgoParams {
 /// variant.
 #[derive(Debug, Clone)]
 pub enum OrderKind {
+    /// Resolved prices for an order constructed from an account preset.
+    #[doc(hidden)]
+    Attached {
+        /// The venue order type.
+        ord_type: String,
+        /// The order type's execution instruction.
+        exec_inst: String,
+        /// Resolved price fields, including adjustments.
+        prices: Vec<(u32, String)>,
+    },
     /// Fill at whatever the market is.
     Market,
     /// Fill at this price or better.
@@ -1366,6 +1379,86 @@ pub struct DeltaNeutralContractSpec {
     pub price: f64,
 }
 
+/// What an attached family states on each of its members.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AttachedAttrs {
+    /// The member's API order and client (6121, 6119), where they differ
+    /// from its venue number.
+    pub api_identity: Option<(i64, i32)>,
+    /// The contract confirmed for the family (6008).
+    pub contract_id: Option<i64>,
+    /// The ratio factor a combination's legs were simplified by (6724).
+    pub ratio_factor: Option<f64>,
+    /// Resolved combination terms.
+    pub combo: Option<AttachedComboFrame>,
+    /// The family's group, member index and colour (6531).
+    pub family_key: String,
+    /// The parent's venue name as a report of this order stated it (6107),
+    /// which a replace restates. Unset, a child names its parent as the
+    /// venue last took it.
+    pub parent: String,
+    /// Price this child from the parent's trade price (6704).
+    pub use_parent_price: bool,
+    /// Its distance from the parent's trade price (6446).
+    pub profit_offset: Option<f64>,
+}
+
+impl AttachedAttrs {
+    /// Keep what `self` states and take from `held` what it leaves unstated,
+    /// as a change to an order keeps the family it belongs to.
+    pub fn fill_missing(&mut self, held: &Self) {
+        self.api_identity = self.api_identity.or(held.api_identity);
+        self.contract_id = self.contract_id.or(held.contract_id);
+        self.ratio_factor = self.ratio_factor.or(held.ratio_factor);
+        if self.combo.is_none() {
+            self.combo.clone_from(&held.combo);
+        }
+        if self.family_key.is_empty() {
+            self.family_key.clone_from(&held.family_key);
+        }
+        if self.parent.is_empty() {
+            self.parent.clone_from(&held.parent);
+        }
+        self.use_parent_price |= held.use_parent_price;
+        self.profit_offset = self.profit_offset.or(held.profit_offset);
+    }
+}
+
+impl OrderAttrs {
+    /// The attached terms, stated or not.
+    pub(crate) fn attached_mut(&mut self) -> &mut AttachedAttrs {
+        self.attached.get_or_insert_with(Default::default)
+    }
+
+    /// Take from `held` the attached terms this statement leaves unstated.
+    pub(crate) fn keep_attached(&mut self, held: Option<&AttachedAttrs>) {
+        if let Some(held) = held {
+            self.attached_mut().fill_missing(held);
+        }
+    }
+}
+
+/// Resolved contract terms carried by a combination order.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AttachedComboFrame {
+    /// Whether the combination uses aggregate market data.
+    pub market_data_generic: bool,
+    /// The combination multiplier, when stated.
+    pub multiplier: Option<f64>,
+    /// The price mode assigned to the combination.
+    pub price_mode: i32,
+    /// The combination type assigned from its legs.
+    pub combo_type: i32,
+    /// Whether the underlying remains separate from the legs.
+    pub separate_delta_neutral: bool,
+    /// Whether every leg states its destination.
+    pub include_leg_exchanges: bool,
+    /// The resolved underlying and its price terms.
+    pub delta_neutral_contract: Option<DeltaNeutralContractSpec>,
+}
+
 /// One leg of a combination, as the order states it.
 ///
 /// The wire takes the contract by id, a ratio, and a side as a flag rather than
@@ -1479,17 +1572,6 @@ pub enum OrderRequest {
         /// Everything else the caller set on it.
         attrs: OrderAttrs,
     },
-    /// Limit order for opening auction (TIF=OPG).
-    /// Algorithmic order: limit order with IB algo strategy overlay (VWAP, TWAP, etc.).
-    /// Pegged to Benchmark: pegs to a benchmark instrument's price. OrdType PB.
-    /// Companion tags: 6941=refConId, 6938=isPegDecrease, 6939=pegChangeAmt,
-    /// 6942=refChangeAmt.
-    /// Limit order for auction (TIF=AUC, tag 59=8). Participates in exchange
-    /// opening/closing auction.
-    /// Market-to-Limit for auction (TIF=AUC, tag 59=8). MTL + auction participation.
-    /// What-If order: sends a limit order with tag 6091=1 for margin/commission
-    /// preview.
-    /// The order is NOT placed — response comes back as 35=8 with margin fields.
     /// Withdraw one order.
     Cancel {
         /// The caller's number for the order.
@@ -1555,6 +1637,25 @@ pub enum OrderRequest {
 }
 
 impl OrderRequest {
+    /// Read the attributes a placement or a replace states beyond its kind.
+    pub(crate) fn attrs(&self) -> Option<&OrderAttrs> {
+        match self {
+            Self::SubmitEx { attrs, .. } => Some(attrs),
+            Self::Modify { spec: Some(spec), .. } => Some(&spec.attrs),
+            _ => None,
+        }
+    }
+
+    /// What a placement or a replace states beyond its kind, where it states
+    /// anything, for amendment.
+    pub(crate) fn attrs_mut(&mut self) -> Option<&mut OrderAttrs> {
+        match self {
+            Self::SubmitEx { attrs, .. } => Some(attrs),
+            Self::Modify { spec: Some(spec), .. } => Some(&mut spec.attrs),
+            _ => None,
+        }
+    }
+
     /// Extract the order_id from any variant. Returns 0 for CancelAll (no order_id).
     pub fn order_id(&self) -> OrderId {
         match self {
@@ -1666,6 +1767,9 @@ impl OrderBuffer {
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
+
+    /// The requests still waiting to be written.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &OrderRequest> { self.buf.iter() }
 
     /// How many requests are buffered.
     pub fn len(&self) -> usize {

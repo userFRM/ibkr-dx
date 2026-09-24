@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+mod attached_quotes;
+
 use crate::bridge::{Event, SharedState};
 use crate::protocol::datetime::chrono_free_timestamp;
 use crate::engine::context::Context;
@@ -574,6 +576,9 @@ fn deliver_series(
             else {
                 return true;
             };
+            shared.market.note_pricing_mark(instrument, (flags & 1 == 1
+                && flags & 0x0800_0000 == 0 && price != -1.0 && price != f64::MAX)
+                .then_some(price));
             // And minus one is the venue holding none, not a price of minus
             // one: taken as a price it marks the position at a negative. Nor
             // is the largest a double carries, or a number that is no number.
@@ -998,6 +1003,10 @@ pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, MdReqRecord)>,
+    pricing_present: Vec<u8>,
+    attached_mark_watches: std::collections::HashMap<InstrumentId, attached_quotes::Watch>,
+    attached_quote_watches: std::collections::HashMap<InstrumentId, attached_quotes::Watch>,
+    attached_combo_quotes: std::collections::HashMap<InstrumentId, attached_quotes::ComboQuote>,
     /// Venue numbers whose quotes this session has no contract for, each said
     /// once. A quote naming one is dropped, and dropped silently there is no
     /// way to tell a venue that stopped sending from one still sending under a
@@ -2282,6 +2291,10 @@ impl FarmState {
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
             instrument_md_reqs: Vec::new(),
+            pricing_present: Vec::new(),
+            attached_mark_watches: std::collections::HashMap::new(),
+            attached_quote_watches: std::collections::HashMap::new(),
+            attached_combo_quotes: std::collections::HashMap::new(),
             quotes_for_no_one: std::collections::HashSet::new(),
             depth_subs: Vec::new(),
             depth_rows: Vec::new(),
@@ -2545,6 +2558,21 @@ impl FarmState {
                 }
             };
 
+            let close_attributes = match (tick.layout, tick.tick_type) {
+                (tick_decoder::RecordLayout::Ordinary, 12)
+                | (tick_decoder::RecordLayout::Extremes, 23) => Some(tick.magnitude as i32),
+                _ => None,
+            };
+            let close_date = (tick.tick_type == tick_decoder::O_TS_BASE
+                && tick.previous_type != Some(13)
+                && matches!(self.asked_sec_type(instrument, context).as_str(), "BAG" | "COMB"))
+                .then_some(tick.magnitude as i32);
+            if close_attributes.is_some() || close_date.is_some() {
+                let mode = self.request_mode(instrument);
+                shared.market.note_pricing_close_metadata(instrument, mode, close_attributes, close_date);
+                continue;
+            }
+
             // A yield is stated on the numbers a price is stated on, and the
             // record says which by its layout. It is counted in ten
             // thousandths rather than in the contract's own increments — the
@@ -2738,6 +2766,21 @@ impl FarmState {
             }
 
             if applied {
+                let present = match tick_type {
+                    tick_decoder::O_BID_PRICE => crate::bridge::PRICING_BID,
+                    tick_decoder::O_ASK_PRICE => crate::bridge::PRICING_ASK,
+                    tick_decoder::O_LAST_PRICE => crate::bridge::PRICING_LAST,
+                    tick_decoder::O_CLOSE_PRICE => crate::bridge::PRICING_CLOSE,
+                    tick_decoder::O_BID_SIZE => crate::bridge::PRICING_BID_SIZE,
+                    tick_decoder::O_ASK_SIZE => crate::bridge::PRICING_ASK_SIZE,
+                    tick_decoder::O_LAST_SIZE => crate::bridge::PRICING_LAST_SIZE,
+                    tick_decoder::O_QUOTE_STATE => crate::bridge::PRICING_STATE,
+                    _ => 0,
+                };
+                if self.pricing_present.len() <= instrument as usize {
+                    self.pricing_present.resize(instrument as usize + 1, 0);
+                }
+                self.pricing_present[instrument as usize] |= present;
                 let at = (instrument >> 6) as usize;
                 if at >= notified.len() {
                     notified.resize(at + 1, 0);
@@ -2753,6 +2796,13 @@ impl FarmState {
 
         // Phase 2: Publish complete quotes after all ticks in the batch are applied.
         for &instrument in &notified_ids {
+            let mode = self.request_mode(instrument);
+            let (_, state_mask) = shared.market.quote_attribute_masks(instrument);
+            shared.market.push_pricing_quote(
+                instrument, mode, context.quote(instrument),
+                self.pricing_present[instrument as usize], state_mask,
+            );
+            self.pricing_present[instrument as usize] = 0;
             shared.market.push_quote(instrument, context.quote(instrument));
             emit(event_tx, Event::Tick(instrument));
             notified[(instrument >> 6) as usize] &= !(1u64 << (instrument & 63));
@@ -2924,6 +2974,8 @@ impl FarmState {
             }));
         if !is_a_snapshot {
             shared.market.note_subscription_accepted(instrument);
+            let mode = self.request_mode(instrument);
+            shared.market.note_pricing_subscription(instrument, mode, true);
         } else {
             // The answer arrives as a generic tick under this number, beside
             // the other series in the same message. Filed as a quote alone,
@@ -3438,6 +3490,9 @@ impl FarmState {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|tick| !already_asked.contains(tick))
+                .filter(|tick| !self.instrument_md_reqs.iter().any(|(id, record)| {
+                    *id == instrument && record.entries.iter().any(|entry| entry.request_type == *tick)
+                }))
                 .collect()
         };
         let mut extra_series: Vec<(u32, u32)> = Vec::new();
@@ -3523,6 +3578,7 @@ impl FarmState {
             self.md_resub_info.push((instrument, symbol.to_string(), exchange.to_string(), sec_type.to_string(), last_trade_date.to_string(), strike, right.to_string(), multiplier.to_string(), mode_9887));
         }
 
+        let combo_quote = self.attached_combo_quotes.get(&instrument).cloned();
         if let Some(conn) = farm_conn.as_mut() {
             let bid_ask_str = bid_ask_id.to_string();
             let last_str = last_id.to_string();
@@ -3540,11 +3596,12 @@ impl FarmState {
             // SecurityType (167) and Exchange (207), so both must describe the
             // actual contract. When con_id is 0, include the descriptive fields
             // as well so the server can resolve by description.
-            if con_id > 0 {
-                let tags = build_conid_subscribe_tags(
+            if con_id > 0 || combo_quote.is_some() {
+                let mut tags = build_conid_subscribe_tags(
                     realtime, regulatory_snapshot, bid_ask_id, last_id, con_id, exchange, sec_type,
                     mode_9887, &ts, &extra_series,
                 );
+                if let Some(combo) = &combo_quote { combo.decorate(&mut tags); }
                 let refs: Vec<(u32, &str)> =
                     tags.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
                 let _ = conn.send_fixcomp(&refs);
@@ -3567,9 +3624,10 @@ impl FarmState {
                 //
                 // Asked for under the same request as the prices, so a caller
                 // reading a halt reads it against the quote it belongs to.
-                let tags = build_trading_status_subscribe_tags(
+                let mut tags = build_trading_status_subscribe_tags(
                     status_req_id, con_id, sec_type, exchange, &ts,
                 );
+                if let Some(combo) = &combo_quote { combo.decorate(&mut tags); }
                 let refs: Vec<(u32, &str)> =
                     tags.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
                 let _ = conn.send_fixcomp(&refs);
@@ -3584,6 +3642,7 @@ impl FarmState {
                         *value = BBO_EXCHANGE_MAP_REQUEST_TYPE.to_string();
                     }
                 }
+                if let Some(combo) = &combo_quote { combo.decorate(&mut venue_map); }
                 let refs: Vec<(u32, &str)> =
                     venue_map.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
                 let _ = conn.send_fixcomp(&refs);
@@ -3687,6 +3746,14 @@ impl FarmState {
             self.stop_asking_for_series(instrument, con_id, took_it, series, issued, farm_conn, hb);
             return;
         }
+        if let Some(watch) = self.attached_mark_watches.get_mut(&instrument) {
+            watch.withdrawal = Some((con_id, took_it, series.to_vec(), issued));
+            return;
+        }
+        if let Some(watch) = self.attached_quote_watches.get_mut(&instrument) {
+            watch.withdrawal = Some((con_id, took_it, series.to_vec(), issued));
+            return;
+        }
         self.subscription_asked_on.remove(&instrument);
         let delayed = self.delayed_subscriptions.remove(&instrument);
         // The occupancy stays until the slot itself goes back: the release that
@@ -3717,6 +3784,7 @@ impl FarmState {
         // print for everything that traded in between, or for a negative
         // number of shares where the venue has started its day over.
         self.rt_volume_totals.retain(|(watched, _), _| *watched != instrument);
+        let combo_quote = self.attached_combo_quotes.remove(&instrument);
         let record = match self.instrument_md_reqs.iter()
             .position(|(id, _)| *id == instrument)
         {
@@ -3794,7 +3862,7 @@ impl FarmState {
             {
                 tags.push((9887, &mode_str));
             }
-            let _ = conn.send_fixcomp(&tags);
+            attached_quotes::send_decorated(conn, &tags, combo_quote.as_ref());
         }
         // Said, because the venue serves a limited number of these at once and
         // a withdrawal that leaves no trace cannot be told apart from one that
@@ -4148,7 +4216,8 @@ impl FarmState {
         // the floor: the call answered, the rebuild asked for the list as it
         // was, and the caller waited on a stream nobody had asked for.
         self.asked_generic_ticks.entry(instrument).or_default().extend(new_ones.iter().copied());
-        let Some(con_id) = context.market.con_id(instrument).filter(|id| *id > 0) else { return };
+        let Some(con_id) = context.market.con_id(instrument)
+            .filter(|id| *id > 0 || self.attached_combo_quotes.contains_key(&instrument)) else { return };
         // Nothing is allocated where there is no live subscription to add it
         // to. A connection that has gone takes the record with it and leaves
         // the caller's list, which the rebuild reads: numbers allocated here
@@ -4181,10 +4250,11 @@ impl FarmState {
         }
         if let Some(conn) = farm_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let tags = build_series_subscribe_tags(
+            let mut tags = build_series_subscribe_tags(
                 con_id, &exchange, &sec_type, mode_9887, &ts, &rows,
                 self.spread_scans.get(&con_id).map(String::as_str),
             );
+            if let Some(combo) = self.attached_combo_quotes.get(&instrument) { combo.decorate(&mut tags); }
             let refs: Vec<(u32, &str)> =
                 tags.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
             let _ = conn.send_fixcomp(&refs);
@@ -4196,6 +4266,14 @@ impl FarmState {
         }
     }
 
+    /// The feed mode an instrument's subscription was asked under, or nought.
+    fn request_mode(&self, instrument: InstrumentId) -> i32 {
+        self.instrument_md_reqs
+            .iter()
+            .find(|(id, _)| *id == instrument)
+            .map_or(0, |(_, request)| request.mode_9887)
+    }
+
     /// Record which request the subscription on a slot belongs to, as one
     /// number in the order of everything the client has asked for.
     ///
@@ -4203,6 +4281,9 @@ impl FarmState {
     /// that contract too, and a withdrawal decided before it asked is not
     /// about the subscription it is being served off.
     pub(crate) fn note_subscription_asked_on(&mut self, instrument: InstrumentId, issued: u64) {
+        if let Some(watch) = self.attached_quote_watches.get_mut(&instrument) {
+            watch.owned = false;
+        }
         let held = self.subscription_asked_on.entry(instrument).or_insert(issued);
         *held = (*held).max(issued);
     }
@@ -4264,6 +4345,12 @@ impl FarmState {
     pub(crate) fn note_series_asked_on(
         &mut self, instrument: InstrumentId, ticks: &[u32], issued: u64,
     ) {
+        if ticks.contains(&232)
+            && let Some(watch) = self.attached_mark_watches.get_mut(&instrument)
+        {
+            watch.owned = false;
+            watch.withdrawal = None;
+        }
         for tick in ticks {
             let held = self.series_asked_on.entry((instrument, *tick)).or_insert(issued);
             *held = (*held).max(issued);
@@ -4332,6 +4419,12 @@ impl FarmState {
         // Withdrawn here, a caller that named the trading status took the
         // trading status off a subscription that goes on running, and nothing
         // asks for it again until a reconnect.
+        if unwanted.contains(&232)
+            && !self.series_asked_on.get(&(instrument, 232)).is_some_and(|asked| *asked > issued)
+            && let Some(watch) = self.attached_mark_watches.get_mut(&instrument)
+        {
+            watch.owned = true;
+        }
         let unwanted: Vec<u32> = unwanted.iter()
             .copied()
             .filter(|tick| {
@@ -4343,6 +4436,7 @@ impl FarmState {
                 ]
                 .contains(tick)
             })
+            .filter(|tick| *tick != 232 || !self.attached_mark_watches.contains_key(&instrument))
             // And nothing another caller has asked for since this was decided.
             // Answered for the slot as a whole, a caller asking for one series
             // kept every series on it, and the one this caller had given up
@@ -4439,7 +4533,7 @@ impl FarmState {
             if mode_9887 != 0 && *request_type != REGULATORY_SNAPSHOT_REQUEST_TYPE {
                 tags.push((9887, &mode_str));
             }
-            let _ = conn.send_fixcomp(&tags);
+            attached_quotes::send_decorated(conn, &tags, self.attached_combo_quotes.get(&instrument));
         }
         hb.last_farm_sent = Instant::now();
         log::info!(
@@ -4970,6 +5064,7 @@ impl FarmState {
         self.replay_queue = active.into_iter().collect();
         self.replay_not_before = None;
         self.drive_replay(replay, farm_conn, hb);
+        self.replay_attached_marks(farm_conn, hb);
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
         let depth_params = std::mem::take(&mut self.depth_resub_info);
@@ -5246,6 +5341,10 @@ impl FarmState {
                 221 => self.deliver_mark(instrument, 37, payload, context, shared),
                 220 => self.deliver_mark(instrument, 78, payload, context, shared),
                 619 => self.deliver_mark(instrument, 79, payload, context, shared),
+                225 => {
+                    self.deliver_pricing_auction(instrument, payload, shared);
+                    deliver_series(tick, payload, instrument, shared);
+                }
                 233 => self.deliver_running_volume(instrument, 48, payload, shared),
                 375 => self.deliver_running_volume(instrument, 77, payload, shared),
                 // What the venue holds about the company behind a contract
@@ -5573,6 +5672,20 @@ impl FarmState {
         });
     }
 
+    fn deliver_pricing_auction(&self, instrument: InstrumentId, payload: &[u8], shared: &SharedState) {
+        if payload.len() < 20 || !payload.len().is_multiple_of(4) { return; }
+        let optional_price = |offset| series_f32(payload, offset).filter(|value| {
+            !value.is_nan() && *value != f32::MAX && *value != f32::from_bits(1)
+        }).map(f64::from);
+        let optional_size = |offset| series_i32(payload, offset)
+            .filter(|value| *value != i32::MIN).unwrap_or(i32::MAX);
+        let mode = self.request_mode(instrument);
+        shared.market.note_pricing_auction(
+            instrument, mode, series_f32(payload, 8).map(f64::from), optional_size(0),
+            optional_price(20), optional_size(28), optional_price(24), optional_size(32),
+        );
+    }
+
     /// One trade off the running-volume series, as the reference client
     /// states it.
     ///
@@ -5596,6 +5709,12 @@ impl FarmState {
         ) else {
             return;
         };
+        if tick_type == 48 {
+            let vwap = (value.is_finite() && value != f64::MAX
+                && shares != i64::MAX && shares as i32 > 0 && shares as i32 != i32::MAX)
+                .then_some(value / shares as f64);
+            shared.market.note_pricing_vwap(instrument, vwap);
+        }
         // The venue says it holds no total by stating the largest the type
         // carries, which is not a share count.
         if shares == i64::MAX {
