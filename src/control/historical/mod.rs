@@ -274,14 +274,13 @@ impl BarSize {
     /// five-second bar as a one-second one and handed the caller five times
     /// the volume under a size it never traded in.
     ///
-    /// A week and a month are out for a second reason: the fold opens a bar on
-    /// a whole multiple of its own length counted from the epoch, and neither
-    /// of those lands where the venue's does. Epoch day zero was a Thursday, so
-    /// a folded week opens on one; a folded month is thirty days counted from
-    /// 1970 and coincides with no calendar month. The venue states the bounds
-    /// of the bars it aggregated — `date` and `endDate` — and they are Monday
-    /// to Friday and the first of the month to the last. A day still opens at
-    /// midnight, which is a boundary, and is documented as the one it is.
+    /// A week and a month are formed on the calendar rather than on a multiple
+    /// of their length: a week opens on its Monday and a month on its first
+    /// day, both at midnight UTC, which is where a gateway folds them. The
+    /// venue states the bounds of the bars it aggregated — `date` and
+    /// `endDate` — and they are Monday to Friday and the first of the month to
+    /// the last. A day opens at midnight, which is a boundary, and is
+    /// documented as the one it is.
     ///
     /// This is what this client can form, not what the venue accepts — nothing
     /// on the wire says a size may not be kept up to date. The list it replaces
@@ -289,7 +288,8 @@ impl BarSize {
     /// one that cannot.
     pub fn supports_keep_up_to_date(&self) -> bool {
         let seconds = self.seconds();
-        seconds >= 5 && seconds.is_multiple_of(5) && seconds <= 86_400
+        matches!(self, Self::Week1 | Self::Month1)
+            || (seconds >= 5 && seconds.is_multiple_of(5) && seconds <= 86_400)
     }
 
     /// How long one of these lasts.
@@ -650,8 +650,8 @@ pub fn parse_bar_response(xml: &str) -> Option<HistoricalResponse> {
                 .unwrap_or("")
                 .to_string(),
             // And where it ends, under the same two spellings. Read under
-            // neither, the bounds this client reasons about when it decides a
-            // week cannot be kept up to date were thrown away unread.
+            // neither, the bounds the venue states for a week or a month were
+            // thrown away unread.
             end: tag(bar_xml, "endTime")
                 .or_else(|| tag(bar_xml, "endDate"))
                 .unwrap_or("")
@@ -710,6 +710,11 @@ pub fn parse_ticker_id(xml: &str) -> Option<String> {
 pub fn head_timestamp_data_type(what_to_show: &str) -> Result<&'static str, String> {
     if what_to_show.eq_ignore_ascii_case("OPTION_EXERCISE_INTEREST_RATE") {
         return Ok("OptExInterestRate");
+    }
+    // The adjusted series begins where the raw trades it is folded from do,
+    // and a gateway asks for the earliest trade to answer it.
+    if what_to_show_is_adjusted(what_to_show) {
+        return Ok(BarDataType::Trades.as_str());
     }
     BarDataType::from_api_str(what_to_show).map(|series| series.as_str())
 }

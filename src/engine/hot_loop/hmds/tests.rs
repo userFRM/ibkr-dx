@@ -1504,6 +1504,44 @@ mod forming_bar_tests {
         assert_eq!(next.volume, 10.0, "nothing carried over");
     }
 
+    /// A week is folded from its Monday and a month from its first day, both
+    /// at midnight UTC, as a gateway folds them. Counted from the epoch
+    /// instead, a week opened on a Thursday and a month on whatever day thirty
+    /// days from 1970 fell on.
+    #[test]
+    fn a_week_and_a_month_are_folded_on_the_calendar() {
+        let week = crate::control::historical::BarSize::Week1.seconds();
+        let month = crate::control::historical::BarSize::Month1.seconds();
+        let mut weekly = FormingBar {
+            req_id: 1, seconds: week, opened_at: 0, bar: Default::default(), weighted: 0.0,
+        };
+        // Sunday 20 September 2026 23:59:55, then Monday 21 September 00:00.
+        let sunday = weekly.fold(&five(1_789_948_795, 10.0, 10.0, 10.0, 10.0, 5.0));
+        assert_eq!(sunday.timestamp, 1_789_344_000, "the week that opened on Monday the 14th");
+        let monday = weekly.fold(&five(1_789_948_800, 11.0, 11.0, 11.0, 11.0, 7.0));
+        assert_eq!(monday.timestamp, 1_789_948_800, "a new week on Monday the 21st");
+        assert_eq!((monday.open, monday.volume), (11.0, 7.0), "nothing carried over");
+
+        let mut monthly = FormingBar {
+            req_id: 2, seconds: month, opened_at: 0, bar: Default::default(), weighted: 0.0,
+        };
+        // Saturday 31 January 2026 23:59:55, then Sunday 1 February 00:00.
+        let january = monthly.fold(&five(1_769_903_995, 10.0, 10.0, 10.0, 10.0, 5.0));
+        assert_eq!(january.timestamp, 1_767_225_600, "January opened on the 1st");
+        let february = monthly.fold(&five(1_769_904_000, 12.0, 12.0, 12.0, 12.0, 3.0));
+        assert_eq!(february.timestamp, 1_769_904_000, "February opens on the 1st");
+        // A leap day is in its own month.
+        let leap = monthly.fold(&five(1_709_208_000, 12.0, 12.0, 12.0, 12.0, 3.0));
+        assert_eq!(leap.timestamp, 1_706_745_600, "29 February 2024 is February's");
+
+        // A stamp in the epoch's first days, before any Monday: the week opens
+        // at the epoch rather than counting back past it.
+        let mut early = FormingBar {
+            req_id: 3, seconds: week, opened_at: 1, bar: Default::default(), weighted: 0.0,
+        };
+        assert_eq!(early.fold(&five(86_400, 1.0, 1.0, 1.0, 1.0, 1.0)).timestamp, 0);
+    }
+
     /// The trade count comes off the wire at the full width the field carries,
     /// so two bars in one interval need not add up to one.
     ///

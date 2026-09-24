@@ -381,13 +381,16 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         verdict = (
             "**Every call and callback on that list is present on both surfaces.** "
             + (f"{held // max(len(ours), 1)} callbacks are declared and not fired: "
-               "nothing this connection receives has been seen to state a reroute to "
-               "another contract, or a delta-neutral pairing. Each says so where it is "
-               "declared, so a program that implements one still compiles and runs. "
+               "a gateway reroutes a request to another contract for a contract for "
+               "difference whose definition asks for it, and this client does not read "
+               "a definition's flags for that before subscribing: the request goes to "
+               "the venue as asked. Each says so where it is declared, so a program "
+               "that implements one still compiles and runs. "
                if held else "")
             + (f"{unsent} more are declared by the TWS API and never fire on a gateway — "
                "the four steps of the verification handshake, the exchange-for-physical "
-               "quote, and `win_error`, which no message on the wire carries — so they "
+               "quote, the delta-neutral validation, which a gateway never sends, and "
+               "`win_error`, which no message on the wire carries — so they "
                "fire here exactly as often as there: never."
                if unsent else "")
         )

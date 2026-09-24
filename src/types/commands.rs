@@ -128,7 +128,7 @@ pub enum ControlCommand {
     /// (empty = UsFarm default).
     /// `mode_9887` encodes per-request market-data mode via FIX field 9887:
     /// 0 = REALTIME (absent, default fan-out 264=442 BID_ASK + 264=443 LAST),
-    /// 1 = DELAYED, 2 = FROZEN, 3 = DELAYED_FROZEN (single 264=1 TOP + 9887=N).
+    /// 1 = DELAYED, 2 = FROZEN, 3 = DELAYED_FROZEN (the same 264=442 + 264=443 pair, each with 9887=N).
     Subscribe {
         /// The contract this names.
         contract: ContractRef,

@@ -130,14 +130,12 @@ bound is chosen.
 ## Numbered ticks this client does not deliver
 
 Ninety-six numbered market-data ticks reach a caller of the reference client.
-Eighty-seven of them reach one here. These nine do not, and each for a reason
-that can be checked rather than taken on trust.
+Ninety of them reach one here. These six do not, for a reason that can be
+checked rather than taken on trust.
 
 | Ticks | What | Why not |
 | --- | --- | --- |
-| 10, 11, 12 and the delayed 80, 81, 82 | The option model struck against the bid, the ask and the last | Not sent by the venue. A gateway works each of them out itself: for a side it takes that side's option price and finds the volatility at which the model prices the option there, then evaluates the greeks at it. The venue sends one model per option and that one is delivered, on 13 and on 83 where the feed is delayed. This client's own model now reads the venue's schedule of ex-dates and reproduces the venue's published price exactly, its delta within half a per cent and its gamma within one; what one day costs is within seven. What one point of volatility is worth is not, and the venue's own figures cannot settle how far out it is — at one strike its call and its put state vegas seven per cent apart, which is further than this client is from either. Published, these would be this client's arithmetic wearing the venue's name |
-| The delayed 103, 104 | Bid and ask yield on a delayed feed | The yields themselves arrive and are delivered, on 50, 51 and 52. The delayed feed states its prices under numbers of its own and no session here has seen it state a yield |
-| 85 | The moment a regulatory snapshot was taken | A gateway fills it from the venue's answer to a regulatory snapshot. This client asks for one (`regulatory_snapshot` on `req_mkt_data_ex`), and the venue refuses the request on an account without that entitlement, so no answer has been read here to take the time from |
+| 10, 11, 12 and the delayed 80, 81, 82 | The option model struck against the bid, the ask and the last | Not sent by the venue. A gateway works each of them out with its own option model: for a side it takes that side's option price and finds the volatility at which its model prices the option there, then evaluates the greeks at it. This client does not run that model. The venue sends one model per option and that one is delivered, on 13 and on 83 where the feed is delayed. This client's own model reads the venue's schedule of ex-dates and reproduces the venue's published price exactly, its delta within half a per cent and its gamma within one; what one day costs is within seven. What one point of volatility is worth is not, and the venue's own figures cannot settle how far out it is — at one strike its call and its put state vegas seven per cent apart, which is further than this client is from either |
 
 Everything else the venue publishes and a caller can ask for is delivered, on
 the callback the reference client delivers it on.
@@ -149,29 +147,64 @@ behaviour will still be wrong, which is why they are here.
 
 ## Callbacks nothing fires
 
-Three callbacks exist so a program written against the TWS API compiles and
+Two callbacks exist so a program written against the TWS API compiles and
 runs, and nothing here fires them.
 
 | Callback | Why |
 | --- | --- |
-| `delta_neutral_validation` | A gateway sends it. No message this client receives carries the pairing it reports, so nothing here fires it |
-| `reroute_mkt_data_req` | The contract a market-data request should be asked for under instead — a contract for difference standing for a share. A gateway sends it when a request is to be asked for under another contract. Nothing this connection receives has been seen to state one, so nothing here fires it |
+| `reroute_mkt_data_req` | The contract a market-data request should be asked for under instead — a contract for difference standing for a share. A gateway sends it, and asks the venue nothing, for a contract for difference whose own definition asks for its underlying's data, where the account's logon permissions allow that. This client does not read a definition's flags for asking on the underlying before subscribing: the request goes to the venue as asked, and this never fires |
 | `reroute_mkt_depth_req` | The same, for a request for the book rather than the quote |
 
-Six more never fire for a program on a gateway, and fire here as often: never.
+Seven more never fire for a program on a gateway, and fire here as often: never.
 They are on [Venue behaviour](./venue-behaviour.md).
 
 Every other call and callback on the canonical list is served on both
 languages. The call-by-call matrix is [generated from the source](./coverage.md).
 
-## A book no venue can give is asked for anyway
+## Smart depth is one request
 
-A gateway refuses a book asked for on no particular venue, and smart depth on a
-currency, before asking the venue: 10092, deep market data is not supported for
-that combination of security type and exchange. This client sends both, and
-the venue acknowledges each and then answers with nothing. No error follows, so
-check what came back rather than assuming a subscription that was accepted is
-one that will deliver.
+A book is refused before anything is sent where a gateway refuses it, in its
+words and in both languages: no exchange (*Please enter exchange.*), a
+combination (*Market depth does not support combos.*) and no rows (*Market
+depth rows requested must be greater than zero.*), each under 321. A book on a
+market the routing table names for the top of the book only — a share on the
+smart destination asked for without smart depth, as the table this account is
+given reads — is refused before the venue is asked, under 10092, *Deep market
+data is not supported for this combination of security type/exchange*, as a
+gateway refuses it. Smart depth is not refused on a type a gateway gathers a
+book for from each venue the contract trades on: shares, contracts for
+difference, options, futures, currencies, bonds, crypto and the rest.
+
+What differs is how smart depth is asked for. A gateway gathers one book from
+each venue the contract trades on; this client asks for it as one request on
+the smart destination, and on a share the smart destination serves no book, so
+nothing arrives and no error follows. A gateway also matches a smart row by
+the contract's listing exchange and aggregate group, so a share listed on PINK
+in group 1 is served a book on the smart destination; this client does not know
+those when it asks, and refuses every share on the smart destination without
+smart depth.
+
+## A regulatory snapshot is asked for whatever the permission
+
+A regulatory snapshot (`regulatory_snapshot` on `req_mkt_data_ex`) is answered
+by the venue in one message, which this client reads and hands to the
+snapshot's own request, as a gateway does. Where the venue states the
+contract's snapshot as chargeable, the moment the answer was read is stamped on
+a clock corrected to the venue's and delivered as text on 85, in milliseconds;
+a contract the account sees in real time is answered without it. Like a
+gateway, this client waits up to two seconds for the contract's map of venues
+before publishing, so the exchange letters on 32, 33, 84, 109 and 110 are the
+contract's own, and the snapshot ends as soon as its answer is published.
+Where the map never comes it publishes none of the answer, as a gateway
+publishes none; the error a gateway reports then is not reproduced, as its
+words are not settled here. On an account without the entitlement the venue
+refuses the request, so no answer has been read here from a session.
+
+What differs is what happens before and after. A gateway reads the contract's
+snapshot permission first and refuses, without asking the venue, a snapshot
+the permission does not allow — nothing stated, no top of book, or not
+available through the API — and gives up on the data after seven seconds. This
+client asks the venue whatever the permission, and waits up to eleven seconds.
 
 ## Arguments a gateway acts on and this client does not need
 

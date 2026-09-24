@@ -58,7 +58,9 @@ impl EClient {
     /// is the trading day of an instrument that trades around the clock and is
     /// the middle of the evening for one that does not — a US listing's
     /// forming daily bar opens in its after-hours session and spans two of
-    /// them. Bars already closed are the venue's own and are not folded here.
+    /// them. A week opens on its Monday and a month on its first day, both at
+    /// midnight UTC, on the calendar as a gateway folds them. Bars already
+    /// closed are the venue's own and are not folded here.
     pub fn req_historical_data(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, bar_size: &str,
@@ -81,27 +83,14 @@ impl EClient {
                 filters: contract.lookup_filters(),
             });
         }
-        ClientCore::validate_historical_args(bar_size, what_to_show, keep_up_to_date)?;
-        // The adjusted series folds the raw trades with the contract's own
-        // corporate actions, which are asked for by the venue's id for the
-        // contract. Named by anything else, that ask cannot be made — so a
-        // request that could not be folded is refused here rather than answered
-        // with raw trades under an adjusted name. The waiting call refuses the
-        // same request the same way.
-        if crate::control::historical::what_to_show_is_adjusted(what_to_show)
-            && contract.con_id == 0
-        {
-            return Err(Refusal::validation(
-                "ADJUSTED_LAST is folded from the contract's corporate actions, which are \
-                 asked for by the venue's id for the contract, and this one does not carry \
-                 it: qualify the contract first and pass what comes back".to_string(),
-            ));
-        }
+        ClientCore::validate_historical_args(
+            bar_size, what_to_show, keep_up_to_date, end_date_time, &contract.sec_type,
+        )?;
         // How this request wants its bar times written. The venue states one
         // form; whichever the caller asked for is what is written.
         self.core.note_date_format(req_id, format_date);
         // And what its range is counted from, which the reply does not state.
-        self.core.note_historical_span(req_id, end_date_time, duration);
+        self.core.note_historical_span(req_id, end_date_time, duration, bar_size);
         let wire = wire_req_id(req_id)?;
         // Whatever finished under this id before, this is a new request. The
         // other surface said so and this one did not: the id stayed marked

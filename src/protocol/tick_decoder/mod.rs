@@ -164,24 +164,6 @@ pub const O_LAST_EXCH: u64 = 27;
 pub const O_BID_EXCH: u64 = 16;
 /// Tick type 17 on the wire: the ask exch.
 pub const O_ASK_EXCH: u64 = 17;
-/// UNVERIFIED. Named for a halt on no evidence — unlike its neighbours, which
-/// cite measurements against daily bars and wall-clock samples.
-///
-/// The venue does state a halt, but carries it elsewhere: as a generic tick
-/// under id 437, whose payload opens with three big-endian 32-bit ints
-/// (a status bitmask, a timestamp, a status index) and carries a fourth that
-/// is not interpreted, rather than anything in this stream. Its statuses are a named set, each carrying an index and a mask of
-/// one shifted by it: exchange open at 0,
-/// regulatory halt at 1, volatility halt at 2, short-sale restriction at 3, and
-/// no-status-available at 16 rather than at its position in the enum. "Halted"
-/// is the regulatory or volatility mask, so bit 1 or bit 2, and not an index
-/// equal to one. [`crate::protocol::trading_status`] reads it.
-///
-/// So this opcode is something else, and nothing may report a halt from it
-/// until the real path is read. A wrong halt is worse than no halt: a caller
-/// told a contract is trading when it is not will price against a book that is
-/// not there.
-pub const O_UNVERIFIED_18: u64 = 18;
 /// Previous session's close. Settled against the authoritative daily bars for
 /// the same contract: the wire carried 27922.00 while the current session's
 /// bar closed at 27913.75 and the prior session's closed at exactly 27922.00.

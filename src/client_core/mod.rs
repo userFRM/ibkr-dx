@@ -90,16 +90,19 @@ fn position_is_multiplied(pi: &PositionInfo) -> bool {
     }
 }
 
-/// Render an exchange-code bitmask to a letter string using the smart components
-/// table. Each set bit at position N picks `smart_components[N].exchange_letter`.
+/// Render an exchange-code bitmask to a letter string, from the map of venues
+/// the venue stated for this contract's BBO exchange. Each set bit picks the
+/// letter the map gives that bit.
 ///
-/// Bit ordering and width follow the TWS-API convention; the dispatch path
-/// tolerates an empty result where the mask layout differs.
-pub fn render_exchange_mask(mask: i64, shared: &SharedState) -> String {
+/// A map not stated yet renders nothing, and a bit it does not name adds
+/// nothing.
+pub fn render_exchange_mask(
+    mask: i64, instrument: InstrumentId, shared: &SharedState,
+) -> String {
     if mask == 0 {
         return String::new();
     }
-    let components = shared.reference.smart_components();
+    let components = shared.reference.smart_components_of(instrument);
     let mut out = String::with_capacity(8);
     let mut bits = mask as u64;
     while bits != 0 {
@@ -146,16 +149,29 @@ pub struct StringTickEvent {
 
 /// The number a delayed feed carries a tick under, as the reference client
 /// numbers one: the bid, the ask and the last from 66, the sizes and the rest
-/// after them, and the halt and the timestamp under their own.
+/// after them, the halt and the timestamp under their own, and a bond's bid and
+/// ask yields on 103 and 104.
+///
+/// A delayed feed has no number for the last yield. A gateway publishes the
+/// bid's and the ask's yields on a delayed feed and not the last's, so
+/// [`DELAYED_LAST_YIELD_UNSENT`] is kept back rather than numbered here.
 fn as_delayed(tick_type: i32) -> i32 {
     match tick_type {
         TICK_BID => 66, TICK_ASK => 67, TICK_LAST => 68,
         TICK_BID_SIZE => 69, TICK_ASK_SIZE => 70, TICK_LAST_SIZE => 71,
         TICK_HIGH => 72, TICK_LOW => 73, TICK_VOLUME => 74, TICK_CLOSE => 75, TICK_OPEN => 76,
         TICK_LAST_TIMESTAMP => 88, TICK_HALTED => 90,
+        50 => 103, 51 => 104,
         other => other,
     }
 }
+
+/// Every kind a snapshot is made of: bid, ask, last, open, close.
+const SNAPSHOT_WHOLE: u8 = 1 | 2 | 4 | 8 | 16;
+
+/// The last trade's yield, which a delayed feed states on the same record a
+/// live one does and a gateway does not publish from it.
+const DELAYED_LAST_YIELD_UNSENT: i32 = 52;
 
 impl ClientCore {
     /// Note this contract's feed as delayed, so a test can read what a caller
@@ -201,6 +217,13 @@ pub struct QuotePollResult {
     pub delayed: bool,
     /// true if any tick was delivered (for snapshot detection).
     pub delivered: bool,
+    /// The venue's answer to a chargeable snapshot, each tick addressed to
+    /// one of the snapshot's own requests and to nobody else watching the
+    /// contract. Prices and sizes.
+    pub snapshot_ticks: Vec<TickEvent>,
+    /// The same answer's text: where each side is quoted, and the moment it
+    /// was read.
+    pub snapshot_strings: Vec<StringTickEvent>,
 }
 
 /// PnL update (account-level).
@@ -798,6 +821,8 @@ pub struct HistoricalAsk {
     /// The zone the venue stated the series on, once it has, for the bars
     /// that continue it.
     pub zone: String,
+    /// Whether its bars are a day long or longer, and so dated by the day.
+    pub by_day: bool,
 }
 
 /// A request number held for the length of a registration.
@@ -2824,6 +2849,29 @@ impl ClientCore {
         Ok(())
     }
 
+    /// What a gateway refuses in a request for a book before it looks the
+    /// contract up: no exchange named, a combination, or no rows.
+    ///
+    /// Each is refused as a gateway refuses it, with its reason. An empty
+    /// exchange is not read as the smart destination: a gateway asks the
+    /// caller to name one.
+    pub fn validate_depth_request(
+        exchange: &str, sec_type: &str, num_rows: i32,
+    ) -> Result<(), Refusal> {
+        if exchange.trim().is_empty() {
+            return Err(Refusal::validation("Please enter exchange."));
+        }
+        if sec_type.trim().eq_ignore_ascii_case("BAG") {
+            return Err(Refusal::validation("Market depth does not support combos."));
+        }
+        if num_rows <= 0 {
+            return Err(Refusal::validation(
+                "Market depth rows requested must be greater than zero.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Give the number back, or say it was holding no book.
     pub fn release_the_book(&self, req_id: i64) -> Result<(), Refusal> {
         if !self.depth_reqs.lock().unwrap().remove(&req_id) {
@@ -4536,8 +4584,8 @@ impl ClientCore {
             None
         };
 
-        // Exchange-code string ticks: rendering is left to dispatch since it
-        // depends on shared.reference.smart_components. Emit a delta record
+        // Exchange-code string ticks, rendered from the contract's own map of
+        // venues. Emit a delta record
         // when the bitmask changes; dispatch resolves the letter string.
         let mut string_ticks = Vec::new();
         // What is cached for this instrument, which is the quote as it stands
@@ -4548,7 +4596,7 @@ impl ClientCore {
         ];
         for &(idx, tt) in EXCH_TICKS {
             if fields[idx] != last[idx] {
-                let letters = render_exchange_mask(fields[idx], shared);
+                let letters = render_exchange_mask(fields[idx], iid, shared);
                 // A mask with bits set and no letters to show for them is
                 // one the venue has not named its exchanges for yet. Caching
                 // it as delivered leaves it equal to the next mask, so it is
@@ -4585,6 +4633,7 @@ impl ClientCore {
         }
 
         map.insert(iid, cached);
+        drop(map);
 
         // The extra series the caller asked for. They arrive on records of
         // their own rather than as quote fields, so they are queued as they
@@ -4593,8 +4642,30 @@ impl ClientCore {
         // carries it, because the venue's own record says.
         for series in shared.market.drain_series_ticks(iid) {
             match series.value {
+                // A yield is numbered as the feed is, the way the prices it
+                // travels with are: a delayed feed's go out on 103 and 104.
+                // Every other series keeps the number it was published under.
+                crate::types::SeriesValue::Price(_)
+                    if delayed && series.tick_type == DELAYED_LAST_YIELD_UNSENT =>
+                {
+                    shared.market.note_unread_wire_under(
+                        "market data",
+                        "a delayed last yield".to_string(),
+                        "a last yield on a delayed feed, which has no number to be delivered \
+                         under"
+                            .to_string(),
+                    );
+                    continue;
+                }
                 crate::types::SeriesValue::Price(value) => ticks.push(TickEvent {
-                    req_id, tick_type: series.tick_type, value, is_price: true,
+                    req_id,
+                    tick_type: if matches!(series.tick_type, 50 | 51) {
+                        numbered(series.tick_type)
+                    } else {
+                        series.tick_type
+                    },
+                    value,
+                    is_price: true,
                 }),
                 crate::types::SeriesValue::Size(value) => ticks.push(TickEvent {
                     req_id, tick_type: series.tick_type, value, is_price: false,
@@ -4609,8 +4680,45 @@ impl ClientCore {
             delivered = true;
         }
 
+        // The venue's answer to a chargeable snapshot is one message, handed to
+        // the snapshot's own requests and to no stream watching the same
+        // contract, and a gateway ends the snapshot as soon as it has
+        // published it. Published under the numbers a gateway's snapshot
+        // carries, which are not renumbered for a delayed feed.
+        let mut snapshot_ticks = Vec::new();
+        let mut snapshot_strings = Vec::new();
+        if let Some(answer) = shared.market.take_snapshot_answer(iid) {
+            let one_shots = self.chargeable_snapshot_reqs.lock().unwrap().clone();
+            let asking: Vec<i64> = self.watchers_of(iid).into_iter()
+                .filter(|id| one_shots.contains(id))
+                .collect();
+            let mut waiting = self.snapshot_reqs.lock().unwrap();
+            for id in asking {
+                for said in &answer {
+                    match &said.value {
+                        crate::types::SeriesValue::Price(value) => snapshot_ticks.push(TickEvent {
+                            req_id: id, tick_type: said.tick_type, value: *value, is_price: true,
+                        }),
+                        crate::types::SeriesValue::Size(value) => snapshot_ticks.push(TickEvent {
+                            req_id: id, tick_type: said.tick_type, value: *value, is_price: false,
+                        }),
+                        crate::types::SeriesValue::Text(value) => {
+                            snapshot_strings.push(StringTickEvent {
+                                req_id: id, tick_type: said.tick_type, value: value.clone(),
+                            })
+                        }
+                        crate::types::SeriesValue::Generic(_) => {}
+                    }
+                }
+                if let Some((_, stated)) = waiting.get_mut(&id) {
+                    *stated = SNAPSHOT_WHOLE;
+                }
+            }
+        }
+
         QuotePollResult {
             delayed, ticks, generic_ticks, string_ticks, timestamp, delivered,
+            snapshot_ticks, snapshot_strings,
             eligible_mask,
             quote_state_mask,
         }
@@ -4664,14 +4772,12 @@ impl ClientCore {
         /// How long after asking the reference client gives up waiting for the
         /// rest of a snapshot.
         const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(11);
-        /// Every kind: bid, ask, last, open, close.
-        const WHOLE: u8 = 1 | 2 | 4 | 8 | 16;
 
         let mut waiting = self.snapshot_reqs.lock().unwrap();
         let Some((asked_at, stated)) = waiting.get(&req_id).copied() else {
             return false;
         };
-        if stated == WHOLE || asked_at.elapsed() >= GIVE_UP_AFTER {
+        if stated == SNAPSHOT_WHOLE || asked_at.elapsed() >= GIVE_UP_AFTER {
             waiting.remove(&req_id);
             return true;
         }
@@ -5882,12 +5988,18 @@ impl ClientCore {
     }
 
     /// The end and the duration a bar request named, which its range is
-    /// counted from once its bars have all arrived.
-    pub fn note_historical_span(&self, req_id: i64, end_date_time: &str, duration: &str) {
+    /// counted from once its bars have all arrived, and the size of its bars,
+    /// which says how the bar still forming is dated.
+    pub fn note_historical_span(
+        &self, req_id: i64, end_date_time: &str, duration: &str, bar_size: &str,
+    ) {
+        use crate::control::historical::BarSize;
         let mut asks = self.historical_asks.lock().unwrap();
         let ask = asks.entry(req_id).or_default();
         ask.end_date_time = end_date_time.to_string();
         ask.duration = duration.to_string();
+        ask.by_day = BarSize::from_api_str(bar_size)
+            .is_ok_and(|size| size.seconds() >= BarSize::Day1.seconds());
     }
 
     /// The range a finished request covered, as stated beside the last bar.
@@ -5942,13 +6054,14 @@ impl ClientCore {
     }
 
     /// A continuing bar's time as the caller asked bars to be dated, on the
-    /// zone its history was stated on.
+    /// zone its history was stated on — or by its day alone where its bars are
+    /// a day long or longer, as the history's are.
     pub fn bar_time_for_epoch(&self, req_id: i64, secs: i64) -> String {
         let asks = self.historical_asks.lock().unwrap();
-        let (format_date, zone) = asks
+        let (format_date, zone, by_day) = asks
             .get(&req_id)
-            .map_or((1, ""), |ask| (ask.format_date, ask.zone.as_str()));
-        crate::protocol::datetime::bar_epoch_as_asked(secs, format_date, zone)
+            .map_or((1, "", false), |ask| (ask.format_date, ask.zone.as_str(), ask.by_day));
+        crate::protocol::datetime::bar_epoch_as_asked(secs, format_date, zone, by_day)
     }
 
     /// Validate historical-request arguments before anything reaches the
@@ -5956,39 +6069,61 @@ impl ClientCore {
     /// silently through two divergent tables, and an unrecognized
     /// what_to_show falls back to TRADES. The caller is answered with a
     /// synchronous Err at the call instead of plausible, wrong candles.
+    ///
+    /// And what a gateway refuses before it asks the venue, in its words: the
+    /// adjusted series with an end date or with bars longer than a day, and a
+    /// request kept up to date with an end date, on a combination, or on a
+    /// series a gateway keeps no bar current for.
     pub fn validate_historical_args(
         bar_size: &str,
         what_to_show: &str,
         keep_up_to_date: bool,
+        end_date_time: &str,
+        sec_type: &str,
     ) -> Result<(), String> {
         let bs = crate::control::historical::BarSize::from_api_str(bar_size)?;
-        // The adjusted series is folded from the whole raw series and the
-        // contract's actions, so it is served from a historical request and not
-        // named on the wire — its name is not in the table `from_api_str`
-        // checks. Kept up to date it never completes, so there is no whole
-        // series to fold and no bar this client could hand over adjusted;
-        // refused outright rather than at the first bar that cannot form.
-        if crate::control::historical::what_to_show_is_adjusted(what_to_show) {
-            if keep_up_to_date {
-                return Err(
-                    "ADJUSTED_LAST cannot be kept up to date: the adjusted series is \
-                     folded from the whole raw series and the contract's actions, and a \
-                     request that never completes has no whole series to fold"
-                        .to_string(),
-                );
-            }
+        // The adjusted series is folded here from the raw trades and the
+        // contract's actions, bar by bar and by the bar's date. A gateway
+        // refuses it with an end date, and with a bar longer than a day — a
+        // week straddling a split is not one bar any factor adjusts.
+        let adjusted = crate::control::historical::what_to_show_is_adjusted(what_to_show);
+        if adjusted && !end_date_time.trim().is_empty() {
+            return Err("End date not supported with adjusted last".to_string());
+        }
+        if adjusted && bs.seconds() > crate::control::historical::BarSize::Day1.seconds() {
+            return Err("Multi day bar size not supported with adjusted last".to_string());
+        }
+        // Its name is not in the table `from_api_str` checks: it is not a
+        // name the venue answers to.
+        if !adjusted {
+            crate::control::historical::BarDataType::from_api_str(what_to_show)?;
+        }
+        if !keep_up_to_date {
             return Ok(());
         }
-        crate::control::historical::BarDataType::from_api_str(what_to_show)?;
-        if keep_up_to_date && !bs.supports_keep_up_to_date() {
+        if !end_date_time.trim().is_empty() {
+            return Err("End date not supported with live updates".to_string());
+        }
+        if sec_type.trim().eq_ignore_ascii_case("BAG") {
+            return Err("Live updates for combos are not supported".to_string());
+        }
+        // The series a gateway keeps a bar current for, by the name the caller
+        // gave, compared as given. The adjusted series is not one of them: it
+        // is folded from a whole series, and a request that never completes
+        // has none. Nor is a name left empty, which this client reads as
+        // trades elsewhere and a gateway compares as it stands.
+        const KEPT_CURRENT: [&str; 6] = [
+            "TRADES", "MIDPOINT", "BID", "ASK", "CALL_OPTION_OPEN_INTEREST",
+            "PUT_OPTION_OPEN_INTEREST",
+        ];
+        if !KEPT_CURRENT.iter().any(|kept| what_to_show.eq_ignore_ascii_case(kept)) {
+            return Err("Source price not supported with live updates".to_string());
+        }
+        if !bs.supports_keep_up_to_date() {
             return Err(format!(
                 "bar_size '{bar_size}' cannot be kept up to date: what the venue \
                  keeps sending is five-second bars and a bar still forming is folded \
-                 from those, so a size that is a whole number of them can be formed \
-                 and one shorter than five seconds cannot. A week and a month are \
-                 out too: the fold opens a bar on a multiple of its own length from \
-                 the epoch, and the venue's week runs Monday to Friday and its month \
-                 is a calendar one",
+                 from those, so a size shorter than five seconds cannot be formed",
             ));
         }
         Ok(())

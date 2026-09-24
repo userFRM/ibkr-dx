@@ -1031,6 +1031,467 @@ mod news_tests {
         );
     }
 
+    /// The parameters the option model works a chain from are asked for on the
+    /// model's name, where a gateway asks for them, and not where the
+    /// underlying trades.
+    #[test]
+    fn the_chain_model_series_are_asked_for_on_the_models_name() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(756733);
+        let (conn, peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+
+        farm.asked_generic_ticks.insert(instrument, vec![687, 236]);
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            false, &mut conn, &mut hb,
+        );
+        let stated = |msg: &[u8], tag: u32| -> Vec<String> {
+            let prefix = format!("{tag}=");
+            msg.split(|&b| b == 0x01)
+                .filter_map(|field| {
+                    std::str::from_utf8(field).ok()?.strip_prefix(prefix.as_str()).map(str::to_string)
+                })
+                .collect()
+        };
+        let mut asked_on = Vec::new();
+        for msg in super::drain_inner(&mut peer) {
+            if stated(&msg, 264).iter().any(|t| t == "442") {
+                asked_on = stated(&msg, 264).into_iter().zip(stated(&msg, 207)).collect();
+            }
+        }
+        let venue_of = |tick: &str| {
+            asked_on.iter().find(|(t, _)| t == tick).map(|(_, v)| v.clone())
+        };
+        assert_eq!(venue_of("687").as_deref(), Some("IBVOL"), "{asked_on:?}");
+        assert_eq!(venue_of("236").as_deref(), Some("BEST"), "the rest where it trades");
+        assert_eq!(venue_of("442").as_deref(), Some("BEST"));
+
+        // Withdrawn where it was asked for.
+        let record = farm.instrument_md_reqs.iter()
+            .find(|(id, _)| *id == instrument)
+            .map(|(_, record)| record)
+            .expect("the subscription is recorded");
+        let entry = record.entries.iter().find(|e| e.request_type == 687).expect("an entry");
+        assert_eq!(entry.venue, "IBVOL");
+
+        // And a caller who joins asks the same way.
+        let tags = build_series_subscribe_tags(
+            756733, "SMART", "STK", 0, "20260916-00:00:00", &[(9, 691)], None,
+        );
+        assert_eq!(super::tag_values(&tags, 207), ["IBVOL"]);
+    }
+
+    /// What the option model works a chain from is kept for the contract, and
+    /// the set as the chain closed is not read as company text.
+    #[test]
+    fn the_chain_model_series_are_read_and_kept() {
+        use std::io::Write as _;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(756733);
+
+        let mut body = Vec::new();
+        for v in [4i32, 1, 7, 0] {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        body.extend_from_slice(&450.5f64.to_be_bytes());
+        for v in [0i32, 0, 1_790_000_000, 0, 5] {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&body).unwrap();
+        let mut payload = vec![0x01];
+        payload.extend(z.finish().unwrap());
+
+        for (tag, series) in [(81u32, 687u32), (82, 691)] {
+            farm.generic_tick_tags.push((tag, series, instrument));
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(tag, series, &payload)]), &mut context, &shared, &None,
+            );
+            let sets = shared.market.chain_model_parameters(instrument, series);
+            assert_eq!(sets.len(), 1, "series {series} is read");
+            assert_eq!(sets[0].product_id, 7);
+            assert_eq!(sets[0].underlying_price, Some(450.5));
+        }
+        assert!(
+            shared.reference.company_data_series(756733).is_empty(),
+            "the closing set is not company text",
+        );
+
+        // A record that cannot be read leaves the last one standing.
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(81, 687, &[0x01, 0x02])]), &mut context, &shared, &None,
+        );
+        assert_eq!(shared.market.chain_model_parameters(instrument, 687).len(), 1);
+
+        // And the slot handed back takes them with it.
+        shared.market.forget_option_model(instrument);
+        assert!(shared.market.chain_model_parameters(instrument, 687).is_empty());
+    }
+
+    /// Each contract reads its exchange masks against the map of venues the
+    /// venue stated for its own BBO exchange and security type — named sixth
+    /// on every acknowledgement — and a caller names that map the way
+    /// `tick_req_params` states it. One table for the session had the last
+    /// map stated overwrite every contract's letters.
+    #[test]
+    fn each_contract_reads_its_masks_against_the_map_for_its_own_bbo_exchange() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let spy = context.market.register(756733);
+        context.market.set_routing(spy, "STK", "SMART");
+        let eur = context.market.register(12087792);
+        context.market.set_routing(eur, "CASH", "IDEALPRO");
+        for (req, instrument, map) in [(1u32, spy, false), (2, spy, true), (3, eur, false), (4, eur, true)] {
+            farm.md_req_to_instrument.push((req, instrument));
+            if map {
+                farm.generic_tick_reqs.push((req, BBO_EXCHANGE_MAP_REQUEST_TYPE));
+            }
+        }
+        // As the venue writes them: nine fields, the sixth the BBO exchange.
+        for (tag, req, bbo) in [(76904u32, 1u32, "a6"), (76907, 2, "a6"), (76910, 3, "c2"), (76911, 4, "c2")] {
+            let ack = format!("35=Q\x01{tag},{req},0.01,0,3,{bbo},,1,1");
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        }
+        let map = |text: &[u8]| {
+            let mut payload = (text.len() as u32).to_be_bytes().to_vec();
+            payload.extend_from_slice(text);
+            while !(payload.len() - 4).is_multiple_of(4) {
+                payload.push(0);
+            }
+            payload
+        };
+        let spy_map = map(b"9/J/EDGEA;10/Y/BYX");
+        let eur_map = map(b"9/X/IDEALPRO");
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(76907, BBO_EXCHANGE_MAP_REQUEST_TYPE, &spy_map)]),
+            &mut context, &shared, &None,
+        );
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(76911, BBO_EXCHANGE_MAP_REQUEST_TYPE, &eur_map)]),
+            &mut context, &shared, &None,
+        );
+
+        assert_eq!(shared.reference.bbo_exchange_of(spy), "a60001", "a share's code is 1");
+        assert_eq!(shared.reference.bbo_exchange_of(eur), "c2000A", "a currency's is 10");
+        let render = |instrument| crate::client_core::render_exchange_mask(1 << 9, instrument, &shared);
+        assert_eq!(render(spy), "J", "the share's letters are its own after another map arrived");
+        assert_eq!(render(eur), "X");
+
+        let letters = |named: &str| {
+            shared.reference.ask_smart_components(1, named).map(|found| {
+                found.expect("a map stated").into_iter().map(|c| c.exchange_letter).collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(letters("a60001"), Ok(vec!["J".to_string(), "Y".to_string()]));
+        assert_eq!(letters("c2000A"), Ok(vec!["X".to_string()]));
+        assert_eq!(letters("c2"), Ok(vec!["X".to_string()]), "an id alone, under any type");
+        for unknown in ["zz0001", "a6000A", "a7"] {
+            let refused = letters(unknown).expect_err(unknown);
+            assert_eq!(
+                (refused.code, refused.message.as_str()),
+                (321, "Invalid BBO exchange/security type code"),
+            );
+        }
+    }
+
+    /// A contract named by its id alone states no type of its own, and is
+    /// asked for under its definition's: its BBO exchange carries that type's
+    /// code, as a gateway's always carries the definition's, and a caller
+    /// naming it that way is answered.
+    #[test]
+    fn a_contract_named_by_id_alone_states_the_type_it_was_asked_under() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(756733);
+        farm.md_req_to_instrument.push((1, instrument));
+        farm.instrument_md_reqs.push((instrument, MdReqRecord {
+            con_id: 756733, sec_type: "CS".into(), mode_9887: 0,
+            entries: vec![MdReqEntry {
+                req_id: 1, request_type: REALTIME_BID_ASK_REQUEST_TYPE, venue: "BEST".into(),
+            }],
+        }));
+        farm.handle_subscription_ack(b"35=Q\x0176904,1,0.01,0,3,a6,,1,1", &mut context, &shared);
+        assert_eq!(shared.reference.bbo_exchange_of(instrument), "a60001");
+        assert!(shared.reference.ask_smart_components(7, "a60001").is_ok());
+    }
+
+    /// A contract's definition states which venues its smart route reaches,
+    /// and is not the map a quote's masks are read against: a definition
+    /// arriving after the map leaves the contract's letters as they were.
+    #[test]
+    fn a_definition_does_not_rewrite_the_map_of_venues() {
+        let shared = SharedState::new();
+        let mut context = Context::new();
+        let mut ccp = crate::engine::hot_loop::ccp::CcpState::new();
+        shared.reference.note_bbo_exchange(0, "a6", "STK");
+        shared.reference.set_smart_components_of(0, "STK", vec![crate::types::SmartComponent {
+            bit_number: 0, exchange: "AMEX".into(), exchange_letter: "A".into(),
+        }]);
+        let frame = crate::protocol::fix::fix_build(
+            &[
+                (crate::protocol::fix::TAG_MSG_TYPE, "d"), (320, "R1"), (6008, "756733"),
+                (55, "SPY"), (6177, "AMEX,NYSE,CHX"),
+            ],
+            1,
+        );
+        ccp.process_ccp_message(
+            &frame, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1",
+        );
+        assert_eq!(crate::client_core::render_exchange_mask(1, 0, &shared), "A");
+    }
+
+    /// The venue's answer to a chargeable snapshot arrives as a generic tick,
+    /// under the number its acknowledgement gave. It is read in the layout its
+    /// length names and published under a gateway's numbers, stamped on 85
+    /// with the moment it was read where the venue states the snapshot as
+    /// chargeable. Filed as a quote alone, the answer went unread and every
+    /// record behind it in the same message was dropped with it.
+    #[test]
+    fn a_chargeable_snapshot_is_read_and_stamped_where_it_is_chargeable() {
+        use crate::types::SeriesValue;
+        let decimal = |c: u64| (398u64 << 53 | c).to_be_bytes();
+        let mut answer = Vec::new();
+        for v in [1i32, 0b1, 0b10, 1] {
+            answer.extend_from_slice(&v.to_be_bytes());
+        }
+        for size in [3u64, 4, 1, 12_345] {
+            answer.extend_from_slice(&decimal(size));
+        }
+        for price in [150.25f64, 150.30, 150.27, 149.0, 151.5, 148.75] {
+            answer.extend_from_slice(&price.to_be_bytes());
+        }
+
+        for (stated, stamped) in [("2", true), ("3", false)] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let instrument = context.market.register(265598);
+            context.market.set_routing(instrument, "STK", "SMART");
+            farm.md_req_to_instrument.push((1, instrument));
+            farm.instrument_md_reqs.push((instrument, MdReqRecord {
+                con_id: 265598, sec_type: "CS".into(), mode_9887: 0,
+                entries: vec![MdReqEntry {
+                    req_id: 1, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "BEST".into(),
+                }],
+            }));
+            // Sizes counted in hundreds, as the acknowledgement's last field
+            // says. And a later acknowledgement stating nought about the
+            // snapshot, as one on the same contract does: nought says nothing.
+            let ack = format!("35=Q\x0190001,1,0.01,0,{stated},a6,,1,100");
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            farm.md_req_to_instrument.push((3, instrument));
+            farm.handle_subscription_ack(b"35=Q\x0190003,3,0.01,0,0,a6,,0,100", &mut context, &shared);
+            shared.reference.set_smart_components_of(instrument, "STK", vec![
+                crate::types::SmartComponent { bit_number: 0, exchange: "ARCA".into(), exchange_letter: "P".into() },
+                crate::types::SmartComponent { bit_number: 1, exchange: "NASDAQ".into(), exchange_letter: "Q".into() },
+            ]);
+            // And a series behind it in the same message.
+            farm.generic_tick_tags.push((90002, 511, instrument));
+            shared.market.note_venue_millis(1_790_000_000_000);
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[
+                    (90001, REGULATORY_SNAPSHOT_REQUEST_TYPE, &answer),
+                    (90002, 511, &0.2f64.to_be_bytes()),
+                ]),
+                &mut context, &shared, &None,
+            );
+
+            let said = shared.market.take_snapshot_answer(instrument).expect("the answer is handed over");
+            let find = |tick_type: i32| {
+                said.iter().find(|t| t.tick_type == tick_type).map(|t| format!("{:?}", t.value))
+            };
+            let stated = |value: SeriesValue| Some(format!("{value:?}"));
+            assert_eq!(find(1), stated(SeriesValue::Price(150.25)), "{said:?}");
+            assert_eq!(find(0), stated(SeriesValue::Size(300.0)), "in the contract's increments");
+            assert_eq!(find(2), stated(SeriesValue::Price(150.30)));
+            assert_eq!(find(3), stated(SeriesValue::Size(400.0)));
+            assert_eq!(find(4), stated(SeriesValue::Price(150.27)));
+            assert_eq!(find(5), stated(SeriesValue::Size(100.0)));
+            assert_eq!(find(6), stated(SeriesValue::Price(151.5)));
+            assert_eq!(find(7), stated(SeriesValue::Price(148.75)));
+            assert_eq!(find(9), stated(SeriesValue::Price(149.0)));
+            assert_eq!(find(8), stated(SeriesValue::Size(1_234_500.0)));
+            assert_eq!(find(32), stated(SeriesValue::Text("P".into())), "the bid's mask");
+            assert_eq!(find(33), stated(SeriesValue::Text("Q".into())), "the ask's mask");
+            assert_eq!(find(84), stated(SeriesValue::Text("Q".into())), "the last's place in the list");
+            let stamp = said.iter().find(|t| t.tick_type == 85).map(|t| t.value.clone());
+            match stamp {
+                Some(SeriesValue::Text(millis)) => {
+                    assert!(stamped, "a snapshot the venue does not charge for is not stamped");
+                    let millis: i64 = millis.parse().expect("milliseconds");
+                    assert!((millis - 1_790_000_000_000).abs() < 5_000, "on the venue's clock: {millis}");
+                }
+                None => assert!(!stamped, "a chargeable snapshot is stamped"),
+                other => panic!("the stamp is text: {other:?}"),
+            }
+            assert!(
+                shared.market.drain_series_ticks(instrument).is_empty(),
+                "none of it rides the series every watcher of the contract hears",
+            );
+            assert_eq!(
+                shared.market.stated_figures(instrument, 511), vec![0.2],
+                "the record behind the answer is read too",
+            );
+        }
+    }
+
+    /// A chargeable snapshot's answer that arrives before its contract's map
+    /// of venues waits for the map, as a gateway waits, and is published with
+    /// the letters the map gives once it is stated. Read at once, the masks
+    /// found no map and their letters were dropped for good.
+    #[test]
+    fn a_chargeable_snapshot_waits_for_its_map_of_venues() {
+        let decimal = |c: u64| (398u64 << 53 | c).to_be_bytes();
+        let mut answer = Vec::new();
+        for v in [1i32, 1 << 9, 1 << 10, 9] {
+            answer.extend_from_slice(&v.to_be_bytes());
+        }
+        for size in [3u64, 4, 1, 12_345] {
+            answer.extend_from_slice(&decimal(size));
+        }
+        for price in [150.25f64, 150.30, 150.27, 149.0, 151.5, 148.75] {
+            answer.extend_from_slice(&price.to_be_bytes());
+        }
+        let mut map = b"9/J/EDGEA;10/Y/BYX".to_vec();
+        map.splice(0..0, (map.len() as u32).to_be_bytes());
+        while !(map.len() - 4).is_multiple_of(4) {
+            map.push(0);
+        }
+
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(265598);
+        context.market.set_routing(instrument, "STK", "SMART");
+        farm.md_req_to_instrument.push((1, instrument));
+        farm.md_req_to_instrument.push((2, instrument));
+        farm.generic_tick_reqs.push((2, BBO_EXCHANGE_MAP_REQUEST_TYPE));
+        farm.instrument_md_reqs.push((instrument, MdReqRecord {
+            con_id: 265598, sec_type: "CS".into(), mode_9887: 0,
+            entries: vec![MdReqEntry {
+                req_id: 1, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "BEST".into(),
+            }],
+        }));
+        farm.handle_subscription_ack(b"35=Q\x0190001,1,0.01,0,2,a6,,1,1", &mut context, &shared);
+        farm.handle_subscription_ack(b"35=Q\x0190002,2,0.01,0,0,a6,,0,1", &mut context, &shared);
+
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(90001, REGULATORY_SNAPSHOT_REQUEST_TYPE, &answer)]),
+            &mut context, &shared, &None,
+        );
+        assert!(shared.market.take_snapshot_answer(instrument).is_none(), "held for the map");
+
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(90002, BBO_EXCHANGE_MAP_REQUEST_TYPE, &map)]),
+            &mut context, &shared, &None,
+        );
+        let said = shared.market.take_snapshot_answer(instrument).expect("published once the map is");
+        let text = |tick_type: i32| {
+            said.iter().find(|t| t.tick_type == tick_type).map(|t| format!("{:?}", t.value))
+        };
+        assert_eq!(text(32).as_deref(), Some(r#"Text("J")"#), "{said:?}");
+        assert_eq!(text(33).as_deref(), Some(r#"Text("Y")"#));
+        assert_eq!(text(84).as_deref(), Some(r#"Text("J")"#));
+
+        // A map that never comes: let go once a gateway stops waiting, and
+        // none of the answer is published.
+        let other = context.market.register(8314);
+        farm.md_req_to_instrument.push((5, other));
+        farm.handle_subscription_ack(b"35=Q\x0190005,5,0.01,0,2,b7,,1,1", &mut context, &shared);
+        farm.generic_tick_tags.push((90005, REGULATORY_SNAPSHOT_REQUEST_TYPE, other));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(90005, REGULATORY_SNAPSHOT_REQUEST_TYPE, &answer)]),
+            &mut context, &shared, &None,
+        );
+        farm.publish_snapshot_answers(&context, &shared);
+        assert_eq!(farm.snapshot_answers_held.len(), 1, "still waiting");
+        farm.snapshot_answers_held[0].3 -= std::time::Duration::from_millis(2001);
+        farm.publish_snapshot_answers(&context, &shared);
+        assert!(farm.snapshot_answers_held.is_empty(), "no longer waited for");
+        assert!(shared.market.take_snapshot_answer(other).is_none(), "and nothing published");
+    }
+
+    /// The exchanges a caller is told offer a book are the ones the routing
+    /// table names a book for, one per security type and book, in the API's
+    /// words.
+    #[test]
+    fn the_depth_directory_is_what_the_table_names_a_book_for() {
+        let table = crate::protocol::routing::RoutingTable::parse(
+            "ISLAND,STK,Top|Deep2|Deep,-1,*,h,4000,usfarm;\
+             BEST,CS,AggDeep,1,PINK,h,4000,usfarm;\
+             BEST,STK,Top,1,*,h,4000,usfarm;\
+             EVERYTHING,STK,*,-1,*,h,4000,f;\
+             IBEFP,COMB,Top|Deep2,-1,*,h,4000,usfuture;\
+             SEHK,OPT|WAR,DeepX,-1,*,h,4000,hfarm;\
+             SMART,STK,Deep,-1,*,h,4000,usfarm;\
+             ISLAND,STK,Deep,-1,*,h2,4000,usfarm.nj;\
+             ANYEXCH,ANY,Deep,-1,*,h,4000,f;\
+             CHIX,cs|Stock|SBL|WIDGET,Deep,-1,*,h,4000,eufarm",
+        );
+        let said: Vec<(String, String, String, String, i32)> = super::super::depth_directory(&table)
+            .into_iter()
+            .map(|d| (d.exchange, d.sec_type, d.listing_exch, d.service_data_type, d.agg_group))
+            .collect();
+        let row = |e: &str, t: &str, l: &str, s: &str, g: i32| {
+            (e.to_string(), t.to_string(), l.to_string(), s.to_string(), g)
+        };
+        assert_eq!(
+            said,
+            [
+                row("ISLAND", "STK", "", "Deep2", i32::MAX),
+                row("ISLAND", "STK", "", "Deep", i32::MAX),
+                row("SMART", "STK", "PINK", "AggDeep", 1),
+                row("IBEFP", "BAG", "", "Deep2", i32::MAX),
+                row("SEHK", "OPT", "", "DeepX", i32::MAX),
+                row("SEHK", "WAR", "", "DeepX", i32::MAX),
+                // Any exchange and any type, written as wildcards.
+                row("*", "*", "", "Deep", i32::MAX),
+                // A type read whatever its case, or by the name it is shown
+                // under; one that is no type is written as nothing.
+                row("CHIX", "STK", "", "Deep", i32::MAX),
+                row("CHIX", "SLB", "", "Deep", i32::MAX),
+                row("CHIX", "", "", "Deep", i32::MAX),
+            ],
+        );
+    }
+
+    /// The volatility a contract has shown over a run of days, one series per
+    /// run: one double each, the same record as the thirty-day one that
+    /// reaches a caller on tick 23.
+    ///
+    /// Framed and then left unread, so what the venue stated on them went
+    /// nowhere.
+    #[test]
+    fn the_historical_volatility_series_are_kept_as_stated() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(7003);
+
+        for (tag, series, vol) in [
+            (71u32, 511u32, 0.18), (72, 513, 0.21), (73, 514, 0.22), (74, 515, 0.23),
+            (75, 516, 0.24), (76, 517, 0.25),
+        ] {
+            farm.generic_tick_tags.push((tag, series, instrument));
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(tag, series, &f64::to_be_bytes(vol))]),
+                &mut context, &shared, &None,
+            );
+            assert_eq!(
+                shared.market.stated_figures(instrument, series), vec![vol],
+                "series {series} states one figure, and it is kept",
+            );
+        }
+    }
+
     /// The series that state figures, read at the venue's own widths and in
     /// its own order.
     ///
@@ -1612,7 +2073,8 @@ mod news_tests {
         let instrument = context.market.register(756733);
         context.market.set_min_tick(instrument, 0.01);
         context.market.set_size_tick(instrument, 1.0);
-        shared.reference.set_smart_components(vec![
+        shared.reference.note_bbo_exchange(instrument, "a6", "STK");
+        shared.reference.set_smart_components_of(instrument, "STK", vec![
             crate::types::SmartComponent { bit_number: 2, exchange: "NYSE".into(), exchange_letter: "N".into() },
             crate::types::SmartComponent { bit_number: 5, exchange: "ARCA".into(), exchange_letter: "P".into() },
         ]);
@@ -4411,6 +4873,39 @@ mod depth_identity_tests {
         assert!(farm.within_asked_depth(1, 99));
     }
 
+    /// A book on a market the routing table names for the top of the book
+    /// alone is refused as a gateway refuses it, with its number and words,
+    /// and nothing is sent. Smart depth on a type a gateway gathers a book for
+    /// from each venue is never refused by one, and is sent.
+    #[test]
+    fn a_book_no_route_serves_is_refused_as_a_gateway_refuses_it() {
+        let mut farm = FarmState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let (mut conn, peer) = Connection::for_test();
+        conn.routing = crate::protocol::routing::RoutingTable::parse(
+            "BEST,STK,Top,1,*,h,4000,usfarm;IEX,STK,Top|Deep,-1,*,h,4000,usfarm",
+        );
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+
+        farm.send_depth_subscribe(1, 756733, "SMART", "", "STK", 5, false, &mut conn, &mut hb, &shared);
+        assert_eq!(
+            shared.reference.drain_historical_errors(),
+            [(
+                1,
+                crate::error_codes::DEEP_DATA_NOT_SUPPORTED,
+                "Deep market data is not supported for this combination of security type/exchange"
+                    .to_string(),
+            )],
+        );
+        assert!(super::drain_inner(&mut peer).is_empty(), "nothing asked of the venue");
+
+        farm.send_depth_subscribe(2, 756733, "SMART", "", "STK", 5, true, &mut conn, &mut hb, &shared);
+        assert!(shared.reference.drain_historical_errors().is_empty(), "smart depth is not refused");
+        assert_eq!(super::drain_inner(&mut peer).len(), 1, "and is asked for");
+    }
+
     /// A book is asked for once and withdrawn once, and what is withdrawn is
     /// what this client asked under rather than what the caller stated.
     #[test]
@@ -4716,17 +5211,31 @@ mod depth_position_tests {
     /// characters is handed on alone, and neither is trimmed.
     #[test]
     fn an_acknowledgement_is_read_as_a_gateway_reads_it() {
-        let read = |ack: &str| {
-            let parts: Vec<&str> = ack.split(',').collect();
-            let p = stated_request_params(&parts, 0.01, "STK");
+        let read = |fifth: &str, sixth: &str| {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let shared = SharedState::new();
+            let instrument = context.market.register(756733);
+            context.market.set_routing(instrument, "STK", "SMART");
+            farm.send_mktdata_subscribe(
+                756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+                false, &mut None, &mut hb,
+            );
+            let quote = farm.md_req_to_instrument.iter()
+                .map(|(id, _)| *id)
+                .find(|id| !farm.generic_tick_reqs.iter().any(|(g, _)| g == id))
+                .expect("the quote's own request");
+            let ack = format!("35=Q\x0133082,{quote},0.01,0,{fifth},{sixth},,1,1");
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            let (_, p) = shared.market.drain_tick_req_params().pop().expect("stated");
             (p.snapshot_permissions, p.bbo_exchange)
         };
-        assert_eq!(read("33082,7,0.01,0,4,SMART,,1,1"), (4, "SMART".to_string()));
-        assert_eq!(read("33082,7,0.01,0,7,9c,,1,1"), (0, "9c0001".to_string()), "seven is no permission");
-        assert_eq!(read("33082,7,0.01,0,-1,9c,,1,1"), (0, "9c0001".to_string()));
-        assert_eq!(read("33082,7,0.01,0, 3, 9c,,1,1"), (0, " 9c0001".to_string()), "as written");
-        assert_eq!(read("33082,7,0.01,0,3,,,1,1"), (3, String::new()), "no exchange, nothing appended");
-        assert_eq!(read("33082,7,0.01,0,3"), (0, String::new()), "five fields state neither");
+        assert_eq!(read("4", "SMART"), (4, "SMART".to_string()));
+        assert_eq!(read("7", "9c"), (0, "9c0001".to_string()), "seven is no permission");
+        assert_eq!(read("-1", "9c"), (0, "9c0001".to_string()));
+        assert_eq!(read(" 3", " 9c"), (0, " 9c0001".to_string()), "as written");
+        assert_eq!(read("3", ""), (3, String::new()), "no exchange, nothing appended");
     }
 
 }
@@ -4773,7 +5282,7 @@ mod exchange_map_tests {
         farm.generic_tick_tags.push((7, BBO_EXCHANGE_MAP_REQUEST_TYPE, instrument));
         farm.handle_generic_tick(&msg, &mut context, &shared, &None);
 
-        let named = shared.reference.smart_components();
+        let named = shared.reference.smart_components_of(instrument);
         assert_eq!(named.len(), 3, "every venue the map names: {named:?}");
         assert_eq!(named[0].bit_number, 9, "the bit the entry states, not where it sat");
         assert_eq!(named[0].exchange, "EDGEA", "and its own name: {named:?}");
@@ -4784,7 +5293,7 @@ mod exchange_map_tests {
 
         // Rendered against a mask, the letters are letters.
         assert_eq!(
-            crate::client_core::render_exchange_mask((1 << 9) | (1 << 10), &shared),
+            crate::client_core::render_exchange_mask((1 << 9) | (1 << 10), instrument, &shared),
             "JY",
             "two venues, two letters",
         );
@@ -4817,7 +5326,7 @@ mod exchange_map_tests {
         farm.handle_generic_tick(&msg, &mut context, &shared, &None);
 
         assert!(
-            shared.reference.smart_components().is_empty(),
+            shared.reference.smart_components_of(instrument).is_empty(),
             "nothing the mask's bits could be read against",
         );
     }

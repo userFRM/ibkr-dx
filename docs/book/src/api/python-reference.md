@@ -319,7 +319,7 @@ def corporate_actions(contract, start_date, end_date)
 
 #### `historical_data`
 
-Bars for a contract over a period, handed back rather than delivered a bar at a time to a callback.  The venue has no adjusted series to pass through: what it serves is raw trades, and the two series the vendor states as adjusted — TRADES and ADJUSTED_LAST — are those folded with the contract's own actions. The fold is made once the series is whole and the actions are in hand, before a bar is handed to anyone. This call waits and hands the series back in one piece; `reqHistoricalData` delivers the same bars one at a time on its callbacks. Both ask for the actions by the venue's id for the contract, and refuse a contract that does not carry it.
+Bars for a contract over a period, handed back rather than delivered a bar at a time to a callback.  The venue has no adjusted series to pass through: what it serves is raw trades, and the two series the vendor states as adjusted — TRADES and ADJUSTED_LAST — are those folded with the contract's own actions. The fold is made once the series is whole and the actions are in hand, before a bar is handed to anyone. This call waits and hands the series back in one piece; `reqHistoricalData` delivers the same bars one at a time on its callbacks. Both ask for the actions by the venue's id for the contract, which the venue is asked for first where the contract is named some other way.
 
 ```python
 def historical_data(contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth=1)
@@ -1275,6 +1275,21 @@ def stated_rows(req_id, series)
 
 ---
 
+#### `chain_model_parameters`
+
+What one of the option model's chain series last stated for a subscription on an underlying.  A list with one dict per class of the underlying's options: the underlying's price, the dividends expected, and per expiry the yield, the interest rate, the forward and the at-the-money volatilities the model works from. Ask for series 687 for the standing set, or 691 for the set as the chain closed, in the generic tick list of a subscription on the underlying.  The documented API has no call for either: a gateway reads them for its own option model and hands none of it on. Empty where the request names no subscription, or the series has stated nothing for it.
+
+```python
+def chain_model_parameters(req_id, series)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `series` | `int` |  |
+
+---
+
 #### `paired_figures_series`
 
 Which series have stated paired figures for a subscription, in order.
@@ -2010,7 +2025,7 @@ def update_display_group(req_id, contract_info)
 
 #### `req_smart_components`
 
-Ask which venue each bit of a quote's exchange mask refers to. The venue states the map beside the quote, so a quote has to have been asked for first. Answered on `smart_components`.  `bbo_exchange` is taken and not applied. The venue states one table of routing components at logon, for this session rather than per exchange, and that whole table is what comes back.
+Ask which venue each bit of a quote's exchange mask refers to. The venue states the map beside the quote, so a quote has to have been asked for first. Answered on `smart_components`.  `bbo_exchange` names the map: the one `tick_req_params` states for the contract. The venue states a map per BBO exchange and security type, so one contract's venues are not another's. A BBO exchange no subscription named is refused as a gateway refuses it; one whose map has not arrived yet is waited for up to two seconds, as a gateway waits, and answered from the dispatch loop rather than by holding this call.
 
 ```python
 def req_smart_components(req_id, bbo_exchange)
@@ -3104,20 +3119,9 @@ One bond matching a description, with its terms: what it pays, how and when, whe
 
 ---
 
-#### `delta_neutral_validation`
-
-The contract the venue paired with a delta-neutral order.  A gateway sends it. No message this client receives carries the pairing it reports, so nothing here fires it.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `delta_neutral_contract` | `Py<PyAny>` |  |
-
----
-
 #### `reroute_mkt_data_req`
 
-The contract a market-data request should be asked for under instead.  A gateway sends it when a request is to be asked for under another contract and venue — a contract for difference standing for a share. Nothing this connection receives has been seen to state one, so nothing here fires it.
+The contract a market-data request should be asked for under instead.  A gateway sends it, and asks the venue nothing, for a contract for difference whose own definition asks for its underlying's data, where the account's logon permissions allow that: the underlying's contract and the venue to ask on. This client does not read a definition's flags for asking on the underlying before subscribing: the request goes to the venue as asked, and this never fires.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3136,6 +3140,17 @@ The same, for a request for the book rather than the quote.
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `con_id` | `int` | Contract ID. Unique per instrument. |
 | `exchange` | `str` | Exchange name. |
+
+---
+
+#### `delta_neutral_validation`
+
+The contract the venue paired with a delta-neutral order.  Declared by the TWS API and never fired on a gateway: a gateway never sends it. It fires here as it does there: never.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `delta_neutral_contract` | `Py<PyAny>` |  |
 
 ---
 

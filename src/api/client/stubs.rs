@@ -12,15 +12,23 @@ impl EClient {
 
     /// Request smart routing components for a BBO exchange. Matches
     /// `reqSmartComponents` in C++.
-    /// Gateway-local — returns component exchanges from init data.
     ///
-    /// `bbo_exchange` is taken and not applied. The venue states one table of
-    /// routing components at logon, for this session rather than per exchange,
-    /// and that whole table is what comes back.
-    pub fn req_smart_components(&self, req_id: i64, _bbo_exchange: &str, wrapper: &mut impl Wrapper) {
+    /// Answered from the map of venues the venue stated beside the
+    /// subscription whose acknowledgement named that BBO exchange — the one
+    /// `tick_req_params` states. The venue states a map per BBO exchange and
+    /// security type, so one contract's venues are not another's.
+    ///
+    /// A BBO exchange no subscription named is refused as a gateway refuses
+    /// it. One whose map has not arrived yet is waited for up to two seconds,
+    /// as a gateway waits, and answered from `process_msgs` rather than by
+    /// holding this call.
+    pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str, wrapper: &mut impl Wrapper) {
         if self.session_over() { return wrapper.error(-1, Refusal::NOT_CONNECTED as i64, "Not connected", ""); }
-        let components = self.shared.reference.smart_components();
-        wrapper.smart_components(req_id, &components);
+        match self.shared.reference.ask_smart_components(req_id, bbo_exchange) {
+            Ok(Some(components)) => wrapper.smart_components(req_id, &components),
+            Ok(None) => {}
+            Err(why) => wrapper.error(req_id, i64::from(why.code), &why.message, ""),
+        }
     }
 
     // ── News Providers ──

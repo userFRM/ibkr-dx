@@ -123,9 +123,9 @@ impl EClient {
     /// | `mode_9887` | mode             | wire shape |
     /// |-------------|------------------|---|
     /// | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 |
-    /// | `1`         | DELAYED          | `264=1` (TOP) + `9887=1` |
-    /// | `2`         | FROZEN           | `264=1` (TOP) + `9887=2` |
-    /// | `3`         | DELAYED_FROZEN   | `264=1` (TOP) + `9887=3` |
+    /// | `1`         | DELAYED          | `264=442` + `264=443`, each with `9887=1` |
+    /// | `2`         | FROZEN           | `264=442` + `264=443`, each with `9887=2` |
+    /// | `3`         | DELAYED_FROZEN   | `264=442` + `264=443`, each with `9887=3` |
     ///
     /// The frozen mode keeps thinly-traded names quoting after-hours, when the
     /// realtime feed is silent.
@@ -350,11 +350,12 @@ impl EClient {
 
     /// Subscribe to market depth (L2 order book). Matches `reqMktDepth` in C++.
     ///
-    /// A contract that names no venue and no security type is sent as it
-    /// stands. The engine reads an unnamed venue as the smart destination and
-    /// checks a named security type against the venue's routing table.
-    /// Substituting a stock here asks for a future's book as a stock's, which
-    /// the venue refuses as a book it does not serve.
+    /// Refused as a gateway refuses it, before anything is sent: a contract
+    /// naming no exchange, a combination, and a book of no rows. A contract
+    /// that names no security type is sent as it stands, and the engine checks
+    /// a named one against the venue's routing table. Substituting a stock here
+    /// asks for a future's book as a stock's, which the venue refuses as a book
+    /// it does not serve.
     pub fn req_mkt_depth(
         &self, req_id: i64, contract: &Contract,
         num_rows: i32, is_smart_depth: bool,
@@ -363,6 +364,12 @@ impl EClient {
         // wire cannot carry holds nothing, and taking the slot first left it
         // held against a request that was then refused.
         let wire = wire_req_id(req_id)?;
+        // No session is said before anything about the request, as the
+        // reference client says it and as the other surface does.
+        if self.session_over() {
+            return Err(Refusal::not_connected("Not connected"));
+        }
+        crate::client_core::ClientCore::validate_depth_request(&contract.exchange, &contract.sec_type, num_rows)?;
         // A book rides the quote feed, so a feed the engine has given up on
         // serves none. Accepted, the request took a book slot and reached a
         // sender with no connection to write it to, which is silent — and a
@@ -649,6 +656,28 @@ impl EClient {
             return Vec::new();
         };
         self.shared.market.stated_rows(instrument, series)
+    }
+
+    /// What one of the option model's chain series last stated for a
+    /// subscription on an underlying.
+    ///
+    /// Per class of the underlying's options: the underlying's price, the
+    /// dividends expected, and per expiry the yield, the interest rate, the
+    /// forward and the at-the-money volatilities the model works from. Ask for
+    /// series 687 for the standing set, or 691 for the set as the chain
+    /// closed, in the generic tick list of a subscription on the underlying.
+    ///
+    /// The documented API has no call for either: a gateway reads them for its
+    /// own option model and hands none of it on. Empty where the request names
+    /// no subscription, or the series has stated nothing for it.
+    pub fn chain_model_parameters(
+        &self, req_id: i64, series: u32,
+    ) -> Vec<crate::types::ChainModelParameters> {
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Vec::new();
+        };
+        self.shared.market.chain_model_parameters(instrument, series)
     }
 
     /// Which series have stated paired figures for a subscription, in order.

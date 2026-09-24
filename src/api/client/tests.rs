@@ -4476,54 +4476,79 @@ fn req_historical_data_serves_adjusted_last() {
     }
 }
 
-/// The adjusted series is folded from the contract's corporate actions, which
-/// are asked for by the venue's id for the contract. Named by anything else the
-/// fold cannot be made, so the request is refused rather than answered with raw
-/// trades under an adjusted name — as the waiting call refuses it.
+/// A contract named by its symbol is asked for adjusted as it is for anything
+/// else: the venue names it before the query goes out, so the fold has the id
+/// it asks for the actions by.
 #[test]
-fn req_historical_data_refuses_adjusted_last_without_the_venue_id() {
+fn req_historical_data_sends_adjusted_last_for_a_contract_named_by_symbol() {
     let (client, rx, _shared) = test_client();
-    let unqualified = Contract {
+    let by_symbol = Contract {
         symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(),
         ..Default::default()
     };
-    let err = client
-        .req_historical_data(5, &unqualified, "", "1 Y", "1 day", "ADJUSTED_LAST", true, 1, false)
-        .unwrap_err();
-    assert!(err.message.contains("venue's id"), "got: {err}");
-    assert!(rx.try_recv().is_err(), "nothing may reach the engine");
+    client
+        .req_historical_data(5, &by_symbol, "", "1 Y", "1 day", "ADJUSTED_LAST", true, 1, false)
+        .expect("sent, as a gateway sends it");
+    match rx.try_recv().expect("the request reaches the engine") {
+        ControlCommand::FetchHistorical { contract, what_to_show, .. } => {
+            assert_eq!((contract.con_id, what_to_show.as_str()), (0, "ADJUSTED_LAST"));
+        }
+        other => panic!("expected a historical request, got {other:?}"),
+    }
 }
 
-/// A request kept up to date never completes, so there is no whole series to
-/// fold: ADJUSTED_LAST and keepUpToDate together are refused rather than
-/// answered with a series that can never be put on one scale.
+/// A request kept up to date is refused on the adjusted series as a gateway
+/// refuses it: it keeps no bar current for that series.
 #[test]
 fn req_historical_data_refuses_adjusted_last_kept_up_to_date() {
     let (client, rx, _shared) = test_client();
     let err = client
         .req_historical_data(5, &spy(), "", "1 D", "5 mins", "ADJUSTED_LAST", true, 1, true)
         .unwrap_err();
-    assert!(err.message.contains("kept up to date"), "got: {err}");
+    assert_eq!(
+        (err.code, err.message.as_str()),
+        (Refusal::VALIDATION, "Source price not supported with live updates"),
+    );
     assert!(rx.try_recv().is_err(), "nothing may reach the engine");
 }
 
-/// The waiting call is served by the same fold as the callback path, so a
-/// contract with no venue id is refused where the request is made — the fold
-/// cannot ask for the actions without it. Fetching the raw series first and
-/// finding out afterwards would make the caller wait out the answer timeout
-/// for a refusal that was known at once.
+/// What a gateway refuses in a historical request before it asks the venue is
+/// refused here in its words, and nothing is sent.
 #[test]
-fn the_waiting_call_refuses_adjusted_last_without_the_venue_id() {
+fn a_historical_request_a_gateway_refuses_is_refused_here() {
     let (client, rx, _shared) = test_client();
-    let unqualified = Contract {
-        symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+    let combo = Contract {
+        symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "BAG".into(),
         ..Default::default()
     };
-    let err = client
-        .historical_data(&unqualified, "", "1 Y", "1 day", "ADJUSTED_LAST", true)
-        .unwrap_err();
-    assert!(err.message.contains("venue's id"), "got: {err}");
-    assert!(rx.try_recv().is_err(), "nothing may reach the engine");
+    for (contract, end, size, series, keep, reason) in [
+        (spy(), "20250101 00:00:00", "1 day", "ADJUSTED_LAST", false,
+         "End date not supported with adjusted last"),
+        (spy(), "", "1 week", "ADJUSTED_LAST", false,
+         "Multi day bar size not supported with adjusted last"),
+        (spy(), "20250101 00:00:00", "5 mins", "TRADES", true,
+         "End date not supported with live updates"),
+        (combo, "", "5 mins", "TRADES", true, "Live updates for combos are not supported"),
+        (spy(), "", "5 mins", "BID_ASK", true, "Source price not supported with live updates"),
+        (spy(), "", "5 mins", "YIELD_BID", true, "Source price not supported with live updates"),
+        // A name left empty is compared as it stands, and matches none.
+        (spy(), "", "5 mins", "", true, "Source price not supported with live updates"),
+    ] {
+        let err = client
+            .req_historical_data(5, &contract, end, "1 M", size, series, true, 1, keep)
+            .expect_err(reason);
+        assert_eq!((err.code, err.message.as_str()), (Refusal::VALIDATION, reason));
+        assert!(rx.try_recv().is_err(), "nothing was sent for {reason}");
+    }
+    // And a week and a month are kept up to date, and a day adjusted.
+    for (size, series, keep) in [
+        ("1 week", "TRADES", true), ("1 month", "MIDPOINT", true), ("1 day", "ADJUSTED_LAST", false),
+    ] {
+        client
+            .req_historical_data(5, &spy(), "", "1 Y", size, series, true, 1, keep)
+            .unwrap_or_else(|e| panic!("{size} {series}: {e}"));
+        assert!(rx.try_recv().is_ok(), "{size} {series} is sent");
+    }
 }
 
 /// An engine that has gone is not a request that was malformed. A caller that
@@ -8698,25 +8723,62 @@ fn a_permanent_refusal_keeps_its_own_number() {
     );
 }
 
-/// A depth request on a contract naming no exchange and no security type is sent
-/// as it stands.
+/// A depth request on a contract naming no security type is sent as it
+/// stands.
 ///
-/// An unnamed exchange is already routed as SMART, and a named security type is
-/// checked against the routing table, so writing STK in refuses books that
-/// exist for other types.
+/// A named security type is checked against the routing table, so writing STK
+/// in refuses books that exist for other types.
 #[test]
 fn a_depth_request_states_the_contract_it_was_given() {
     let (client, rx, _shared) = test_client();
-    let by_id = crate::types::model::Contract { con_id: 495512563, ..Default::default() };
+    let by_id = crate::types::model::Contract {
+        con_id: 495512563, exchange: "SMART".into(), ..Default::default()
+    };
     client.req_mkt_depth(1, &by_id, 5, false).expect("the request is sent");
     match rx.try_recv().expect("the subscription") {
         ControlCommand::SubscribeDepth { contract, .. } => {
             assert_eq!(contract.sec_type, "", "a security type nobody stated");
-            assert_eq!(contract.exchange, "", "a venue nobody stated");
+            assert_eq!(contract.exchange, "SMART");
             assert_eq!(contract.con_id, 495512563);
         }
         other => panic!("expected SubscribeDepth, got {other:?}"),
     }
+}
+
+/// What a gateway refuses in a request for a book before it looks the
+/// contract up is refused here the same way: no exchange named, a
+/// combination, and no rows, each with the gateway's reason and nothing sent.
+#[test]
+fn a_book_a_gateway_refuses_before_asking_is_refused_here() {
+    let (client, rx, _shared) = test_client();
+    let no_exchange = crate::types::model::Contract { con_id: 756733, ..Default::default() };
+    let combo = crate::types::model::Contract {
+        exchange: "SMART".into(), sec_type: "BAG".into(), ..Default::default()
+    };
+    for (contract, rows, reason) in [
+        (no_exchange, 5, "Please enter exchange."),
+        (combo, 5, "Market depth does not support combos."),
+        (spy(), 0, "Market depth rows requested must be greater than zero."),
+    ] {
+        let refused = client.req_mkt_depth(1, &contract, rows, false).expect_err(reason);
+        assert_eq!((refused.code, refused.message.as_str()), (Refusal::VALIDATION, reason));
+        assert!(rx.try_recv().is_err(), "nothing was sent for it");
+        assert!(client.core.hold_the_book(1).is_ok(), "and no book slot was taken");
+        client.core.release_the_book(1).unwrap();
+    }
+}
+
+/// With no session a book request is refused for that before anything about
+/// the request is looked at, as the reference client refuses it and as the
+/// other surface does.
+#[test]
+fn a_book_asked_for_with_no_session_is_refused_for_that_first() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_session_over("the trading connection");
+    let no_exchange = crate::types::model::Contract { con_id: 756733, ..Default::default() };
+    let refused = client.req_mkt_depth(1, &no_exchange, 0, false).expect_err("no session");
+    assert_eq!(refused.code, Refusal::NOT_CONNECTED, "{refused:?}");
+    assert!(rx.try_recv().is_err());
 }
 
 /// A book rides the quote feed, so a feed given up on serves none.
@@ -8729,7 +8791,9 @@ fn a_depth_request_states_the_contract_it_was_given() {
 fn no_book_is_taken_on_a_feed_that_is_over_for_the_session() {
     let (client, rx, shared) = test_client();
     shared.market.set_market_data_over("the venue would not take the connection back");
-    let contract = crate::types::model::Contract { con_id: 495512563, ..Default::default() };
+    let contract = crate::types::model::Contract {
+        con_id: 495512563, exchange: "SMART".into(), ..Default::default()
+    };
     let asked = client.req_mkt_depth(1, &contract, 5, false);
     assert!(asked.is_err(), "the caller is refused: {asked:?}");
     assert!(rx.try_recv().is_err(), "and nothing was sent for it");
@@ -10347,6 +10411,125 @@ fn the_acknowledged_permission_and_exchange_reach_the_caller() {
     assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01:9c0001:3"), "{:?}", w.events);
 }
 
+/// What the option model's chain series stated for an underlying is read by
+/// the request that asked for it, and by no other.
+#[test]
+fn the_chain_model_parameters_are_read_by_the_request_that_asked() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    shared.market.note_chain_model_parameters(0, 687, vec![crate::types::ChainModelParameters {
+        product_id: 7, underlying_price: Some(450.5), ..Default::default()
+    }]);
+    let read = client.chain_model_parameters(1, 687);
+    assert_eq!((read.len(), read[0].product_id, read[0].underlying_price), (1, 7, Some(450.5)));
+    assert!(client.chain_model_parameters(1, 691).is_empty(), "the closing set is its own series");
+    assert!(client.chain_model_parameters(2, 687).is_empty(), "a request that asked nothing");
+}
+
+/// `tick_req_params` names the BBO exchange the subscription was acknowledged
+/// under, with the security type's code behind it, and that is the name
+/// `req_smart_components` answers to. A name nothing was acknowledged under is
+/// refused as a gateway refuses it.
+#[test]
+fn the_bbo_exchange_on_tick_req_params_is_what_smart_components_answers_to() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    shared.reference.note_bbo_exchange(0, "a6", "STK");
+    shared.reference.set_smart_components_of(0, "STK", vec![crate::types::SmartComponent {
+        bit_number: 9, exchange: "EDGEA".into(), exchange_letter: "J".into(),
+    }]);
+    // As the acknowledgement states it: from what it noted of the contract.
+    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+        min_tick: 0.01,
+        bbo_exchange: shared.reference.bbo_exchange_of(0),
+        snapshot_permissions: i64::from(shared.reference.snapshot_permission_of(0)),
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01:a60001:0"), "{:?}", w.events);
+
+    client.req_smart_components(7, "a60001", &mut w);
+    assert!(w.events.iter().any(|e| e == "smart_components:7:1"), "{:?}", w.events);
+    client.req_smart_components(8, "zz0001", &mut w);
+    assert!(
+        w.events.iter().any(|e| e.starts_with("error:8:321:Invalid BBO exchange/security type code")),
+        "{:?}", w.events,
+    );
+    assert!(!w.events.iter().any(|e| e.starts_with("smart_components:8:")), "and no map");
+}
+
+/// `tick_req_params` states whether the contract's snapshot is chargeable, by
+/// the venue's number, as its acknowledgement said and as a gateway states it.
+#[test]
+fn tick_req_params_states_whether_the_snapshot_is_chargeable() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    shared.reference.note_bbo_exchange(0, "a6", "STK");
+    shared.reference.note_snapshot_permission(0, 3);
+    shared.reference.note_snapshot_permission(0, 0);
+    // As the acknowledgement states it: from what it noted of the contract.
+    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+        min_tick: 0.01,
+        bbo_exchange: shared.reference.bbo_exchange_of(0),
+        snapshot_permissions: i64::from(shared.reference.snapshot_permission_of(0)),
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01:a60001:3"), "{:?}", w.events);
+}
+
+/// A map asked for before it has arrived is answered once it arrives, from
+/// the dispatch loop: a gateway answers it when it lands, and the call that
+/// asked is not held while it waits.
+#[test]
+fn a_map_of_venues_asked_for_early_is_answered_when_it_arrives() {
+    let (client, _rx, shared) = test_client();
+    shared.reference.note_bbo_exchange(4, "c2", "CASH");
+    let mut w = RecordingWrapper::default();
+    let asked = std::time::Instant::now();
+    client.req_smart_components(9, "c2000A", &mut w);
+    assert!(asked.elapsed() < std::time::Duration::from_millis(500), "the call is not held");
+    assert!(w.events.is_empty(), "nothing yet: {:?}", w.events);
+
+    shared.reference.set_smart_components_of(4, "CASH", vec![crate::types::SmartComponent {
+        bit_number: 9, exchange: "IDEALPRO".into(), exchange_letter: "X".into(),
+    }]);
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "smart_components:9:1"), "{:?}", w.events);
+    client.process_msgs(&mut w);
+    assert_eq!(
+        w.events.iter().filter(|e| e.starts_with("smart_components:9:")).count(), 1, "once",
+    );
+}
+
+/// A map that does not arrive within the two seconds a gateway waits is
+/// refused in the gateway's words, under the number it marks a refusal of
+/// its own with; the name is read the way a gateway reads it.
+#[test]
+fn a_map_of_venues_that_never_arrives_is_refused_as_a_gateway_refuses_it() {
+    let shared = crate::bridge::SharedState::new();
+    shared.reference.note_bbo_exchange(4, "a6", "STK");
+    shared.reference.note_bbo_exchange(5, "ARCAEDGE", "STK");
+    // The code kept to its lowest byte, as a gateway reads it: 0x0101 is a
+    // share's.
+    assert_eq!(shared.reference.ask_smart_components(1, "a60101"), Ok(None));
+    assert!(shared.reference.drain_smart_component_answers(std::time::Instant::now()).is_empty());
+    let later = std::time::Instant::now() + std::time::Duration::from_millis(2001);
+    assert_eq!(
+        shared.reference.drain_smart_component_answers(later),
+        [(1, Err(crate::error_codes::Refusal {
+            code: i32::MAX,
+            message: "Unable to retrieve smart components for BBO exchange a6 and security type STK"
+                .into(),
+        }))],
+    );
+    // An id longer than four characters is stated as it stands.
+    assert_eq!(shared.reference.bbo_exchange_of(5), "ARCAEDGE");
+    assert_eq!(shared.reference.bbo_exchange_of(4), "a60001");
+}
+
 /// A bar that continues a kept-up-to-date request is dated as the history
 /// before it was: in the caller's format, on the series' own zone.
 ///
@@ -10369,6 +10552,42 @@ fn an_update_bar_is_dated_as_the_history_before_it() {
         w.events.iter().any(|e| e == "historical_data_update:5:20250904 11:33:20 US/Eastern"),
         "{:?}", w.events.iter().filter(|e| e.starts_with("historical_data_update")).collect::<Vec<_>>(),
     );
+}
+
+/// A bar a day long or longer is dated by its day alone, as the history's
+/// bars are and as a gateway dates the one still forming. Written as an
+/// instant on the series' zone, a week's update read as the Sunday evening
+/// before it and a month's as the last day of the month before, beside a
+/// history dated by day: a program comparing the two was handed a date and
+/// a time for one bar.
+#[test]
+fn an_update_to_a_bar_of_a_day_or_longer_is_dated_by_its_day() {
+    let (client, _rx, shared) = test_client();
+    for (req_id, size, opened_at, dated) in [
+        (5u32, "1 day", 1_790_208_000u32, "20260924"),
+        (6, "1 week", 1_789_948_800, "20260921"),
+        (7, "1 month", 1_788_220_800, "20260901"),
+    ] {
+        client
+            .req_historical_data(i64::from(req_id), &spy(), "", "1 Y", size, "TRADES", true, 1, true)
+            .expect("asked");
+        shared.reference.push_historical_data(req_id, crate::control::historical::HistoricalResponse {
+            query_id: format!("q{req_id}"), timezone: "US/Eastern".into(), is_complete: true,
+            bars: Vec::new(),
+        });
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        shared.market.push_real_time_bar(req_id, crate::types::RealTimeBar {
+            timestamp: opened_at, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 0.0, wap: 1.0,
+            count: 1,
+        });
+        client.process_msgs(&mut w);
+        let said = format!("historical_data_update:{req_id}:{dated}");
+        assert!(
+            w.events.contains(&said),
+            "{size}: {:?}", w.events.iter().filter(|e| e.starts_with("historical_data_update")).collect::<Vec<_>>(),
+        );
+    }
 }
 
 /// A market-data connection that went away leaves nothing fabricated behind

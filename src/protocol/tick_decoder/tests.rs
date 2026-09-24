@@ -612,11 +612,11 @@ fn decode_extended_with_has_more() {
     // Extended tick with has_more=1, followed by a normal tick
     let mut b = PayloadBuilder::new();
     b.server_tag(0, 77);
-    b.tick_extended(1, O_UNVERIFIED_18, 1, 1, false); // has_more=1
+    b.tick_extended(1, O_LAYOUT, 1, 1, false); // has_more=1
     b.tick(O_BID_PRICE, 0, 1, 99, false);      // has_more=0
     let ticks = decode_ticks_35p(&b.build());
     assert_eq!(ticks.len(), 2);
-    assert_eq!(ticks[0].tick_type, O_UNVERIFIED_18);
+    assert_eq!(ticks[0].tick_type, O_LAYOUT);
     assert_eq!(ticks[0].magnitude, 1);
     assert_eq!(ticks[1].tick_type, O_BID_PRICE);
     assert_eq!(ticks[1].magnitude, 99);
@@ -816,7 +816,8 @@ mod wire_identity_tests {
             O_BID_PRICE, O_ASK_PRICE, O_LAST_PRICE, O_BID_SIZE, O_ASK_SIZE,
             O_LAST_SIZE, O_HIGH_PRICE, O_LOW_PRICE, O_VOLUME, O_TS_BASE,
             O_TS_OFFSET, O_OPEN_PRICE, O_CLOSE_PRICE,
-            O_LAST_EXCH, O_BID_EXCH, O_ASK_EXCH, O_UNVERIFIED_18, O_LAST_TS,
+            O_LAST_EXCH, O_BID_EXCH, O_ASK_EXCH, O_LAYOUT, O_LAST_TS, O_ELIGIBLE,
+            O_QUOTE_STATE,
         ];
         let mut seen = all.to_vec();
         seen.sort_unstable();

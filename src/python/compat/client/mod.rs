@@ -2344,10 +2344,10 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
-    /// The reference client sends a book request's secType and exchange
-    /// straight off the contract. Filling them in here subscribes a contract
-    /// naming only an id to the book of a US stock on SMART, under the
-    /// caller's own request id.
+    /// The reference client sends a book request's secType straight off the
+    /// contract. Filling it in here subscribes a contract naming only an id
+    /// and a venue to the book of a US stock, under the caller's own request
+    /// id.
     #[test]
     fn a_book_request_states_the_contract_it_was_given() {
         Python::initialize();
@@ -2356,7 +2356,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
             let contract = Py::new(py, Contract {
                 con_id: 495512563,
                 sec_type: String::new(),
-                exchange: String::new(),
+                exchange: "SMART".into(),
                 ..Default::default()
             }).unwrap();
             client.call_method1(py, "req_mkt_depth", (1i64, &contract, 5i32, false)).unwrap();
@@ -2365,9 +2365,98 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
             let ControlCommand::SubscribeDepth { contract, .. } = sent else {
                 panic!("a book request sent something else");
             };
-            assert_eq!(contract.exchange, "", "an exchange was invented");
+            assert_eq!(contract.exchange, "SMART");
             assert_eq!(contract.sec_type, "", "a security type was invented");
             assert_eq!(contract.con_id, 495512563);
+        });
+    }
+
+    /// What the option model's chain series stated reaches a caller on this
+    /// surface as on the Rust one, one dict per set with its terms inside.
+    #[test]
+    fn the_chain_model_parameters_are_read_here_too() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, _w) = wired_client(py);
+            client.borrow(py).core.req_to_instrument.lock().unwrap().insert(1, 0);
+            shared.market.note_chain_model_parameters(0, 687, vec![crate::types::ChainModelParameters {
+                product_id: 7,
+                underlying_price: Some(450.5),
+                terms: vec![crate::types::ChainModelTerm {
+                    last_trade_date: "20260417".into(), interest_rate: 0.0433,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]);
+            let sets = client.call_method1(py, "chain_model_parameters", (1i64, 687u32)).unwrap();
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("sets", sets).unwrap();
+            let read: (i64, f64, String, f64) = py
+                .eval(
+                    c"(sets[0]['productId'], sets[0]['underlyingPrice'], sets[0]['terms'][0]['lastTradeDate'], sets[0]['terms'][0]['interestRate'])",
+                    Some(&g), None,
+                )
+                .unwrap().extract().unwrap();
+            assert_eq!(read, (7, 450.5, "20260417".to_string(), 0.0433));
+        });
+    }
+
+    /// A map of venues asked for before it arrives is answered from the
+    /// dispatch loop once it does, and the call that asked is not held: a
+    /// program asking from inside a callback would otherwise stall its own
+    /// dispatch for as long as the wait.
+    #[test]
+    fn a_map_of_venues_asked_for_early_is_answered_from_dispatch() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, w) = wired_client(py);
+            shared.reference.note_bbo_exchange(4, "c2", "CASH");
+            let asked = std::time::Instant::now();
+            client.call_method1(py, "req_smart_components", (9i64, "c2000A")).unwrap();
+            assert!(asked.elapsed() < std::time::Duration::from_millis(500), "not held");
+            shared.reference.set_smart_components_of(4, "CASH", vec![crate::types::SmartComponent {
+                bit_number: 9, exchange: "IDEALPRO".into(), exchange_letter: "X".into(),
+            }]);
+            client.get().dispatch_once(py, &shared).unwrap();
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            let said: Vec<(i64, String)> = py
+                .eval(
+                    c"[(c[1], c[2][0].exchange) for c in w.calls if c[0] == 'smartComponents']",
+                    Some(&g), None,
+                )
+                .unwrap().extract().unwrap();
+            assert_eq!(said, [(9, "IDEALPRO".to_string())]);
+        });
+    }
+
+    /// What a gateway refuses in a request for a book before it looks the
+    /// contract up is refused on this surface as on the Rust one, with the
+    /// gateway's reason, and nothing is sent.
+    #[test]
+    fn a_book_a_gateway_refuses_before_asking_is_refused_here_too() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, rx, _shared, w) = wired_client(py);
+            let cases = [
+                (String::new(), String::new(), 5i32, "Please enter exchange."),
+                ("SMART".to_string(), "BAG".to_string(), 5, "Market depth does not support combos."),
+                ("SMART".to_string(), "STK".to_string(), 0,
+                 "Market depth rows requested must be greater than zero."),
+            ];
+            for (exchange, sec_type, rows, reason) in cases {
+                let contract = Py::new(py, Contract {
+                    con_id: 756733, exchange, sec_type, ..Default::default()
+                }).unwrap();
+                client.call_method1(py, "req_mkt_depth", (1i64, &contract, rows, false)).unwrap();
+                assert!(rx.try_recv().is_err(), "nothing was sent for {reason}");
+                let g = pyo3::types::PyDict::new(py);
+                g.set_item("w", &w).unwrap();
+                let said: Vec<(i64, i64, String)> = py
+                    .eval(c"[(c[1], c[3], c[4]) for c in w.calls if c[0] == 'error']", Some(&g), None)
+                    .unwrap().extract().unwrap();
+                assert!(said.contains(&(1, 321, reason.to_string())), "{reason}: {said:?}");
+            }
         });
     }
 

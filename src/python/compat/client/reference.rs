@@ -35,7 +35,7 @@ impl EClient {
         // surface: the venue states one form and the caller may want the other.
         self.core.note_date_format(req_id, format_date);
         // And what its range is counted from, which the reply does not state.
-        self.core.note_historical_span(req_id, end_date_time, duration_str);
+        self.core.note_historical_span(req_id, end_date_time, duration_str, bar_size_setting);
         let _ = chart_options;
         // Whatever finished under this id before, this is a new request.
         if let Ok(wire) = wire_req_id(req_id) {
@@ -43,7 +43,8 @@ impl EClient {
         }
         if !what_to_show.eq_ignore_ascii_case("SCHEDULE")
             && let Err(why) = ClientCore::validate_historical_args(
-                bar_size_setting, what_to_show, keep_up_to_date,
+                bar_size_setting, what_to_show, keep_up_to_date, end_date_time,
+                &contract.sec_type,
             )
         {
             return self.report_refusal(py, req_id, why.into());

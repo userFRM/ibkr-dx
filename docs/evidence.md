@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 82. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 155. 124 are sent; 19 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 3,617 offline, and 184 more that live in the suites run against a broker session |
+| Tests | 3,658 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -70,9 +70,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,748 | No |
+| Rust unit and integration | 2,787 | No |
 | Rust, live | 9 | Yes |
-| Python | 869 | No |
+| Python | 871 | No |
 | Python, live | 124 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -208,19 +208,18 @@ client's own allocation; what a gateway answers the same way is on
   satisfy this, and the interface this client mirrors encourages one counter
   for both.
 - **`keepUpToDate` queries are closed on first response.** Continuation is
-  provided by folding the 5-second bar stream into the requested bar size.
+  provided by folding the 5-second bar stream into the requested bar size. A
+  week and a month are folded on the calendar, opening on the Monday and on
+  the 1st at midnight UTC, and start from the stream rather than from the
+  venue's current bar.
 - **The option-exercise interest rate series is not served.**
   `OptExInterestRate` is accepted as a tick query against an option contract
   and rejected by name against the underlying, and every window tested returns
   an empty result set.
-- **A crypto's book and its trade stream are acknowledged and carry nothing.**
-  The request sent for a crypto is the request sent for a share and differs
-  only in the security type, and that same request against a future is answered
-  with the entitlement — so the shape reaches the server and is understood.
-  Both increments of the trade stream are acknowledged and produce no records,
-  while on the same contract in the same session top of book streams
-  continuously and a historical tick request is answered. The server holds the
-  data and does not stream it.
+- **A crypto's trade stream delivers and its book does not.** Measured on 13
+  September: the tick-by-tick `AllLast` stream on BTC on PAXOS delivered 61
+  records in 30 seconds, and the pair's book delivered nothing on an account
+  with no crypto depth subscription.
 
 ## Sessions
 
@@ -248,14 +247,13 @@ not hold. `scripts/endurance.py --minutes 175`.
 
 That check takes every subscription out and puts it back each cycle, which no
 other check here does, and it is the only one that sees what a long-running
-program sees. Run it before believing a change to the quote path, while US
-shares trade: it requires a book and a trade stream to arrive at least once.
-Outside those hours the currency pair's book on `IDEALPRO` has been seen to
-arrive, while the crypto pair's trade stream is acknowledged and carries
-nothing (see the constraint above), so the trade check needs US shares
-trading. On the account measured, a book was refused by name on
-some venues and acknowledged with nothing on others; both read from here as a
-stream that did not arrive.
+program sees. Run it before believing a change to the quote path: it requires
+a book and a trade stream to arrive at least once. Outside the hours US shares
+trade, the currency pair's book on `IDEALPRO` has been seen to arrive, and the
+crypto pair's trade stream delivers at any hour (see the constraint above), so
+neither check waits on US shares trading. On the account measured, a book was
+refused by name on some venues and acknowledged with nothing on others; both
+read from here as a stream that did not arrive.
 
 ## Architectural differences from a gateway process
 
@@ -288,13 +286,18 @@ These are this client's own.
   of order types to each exchange is not yet established here.
 
 - **The carry term in a hypothetical solve is fitted, not read.** The series
-  that would state it (`OptExInterestRate`, under the protocol constraints
-  above) is not served, so a caller-supplied price or volatility is solved
-  against a rate inferred from the venue's own model rather than one the venue
-  stated. It absorbs whatever else the two models disagree about: two contracts
-  on one underlying and expiry fitted 4.9% and 20.1%. It does not affect the
-  volatility or the greeks a caller reads, which are the venue's and are not
-  solved here.
+  that states it is the option chain's model parameters, 687, asked for on the
+  option model's name for the underlying: per expiry it states a model yield,
+  an interest rate, a forward and the at-the-money volatilities. A gateway
+  reads it for its own option model and never forwards it to a program; this
+  client reads it and hands it to a caller (`chain_model_parameters`). The
+  venue states no unit for the yield and the rate, and the solve does not use
+  them while none is established: a caller-supplied price or volatility is
+  solved against a carry fitted to the venue's model price rather than one the
+  venue stated. It absorbs whatever else the two models disagree about: two
+  contracts on one underlying and expiry fitted 4.9% and 20.1%. It does not
+  affect the volatility or the greeks a caller reads, which are the venue's and
+  are not solved here.
 
 ## Refusals
 

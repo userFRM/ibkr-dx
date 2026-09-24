@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashMap};
 ///
 /// A market listing more than one is offering the better of them; this is the
 /// order to ask in.
-const BOOK_ENDPOINTS: [&str; 4] = ["AggDeep", "Deep2", "DeepX", "Deep"];
+pub(crate) const BOOK_ENDPOINTS: [&str; 4] = ["AggDeep", "Deep2", "DeepX", "Deep"];
 
 /// One market, and where to ask about it.
 #[derive(Debug, Clone, PartialEq, Eq)]

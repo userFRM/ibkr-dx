@@ -69,14 +69,15 @@ delivers them.
 
 ## Callbacks that never fire on a gateway
 
-The TWS API declares six callbacks that never fire for a program on a gateway:
-the four steps of the verification handshake (`verify_message_api`,
+The TWS API declares seven callbacks that never fire for a program on a
+gateway: the four steps of the verification handshake (`verify_message_api`,
 `verify_completed`, `verify_and_auth_message_api`,
-`verify_and_auth_completed`), the exchange-for-physical quote (`tick_efp`), and
-`win_error`, which no message on the wire carries; the TWS API's Python client
-declares it and never raises it. Each is declared here, so a program
-implementing one compiles and runs, and each fires here as often as it does on
-a gateway: never. Trouble on a connection reaches the error callback.
+`verify_and_auth_completed`), the exchange-for-physical quote (`tick_efp`), the
+delta-neutral validation (`delta_neutral_validation`), which a gateway never
+sends, and `win_error`, which no message on the wire carries; the TWS API's
+Python client declares it and never raises it. Each is declared here, so a
+program implementing one compiles and runs, and each fires here as often as it
+does on a gateway: never. Trouble on a connection reaches the error callback.
 
 # Requests
 

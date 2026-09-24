@@ -923,6 +923,9 @@ impl HotLoop {
             // previous contract's volatility and price, and answered finite.
             self.shared.market.forget_option_model(instrument);
             self.shared.market.forget_subscription_failures(instrument);
+            // And the BBO exchange its acknowledgement named, which the next
+            // contract to take the slot is acknowledged under afresh.
+            self.shared.reference.forget_bbo_exchange(instrument);
             // What the extra series stated and nobody read goes with the
             // subscription: held, it outlives every caller that asked and the
             // next one to watch this slot is handed readings from before it.
@@ -1941,24 +1944,26 @@ impl HotLoop {
                 }
                 ControlCommand::FetchHistorical { contract, req_id, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
-                    if keep_up_to_date
-                        && !crate::control::historical::BarSize::from_api_str(&bar_size)
-                            .is_ok_and(|size| size.supports_keep_up_to_date())
+                    // What the surfaces refuse of a request kept up to date,
+                    // or of the adjusted series, before the command is sent: a
+                    // size the fold cannot build out of five-second bars —
+                    // folded anyway, each would be relabelled as the shorter
+                    // one and the caller handed five times the volume under a
+                    // size nothing traded in — and what a gateway refuses
+                    // before asking the venue. A caller reaching this loop by
+                    // the control channel goes past the surfaces, so it is
+                    // refused here in the same words.
+                    let refused = if keep_up_to_date
+                        || crate::control::historical::what_to_show_is_adjusted(&what_to_show)
                     {
-                        // What keeps a bar current arrives as five-second
-                        // bars, so a size the fold cannot build out of those is
-                        // refused rather than folded anyway: it relabels each
-                        // five-second bar as the shorter one and hands the
-                        // caller five times the volume under a size nothing
-                        // traded in. The surface refuses these before the
-                        // command is sent; a caller reaching this loop by the
-                        // control channel goes past it, as it does the reading
-                        // of the series name beside this.
-                        let told = format!(
-                            "bars of {bar_size} cannot be kept up to date: what keeps them \
-                             current arrives in five-second bars, and this one cannot be \
-                             built out of those",
-                        );
+                        crate::client_core::ClientCore::validate_historical_args(
+                            &bar_size, &what_to_show, keep_up_to_date, &end_date_time, &sec_type,
+                        )
+                        .err()
+                    } else {
+                        None
+                    };
+                    if let Some(told) = refused {
                         log::error!("historical req_id={req_id}: {told}");
                         // Refused without ending anything, as the duplicate
                         // number below it is: a number already answering goes
@@ -2185,7 +2190,14 @@ impl HotLoop {
                     );
                 }
                 ControlCommand::FetchMktDepthExchanges => {
-                    self.ccp.send_mkt_depth_exchanges_request(&mut self.ccp_conn, &mut self.hb, &self.shared);
+                    // Asked of nobody: the market-data routing table states
+                    // which exchanges serve a book, and it is read at logon.
+                    // An ask made while no market-data connection is up waits
+                    // for the one that replaces it.
+                    if let Some(conn) = self.farm_conn.as_ref() {
+                        farm::note_depth_directory(conn, &self.shared);
+                    }
+                    self.shared.reference.notify_depth_exchanges();
                 }
                 ControlCommand::FetchScannerParams => {
                     self.hmds.send_scanner_params_request(&mut self.hmds_conn, &mut self.hb, &self.shared);
@@ -2411,6 +2423,16 @@ impl HotLoop {
                 }
                 ControlCommand::SubscribeDepth { contract, req_id, num_rows, is_smart_depth, filters, .. } => {
                     let ContractRef { con_id, exchange, sec_type, .. } = contract;
+                    // What the surfaces refuse before the command is sent, a
+                    // gateway refuses before it looks the contract up. A caller
+                    // reaching this loop by the control channel goes past the
+                    // surfaces, so it is refused here in the same words.
+                    if let Err(why) = crate::client_core::ClientCore::validate_depth_request(
+                        &exchange, &sec_type, num_rows,
+                    ) {
+                        self.shared.reference.push_historical_error(req_id, why.code, why.message);
+                        continue;
+                    }
                     self.farm.send_depth_subscribe(
                         req_id, con_id, &exchange, &filters.primary_exchange, &sec_type,
                         num_rows, is_smart_depth,
@@ -2599,6 +2621,12 @@ impl HotLoop {
                     emit(&self.event_tx, Event::Stopped);
                 }
             }
+        }
+
+        // What the option model's chain series last stated goes with a series
+        // withdrawn from a subscription that goes on.
+        for (instrument, series) in self.farm.chain_series_withdrawn.drain(..) {
+            self.shared.market.forget_chain_model_parameters(instrument, series);
         }
 
         // Whatever arrived behind the stop, said rather than dropped. Nothing
@@ -5717,6 +5745,43 @@ mod tests {
             "each five-second bar is relabelled as a one-second one and handed \
              back with five times the volume: {told:?}",
         );
+    }
+
+    /// The adjusted series with an end date, or with bars longer than a day,
+    /// is refused as a gateway refuses it, on the control channel as on the
+    /// surfaces.
+    #[test]
+    fn the_adjusted_series_a_gateway_refuses_is_refused_on_the_control_channel() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        for (req_id, end, bar_size, said) in [
+            (64u32, "20250101 00:00:00", "1 day", "End date not supported with adjusted last"),
+            (65, "", "1 week", "Multi day bar size not supported with adjusted last"),
+        ] {
+            tx.send(ControlCommand::FetchHistorical {
+                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), ..Default::default() },
+                req_id,
+                end_date_time: end.into(),
+                duration: "1 Y".into(),
+                bar_size: bar_size.into(),
+                what_to_show: "ADJUSTED_LAST".into(),
+                use_rth: true,
+                keep_up_to_date: false,
+                include_expired: false,
+                filters: Default::default(),
+            })
+            .expect("the engine holds the other end");
+            hl.poll_once();
+            let told = shared.reference.drain_historical_errors();
+            assert!(
+                told.iter().any(|(rid, code, message)| {
+                    *rid == req_id && *code == crate::error_codes::Refusal::VALIDATION && message == said
+                }),
+                "{told:?}",
+            );
+        }
     }
 
     /// A series named by something this client does not know is refused, not
@@ -8910,6 +8975,111 @@ mod tests {
             "{told:?}",
         );
         assert_eq!(shared.reference.drain_contract_details_end(), [7], "and the request is ended");
+    }
+
+    /// A caller asking which exchanges serve a book is answered from the
+    /// market-data routing table, which states the book each serves and the
+    /// group it aggregates into. The exchange directory the trading connection
+    /// states names neither.
+    #[test]
+    fn the_book_exchanges_are_answered_from_the_routing_table() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+
+        // Asked before a market-data connection is up: it waits.
+        tx.send(ControlCommand::FetchMktDepthExchanges).unwrap();
+        hl.poll_control_commands();
+        assert!(shared.reference.drain_depth_exchanges().is_none(), "nothing to answer with yet");
+
+        let (mut conn, _peer) = crate::protocol::connection::Connection::for_test();
+        conn.routing = crate::protocol::routing::RoutingTable::parse(
+            "ISLAND,STK,Top|Deep2,-1,*,h,4000,usfarm;BEST,STK,AggDeep,1,PINK,h,4000,usfarm",
+        );
+        hl.reconnect_farm(conn);
+        let said: Vec<(String, String, String, String, i32)> = shared.reference
+            .drain_depth_exchanges()
+            .expect("the ask that waited is answered once the table is here")
+            .into_iter()
+            .map(|d| (d.exchange, d.sec_type, d.listing_exch, d.service_data_type, d.agg_group))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("ISLAND".into(), "STK".into(), String::new(), "Deep2".into(), i32::MAX),
+                ("SMART".into(), "STK".into(), "PINK".into(), "AggDeep".into(), 1),
+            ],
+        );
+
+        // And asked again, answered at once.
+        tx.send(ControlCommand::FetchMktDepthExchanges).unwrap();
+        hl.poll_control_commands();
+        assert_eq!(shared.reference.drain_depth_exchanges().map(|d| d.len()), Some(2));
+
+        // A table that names no book, or was never read, is answered as it
+        // stands — empty — as a gateway answers with whatever it holds.
+        // Waited on instead, the caller was never answered for the session.
+        let (empty, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.reconnect_farm(empty);
+        tx.send(ControlCommand::FetchMktDepthExchanges).unwrap();
+        hl.poll_control_commands();
+        assert_eq!(shared.reference.drain_depth_exchanges(), Some(Vec::new()));
+    }
+
+    /// What the option model's chain series last stated goes with the series
+    /// when it alone is withdrawn and the subscription stays, as a gateway
+    /// forgets it; kept, it was handed out as standing long after anything
+    /// was asked for it.
+    #[test]
+    fn a_chain_series_withdrawn_takes_what_it_stated_with_it() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let instrument = hl.context_mut().market.register(756733);
+        hl.farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            false, &mut None, &mut HeartbeatState::new(),
+        );
+        hl.farm.also_ask_for_series(
+            instrument, 756733, &[687, 236], &hl.context, &mut None, &mut HeartbeatState::new(),
+        );
+        for series in [687, 691] {
+            shared.market.note_chain_model_parameters(instrument, series, vec![Default::default()]);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::StopAskingForSeries {
+            instrument, con_id: 0, took_it: 0, generic_ticks: vec![687], issued: u64::MAX,
+        })
+        .unwrap();
+        hl.poll_control_commands();
+        assert!(shared.market.chain_model_parameters(instrument, 687).is_empty(), "withdrawn");
+        assert_eq!(shared.market.chain_model_parameters(instrument, 691).len(), 1, "not this one");
+    }
+
+    /// A book a gateway refuses before it looks the contract up is refused on
+    /// the control channel as on the surfaces, and nothing is sent.
+    #[test]
+    fn a_book_a_gateway_refuses_is_refused_on_the_control_channel() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (conn, peer) = crate::protocol::connection::Connection::for_test();
+        let mut peer = crate::protocol::connection::Connection::new_raw(peer).unwrap();
+        hl.farm_conn = Some(conn);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::SubscribeDepth {
+            req_id: 9, num_rows: 5, is_smart_depth: false, filters: Default::default(),
+            contract: crate::types::ContractRef { con_id: 756733, ..Default::default() },
+        })
+        .unwrap();
+        hl.poll_control_commands();
+        assert_eq!(
+            shared.reference.drain_historical_errors(),
+            [(9, crate::error_codes::Refusal::VALIDATION, "Please enter exchange.".to_string())],
+        );
+        assert!(hl.farm.depth_subs.is_empty());
+        assert!(farm::tests::drain_inner(&mut peer).is_empty(), "nothing asked of the venue");
     }
 
     /// A news subscription is a market-data request and goes out on the

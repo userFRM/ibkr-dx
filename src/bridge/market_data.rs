@@ -220,6 +220,15 @@ pub struct MarketDataState {
     >,
     /// The rows of three figures each series has stated for a contract.
     stated_rows: Mutex<StatedRowsHeld>,
+    /// The venue's answer to each contract's chargeable snapshot, not yet read.
+    snapshot_answers: Mutex<std::collections::HashMap<crate::types::InstrumentId, Vec<SeriesTick>>>,
+    /// What each of the option model's chain series last stated for an
+    /// underlying.
+    chain_model_parameters: Mutex<
+        std::collections::HashMap<
+            (crate::types::InstrumentId, u32), Vec<crate::types::ChainModelParameters>,
+        >,
+    >,
     /// The runs of paired figures each series has stated for a contract.
     paired_figures: Mutex<PairedFiguresHeld>,
     /// Which contracts the venue is restricting short sales in.
@@ -282,6 +291,8 @@ impl MarketDataState {
             numbered_figures: Mutex::new(std::collections::HashMap::new()),
             paired_figures: Mutex::new(std::collections::HashMap::new()),
             stated_rows: Mutex::new(std::collections::HashMap::new()),
+            chain_model_parameters: Mutex::new(std::collections::HashMap::new()),
+            snapshot_answers: Mutex::new(std::collections::HashMap::new()),
             scanned_strategies: Mutex::new(std::collections::HashMap::new()),
             closing_option_model: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
@@ -397,6 +408,7 @@ impl MarketDataState {
         self.numbered_figures.lock().unwrap().retain(|(at, ..), _| *at != instrument);
         self.paired_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
         self.stated_rows.lock().unwrap().retain(|(at, _), _| *at != instrument);
+        self.chain_model_parameters.lock().unwrap().retain(|(at, _), _| *at != instrument);
         self.scanned_strategies.lock().unwrap().remove(&instrument);
         self.closing_option_model.lock().unwrap().remove(&instrument);
         // A restriction belongs to the contract that was in the slot, not to
@@ -953,6 +965,24 @@ impl MarketDataState {
         self.series_ticks.lock().unwrap().remove(&instrument).unwrap_or_default()
     }
 
+    /// The venue's whole answer to a contract's chargeable snapshot, under
+    /// the numbers a gateway publishes it under. Kept apart from the series,
+    /// which reach everyone watching the contract: the answer is the
+    /// snapshot's own.
+    #[doc(hidden)] pub fn push_snapshot_answer(
+        &self, instrument: crate::types::InstrumentId, answer: Vec<SeriesTick>,
+    ) {
+        self.snapshot_answers.lock().unwrap().insert(instrument, answer);
+    }
+
+    /// The answer to this contract's chargeable snapshot, where the venue has
+    /// given one since the last read.
+    pub fn take_snapshot_answer(
+        &self, instrument: crate::types::InstrumentId,
+    ) -> Option<Vec<SeriesTick>> {
+        self.snapshot_answers.lock().unwrap().remove(&instrument)
+    }
+
     /// What the venue says about a contract's two prices rather than what they
     /// are: one mask for whether each side may be dealt on without a human,
     /// one for pre-open and past-limit.
@@ -975,6 +1005,7 @@ impl MarketDataState {
     /// Everything held for a contract goes when its subscription does.
     #[doc(hidden)] pub fn forget_series_ticks(&self, instrument: crate::types::InstrumentId) {
         self.series_ticks.lock().unwrap().remove(&instrument);
+        self.snapshot_answers.lock().unwrap().remove(&instrument);
         self.quote_attribute_masks.lock().unwrap().remove(&instrument);
     }
 
@@ -1198,6 +1229,39 @@ impl MarketDataState {
         strategies: Vec<crate::types::ScannedStrategy>,
     ) {
         self.scanned_strategies.lock().unwrap().insert(instrument, strategies);
+    }
+
+    /// What one of the option model's chain series last stated for an
+    /// underlying: per class of its options, the underlying's price, the
+    /// dividends expected and per expiry the yield, the rate, the forward and
+    /// the at-the-money volatilities.
+    ///
+    /// The standing set is series 687 and the set as the chain closed is 691.
+    /// The documented API has no call for either. Empty until the series has
+    /// been asked for and answered, and gone with the subscription.
+    pub fn chain_model_parameters(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+    ) -> Vec<crate::types::ChainModelParameters> {
+        self.chain_model_parameters
+            .lock()
+            .unwrap()
+            .get(&(instrument, series))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// A chain series withdrawn: what it last stated is no longer standing.
+    #[doc(hidden)] pub fn forget_chain_model_parameters(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+    ) {
+        self.chain_model_parameters.lock().unwrap().remove(&(instrument, series));
+    }
+
+    #[doc(hidden)] pub fn note_chain_model_parameters(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+        sets: Vec<crate::types::ChainModelParameters>,
+    ) {
+        self.chain_model_parameters.lock().unwrap().insert((instrument, series), sets);
     }
 
     #[doc(hidden)] pub fn note_stated_rows(

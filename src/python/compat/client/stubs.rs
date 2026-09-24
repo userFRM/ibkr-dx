@@ -362,30 +362,23 @@ impl EClient {
     /// The venue states the map beside the quote, so a quote has to have been
     /// asked for first. Answered on `smart_components`.
     ///
-    /// `bbo_exchange` is taken and not applied. The venue states one table of
-    /// routing components at logon, for this session rather than per exchange,
-    /// and that whole table is what comes back.
+    /// `bbo_exchange` names the map: the one `tick_req_params` states for the
+    /// contract. The venue states a map per BBO exchange and security type, so
+    /// one contract's venues are not another's. A BBO exchange no subscription
+    /// named is refused as a gateway refuses it; one whose map has not arrived
+    /// yet is waited for up to two seconds, as a gateway waits, and answered
+    /// from the dispatch loop rather than by holding this call.
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
-        let _ = bbo_exchange;
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         let shared = self.shared_state()?;
-        let sc = shared.reference.smart_components();
-        // A list, which is what the reference client's decoder builds: the name
-        // it gives the argument says "map" and the thing it passes is a list, so
-        // a program written against it iterates the components and reads each
-        // one's fields. Handed a dict keyed by bit number, that loop walked the
-        // keys and asked an integer for `bitNumber`.
-        let mut components = Vec::with_capacity(sc.len());
-        for c in sc.iter() {
-            components.push(Py::new(py, SmartComponentPy {
-                bit_number: c.bit_number,
-                exchange: c.exchange.clone(),
-                exchange_letter: c.exchange_letter.clone(),
-            })?);
+        match shared.reference.ask_smart_components(req_id, bbo_exchange) {
+            Ok(Some(sc)) => {
+                let list = smart_components_list(py, &sc)?;
+                self.deliver(py, "smart_components", (req_id, list.as_any()))
+            }
+            Ok(None) => Ok(()),
+            Err(why) => self.report_refusal(py, req_id, why),
         }
-        let list = pyo3::types::PyList::new(py, components)?;
-        self.deliver(py, "smart_components", (req_id, list.as_any()))?;
-        Ok(())
     }
 
     // ── News Providers ──
@@ -862,6 +855,25 @@ fn advisor_partition(fa_data_type: i32) -> Option<&'static str> {
     }
 }
 
+/// A map of venues as a program written against the reference client reads
+/// one: a list, which is what that client's decoder builds. The name it gives
+/// the argument says "map" and the thing it passes is a list, so a program
+/// iterates the components and reads each one's fields. Handed a dict keyed by
+/// bit number, that loop walked the keys and asked an integer for `bitNumber`.
+pub(crate) fn smart_components_list<'py>(
+    py: Python<'py>, sc: &[crate::types::SmartComponent],
+) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+    let mut components = Vec::with_capacity(sc.len());
+    for c in sc {
+        components.push(Py::new(py, SmartComponentPy {
+            bit_number: c.bit_number,
+            exchange: c.exchange.clone(),
+            exchange_letter: c.exchange_letter.clone(),
+        })?);
+    }
+    pyo3::types::PyList::new(py, components)
+}
+
 #[cfg(test)]
 mod advisor_partition_tests {
     use super::advisor_partition;
@@ -1091,3 +1103,4 @@ mod calendar_request_tests {
         });
     }
 }
+

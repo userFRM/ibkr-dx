@@ -18,7 +18,10 @@
 use ibkr_dx::control::contracts;
 use ibkr_dx::control::fundamental;
 use ibkr_dx::control::{historical, news};
-use ibkr_dx::protocol::{fix, fixcomp, ns, tbt_stream, tick_decoder, trading_status, xyz};
+use ibkr_dx::protocol::{
+    chain_model, fix, fixcomp, ns, regulatory_snapshot, tbt_stream, tick_decoder,
+    trading_status, xyz,
+};
 
 /// A byte sequence that is not a frame, from a stated seed. The same seed
 /// always produces the same bytes, so a failure reproduces.
@@ -172,10 +175,30 @@ fn a_payload_that_must_be_expanded_is_not_fatal() {
     // A compressed or length-prefixed payload states how much follows it. A
     // length that overruns what did follow is the shape a truncated read
     // produces, and it is the one that reads past an end.
+    // The option model's chain parameters: a version, one set, and the set.
+    let chain_model = {
+        use std::io::Write as _;
+        let mut body = Vec::new();
+        for v in [4i32, 1, 7, 1] {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        body.extend_from_slice(&100f64.to_be_bytes());
+        body.extend_from_slice(&1f64.to_be_bytes());
+        body.extend_from_slice(&3i32.to_be_bytes());
+        body.extend_from_slice(b"SPY\0");
+        body.extend_from_slice(&450f64.to_be_bytes());
+        for v in [0i32, 0, 1_790_000_000, 0, 5] {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut z = flate2::write::ZlibEncoder::new(vec![0x01], flate2::Compression::default());
+        z.write_all(&body).unwrap();
+        z.finish().unwrap()
+    };
     let frames = [
         fix_frame(&[("35", "y"), ("95", "64"), ("96", "not really compressed")]),
         b"\x00\x00\x00\x40\x00\x00\x00\x08payload".to_vec(),
         b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03truncated gzip".to_vec(),
+        chain_model,
     ];
     for frame in frames {
         for wrong in every_corruption(&frame) {
@@ -184,6 +207,7 @@ fn a_payload_that_must_be_expanded_is_not_fatal() {
             let _ = xyz::xyz_parse_response(&wrong);
             let _ = fundamental::decompress_fundamental_data(&wrong);
             let _ = news::jc_decode(&wrong);
+            let _ = chain_model::parse(&wrong);
         }
     }
 }
@@ -193,8 +217,11 @@ fn a_frame_of_pure_noise_is_not_fatal() {
     // Nothing about these is a frame. A parser reached by a resynchronising
     // reader sees exactly this.
     for seed in 0..64u64 {
-        for len in [0usize, 1, 2, 3, 7, 16, 64, 255, 256, 1024] {
+        // The chargeable snapshot's answer is read at three lengths and no
+        // other, so those three are among them.
+        for len in [0usize, 1, 2, 3, 7, 16, 64, 72, 96, 136, 255, 256, 1024] {
             let bytes = noise(seed, len);
+            let _ = regulatory_snapshot::parse(&bytes);
             let _ = contracts::parse_secdef_responses(&bytes, true);
             let _ = contracts::parse_market_rules(&bytes);
             let _ = contracts::parse_schedule_response(&bytes);
@@ -215,6 +242,7 @@ fn a_frame_of_pure_noise_is_not_fatal() {
             let _ = xyz::xyz_parse_response(&bytes);
             let _ = fundamental::decompress_fundamental_data(&bytes);
             let _ = news::jc_decode(&bytes);
+            let _ = chain_model::parse(&bytes);
         }
     }
 }

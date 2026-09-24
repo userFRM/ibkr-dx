@@ -94,6 +94,7 @@ enum Cb {
     NewsBulletin { msg_id: i64, msg_type: i32, message: String },
     PnlSingle { req_id: i64, pos: f64 },
     SmartComponents { req_id: i64, count: usize },
+    TickReqParams { bbo_exchange: String },
     NewsProviders { count: usize },
     CurrentTime { time: i64 },
     SoftDollarTiers { req_id: i64, count: usize },
@@ -366,6 +367,9 @@ impl Wrapper for RecWrapper {
     }
     fn smart_components(&mut self, req_id: i64, components: &[ibkr_dx::types::SmartComponent]) {
         self.push(Cb::SmartComponents { req_id, count: components.len() });
+    }
+    fn tick_req_params(&mut self, _: i64, _: f64, bbo_exchange: &str, _: i64) {
+        self.push(Cb::TickReqParams { bbo_exchange: bbo_exchange.into() });
     }
     fn news_providers(&mut self, providers: &[ibkr_dx::types::NewsProvider]) {
         self.push(Cb::NewsProviders { count: providers.len() });
@@ -1346,8 +1350,24 @@ fn api_gt_suite() {
     // ── 27. Gateway-local: req_smart_components ──
     {
         print!("  req_smart_components... ");
+        // The map is named by the BBO exchange a subscription's
+        // `tick_req_params` states, so a quote is asked for first.
         wrapper.drain();
-        client.req_smart_components(900, "SMART", &mut wrapper);
+        client.req_mkt_data(901, &spy(), "", false, false).unwrap();
+        poll(&client, &mut wrapper, Duration::from_secs(5));
+        client.cancel_mkt_data(901).unwrap();
+        let bbo = wrapper.drain().iter().find_map(|c| match c {
+            Cb::TickReqParams { bbo_exchange } if !bbo_exchange.is_empty() => Some(bbo_exchange.clone()),
+            _ => None,
+        }).unwrap_or_default();
+        client.req_smart_components(900, &bbo, &mut wrapper);
+        // A map that has not arrived yet is answered from the dispatch loop
+        // once it does, within the two seconds a gateway waits.
+        poll_until(
+            &client, &mut wrapper,
+            |cbs| cbs.iter().any(|c| matches!(c, Cb::SmartComponents { req_id: 900, .. })),
+            Duration::from_secs(3),
+        );
         let cbs = wrapper.drain();
         let sc: Vec<_> = cbs.iter().filter_map(|c| if let Cb::SmartComponents { count, .. } = c { Some(*count) } else { None }).collect();
         if sc.is_empty() || sc[0] == 0 {

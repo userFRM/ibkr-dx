@@ -71,10 +71,13 @@ fn build_conid_subscribe_tags(
     // subscription has no number for what last traded, so the venue's answer
     // to that half arrives under nothing and the caller's last-trade price,
     // size and time never move.
-    let mut entries: Vec<(u32, String)> = if regulatory_snapshot {
-        vec![(bid_ask_id, REGULATORY_SNAPSHOT_REQUEST_TYPE.to_string())]
+    let mut entries: Vec<(u32, String, &str)> = if regulatory_snapshot {
+        vec![(bid_ask_id, REGULATORY_SNAPSHOT_REQUEST_TYPE.to_string(), fix_exchange)]
     } else {
-        vec![(bid_ask_id, "442".to_string()), (last_id, "443".to_string())]
+        vec![
+            (bid_ask_id, "442".to_string(), fix_exchange),
+            (last_id, "443".to_string(), fix_exchange),
+        ]
     };
     // Every extra series the caller named, as further entries of this same
     // request rather than requests of their own. The venue is sent one message
@@ -84,7 +87,11 @@ fn build_conid_subscribe_tags(
     //
     // The chargeable snapshot is a request type of its own and carries none.
     if !regulatory_snapshot {
-        entries.extend(extra_series.iter().map(|(req_id, tick)| (*req_id, tick.to_string())));
+        entries.extend(
+            extra_series
+                .iter()
+                .map(|(req_id, tick)| (*req_id, tick.to_string(), series_venue(*tick, fix_exchange))),
+        );
     }
     // 146 = NoRelatedSym: how many entries follow, counted rather than stated
     // per shape, so a shape added here cannot state the wrong number.
@@ -95,10 +102,10 @@ fn build_conid_subscribe_tags(
         (146, entries.len().to_string()),
     ];
 
-    for (req_id, depth) in &entries {
+    for (req_id, depth, venue) in &entries {
         tags.push((262, req_id.to_string()));
         tags.push((6008, con_id_str.clone()));
-        tags.push((207, fix_exchange.to_string()));
+        tags.push((207, venue.to_string()));
         tags.push((167, fix_sec_type.to_string()));
         tags.push((264, depth.to_string()));
         tags.push((6088, "Socket".to_string()));
@@ -148,7 +155,11 @@ fn build_series_subscribe_tags(
         // is acknowledged and then never stated, on both a paper and a live
         // login for this account, so what withholds it is not the venue named
         // here.
-        let venue = if *tick == CLOSING_GREEKS_REQUEST_TYPE { GREEKS_VENUE } else { fix_exchange };
+        let venue = if *tick == CLOSING_GREEKS_REQUEST_TYPE {
+            GREEKS_VENUE
+        } else {
+            series_venue(*tick, fix_exchange)
+        };
         tags.push((262, req_id.to_string()));
         tags.push((6008, con_id_str.clone()));
         tags.push((207, venue.to_string()));
@@ -444,11 +455,11 @@ fn deliver_series(
                 shared.market.note_stated_rows(instrument, tick, rows);
             }
         }
-        // The one series this client does not read, and the reason is not that
-        // it is hard: the venue declares it and the plumbing to subscribe it,
-        // and then nothing anywhere asks for it or says how to read what it
-        // would answer with. There is no layout to read because nothing reads
-        // it. Recorded so a message that does arrive is not lost in silence.
+        // The one series this client does not read, and a gateway reads
+        // nothing from it either: it hands the payload to no reader and
+        // refuses the series in a generic tick list. There is no layout to
+        // read because nothing reads it. Recorded so a message that does
+        // arrive is not lost in silence.
         230 => {
             shared.market.note_unread_wire_under(
                 "farm",
@@ -820,6 +831,7 @@ fn deliver_series(
 /// | 497, 597 | Two of the venue's own volatility figures for an option |
 /// | 504 | What one contract delivers |
 /// | 509 | The two halves of a sentiment reading |
+/// | 511, 513, 514, 515, 516, 517 | The volatility a contract has shown over 10, 50, 75, 100, 150 and 200 days |
 /// | 527 | Volatility over twenty days |
 /// | 540 | The yield the venue works out from the price |
 /// | 545 | The volatility the venue's own model settles on |
@@ -840,7 +852,8 @@ const STATED_FIGURES: &[(u32, &str)] = &[
     (200, "d"), (266, "dd"), (291, "d"), (317, "dii"), (388, "dddd"), (391, "ddiidd"),
     (393, "dd"), (398, "i"), (399, "iii"), (402, "dddiii"), (407, "dddd"),
     (418, "d"), (459, "fiii"), (493, "did"), (497, "d"), (504, "di"),
-    (509, "ii"), (527, "d"), (531, "dii"), (540, "di"), (545, "d"),
+    (509, "ii"), (511, "d"), (513, "d"), (514, "d"), (515, "d"), (516, "d"), (517, "d"),
+    (527, "d"), (531, "dii"), (540, "di"), (545, "d"),
     (584, "i"), (585, "i"), (597, "d"), (606, "did"), (613, "iff"),
     (645, "di"), (647, "d"), (649, "fi"), (657, "dif"), (658, "di"),
     (587, "di"), (680, "d"), (688, "id"), (689, "ddii"), (694, "id"), (734, "id"),
@@ -1087,6 +1100,16 @@ pub(crate) struct FarmState {
     /// The venue's number for a generic-tick subscription, and what it
     /// carries: (server tag, request type, instrument).
     generic_tick_tags: Vec<(u32, u32, InstrumentId)>,
+    /// Chargeable snapshots answered before their contract's map of venues
+    /// was stated: the contract, the answer, the moment it was read on the
+    /// venue's clock, and when it arrived.
+    snapshot_answers_held: Vec<(
+        InstrumentId, crate::protocol::regulatory_snapshot::SnapshotAnswer, i64, Instant,
+    )>,
+    /// The option model's chain series withdrawn from a subscription that
+    /// goes on, whose last statements go with them: a gateway forgets what
+    /// such a series stated once it stops asking for it.
+    pub(crate) chain_series_withdrawn: Vec<(InstrumentId, u32)>,
     /// The headline subscriptions this session holds: the contract, the
     /// request number they were asked under, the providers, the contract's id
     /// and its type. Kept so a rebuilt connection asks for each again, and a
@@ -1109,6 +1132,163 @@ pub(crate) struct FarmState {
     /// what tells the venue what to look for.
     spread_scans: std::collections::HashMap<i64, String>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
+}
+
+/// A chargeable snapshot's answer, under the numbers a gateway publishes it
+/// under, handed to the snapshot's own requests: the snapshot is over once it
+/// has been.
+fn publish_snapshot_answer(
+    instrument: InstrumentId,
+    answer: &crate::protocol::regulatory_snapshot::SnapshotAnswer,
+    taken: i64,
+    context: &Context,
+    shared: &SharedState,
+) {
+    use crate::types::SeriesValue;
+    /// The venue's number for a chargeable snapshot.
+    const CHARGEABLE: u32 = 2;
+    let counted_in = match context.market.size_tick(instrument) {
+        stated if stated > 0.0 => stated,
+        _ => 1.0,
+    };
+    let mut published: Vec<crate::types::SeriesTick> = Vec::new();
+    let mut say = |tick_type: i32, value: SeriesValue| {
+        let said = match &value {
+            SeriesValue::Price(v) | SeriesValue::Size(v) | SeriesValue::Generic(v) => {
+                v.is_finite() && *v != f64::MAX
+            }
+            SeriesValue::Text(t) => !t.is_empty(),
+        };
+        if said {
+            published.push(crate::types::SeriesTick { instrument, tick_type, value });
+        }
+    };
+    let letters = |mask: i64| crate::client_core::render_exchange_mask(mask, instrument, shared);
+    for (side, price_tick, size_tick) in [
+        (answer.bid, 1, 0), (answer.ask, 2, 3), (answer.last, 4, 5),
+        (answer.odd_bid, 105, 107), (answer.odd_ask, 106, 108),
+    ] {
+        if let Some((price, size)) = side {
+            say(price_tick, SeriesValue::Price(price));
+            say(size_tick, SeriesValue::Size(size * counted_in));
+        }
+    }
+    for (mask, tick_type) in [
+        (answer.bid_exchanges, 32), (answer.ask_exchanges, 33),
+        (answer.odd_bid_exchanges, 109), (answer.odd_ask_exchanges, 110),
+    ] {
+        if mask > 0 {
+            say(tick_type, SeriesValue::Text(letters(mask)));
+        }
+    }
+    if let Some(at) = answer.last_exchange.filter(|at| *at < 63) {
+        say(84, SeriesValue::Text(letters(1 << at)));
+    }
+    for (figure, tick_type) in [(answer.high, 6), (answer.low, 7), (answer.close, 9)] {
+        if let Some(price) = figure {
+            say(tick_type, SeriesValue::Price(price));
+        }
+    }
+    if let Some(volume) = answer.volume {
+        say(8, SeriesValue::Size(volume * counted_in));
+    }
+    if shared.reference.snapshot_permission_of(instrument) == CHARGEABLE {
+        say(85, SeriesValue::Text(taken.to_string()));
+    }
+    shared.market.push_snapshot_answer(instrument, published);
+}
+
+/// Which exchanges serve a book, from the routing table the market-data
+/// connection was given at logon. A table that names none, or was never read,
+/// is an answer too, and an empty one: a gateway answers with whatever table
+/// it holds.
+pub(crate) fn note_depth_directory(conn: &Connection, shared: &SharedState) {
+    shared.reference.push_depth_exchanges(depth_directory(&conn.routing));
+}
+
+/// A security type as a row of the routing table names it, read the way a
+/// gateway's parser reads one and written the way it writes it.
+///
+/// `CS`, `COMB` and `ANY` are read whatever their case; a type is also known
+/// by the longer name it is shown under; and a name that is none of these is
+/// no type at all, written as nothing.
+fn routing_sec_type(stated: &str) -> &'static str {
+    /// Each type as it is written, and the name it is shown under. An event
+    /// contract's shown name is not a fixed one, so it is known by the
+    /// written one alone.
+    const NAMED: [(&str, &str); 25] = [
+        ("STK", "Stock"), ("CFD", "CFD"), ("OPT", "Option"), ("FOP", "Futures Options"),
+        ("WAR", "Warrant"), ("FUT", "Futures"), ("FWD", "Forward"), ("BAG", "Comb"),
+        ("PDC", "Predefined Combinations"), ("CASH", "Forex"), ("IND", "Index"),
+        ("BOND", "Bond"), ("BILL", "Bill"), ("FIXED", "Fixed"), ("FUND", "Fund"),
+        ("SLB", "SBL"), ("News", "NEWS"), ("CMDTY", "Commodity"), ("BSK", "Basket"),
+        ("IOPT", "Structured"), ("ICU", "Inter-commodity Spread Underlying"),
+        ("ICS", "Inter-commodity Spreads"), ("PHYSS", "PHYSS"), ("CRYPTO", "Crypto"),
+        ("EC", ""),
+    ];
+    if stated.is_empty() || stated.eq_ignore_ascii_case("NONE") {
+        return "";
+    }
+    if stated.eq_ignore_ascii_case("CS") {
+        return "STK";
+    }
+    if stated.eq_ignore_ascii_case("COMB") {
+        return "BAG";
+    }
+    if stated == "*" || stated.eq_ignore_ascii_case("ANY") {
+        return "*";
+    }
+    let upper = stated.to_ascii_uppercase();
+    NAMED
+        .iter()
+        .find(|(written, shown)| *written == upper || *shown == stated)
+        .map_or("", |(written, _)| *written)
+}
+
+/// The exchanges that serve a book, as a caller asking which exchanges offer
+/// one is answered: one entry per security type and per book a row names.
+///
+/// Read the way a gateway reads its routing table for the same answer. A row
+/// names each book it serves by name, and a row naming every endpoint with `*`
+/// serves the top of the book only, never a book. The exchange is written the
+/// way the API writes it — the venue's smart destination as `SMART` — and a
+/// row the venue files under `SMART` itself is not one of these. The security
+/// type is the API's spelling, the qualifier the listing exchange (nothing
+/// where the row covers every listing), and the book number the aggregation
+/// group (the largest integer where the row names none).
+fn depth_directory(
+    table: &crate::protocol::routing::RoutingTable,
+) -> Vec<crate::types::DepthMktDataDescription> {
+    use crate::protocol::routing::BOOK_ENDPOINTS;
+    let mut out: Vec<crate::types::DepthMktDataDescription> = Vec::new();
+    for row in table.rows().iter().filter(|r| r.exchange != "SMART") {
+        // A row for any exchange is written the way a wildcard is.
+        let exchange = match row.exchange.as_str() {
+            "ANYEXCH" => "*",
+            named => crate::control::contracts::exchange_from_fix(named),
+        };
+        for stated in row.sec_type.split('|') {
+            let sec_type = routing_sec_type(stated);
+            for book in row.endpoints.iter().filter(|e| BOOK_ENDPOINTS.contains(&e.as_str())) {
+                let entry = crate::types::DepthMktDataDescription {
+                    exchange: exchange.to_string(),
+                    sec_type: sec_type.to_string(),
+                    listing_exch: if row.qualifier == "*" {
+                        String::new()
+                    } else {
+                        row.qualifier.clone()
+                    },
+                    service_data_type: book.clone(),
+                    agg_group: if row.book == -1 { i32::MAX } else { row.book },
+                };
+                // A market served from more than one place is one entry.
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The venue's option model, subscribed to by naming the model where a price
@@ -1233,35 +1413,6 @@ fn stated_increment(field: &str) -> Option<f64> {
     (stated.is_finite() && stated > 0.0).then_some(stated)
 }
 
-/// What a subscription's acknowledgement states for the request, as a
-/// gateway hands it on: the increment, the exchange the best bid and offer
-/// come from, and the permission number the venue gives this request.
-///
-/// A subscription is acknowledged in nine fields at the version this session
-/// logs on with — server tag, request, increment, one unused, the permission,
-/// the exchange, then three optional — so the fifth and sixth are read where
-/// the acknowledgement is long enough to carry them, and a shorter one states
-/// neither. Both are taken as a gateway takes them: the permission is one of
-/// its five numbers or nothing stated (0), and the exchange is as written. A
-/// gateway appends the contract's security type to an exchange of four
-/// characters or fewer, as four hex digits, and so does this.
-fn stated_request_params(
-    parts: &[&str], min_tick: f64, fix_sec_type: &str,
-) -> crate::bridge::TickReqParams {
-    let (snapshot_permissions, mut bbo_exchange) = if parts.len() > 5 {
-        (parts[4].parse().ok().filter(|p| (0..=4).contains(p)).unwrap_or(0), parts[5].to_string())
-    } else {
-        (0, String::new())
-    };
-    if !bbo_exchange.is_empty() && bbo_exchange.len() <= 4
-        && let Some(number) =
-            crate::control::contracts::SecurityType::from_fix(fix_sec_type).gateway_number()
-    {
-        bbo_exchange.push_str(&format!("{number:04X}"));
-    }
-    crate::bridge::TickReqParams { min_tick, bbo_exchange, snapshot_permissions }
-}
-
 /// What the venue counts an instrument's sizes in, as its acknowledgement
 /// states it: the last field, after the increment prices move in.
 ///
@@ -1288,6 +1439,16 @@ fn trailing_size_increment(parts: &[&str]) -> Option<f64> {
 
 /// What the option model goes by where an exchange would be named.
 const GREEKS_VENUE: &str = "IBVOL";
+
+/// The parameters the venue's option model works an underlying's chain from:
+/// the standing set, and the set as the chain closed.
+const CHAIN_MODEL_SERIES: [u32; 2] = [687, 691];
+
+/// Where a series is asked for: where the contract trades, except the series
+/// a gateway asks for on the option model's name.
+fn series_venue(tick: u32, contract_venue: &str) -> &str {
+    if CHAIN_MODEL_SERIES.contains(&tick) { GREEKS_VENUE } else { contract_venue }
+}
 
 /// The venue refusing to serve data this account is not subscribed to.
 ///
@@ -1890,12 +2051,9 @@ fn company_text(series: u32, payload: &[u8]) -> Option<std::borrow::Cow<'_, [u8]
         // same runs of `KEY=VALUE` the rest state outright. Held to what one
         // payload may become, as every other inflate here is: what arrives is
         // bounded on the wire and what it becomes is not.
-        386 | 691 => {
+        386 => {
             use std::io::Read as _;
-            // Both compress what they state; they differ in how much they put
-            // in front of it. The calendar states eight bytes of its own, the
-            // other a single byte that is not part of what was squeezed.
-            let compressed = payload.get(if series == 386 { 8 } else { 1 }..)?;
+            let compressed = payload.get(8..)?;
             let mut text = Vec::new();
             flate2::read::ZlibDecoder::new(compressed)
                 .take(crate::protocol::fixcomp::MAX_INFLATED + 1)
@@ -2036,6 +2194,19 @@ fn decode_greeks(payload: &[u8]) -> Option<crate::types::OptionComputation> {
 }
 
 impl FarmState {
+    /// The security type a contract's quote was asked for under, which is
+    /// the one its acknowledgement's BBO exchange and map of venues are stated
+    /// for. A contract named by its id alone states none of its own, and was
+    /// asked for under its definition's.
+    fn asked_sec_type(&self, instrument: InstrumentId, context: &Context) -> String {
+        self.instrument_md_reqs
+            .iter()
+            .find(|(held, _)| *held == instrument)
+            .map(|(_, record)| record.sec_type.clone())
+            .filter(|asked| !asked.is_empty())
+            .unwrap_or_else(|| context.market.order_routing(instrument).0)
+    }
+
     /// Whether this instrument still has market-data state that would be
     /// repointed by a slot reuse: a live subscription, or a record kept for the
     /// next reconnect.
@@ -2125,6 +2296,8 @@ impl FarmState {
             rt_volume_totals: std::collections::HashMap::new(),
             news_subscriptions: Vec::new(),
             generic_tick_tags: Vec::new(),
+            snapshot_answers_held: Vec::new(),
+            chain_series_withdrawn: Vec::new(),
             unread_types: std::collections::HashSet::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
@@ -2142,6 +2315,10 @@ impl FarmState {
         event_tx: &Option<EventSink>,
         hb: &mut HeartbeatState,
     ) {
+        // A snapshot's answer waiting on its contract's map is published once
+        // the map is stated, and let go once a gateway would stop waiting,
+        // whether or not anything else arrives.
+        self.publish_snapshot_answers(context, shared);
         if self.disconnected {
             return;
         }
@@ -2664,6 +2841,24 @@ impl FarmState {
             None => return,
         };
 
+        // What an acknowledgement of the full shape states about the contract
+        // beside the request: fifth, whether its snapshot is chargeable, and
+        // sixth, the BBO exchange its quote is stated under — the key its map
+        // of venues is stated under, and what `tick_req_params` names. Only
+        // the nine-field shape carries these; the shorter one is laid out
+        // differently and its fifth field is something else.
+        // Read untrimmed, as a gateway reads them.
+        if parts.len() >= 9 {
+            if let Ok(stated) = parts[4].parse::<u32>() {
+                shared.reference.note_snapshot_permission(instrument, stated);
+            }
+            if let Some(bbo) = Some(parts[5]).filter(|f| !f.is_empty()) {
+                shared.reference.note_bbo_exchange(
+                    instrument, bbo, &self.asked_sec_type(instrument, context),
+                );
+            }
+        }
+
         // A generic tick is numbered apart from the prices, and its frames say
         // nothing about which tick they carry. What was asked for under this
         // request is the only thing that does, so the two are recorded
@@ -2681,8 +2876,11 @@ impl FarmState {
 
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
-        let (sec_type, _) = context.market.order_routing(instrument);
-        shared.market.push_tick_req_params(instrument, stated_request_params(&parts, min_tick, &sec_type));
+        shared.market.push_tick_req_params(instrument, crate::bridge::TickReqParams {
+            min_tick,
+            bbo_exchange: shared.reference.bbo_exchange_of(instrument),
+            snapshot_permissions: i64::from(shared.reference.snapshot_permission_of(instrument)),
+        });
         // The venue has taken it, so whatever it said the last time it would
         // not is no longer what a request joining this contract is owed.
         //
@@ -2699,6 +2897,13 @@ impl FarmState {
             }));
         if !is_a_snapshot {
             shared.market.note_subscription_accepted(instrument);
+        } else {
+            // The answer arrives as a generic tick under this number, beside
+            // the other series in the same message. Filed as a quote alone,
+            // the reader had no tick for it, stopped there, and dropped every
+            // record behind it.
+            self.generic_tick_tags.retain(|(tag, ..)| *tag != server_tag);
+            self.generic_tick_tags.push((server_tag, REGULATORY_SNAPSHOT_REQUEST_TYPE, instrument));
         }
         if let Some(size_tick) = trailing_size_increment(&parts) {
             context.market.set_size_tick(instrument, size_tick);
@@ -3150,7 +3355,9 @@ impl FarmState {
         // slot it was asked on, so an acknowledgement still in flight bound the
         // old contract's series onto whatever contract the slot went to next.
         for &(id, tick) in &extra_series {
-            entries.push(MdReqEntry { req_id: id, request_type: tick, venue: venue.clone() });
+            entries.push(MdReqEntry {
+                req_id: id, request_type: tick, venue: series_venue(tick, &venue).to_string(),
+            });
         }
         if let Some(id) = greeks_req_id {
             entries.push(MdReqEntry { req_id: id, request_type: GREEKS_REQUEST_TYPE, venue: GREEKS_VENUE.to_string() });
@@ -3505,9 +3712,11 @@ impl FarmState {
         // a book asked for there is asked of somewhere that has none, and the
         // answer is nothing at all: no refusal, no book, no way to tell which.
         //
-        // Said as a refusal instead. Only where the table was read and names
-        // the market: a table this client does not have is not evidence that
-        // the venue serves nothing.
+        // Refused instead, as a gateway refuses it, before the venue is
+        // asked. Only where the table was read and names the market: a table
+        // this client does not have is not evidence that the venue serves
+        // nothing. Not smart depth on a type a gateway gathers a book for from
+        // each venue: a gateway never refuses that, so neither does this.
         // Under the name the venue routes by, not the one a caller was handed.
         // The smart destination is remapped before sending and this
         // client already does it for quotes and for orders; a book asked for
@@ -3518,9 +3727,17 @@ impl FarmState {
             other => other,
         };
 
+        /// The security types a gateway gathers smart depth for from each
+        /// venue the contract trades on.
+        const GATHERED_FROM_EACH_VENUE: [&str; 16] = [
+            "STK", "CFD", "OPT", "FOP", "WAR", "IOPT", "FUT", "FWD", "BAG", "CASH", "BOND",
+            "BILL", "FIXED", "SLB", "CMDTY", "CRYPTO",
+        ];
+        let gathered = is_smart_depth && GATHERED_FROM_EACH_VENUE.contains(&sec_type);
         if let Some(conn) = farm_conn.as_ref()
             && !conn.routing.is_empty()
             && !sec_type.is_empty()
+            && !gathered
         {
             // Whichever name the venue serves a book under here. Asked only
             // about one of them, two markets that serve a book under another
@@ -3544,12 +3761,10 @@ impl FarmState {
             if named_at_all && !serves_a_book {
                 shared.reference.push_historical_error(
                     req_id,
-                    crate::error_codes::Refusal::VALIDATION,
-                    format!(
-                        "the venue serves no book for a {sec_type} on {destination}, \
-                         only the top of one — ask on the exchange the contract \
-                         trades on instead",
-                    ),
+                    crate::error_codes::DEEP_DATA_NOT_SUPPORTED,
+                    "Deep market data is not supported for this combination of security \
+                     type/exchange"
+                        .to_string(),
                 );
                 return;
             }
@@ -3840,7 +4055,7 @@ impl FarmState {
         {
             for (id, tick) in &rows {
                 record.entries.push(MdReqEntry {
-                    req_id: *id, request_type: *tick, venue: venue.clone(),
+                    req_id: *id, request_type: *tick, venue: series_venue(*tick, &venue).to_string(),
                 });
             }
         }
@@ -3879,6 +4094,8 @@ impl FarmState {
     /// slot next, they leave that subscription standing for ever.
     pub(crate) fn forget_what_was_asked_on(&mut self, instrument: InstrumentId) {
         self.subscription_asked_on.remove(&instrument);
+        // And a snapshot's answer still waiting for the contract's map.
+        self.snapshot_answers_held.retain(|(held, ..)| *held != instrument);
         self.subscription_began_under.remove(&instrument);
         self.series_asked_on.retain(|(watched, _), _| *watched != instrument);
         // The route this slot's callers were sent along is kept: a withdrawal
@@ -4097,6 +4314,9 @@ impl FarmState {
         // joined and given up often enough grew the record for ever.
         for tick in &unwanted {
             self.series_asked_on.remove(&(instrument, *tick));
+            if CHAIN_MODEL_SERIES.contains(tick) {
+                self.chain_series_withdrawn.push((instrument, *tick));
+            }
         }
         let Some((_, record)) = self.instrument_md_reqs.iter_mut()
             .find(|(id, _)| *id == instrument)
@@ -4664,6 +4884,9 @@ impl FarmState {
         replay: ReplayPacing,
         shared: &SharedState,
     ) {
+        // The table a caller asking which exchanges serve a book is answered
+        // from, and an ask made while no connection was up is answered now.
+        note_depth_directory(&conn, shared);
         *farm_conn = Some(conn);
         self.disconnected = false;
         hb.last_farm_sent = Instant::now();
@@ -4870,10 +5093,15 @@ impl FarmState {
                             })
                         })
                         .collect();
+                    // Kept under the BBO exchange and security type this
+                    // contract's acknowledgement named: the venue states a map
+                    // per pair, and a contract's masks are read against its own.
                     if !venues.is_empty() {
                         log::info!("the server names {} venues for the exchange mask", venues.len());
-                        shared.reference.set_smart_components(venues);
-                        shared.reference.note_smart_components_provisional(false);
+                        let sec_type = self.asked_sec_type(instrument, context);
+                        shared.reference.set_smart_components_of(instrument, &sec_type, venues);
+                        // A snapshot's answer that was waiting for it.
+                        self.publish_snapshot_answers(context, shared);
                     }
                 }
                 TRADING_STATUS_REQUEST_TYPE => {
@@ -4921,6 +5149,21 @@ impl FarmState {
                 TOP_NEWS_REQUEST_TYPE => {
                     self.deliver_top_news(instrument, payload, shared, event_tx)
                 }
+                // The venue's answer to a chargeable snapshot, under the number
+                // its acknowledgement gave the request.
+                REGULATORY_SNAPSHOT_REQUEST_TYPE => {
+                    self.deliver_regulatory_snapshot(instrument, payload, context, shared)
+                }
+                // What the option model works the underlying's chain from, the
+                // standing set and the set as the chain closed. A record that
+                // cannot be read leaves what the last one stated standing.
+                687 | 691 => match crate::protocol::chain_model::parse(payload) {
+                    Some(sets) => shared.market.note_chain_model_parameters(instrument, tick, sets),
+                    None => log::warn!(
+                        "the option model's chain parameters on series {tick} could not be \
+                         read; what was last stated stands",
+                    ),
+                },
                 // The running volume states totals, and what a caller is owed
                 // is the trade between two of them — so it is read here, where
                 // the totals this contract last stated are held.
@@ -4954,7 +5197,7 @@ impl FarmState {
                 // buys in from elsewhere; the lens it publishes over a
                 // company's accounts; and the price it holds a contract
                 // against for reference.
-                386 | 434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 691 | 699 | 700
+                386 | 434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 699 | 700
                 | 703 | 705 | 726 | 750 | 752 => {
                     self.deliver_company_data(instrument, tick, payload, context, shared)
                 }
@@ -5069,6 +5312,72 @@ impl FarmState {
         emit(event_tx, Event::News(news));
     }
 
+    /// The venue's answer to a chargeable snapshot, published under the
+    /// numbers a gateway publishes it under, and the snapshot ended.
+    ///
+    /// A gateway stamps the moment it reads the answer, on its clock corrected
+    /// to the venue's, and publishes it as text on 85 — where the venue states
+    /// the contract's snapshot as chargeable. A contract the account sees in
+    /// real time is answered without it.
+    ///
+    /// Where each side is quoted is read against the contract's map of venues,
+    /// which is asked for beside the snapshot and can arrive after its answer.
+    /// A gateway waits for that map before it publishes anything, and so does
+    /// this: the answer is held until the map is stated.
+    fn deliver_regulatory_snapshot(
+        &mut self,
+        instrument: InstrumentId,
+        payload: &[u8],
+        context: &Context,
+        shared: &SharedState,
+    ) {
+        // Read before any of the answer is: the moment it arrived, not when
+        // any price in it was made.
+        let taken = shared.market.venue_time_millis();
+        let Some(answer) = crate::protocol::regulatory_snapshot::parse(payload) else {
+            log::warn!(
+                "the chargeable snapshot was answered with {} bytes, which is none of the \
+                 layouts it is stated in; nothing is published from it",
+                payload.len(),
+            );
+            return;
+        };
+        self.snapshot_answers_held.retain(|(held, ..)| *held != instrument);
+        self.snapshot_answers_held.push((instrument, answer, taken, Instant::now()));
+        self.publish_snapshot_answers(context, shared);
+    }
+
+    /// Publish each chargeable snapshot's answer held for its contract's map
+    /// of venues once the map is stated.
+    ///
+    /// A gateway waits two seconds for the map and then publishes none of the
+    /// answer: it reports that the snapshot could not be fetched. The answer
+    /// is let go the same way, and the snapshot ends as one the venue did not
+    /// answer does.
+    // ponytail: the gateway's words for a map that never came are not
+    // settled, so no error is raised here; the snapshot's own sweep ends it.
+    pub(crate) fn publish_snapshot_answers(&mut self, context: &Context, shared: &SharedState) {
+        /// How long a gateway waits for the map.
+        const MAP_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+        if self.snapshot_answers_held.is_empty() {
+            return;
+        }
+        let held = std::mem::take(&mut self.snapshot_answers_held);
+        for (instrument, answer, taken, read_at) in held {
+            if !shared.reference.smart_components_of(instrument).is_empty() {
+                publish_snapshot_answer(instrument, &answer, taken, context, shared);
+            } else if read_at.elapsed() < MAP_WAIT {
+                self.snapshot_answers_held.push((instrument, answer, taken, read_at));
+            } else {
+                log::warn!(
+                    "the chargeable snapshot of slot {instrument} was answered and its map of \
+                     venues never stated, so where its prices are quoted cannot be read; \
+                     nothing is published from it, as a gateway publishes nothing",
+                );
+            }
+        }
+    }
+
     /// The odd lot, off a record of the venue's own fields.
     ///
     /// The two prices are the fields numbered nought and one, their sizes four
@@ -5133,7 +5442,7 @@ impl FarmState {
             // with nothing to show for its bits states nothing rather than an
             // empty venue.
             if let Some(mask) = stated(venue_id).map(|f| f.magnitude).filter(|m| *m > 0) {
-                let letters = crate::client_core::render_exchange_mask(mask, shared);
+                let letters = crate::client_core::render_exchange_mask(mask, instrument, shared);
                 if !letters.is_empty() {
                     say(venue_tick, crate::types::SeriesValue::Text(letters));
                 }

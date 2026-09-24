@@ -24,10 +24,19 @@ One `historical_data` callback per bar, in time order, then one
 was served.
 
 With `keep_up_to_date: true` the bar still forming is folded in from the live
-stream and keeps arriving. That bar opens on a whole multiple of its own length
-counted from the epoch. Up to an hour that is the clock boundary you expect. At
-`1 day` it is midnight UTC, so a US listing's forming daily bar opens in its
-after-hours session and spans two of them.
+stream and keeps arriving. Up to a day, that bar opens on a whole multiple of
+its own length counted from the epoch. Up to an hour that is the clock boundary
+you expect. At `1 day` it is midnight UTC, so a US listing's forming daily bar
+opens in its after-hours session and spans two of them. A week opens on its
+Monday and a month on its first day, both at midnight UTC, as a gateway folds
+them. An update to a bar a day long or longer is dated as the history's bars
+are: by its day alone (`YYYYMMDD`) where the date is written out.
+
+**The bar still forming starts from the five-second bars the stream sends after
+the request, not from the venue's own current bar.** Until the next bar opens —
+for a week up to five trading days, for a month up to a month — every update's
+open, high, low and volume count only what traded since the request. A gateway
+continues the venue's own bar.
 
 ## The shorter form
 
@@ -48,9 +57,12 @@ request with no history at all.
 `bar_size` and `what_to_show` are checked before anything is sent, so a
 misspelling is refused here rather than answered with a different series. With
 `keep_up_to_date: true` the size must be one this client can form from
-the five-second bars the venue keeps sending: five seconds up to a day, in
-whole multiples of five seconds. A second is shorter than what arrives; a week
-and a month would open where the venue's own never do.
+the five-second bars the venue keeps sending: five seconds up to a day in
+whole multiples of five seconds, a week, or a month. A second is shorter than
+what arrives and is refused. A request kept up to date is refused, as a gateway
+refuses it, with an end date, on a combination, or on a series other than
+TRADES, MIDPOINT, BID, ASK and the two option open-interest series — an empty
+series name included.
 
 How far back a series goes, and which bar sizes pair with which durations, are
 the venue's rules. A request outside them comes back as a stated refusal on the

@@ -219,13 +219,7 @@ pub(crate) struct FormingBar {
 impl FormingBar {
     /// Fold a five-second bar in, and answer with the bar as it now stands.
     fn fold(&mut self, five: &crate::types::RealTimeBar) -> crate::types::RealTimeBar {
-        // Counted from the epoch, so a bar opens on a whole multiple of its
-        // own length. Right to the clock for every size up to an hour; for a
-        // day it is midnight UTC, which is the trading day of an instrument
-        // that trades around the clock and the middle of the evening for one
-        // that does not. Folding on the contract's own trading day needs the
-        // schedule down here, which this does not have.
-        let opened_at = five.timestamp - five.timestamp % self.seconds;
+        let opened_at = opening(self.seconds, five.timestamp);
         if opened_at != self.opened_at {
             self.opened_at = opened_at;
             self.bar = *five;
@@ -251,6 +245,34 @@ impl FormingBar {
             five.wap
         };
         self.bar
+    }
+}
+
+/// Where the bar a moment falls in opened, for bars `seconds` long.
+///
+/// Counted from the epoch, so a bar opens on a whole multiple of its own
+/// length. Right to the clock for every size up to an hour; for a day it is
+/// midnight UTC, which is the trading day of an instrument that trades around
+/// the clock and the middle of the evening for one that does not. Folding on
+/// the contract's own trading day needs the schedule down here, which this
+/// does not have.
+///
+/// A week and a month are the calendar's: a week opens on its Monday and a
+/// month on its first day, both at midnight UTC, as a gateway folds them.
+fn opening(seconds: u32, at: u32) -> u32 {
+    use crate::control::historical::BarSize;
+    const DAY: u32 = 86_400;
+    let day = at / DAY;
+    if seconds == BarSize::Week1.seconds() {
+        // The epoch fell on a Thursday, three days past a Monday; a stamp in
+        // its first days opens at the epoch, the earliest a stamp can.
+        day.saturating_sub((day + 3) % 7) * DAY
+    } else if seconds == BarSize::Month1.seconds() {
+        let (year, month, _) = crate::protocol::datetime::days_to_ymd(u64::from(day));
+        let first = crate::protocol::datetime::days_from_civil(year as i64, month as i64, 1);
+        first as u32 * DAY
+    } else {
+        at - at % seconds
     }
 }
 
@@ -1959,9 +1981,8 @@ fn build_tbt_query(
         // The adjusted series is not a wire type: the venue has no such data,
         // so what goes out asks for raw trades and the fold onto one scale
         // happens once both the trades and the contract's actions are held.
-        // The client validates and requires the venue's id before this; this is
-        // the engine-side reading of the same name for a raw control-channel
-        // caller.
+        // The client validates before this; this is the engine-side reading of
+        // the same name for a raw control-channel caller.
         let adjusted = crate::control::historical::what_to_show_is_adjusted(what_to_show);
         // One shared table, rejection instead of a silent Min5/TRADES
         // fallback. The client validates synchronously before the

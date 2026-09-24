@@ -348,6 +348,11 @@ fn known_unread(subtype: &str) -> Option<&'static str> {
              the account, that request's own id and two flags: on this account, nothing the \
              subscription does not deliver itself. It is named as a dimension response",
         ),
+        "102" => Some(
+            "it is the exchange directory, each exchange and the name it goes by. Which \
+             exchanges serve a book, and which book, is the market-data routing table's to \
+             say, and a caller asking is answered from that",
+        ),
         _ => None,
     }
 }
@@ -1284,7 +1289,6 @@ impl CcpState {
                         "210" => handle_account_config(&parsed, shared),
                         "117" => self.handle_advisor_config(&parsed, shared),
                         "139" => self.handle_option_chain(msg, shared),
-                        "102" => self.handle_exchange_list(msg, shared),
                         "107" => self.handle_schedule_reply(msg, shared, event_tx),
                         "18" => {
                             // The venue restating its own clock, unasked. It is
@@ -1452,24 +1456,6 @@ impl CcpState {
                     }
                     let all = crate::control::contracts::parse_secdef_responses(msg, shared.island_for_nasdaq());
                     let listings = all.len();
-                    // The venue states which venues SMART routes to, in the
-                    // order a quote's exchange bitmask refers to. Taking it
-                    // replaces this client's own list, whose order was its own
-                    // and bore no resemblance to this.
-                    if let Some(venues) = all.iter().map(|d| &d.smart_venues).find(|v| !v.is_empty()) {
-                        shared.reference.set_smart_components(
-                            venues
-                                .iter()
-                                .enumerate()
-                                .map(|(i, exchange)| crate::types::SmartComponent {
-                                    bit_number: i as i32,
-                                    exchange: exchange.clone(),
-                                    exchange_letter: crate::types::exchange_letter(exchange).to_string(),
-                                })
-                                .collect(),
-                        );
-                        shared.reference.note_smart_components_provisional(false);
-                    }
                     if listings > 1
                         && let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
                         && rid < 0xF000_0000
@@ -3252,14 +3238,6 @@ impl CcpState {
         }
     }
 
-    pub(crate) fn send_mkt_depth_exchanges_request(&mut self, _ccp_conn: &mut Option<Connection>, _hb: &mut HeartbeatState, shared: &SharedState) {
-        // Depth exchanges are derived from the 6040=102 exchange list received during
-        // init.
-        // No separate server request needed — just signal the shared state to deliver
-        // cached data.
-        shared.reference.notify_depth_exchanges();
-    }
-
     /// Ask the venue for the orders it has finished.
     ///
     /// The same message the session opens with — the mass status request,
@@ -3362,72 +3340,6 @@ impl CcpState {
                 shared.orders.note_completed_orders_end_on(self.completed_orders_asked_on);
             }
         }
-    }
-
-    /// The exchange directory the session opens with, as the rows a caller
-    /// asking which exchanges exist is answered with.
-    ///
-    /// The venue states an exchange and the name it goes by, in two sections —
-    /// shares and derivatives. It states neither what kind of data each
-    /// carries nor which group each aggregates into, so neither is stated
-    /// here: a field this client filled in itself was read as though the venue
-    /// had said it, and a book was gathered from sixty-six venues on four
-    /// continents because a section count had been recorded as an aggregation
-    /// group. Which venues a book is gathered from comes from the contract's
-    /// own definition.
-    fn handle_exchange_list(&self, msg: &[u8], shared: &SharedState) {
-        use crate::types::DepthMktDataDescription;
-        let raw = String::from_utf8_lossy(msg);
-        let fields: Vec<&str> = raw.split('\x01').collect();
-
-        // The message has repeating 100=EXCHANGE|6813=NAME pairs grouped by
-        // sections. Sections: 6523=category|6811=category_name for the share
-        // categories, then 8128=N and 8129=N, each stating how many venues
-        // follow it. What follows 8128 is the index venues and what follows
-        // 8129 the futures venues; the venues before either are the shares.
-        // Labelled shares, every index venue was handed to a caller under a
-        // type it does not trade, and a caller asking which venues carry depth
-        // for an index was told none do.
-        // Every 100/6813 pair becomes a DepthMktDataDescription entry.
-        let mut descs: Vec<DepthMktDataDescription> = Vec::new();
-        let mut current_sec_type = "STK".to_string();
-
-        let mut i = 0;
-        while i < fields.len() {
-            let f = fields[i];
-            if f.starts_with("8128=") {
-                current_sec_type = "IND".to_string();
-            } else if f.starts_with("8129=") {
-                current_sec_type = "FUT".to_string();
-            } else if let Some(exch) = f.strip_prefix("100=") {
-                // The name follows the code, and only a field that carries it
-                // is the name. Taken as whatever followed, an exchange the
-                // venue named nothing for was published under an empty name
-                // and the field behind it was swallowed — and where that field
-                // was the next exchange, or the marker opening the futures
-                // section, what it said was lost with it.
-                let named = fields.get(i + 1).and_then(|f| f.strip_prefix("6813="));
-                if let Some(name) = named {
-                    descs.push(DepthMktDataDescription {
-                        exchange: exch.to_string(),
-                        sec_type: current_sec_type.clone(),
-                        listing_exch: name.to_string(),
-                        // Not stated by the venue here.
-                        service_data_type: String::new(),
-                        // Nor is the aggregation group. Nought is a group of
-                        // its own, so a caller read these venues as grouped
-                        // together; the largest an integer carries is what a
-                        // program written against the reference client reads
-                        // as a group nobody stated.
-                        agg_group: i32::MAX,
-                    });
-                    i += 1; // the name is this entry's, so step over it
-                }
-            }
-            i += 1;
-        }
-        log::info!("Parsed {} exchanges from 6040=102", descs.len());
-        shared.reference.push_depth_exchanges(descs);
     }
 
     /// Give the trading connection up, and the socket it was carried on with

@@ -1553,43 +1553,6 @@ fn the_per_currency_figures_are_read_off_their_bucket() {
     }
 }
 
-/// The venue's exchange directory says which of its sections is which, and a
-/// venue is handed over under the type that section carries.
-///
-/// The directory states the share venues first, then a count of index venues,
-/// then a count of futures venues. Labelled shares, every index venue reached
-/// a caller under a type it does not trade, and a caller asking which venues
-/// carry depth for an index was told none do.
-#[test]
-fn an_exchange_is_handed_over_under_the_type_its_section_carries() {
-    let (ccp, _context, shared) = ord_status_test_state();
-    let msg: Vec<u8> = [
-        "35=U", "6040=102",
-        "100=NYSE", "6813=New York",
-        "8128=1", "100=CBOE", "6813=Chicago Options",
-        "8129=1", "100=CME", "6813=Chicago Mercantile",
-    ].join("\u{1}").into_bytes();
-
-    ccp.handle_exchange_list(&msg, &shared);
-
-    // Read the way a caller reads it: the directory is answered to whoever
-    // asked for it.
-    shared.reference.notify_depth_exchanges();
-    let said: Vec<(String, String)> = shared.reference.drain_depth_exchanges()
-        .into_iter()
-        .map(|d| (d.exchange, d.sec_type))
-        .collect();
-    assert_eq!(
-        said,
-        [
-            ("NYSE".to_string(), "STK".to_string()),
-            ("CBOE".to_string(), "IND".to_string()),
-            ("CME".to_string(), "FUT".to_string()),
-        ],
-        "each venue under the type its own section carries",
-    );
-}
-
 /// An order the venue is still stating is not part of an answer about what it
 /// has finished, whichever handover carries that answer.
 ///
@@ -1669,42 +1632,6 @@ fn the_names_learned_at_recovery_are_held_in_a_window() {
         ccp.the_order_named(1_000_000 + super::WIRE_NAME_WINDOW as u64 + 15),
         Some(super::WIRE_NAME_WINDOW as u64 + 16),
         "and the newest is held",
-    );
-}
-
-/// An exchange the venue names nothing for is not published, and the marker
-/// behind it is still read.
-///
-/// The name follows the code, and only a field carrying it is the name. Taken
-/// as whatever followed, such an exchange went out under an empty name and the
-/// field behind it was swallowed — so where that field opened the futures
-/// section, every futures venue after it was labelled shares. The venue also
-/// states no aggregation group here, and nought is a group of its own: a
-/// caller read these venues as grouped together.
-#[test]
-fn an_exchange_with_no_name_is_left_out_and_the_marker_behind_it_still_read() {
-    let (ccp, _context, shared) = ord_status_test_state();
-    let msg: Vec<u8> = [
-        "35=U", "6040=102",
-        "100=NYSE", "6813=New York",
-        // Named nothing, and the futures marker directly behind it.
-        "100=PHLX",
-        "8129=1", "100=CME", "6813=Chicago Mercantile",
-    ].join("\u{1}").into_bytes();
-
-    ccp.handle_exchange_list(&msg, &shared);
-    shared.reference.notify_depth_exchanges();
-    let said: Vec<(String, String, i32)> = shared.reference.drain_depth_exchanges()
-        .into_iter()
-        .map(|d| (d.exchange, d.sec_type, d.agg_group))
-        .collect();
-    assert_eq!(
-        said,
-        [
-            ("NYSE".to_string(), "STK".to_string(), i32::MAX),
-            ("CME".to_string(), "FUT".to_string(), i32::MAX),
-        ],
-        "the unnamed one is left out and the futures marker was read: {said:?}",
     );
 }
 
@@ -9112,13 +9039,20 @@ fn a_rejected_lookup_of_the_engines_own_leaves_the_contract_askable_again() {
 fn an_ask_for_the_book_venues_is_answered_when_the_directory_lands() {
     let shared = SharedState::new();
     shared.reference.notify_depth_exchanges();
-    assert!(shared.reference.drain_depth_exchanges().is_empty(), "nothing to answer with yet");
+    assert!(shared.reference.drain_depth_exchanges().is_none(), "nothing to answer with yet");
     shared.reference.push_depth_exchanges(vec![crate::types::DepthMktDataDescription {
-        exchange: "ISLAND".into(), sec_type: "STK".into(), listing_exch: "NASDAQ".into(),
-        service_data_type: String::new(), agg_group: 0,
+        exchange: "ISLAND".into(), sec_type: "STK".into(), listing_exch: String::new(),
+        service_data_type: "Deep".into(), agg_group: i32::MAX,
     }]);
-    assert_eq!(shared.reference.drain_depth_exchanges().len(), 1, "the ask that waited is answered");
-    assert!(shared.reference.drain_depth_exchanges().is_empty(), "once");
+    assert_eq!(
+        shared.reference.drain_depth_exchanges().map(|d| d.len()), Some(1),
+        "the ask that waited is answered",
+    );
+    assert!(shared.reference.drain_depth_exchanges().is_none(), "once");
+    // A table naming no book is an answer too: an empty one.
+    shared.reference.push_depth_exchanges(Vec::new());
+    shared.reference.notify_depth_exchanges();
+    assert_eq!(shared.reference.drain_depth_exchanges(), Some(Vec::new()));
 }
 
 /// A scan's batches reach the caller in the order the venue sent them, and

@@ -604,6 +604,8 @@ pub struct ScannedStrategy {
     pub last_figure: f64,
 }
 
+pub use crate::protocol::chain_model::{ChainModelParameters, ChainModelTerm};
+
 /// What the venue states about a contract itself on the tick that carries its
 /// price extremes, beyond the extremes.
 ///
@@ -778,19 +780,19 @@ pub struct DepthUpdate {
     pub is_smart_depth: bool,
 }
 
-/// Exchange metadata for market depth availability.
-#[derive(Debug, Clone)]
+/// An exchange that serves a book, and which book.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DepthMktDataDescription {
-    /// The exchange, as the venue names it.
+    /// The exchange, as the API names it: the smart destination is `SMART`.
     pub exchange: String,
     /// Which kind of contract this row is about.
     pub sec_type: String,
-    /// The exchange's own full name.
+    /// The listing exchange the book is for, or nothing where it is for every
+    /// listing.
     pub listing_exch: String,
-    /// What kind of data it carries. Not stated by the venue
-    /// here, and so not stated.
+    /// Which book: `Deep`, `Deep2`, `DeepX` or `AggDeep`.
     pub service_data_type: String,
-    /// Which group it aggregates into. Not stated by the venue here.
+    /// Which group it aggregates into, or `i32::MAX` where it names none.
     pub agg_group: i32,
 }
 /// The single character the server gives a venue, where it has given one.
@@ -803,7 +805,7 @@ pub fn exchange_letter(_exchange: &str) -> &'static str {
     ""
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 /// One venue behind a quote's exchange mask, and the letter it is named by.
 pub struct SmartComponent {
     /// Which bit of a quote's exchange mask this venue is.

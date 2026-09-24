@@ -15,12 +15,16 @@
 pub mod datetime;
 /// What a subscription says on the wire.
 pub mod market_data;
+/// The parameters the venue's option model works an underlying's chain from.
+pub mod chain_model;
 pub mod connection;
 pub mod fix;
 pub mod tbt_stream;
 pub mod trading_status;
 pub mod fixcomp;
 pub mod ns;
+/// The venue's answer to a chargeable snapshot.
+pub mod regulatory_snapshot;
 pub mod routing;
 pub mod tick_decoder;
 pub mod xyz;

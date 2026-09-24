@@ -42,6 +42,11 @@ impl Refusal {
     /// silence apart from a refusal branches on this; the venue never sends it.
     pub const NO_ANSWER: i32 = -1;
 
+    /// A refusal a gateway gives no number of its own.
+    ///
+    /// A gateway states one under the largest number an integer holds.
+    pub const UNNUMBERED: i32 = i32::MAX;
+
     /// The request is malformed or contradicts itself.
     pub fn validation(message: impl Into<String>) -> Self {
         Self { code: Self::VALIDATION, message: message.into() }
@@ -60,6 +65,12 @@ impl Refusal {
     /// The venue said nothing before the wait ran out.
     pub fn no_answer(message: impl Into<String>) -> Self {
         Self { code: Self::NO_ANSWER, message: message.into() }
+    }
+
+    /// A refusal a gateway gives no number of its own, under the number it
+    /// marks one with.
+    pub fn unnumbered(message: impl Into<String>) -> Self {
+        Self { code: Self::UNNUMBERED, message: message.into() }
     }
 
     /// A refusal exactly as the venue stated it, under its own number.
@@ -199,6 +210,10 @@ pub const NO_SUCH_SCANNER_SUBSCRIPTION: i32 = 365;
 /// the catalogue names depth separately, and a caller branches on which of the
 /// two it asked for.
 pub const NO_SUCH_BOOK: i32 = 310;
+
+/// The code a book is refused under where the market asked names no book
+/// for the contract's type, before the venue is asked.
+pub const DEEP_DATA_NOT_SUPPORTED: i32 = 10092;
 
 /// The code the venue's restart of a book is reported under.
 ///

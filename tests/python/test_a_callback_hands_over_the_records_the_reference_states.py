@@ -45,7 +45,7 @@ def test_smart_components_arrive_as_a_list_of_records():
     """The reference decoder builds a list; the name it gives it says "map"."""
     w, c = _client()
     c._test_note_reference_data(3, "ISLAND", "I", "tier", "val", "brand")
-    c.reqSmartComponents(9, "a")
+    c.reqSmartComponents(9, "a60001")
     c.poll()
     assert isinstance(w.smart, list), f"a dict is not what the reference passes: {type(w.smart)}"
     assert w.smart[0].bitNumber == 3

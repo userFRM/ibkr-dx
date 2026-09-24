@@ -56,6 +56,49 @@ impl RecordKind {
     const ALL: [Self; 4] = [Self::Bars, Self::Depth, Self::Scanner, Self::Answer];
 }
 
+/// A BBO exchange id and the code of the security type it is stated for.
+type BboKey = (String, u16);
+
+/// Each security type a map of venues is stated for, as the API spells it,
+/// and the code the venue gives it.
+const SEC_TYPE_CODES: [(&str, u16); 23] = [
+    ("STK", 1), ("CFD", 2), ("OPT", 3), ("FOP", 4), ("WAR", 5), ("FUT", 6), ("FWD", 7),
+    ("BAG", 8), ("CASH", 10), ("IND", 11), ("BOND", 12), ("BILL", 13), ("FIXED", 14),
+    ("FUND", 15), ("SLB", 16), ("NEWS", 17), ("CMDTY", 18), ("BSK", 19), ("IOPT", 20),
+    ("ICU", 21), ("ICS", 22), ("PHYSS", 23), ("CRYPTO", 24),
+];
+
+/// The code a security type is stated under beside a BBO exchange id, as the
+/// API spells the type or as the wire does; nought for one with no code.
+fn sec_type_code(sec_type: &str) -> u16 {
+    let named = sec_type.trim().to_ascii_uppercase();
+    let named = if named == "CS" { "STK" } else { named.as_str() };
+    SEC_TYPE_CODES.iter().find(|(name, _)| *name == named).map_or(0, |(_, code)| *code)
+}
+
+/// The security type a code names, as the API spells it.
+fn sec_type_named(code: u16) -> Option<&'static str> {
+    SEC_TYPE_CODES.iter().find(|(_, stated)| *stated == code).map(|(name, _)| *name)
+}
+
+/// A BBO exchange as a caller names it: the id, and the security type's code
+/// where the name carries one.
+///
+/// Read the way a gateway reads it: four to eight characters are the id and,
+/// in the last four, a code in hexadecimal, kept to its lowest byte. A code
+/// that names no type leaves the whole name as the id.
+fn split_bbo_exchange(named: &str) -> (&str, Option<u16>) {
+    if (4..=8).contains(&named.len())
+        && named.is_char_boundary(named.len() - 4)
+        && let Ok(code) = i32::from_str_radix(&named[named.len() - 4..], 16)
+        && let Ok(code) = u16::try_from(code as i8)
+        && sec_type_named(code).is_some()
+    {
+        return (&named[..named.len() - 4], Some(code));
+    }
+    (named, None)
+}
+
 /// Historical data, contract definitions, scanners, news archives, market rules,
 /// contract cache.
 pub struct ReferenceState {
@@ -70,9 +113,6 @@ pub struct ReferenceState {
     ours_in_flight: Mutex<std::collections::HashSet<(RecordKind, i64)>>,
     historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
     head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
-    /// Set while the smart-component table is this client's own rather than
-    /// the venue's.
-    smart_components_provisional: AtomicBool,
     contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<u32>>,
     matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
@@ -138,14 +178,27 @@ pub struct ReferenceState {
     /// Drained by the dispatcher and forwarded to `Wrapper::error`.
     historical_errors: Mutex<Vec<(u32, i32, String)>>,
     market_rules: Mutex<Vec<MarketRule>>,
-    depth_exchanges_cache: Mutex<Vec<DepthMktDataDescription>>,
+    depth_exchanges_cache: Mutex<Option<Vec<DepthMktDataDescription>>>,
     depth_exchanges_pending: Mutex<bool>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
     /// The entries above that are the venue's own definitions, not seeds.
     defined_contracts: Mutex<std::collections::HashSet<i64>>,
+    /// Which venue each bit of a quote's exchange mask refers to, per BBO
+    /// exchange and security type: every key an acknowledgement or a map has
+    /// named this session, and the map the venue stated for it — `None` where
+    /// one is coming and has not arrived.
+    smart_component_maps: Mutex<HashMap<BboKey, Option<Vec<crate::types::SmartComponent>>>>,
+    /// The BBO exchange and security type each subscribed contract's
+    /// acknowledgement named.
+    bbo_keys: Mutex<HashMap<crate::types::InstrumentId, BboKey>>,
+    /// Requests for a map that had not arrived when they were made: the
+    /// request, the BBO exchange it named and when it was asked.
+    smart_component_asks: Mutex<Vec<(i64, String, std::time::Instant)>>,
+    /// Whether the venue states each subscribed contract's snapshot as
+    /// chargeable, as its last acknowledgement to say anything did.
+    snapshot_permissions: Mutex<HashMap<crate::types::InstrumentId, u32>>,
     /// Gateway-local init data (populated during connection, read-only after).
-    smart_components: Mutex<Vec<crate::types::SmartComponent>>,
     news_providers: Mutex<Vec<crate::types::NewsProvider>>,
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
@@ -213,7 +266,6 @@ impl ReferenceState {
             ours_in_flight: Mutex::new(Default::default()),
             historical_data: Mutex::new(Vec::with_capacity(16)),
             head_timestamps: Mutex::new(Vec::with_capacity(8)),
-            smart_components_provisional: AtomicBool::new(false),
             contract_details: Mutex::new(Vec::with_capacity(16)),
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
             matching_symbols: Mutex::new(Vec::with_capacity(8)),
@@ -237,11 +289,14 @@ impl ReferenceState {
             adjustments_by_request: Mutex::new(std::collections::HashMap::new()),
             historical_errors: Mutex::new(Vec::with_capacity(4)),
             market_rules: Mutex::new(Vec::new()),
-            depth_exchanges_cache: Mutex::new(Vec::new()),
+            depth_exchanges_cache: Mutex::new(None),
             depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
             defined_contracts: Mutex::new(std::collections::HashSet::new()),
-            smart_components: Mutex::new(Vec::new()),
+            smart_component_maps: Mutex::new(HashMap::new()),
+            bbo_keys: Mutex::new(HashMap::new()),
+            smart_component_asks: Mutex::new(Vec::new()),
+            snapshot_permissions: Mutex::new(HashMap::new()),
             news_providers: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
@@ -279,24 +334,6 @@ impl ReferenceState {
     /// Take every contract details waiting, leaving none.
     pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
         self.contract_details.lock().unwrap().drain(..).collect()
-    }
-
-    /// Whether the smart-component table came from the venue or is this
-    /// client's own list.
-    ///
-    /// The bit numbers in it decide which exchange a quote's bid, ask and last
-    /// are attributed to. The venue assigns them; a list written here can only
-    /// guess, and a guess that renders confidently is indistinguishable from
-    /// knowledge.
-    pub fn smart_components_are_provisional(&self) -> bool {
-        self.smart_components_provisional.load(Ordering::Relaxed)
-    }
-
-    /// Whether the venue map held is this client's guess or
-    /// the venue's statement.
-    pub fn note_smart_components_provisional(&self, provisional: bool) {
-        self.smart_components_provisional
-            .store(provisional, Ordering::Relaxed);
     }
 
     /// The definitions a dispatch loop should deliver, leaving an answering
@@ -1045,37 +1082,33 @@ impl ReferenceState {
     }
 
     /// The depth exchanges an ask is waiting for, once the venue has named
-    /// them.
+    /// them, and whether it has.
     ///
-    /// The venue names the directory once, unprompted, after logon, so an ask
-    /// made before it lands stays open until it does: spent on the empty list,
-    /// the ask was answered with nothing and the directory answered nobody.
-    pub fn drain_depth_exchanges(&self) -> Vec<DepthMktDataDescription> {
+    /// The venue names them in the routing table a market-data connection is
+    /// given at logon, so an ask made while none is up stays open until one
+    /// is: spent on nothing, the ask was answered with nothing and the table
+    /// answered nobody. A table naming no book is an answer, and an empty one.
+    pub fn drain_depth_exchanges(&self) -> Option<Vec<DepthMktDataDescription>> {
         let mut pending = self.depth_exchanges_pending.lock().unwrap();
         if !*pending {
-            return Vec::new();
+            return None;
         }
-        let cache = self.depth_exchanges_cache.lock().unwrap();
-        if cache.is_empty() {
-            return Vec::new();
-        }
+        let held = self.depth_exchanges_cache.lock().unwrap().clone()?;
         *pending = false;
-        cache.clone()
+        Some(held)
     }
 
-    /// Every exchange the venue named at logon, as it named them.
+    /// Every exchange the venue named as serving a book, as it named them.
     ///
     /// Read rather than drained: a caller reading the list must not empty it.
     pub fn depth_exchanges(&self) -> Vec<DepthMktDataDescription> {
-        self.depth_exchanges_cache.lock().unwrap().clone()
+        self.depth_exchanges_cache.lock().unwrap().clone().unwrap_or_default()
     }
 
-    /// The venue states the whole directory in one message, unprompted, every
-    /// time the session logs on. Added to what was already held, a reconnect
-    /// leaves every exchange in it twice — and the list is cloned out on each
-    /// subscribe.
+    /// Replaced whole: a reconnect states the table again, and added to what
+    /// was already held it leaves every exchange in it twice.
     #[doc(hidden)] pub fn push_depth_exchanges(&self, descs: Vec<DepthMktDataDescription>) {
-        *self.depth_exchanges_cache.lock().unwrap() = descs;
+        *self.depth_exchanges_cache.lock().unwrap() = Some(descs);
     }
 
     #[doc(hidden)] pub fn notify_depth_exchanges(&self) {
@@ -1131,9 +1164,148 @@ impl ReferenceState {
 
     // ── Gateway-local init data ──
 
-    /// Which venue each bit of a quote's exchange mask refers to.
-    pub fn smart_components(&self) -> Vec<crate::types::SmartComponent> {
-        self.smart_components.lock().unwrap().clone()
+    /// Which venue each bit of this contract's exchange masks refers to: the
+    /// map the venue stated for the BBO exchange and security type its
+    /// subscription was acknowledged under. Empty until that map is stated.
+    pub fn smart_components_of(
+        &self, instrument: crate::types::InstrumentId,
+    ) -> Vec<crate::types::SmartComponent> {
+        let Some(key) = self.bbo_keys.lock().unwrap().get(&instrument).cloned() else {
+            return Vec::new();
+        };
+        self.smart_component_maps.lock().unwrap().get(&key).cloned().flatten().unwrap_or_default()
+    }
+
+    /// The BBO exchange a contract's subscription was acknowledged under, as a
+    /// gateway states it on `tick_req_params`: the venue's id for it, with the
+    /// security type's four-digit code behind it where the id is four
+    /// characters or fewer. Empty where no acknowledgement named one.
+    pub fn bbo_exchange_of(&self, instrument: crate::types::InstrumentId) -> String {
+        let Some((id, sec_type)) = self.bbo_keys.lock().unwrap().get(&instrument).cloned() else {
+            return String::new();
+        };
+        if id.is_empty() || id.len() > 4 || sec_type == 0 {
+            return id;
+        }
+        format!("{id}{sec_type:04X}")
+    }
+
+    /// The map a caller names by BBO exchange, read the way a gateway reads
+    /// the name: four to eight characters are the id and, in the last four, a
+    /// security type's code in hexadecimal; anything else, or a code naming no
+    /// type, is the id alone and matches the id under any type.
+    ///
+    /// `Err` where no subscription or map has named that key: a gateway
+    /// refuses it. `Ok(None)` where one has and its map has not arrived yet.
+    fn smart_components_named(
+        &self, bbo_exchange: &str,
+    ) -> Result<Option<Vec<crate::types::SmartComponent>>, crate::error_codes::Refusal> {
+        let (id, sec_type) = split_bbo_exchange(bbo_exchange);
+        self.smart_component_maps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|((k, t), _)| *k == id && sec_type.is_none_or(|stated| stated == *t))
+            .map(|(_, map)| map.clone())
+            .ok_or_else(|| {
+                crate::error_codes::Refusal::validation("Invalid BBO exchange/security type code")
+            })
+    }
+
+    /// Ask for the map a caller names by BBO exchange.
+    ///
+    /// A key nothing has named is refused as a gateway refuses it. A map held
+    /// is the answer. One that has not arrived is waited for, as a gateway
+    /// waits for it, and answered from [`Self::drain_smart_component_answers`]
+    /// — the call does not wait for it.
+    pub fn ask_smart_components(
+        &self, req_id: i64, bbo_exchange: &str,
+    ) -> Result<Option<Vec<crate::types::SmartComponent>>, crate::error_codes::Refusal> {
+        let held = self.smart_components_named(bbo_exchange)?;
+        if held.is_none() {
+            self.smart_component_asks.lock().unwrap().push((
+                req_id, bbo_exchange.to_string(), std::time::Instant::now(),
+            ));
+        }
+        Ok(held)
+    }
+
+    /// The asks whose map has arrived, and those that have waited as long as
+    /// a gateway waits — two seconds — refused in the gateway's words, under
+    /// the number it states a refusal of its own under.
+    pub fn drain_smart_component_answers(
+        &self, now: std::time::Instant,
+    ) -> Vec<(i64, Result<Vec<crate::types::SmartComponent>, crate::error_codes::Refusal>)> {
+        const WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+        let mut answered = Vec::new();
+        self.smart_component_asks.lock().unwrap().retain(|(req_id, named, asked_at)| {
+            let answer = match self.smart_components_named(named) {
+                Ok(Some(components)) => Ok(components),
+                Ok(None) if now.duration_since(*asked_at) < WAIT => return true,
+                Ok(None) => {
+                    let (id, sec_type) = split_bbo_exchange(named);
+                    let named = sec_type.and_then(sec_type_named).unwrap_or("null");
+                    Err(crate::error_codes::Refusal::unnumbered(format!(
+                        "Unable to retrieve smart components for BBO exchange {id} and security \
+                         type {named}",
+                    )))
+                }
+                Err(why) => Err(why),
+            };
+            answered.push((*req_id, answer));
+            false
+        });
+        answered
+    }
+
+    /// Note the BBO exchange a contract's subscription was acknowledged under.
+    #[doc(hidden)] pub fn note_bbo_exchange(
+        &self, instrument: crate::types::InstrumentId, id: &str, sec_type: &str,
+    ) {
+        let key = (id.to_string(), sec_type_code(sec_type));
+        self.smart_component_maps.lock().unwrap().entry(key.clone()).or_insert(None);
+        self.bbo_keys.lock().unwrap().insert(instrument, key);
+    }
+
+    /// Whether the venue states a contract's snapshot as chargeable, by the
+    /// venue's number, as its acknowledgement says. Nought says nothing and
+    /// leaves what was said before standing, and so does a number outside
+    /// the five a gateway knows (0 to 4), which a gateway does not keep.
+    #[doc(hidden)] pub fn note_snapshot_permission(
+        &self, instrument: crate::types::InstrumentId, stated: u32,
+    ) {
+        if (1..=4).contains(&stated) {
+            self.snapshot_permissions.lock().unwrap().insert(instrument, stated);
+        }
+    }
+
+    /// The venue's number for whether a contract's snapshot is chargeable, as
+    /// `tick_req_params` states it; nought where no acknowledgement said.
+    pub fn snapshot_permission_of(&self, instrument: crate::types::InstrumentId) -> u32 {
+        self.snapshot_permissions.lock().unwrap().get(&instrument).copied().unwrap_or(0)
+    }
+
+    /// The contract in the slot is gone, and what its acknowledgements said of
+    /// it with it; the maps it named stay, as the venue's statements about a
+    /// key rather than about the contract.
+    #[doc(hidden)] pub fn forget_bbo_exchange(&self, instrument: crate::types::InstrumentId) {
+        self.bbo_keys.lock().unwrap().remove(&instrument);
+        self.snapshot_permissions.lock().unwrap().remove(&instrument);
+    }
+
+    /// Keep the map the venue stated beside a contract's subscription, under
+    /// the key that contract's acknowledgement named — or, where none named
+    /// one, under no BBO exchange and the contract's own type, which is then
+    /// the contract's key.
+    #[doc(hidden)] pub fn set_smart_components_of(
+        &self, instrument: crate::types::InstrumentId, sec_type: &str,
+        components: Vec<crate::types::SmartComponent>,
+    ) {
+        let key = self.bbo_keys.lock().unwrap()
+            .entry(instrument)
+            .or_insert_with(|| (String::new(), sec_type_code(sec_type)))
+            .clone();
+        self.smart_component_maps.lock().unwrap().insert(key, Some(components));
     }
 
     /// Every provider this account may read.
@@ -1426,10 +1598,6 @@ impl ReferenceState {
     #[doc(hidden)] pub fn set_enabled_features(&self, features: Vec<String>) {
         self.settle_island_grant(&features);
         *self.enabled_features.lock().unwrap() = features;
-    }
-
-    #[doc(hidden)] pub fn set_smart_components(&self, components: Vec<crate::types::SmartComponent>) {
-        *self.smart_components.lock().unwrap() = components;
     }
 
     #[doc(hidden)] pub fn set_news_providers(&self, providers: Vec<crate::types::NewsProvider>) {

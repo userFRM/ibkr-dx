@@ -751,6 +751,7 @@ impl EClient {
             let delivering = result.delivered
                 || !result.generic_ticks.is_empty()
                 || !result.string_ticks.is_empty()
+                || !result.snapshot_ticks.is_empty()
                 || result.timestamp.is_some();
             for id in std::iter::once(req_id).chain(watchers.iter().copied()) {
                 if let Some(mdt) = self.core.check_mdt_needed(id, delivering) {
@@ -814,6 +815,23 @@ impl EClient {
                 for id in std::iter::once(ts.req_id).chain(watchers.iter().copied()) {
                     call_wrapper!(self, py, shared, "tick_string", (id, if result.delayed { 88 } else { TICK_LAST_TIMESTAMP }, ts_secs.to_string().as_str()));
                 }
+            }
+            // The answer to a chargeable snapshot, to the snapshot's own
+            // requests alone.
+            for tick in &result.snapshot_ticks {
+                if tick.is_price {
+                    let attrib_obj = match tick.tick_type {
+                        1 => &bid_attrib,
+                        2 => &ask_attrib,
+                        _ => &plain_attrib,
+                    };
+                    call_wrapper!(self, py, shared, "tick_price", (tick.req_id, tick.tick_type, tick.value, attrib_obj));
+                } else {
+                    call_wrapper!(self, py, shared, "tick_size", (tick.req_id, tick.tick_type, tick.value));
+                }
+            }
+            for st in &result.snapshot_strings {
+                call_wrapper!(self, py, shared, "tick_string", (st.req_id, st.tick_type, st.value.as_str()));
             }
             // The holder and everyone watching it, for the reason the ticks
             // above go to both: a caller that asked for a snapshot of a
@@ -1103,8 +1121,7 @@ impl EClient {
         }
 
         // Drain depth exchanges -> mktDepthExchanges
-        let depth_exchanges = shared.reference.drain_depth_exchanges();
-        if !depth_exchanges.is_empty() {
+        if let Some(depth_exchanges) = shared.reference.drain_depth_exchanges() {
             let descriptions: Vec<Py<DepthMktDataDescriptionPy>> = depth_exchanges.iter().map(|d| {
                 Py::new(py, DepthMktDataDescriptionPy {
                     exchange: d.exchange.clone(),
@@ -1116,6 +1133,21 @@ impl EClient {
             }).collect();
             let list = pyo3::types::PyList::new(py, &descriptions)?;
             call_wrapper!(self, py, shared, "mkt_depth_exchanges", (list.as_any(),));
+        }
+
+        // Maps of venues asked for before they arrived: answered once they
+        // have, or refused once the wait a gateway allows has run out.
+        for (req_id, answer) in shared.reference.drain_smart_component_answers(std::time::Instant::now()) {
+            match answer {
+                Ok(components) => {
+                    let list = super::stubs::smart_components_list(py, &components)?;
+                    call_wrapper!(self, py, shared, "smart_components", (req_id, list.as_any()));
+                }
+                Err(why) => {
+                    call_wrapper!(self, py, shared, "error",
+                        (req_id, 0i64, i64::from(why.code), why.message.as_str(), ""));
+                }
+            }
         }
 
         // Drain scanner params -> scannerParameters

@@ -208,7 +208,7 @@ What the venue says back. `ib_async` delivers these as events as well as methods
 |  | `replace_fa_end` | ● | yes | ● | · | ● | ● |
 | Display Groups | `display_group_list` | ● | yes | ● | · | ● | ● |
 |  | `display_group_updated` | ● | yes | ● | · | ● | ● |
-| Other | `delta_neutral_validation` | ● | yes | ● | ● | ◐ | ◐ |
+| Other | `delta_neutral_validation` | ● | no | ● | ● | ● | ● |
 | WSH | `wsh_meta_data` | ● | yes | · | ● | ● | ● |
 |  | `wsh_event_data` | ● | yes | · | ● | ● | ● |
 | Market Data | `reroute_mkt_data_req` | ● | yes | ● | · | ◐ | ◐ |
@@ -250,6 +250,7 @@ ib_async's transport, has a method by that name.
 | `cancel_historical_news` | venue | · | · | · | ● | · |
 | `cancelOrderByPermId` | venue | · | · | · | ● | ● |
 | `ccpSessionId` | venue | · | · | · | ● | ● |
+| `chainModelParameters` | venue | · | · | · | ● | ● |
 | `checkConnected` | this client | · | · | · | · | ● |
 | `closingOptionModel` | venue | · | · | · | ● | ● |
 | `closingOptionModelByInstrument` | venue | · | · | · | ● | ● |

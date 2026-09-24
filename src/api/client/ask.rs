@@ -412,7 +412,8 @@ impl EClient {
     /// before a bar is handed to anyone. This call waits and hands the series
     /// back in one piece; `req_historical_data` delivers the same bars one at
     /// a time on its callbacks. Both ask for the actions by the venue's id for
-    /// the contract, and refuse a contract that does not carry it.
+    /// the contract, which the venue is asked for first where the contract is
+    /// named some other way.
     pub fn historical_data(
         &self, contract: &Contract, end_date_time: &str, duration: &str,
         bar_size: &str, what_to_show: &str, use_rth: bool,

@@ -286,18 +286,6 @@ pub trait Wrapper {
     /// Every venue's chain has been stated.
     fn security_definition_option_parameter_end(&mut self, req_id: i64) { let _ = req_id; }
 
-    // ── Delta-Neutral ──
-
-    /// The contract the venue paired with a delta-neutral order.
-    ///
-    /// A gateway sends it. No message this client receives carries the pairing
-    /// it reports, under any name, so nothing here fires it. A delta-neutral
-    /// order is sent and answered like any other.
-    fn delta_neutral_validation(
-        &mut self, req_id: i64, con_id: i64, delta: f64, price: f64,
-    ) {
-    }
-
     // ── Declared by the TWS API, and not fired here ──
     //
     // Each exists so a program written against that API compiles and runs
@@ -307,10 +295,12 @@ pub trait Wrapper {
 
     /// The contract a market-data request should be asked for under instead.
     ///
-    /// A gateway sends it when a request is to be asked for under another
-    /// contract and venue — a contract for difference standing for a share.
-    /// Nothing this connection receives has been seen to state one, so nothing
-    /// here fires it.
+    /// A gateway sends it, and asks the venue nothing, for a contract for
+    /// difference whose own definition asks for its underlying's data, where
+    /// the account's logon permissions allow that: the underlying's contract
+    /// and the venue to ask on. This client does not read a definition's flags
+    /// for asking on the underlying before subscribing: the request goes to
+    /// the venue as asked, and this never fires.
     fn reroute_mkt_data_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
         let _ = (req_id, con_id, exchange);
     }
@@ -318,6 +308,15 @@ pub trait Wrapper {
     /// The same, for a request for the book rather than the quote.
     fn reroute_mkt_depth_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
         let _ = (req_id, con_id, exchange);
+    }
+
+    /// The contract the venue paired with a delta-neutral order.
+    ///
+    /// Declared by the TWS API and never fired on a gateway: a gateway never
+    /// sends it. It fires here as it does there: never.
+    fn delta_neutral_validation(
+        &mut self, req_id: i64, con_id: i64, delta: f64, price: f64,
+    ) {
     }
 
     /// An exchange-for-physical quote.

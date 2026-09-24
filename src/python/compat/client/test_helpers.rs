@@ -65,14 +65,18 @@ impl EClient {
     }
 
     /// Seed the reference data the logon burst carries, so a test can tell a
-    /// request that delivers it from one that always answers empty.
+    /// request that delivers it from one that always answers empty. The map of
+    /// venues is stated for a share whose acknowledgement named BBO exchange
+    /// `a6`, which `reqSmartComponents` names as `a60001`.
     #[doc(hidden)]
     fn _test_note_reference_data(
         &self, bit_number: i32, exchange: &str, exchange_letter: &str,
         tier_name: &str, tier_val: &str, branding_id: &str,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
-        shared.reference.set_smart_components(vec![crate::types::SmartComponent {
+        const A_SHARE: crate::types::InstrumentId = 0;
+        shared.reference.note_bbo_exchange(A_SHARE, "a6", "STK");
+        shared.reference.set_smart_components_of(A_SHARE, "STK", vec![crate::types::SmartComponent {
             bit_number,
             exchange: exchange.to_string(),
             exchange_letter: exchange_letter.to_string(),

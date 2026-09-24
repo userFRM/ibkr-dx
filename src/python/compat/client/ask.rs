@@ -326,7 +326,8 @@ impl EClient {
     /// before a bar is handed to anyone. This call waits and hands the series
     /// back in one piece; `reqHistoricalData` delivers the same bars one at a
     /// time on its callbacks. Both ask for the actions by the venue's id for
-    /// the contract, and refuse a contract that does not carry it.
+    /// the contract, which the venue is asked for first where the contract is
+    /// named some other way.
     #[pyo3(signature = (contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth=1))]
     fn historical_data(
         &self,

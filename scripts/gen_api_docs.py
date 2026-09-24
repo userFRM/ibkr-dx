@@ -1312,12 +1312,10 @@ STUB_METHODS: set[str] = {
 #: Callbacks a gateway sends and nothing here fires. What each is and why is on
 #: the Limits page.
 STUB_CALLBACKS = {
-    # Nothing in this protocol reaches the sender of one: not a market-data
-    # request, not an order carrying a hedge. There is no first request after
-    # which it could honestly be fired.
-    "delta_neutral_validation",
-    # The contract a request should be asked for under instead, where the venue
-    # reroutes one. Nothing on this connection has been seen to state one.
+    # The contract a request should be asked for under instead. A gateway sends
+    # one for a contract for difference whose definition asks for its
+    # underlying's data; this client does not read a definition's flags for
+    # that before subscribing, so it never fires.
     "reroute_mkt_data_req",
     "reroute_mkt_depth_req",
 }
@@ -1330,6 +1328,9 @@ STUB_CALLBACKS = {
 #: carries either, and the TWS API's own client raises both itself, so they
 #: fire on a gateway as they fire here.
 GATEWAY_SENDS_NONE = {
+    # The contract paired with a delta-neutral order, which a gateway never
+    # sends.
+    "delta_neutral_validation",
     # An exchange-for-physical quote.
     "tick_efp",
     # The verification handshake.

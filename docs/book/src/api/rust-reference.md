@@ -248,7 +248,7 @@ pub fn session(&self) -> &crate::auth::resume::ResumableSession
 
 #### `historical_data`
 
-Bars for a contract, as `req_historical_data` asks for them. The venue has no adjusted series to pass through: what it serves is raw trades, and the two series the vendor states as adjusted — TRADES and ADJUSTED_LAST — are those folded with the contract's own actions. The fold is made once the series is whole and the actions are in hand, before a bar is handed to anyone. This call waits and hands the series back in one piece; `req_historical_data` delivers the same bars one at a time on its callbacks. Both ask for the actions by the venue's id for the contract, and refuse a contract that does not carry it.
+Bars for a contract, as `req_historical_data` asks for them. The venue has no adjusted series to pass through: what it serves is raw trades, and the two series the vendor states as adjusted — TRADES and ADJUSTED_LAST — are those folded with the contract's own actions. The fold is made once the series is whole and the actions are in hand, before a bar is handed to anyone. This call waits and hands the series back in one piece; `req_historical_data` delivers the same bars one at a time on its callbacks. Both ask for the actions by the venue's id for the contract, which the venue is asked for first where the contract is named some other way.
 
 ```rust
 pub fn historical_data( &self, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, ) -> Result<Vec<BarData>, Refusal>
@@ -1164,7 +1164,7 @@ pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list:
 
 #### `req_mkt_data_ex`
 
-Like `req_mkt_data`, but names the market-data mode on the request itself, through FIX field 9887, rather than taking the one the session is set to: | `mode_9887` | mode             | wire shape | |-------------|------------------|---| | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 | | `1`         | DELAYED          | `264=1` (TOP) + `9887=1` | | `2`         | FROZEN           | `264=1` (TOP) + `9887=2` | | `3`         | DELAYED_FROZEN   | `264=1` (TOP) + `9887=3` | The frozen mode keeps thinly-traded names quoting after-hours, when the realtime feed is silent. A contract holds one subscription at a time, so this states the mode for that subscription rather than adding a parallel one — to compare modes on one contract, cancel between them. To set the mode for every subscription instead of naming it per request, call `req_market_data_type`. `regulatory_snapshot` asks for the venue's own chargeable one-shot snapshot: a request type of its own rather than a mode on an ordinary quote, asked for under the snapshot action and with no feed named beside it. It needs the entitlement — an account without it is refused by the venue, which names the request type back. Whether it also costs something is between the account and the broker, and is not on this wire. It ends the way an ordinary snapshot does, so a caller hears `tick_snapshot_end` either way. Its default is false.
+Like `req_mkt_data`, but names the market-data mode on the request itself, through FIX field 9887, rather than taking the one the session is set to: | `mode_9887` | mode             | wire shape | |-------------|------------------|---| | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 | | `1`         | DELAYED          | `264=442` + `264=443`, each with `9887=1` | | `2`         | FROZEN           | `264=442` + `264=443`, each with `9887=2` | | `3`         | DELAYED_FROZEN   | `264=442` + `264=443`, each with `9887=3` | The frozen mode keeps thinly-traded names quoting after-hours, when the realtime feed is silent. A contract holds one subscription at a time, so this states the mode for that subscription rather than adding a parallel one — to compare modes on one contract, cancel between them. To set the mode for every subscription instead of naming it per request, call `req_market_data_type`. `regulatory_snapshot` asks for the venue's own chargeable one-shot snapshot: a request type of its own rather than a mode on an ordinary quote, asked for under the snapshot action and with no feed named beside it. It needs the entitlement — an account without it is refused by the venue, which names the request type back. Whether it also costs something is between the account and the broker, and is not on this wire. It ends the way an ordinary snapshot does, so a caller hears `tick_snapshot_end` either way. Its default is false.
 
 ```rust
 pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, mode_9887: i32, ) -> Result<(), Refusal>
@@ -1237,7 +1237,7 @@ pub fn cancel_tick_by_tick_data(&self, req_id: i64) -> Result<(), Refusal>
 
 #### `req_mkt_depth`
 
-Subscribe to market depth (L2 order book). A contract that names no venue and no security type is sent as it stands. The engine reads an unnamed venue as the smart destination and checks a named security type against the venue's routing table. Substituting a stock here asks for a future's book as a stock's, which the venue refuses as a book it does not serve.
+Subscribe to market depth (L2 order book). Refused as a gateway refuses it, before anything is sent: a contract naming no exchange, a combination, and a book of no rows. A contract that names no security type is sent as it stands, and the engine checks a named one against the venue's routing table. Substituting a stock here asks for a future's book as a stock's, which the venue refuses as a book it does not serve.
 
 ```rust
 pub fn req_mkt_depth( &self, req_id: i64, contract: &Contract, num_rows: i32, is_smart_depth: bool, ) -> Result<(), Refusal>
@@ -1539,6 +1539,23 @@ pub fn stated_rows(&self, req_id: i64, series: u32) -> Vec<(f64, f64, f64)>
 
 ---
 
+#### `chain_model_parameters`
+
+What one of the option model's chain series last stated for a subscription on an underlying. Per class of the underlying's options: the underlying's price, the dividends expected, and per expiry the yield, the interest rate, the forward and the at-the-money volatilities the model works from. Ask for series 687 for the standing set, or 691 for the set as the chain closed, in the generic tick list of a subscription on the underlying. The documented API has no call for either: a gateway reads them for its own option model and hands none of it on. Empty where the request names no subscription, or the series has stated nothing for it.
+
+```rust
+pub fn chain_model_parameters( &self, req_id: i64, series: u32, ) -> Vec<crate::types::ChainModelParameters>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `series` | `u32` |  |
+
+**Returns:** `Vec<crate::types::ChainModelParameters>`
+
+---
+
 #### `paired_figures_series`
 
 Which series have stated paired figures for a subscription, in order.
@@ -1672,7 +1689,7 @@ pub fn option_model_by_instrument( &self, instrument: InstrumentId, ) -> Option<
 
 #### `req_historical_data`
 
-Request historical data. With `keep_up_to_date`, the bar still forming is folded here from the stream the venue sends, and it opens on a whole multiple of its own length counted from the epoch. For every size up to an hour that is the clock boundary a caller expects. For `1 day` it is midnight UTC, which is the trading day of an instrument that trades around the clock and is the middle of the evening for one that does not — a US listing's forming daily bar opens in its after-hours session and spans two of them. Bars already closed are the venue's own and are not folded here.
+Request historical data. With `keep_up_to_date`, the bar still forming is folded here from the stream the venue sends, and it opens on a whole multiple of its own length counted from the epoch. For every size up to an hour that is the clock boundary a caller expects. For `1 day` it is midnight UTC, which is the trading day of an instrument that trades around the clock and is the middle of the evening for one that does not — a US listing's forming daily bar opens in its after-hours session and spans two of them. A week opens on its Monday and a month on its first day, both at midnight UTC, on the calendar as a gateway folds them. Bars already closed are the venue's own and are not folded here.
 
 ```rust
 pub fn req_historical_data( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool, ) -> Result<(), Refusal>
@@ -2188,10 +2205,10 @@ pub fn req_historical_schedule( &self, req_id: i64, contract: &Contract, end_dat
 
 #### `req_smart_components`
 
-Request smart routing components for a BBO exchange. Gateway-local — returns component exchanges from init data. `bbo_exchange` is taken and not applied. The venue states one table of routing components at logon, for this session rather than per exchange, and that whole table is what comes back.
+Request smart routing components for a BBO exchange. Answered from the map of venues the venue stated beside the subscription whose acknowledgement named that BBO exchange — the one `tick_req_params` states. The venue states a map per BBO exchange and security type, so one contract's venues are not another's. A BBO exchange no subscription named is refused as a gateway refuses it. One whose map has not arrived yet is waited for up to two seconds, as a gateway waits, and answered from `process_msgs` rather than by holding this call.
 
 ```rust
-pub fn req_smart_components(&self, req_id: i64, _bbo_exchange: &str, wrapper: &mut impl Wrapper)
+pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str, wrapper: &mut impl Wrapper)
 ```
 
 | Parameter | Type | Description |
@@ -3249,22 +3266,9 @@ Every venue's chain has been stated.
 
 ---
 
-#### `delta_neutral_validation`
-
-The contract the venue paired with a delta-neutral order.  A gateway sends it. No message this client receives carries the pairing it reports, under any name, so nothing here fires it. A delta-neutral order is sent and answered like any other.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
-| `con_id` | `i64` | Contract ID. Unique per instrument. |
-| `delta` | `f64` | Option delta. |
-| `price` | `f64` | Tick price. |
-
----
-
 #### `reroute_mkt_data_req`
 
-The contract a market-data request should be asked for under instead.  A gateway sends it when a request is to be asked for under another contract and venue — a contract for difference standing for a share. Nothing this connection receives has been seen to state one, so nothing here fires it.
+The contract a market-data request should be asked for under instead.  A gateway sends it, and asks the venue nothing, for a contract for difference whose own definition asks for its underlying's data, where the account's logon permissions allow that: the underlying's contract and the venue to ask on. This client does not read a definition's flags for asking on the underlying before subscribing: the request goes to the venue as asked, and this never fires.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3283,6 +3287,19 @@ The same, for a request for the book rather than the quote.
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `con_id` | `i64` | Contract ID. Unique per instrument. |
 | `exchange` | `&str` | Exchange name. |
+
+---
+
+#### `delta_neutral_validation`
+
+The contract the venue paired with a delta-neutral order.  Declared by the TWS API and never fired on a gateway: a gateway never sends it. It fires here as it does there: never.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `con_id` | `i64` | Contract ID. Unique per instrument. |
+| `delta` | `f64` | Option delta. |
+| `price` | `f64` | Tick price. |
 
 ---
 

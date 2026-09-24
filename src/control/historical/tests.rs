@@ -1343,21 +1343,19 @@ fn a_bar_is_kept_up_to_date_when_it_folds_from_the_five_second_stream() {
         !second.supports_keep_up_to_date(),
         "a second is shorter than what arrives, so nothing can form it",
     );
-    // A week and a month fold exactly and still cannot be formed: the fold
-    // opens a bar on a multiple of its own length counted from the epoch, and
-    // epoch day zero was a Thursday. The venue's own aggregate bars state
-    // Monday to Friday and the first of a month to the last.
+    // A week and a month are formed on the calendar, as a gateway forms them.
     for asked in ["1 week", "1 month"] {
         let size = BarSize::from_api_str(asked).expect("a size this client reads");
-        assert!(
-            size.seconds().is_multiple_of(5),
-            "{asked} folds exactly, which is why the length rule alone admitted it",
-        );
-        assert!(
-            !size.supports_keep_up_to_date(),
-            "{asked} would open where the venue's never does",
-        );
+        assert!(size.supports_keep_up_to_date(), "{asked} is kept up to date");
     }
+}
+
+/// The adjusted series begins where the trades it is folded from begin, and a
+/// gateway asks for the earliest trade to answer it.
+#[test]
+fn the_adjusted_series_begins_where_the_trades_do() {
+    assert_eq!(head_timestamp_data_type("adjusted_last"), Ok("Last"));
+    assert_eq!(head_timestamp_data_type("ADJUSTED_LAST"), head_timestamp_data_type("TRADES"));
 }
 
 /// The head-timestamp query states whether an expired contract is meant, as

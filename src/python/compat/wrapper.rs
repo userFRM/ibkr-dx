@@ -469,14 +469,6 @@ impl EWrapper {
     /// it is rated.
     fn bond_contract_details(&self, _req_id: i64, _contract_details: Py<PyAny>) {}
 
-    // ── Tier 3: Delta Neutral Validation ──
-
-    /// The contract the venue paired with a delta-neutral order.
-    ///
-    /// A gateway sends it. No message this client receives carries the pairing
-    /// it reports, so nothing here fires it.
-    fn delta_neutral_validation(&self, _req_id: i64, _delta_neutral_contract: Py<PyAny>) {}
-
     // ── Tier 3: declared by the TWS API, and not fired here ──
     //
     // Each exists so a program written against that API runs against this
@@ -484,14 +476,22 @@ impl EWrapper {
 
     /// The contract a market-data request should be asked for under instead.
     ///
-    /// A gateway sends it when a request is to be asked for under another
-    /// contract and venue — a contract for difference standing for a share.
-    /// Nothing this connection receives has been seen to state one, so nothing
-    /// here fires it.
+    /// A gateway sends it, and asks the venue nothing, for a contract for
+    /// difference whose own definition asks for its underlying's data, where
+    /// the account's logon permissions allow that: the underlying's contract
+    /// and the venue to ask on. This client does not read a definition's flags
+    /// for asking on the underlying before subscribing: the request goes to
+    /// the venue as asked, and this never fires.
     fn reroute_mkt_data_req(&self, _req_id: i64, _con_id: i64, _exchange: &str) {}
 
     /// The same, for a request for the book rather than the quote.
     fn reroute_mkt_depth_req(&self, _req_id: i64, _con_id: i64, _exchange: &str) {}
+
+    /// The contract the venue paired with a delta-neutral order.
+    ///
+    /// Declared by the TWS API and never fired on a gateway: a gateway never
+    /// sends it. It fires here as it does there: never.
+    fn delta_neutral_validation(&self, _req_id: i64, _delta_neutral_contract: Py<PyAny>) {}
 
     /// An exchange-for-physical quote. Declared by the TWS API and never fired
     /// on a gateway, so it fires here as it does there: never.

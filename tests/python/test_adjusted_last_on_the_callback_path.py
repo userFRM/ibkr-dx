@@ -11,8 +11,8 @@ can now.
 The fold itself is exercised at the engine, where the two replies land and are
 correlated, so both surfaces deliver the same adjusted bars. Here is the
 callback surface's own half: it accepts the request rather than refusing it,
-and it refuses the two shapes it cannot fold — a contract with no venue id, and
-a request kept up to date, which never completes into a whole series to fold.
+and it refuses what a gateway refuses before asking the venue — the series kept
+up to date, an end date, and a bar longer than a day.
 """
 
 import ibkr_dx
@@ -68,13 +68,44 @@ def test_adjusted_last_without_the_venue_id_is_sent():
 
 
 def test_adjusted_last_kept_up_to_date_is_refused():
-    """Kept up to date the request never completes, so there is no whole series
-    to fold onto one scale: refused rather than answered with one that cannot
-    be adjusted."""
+    """A gateway keeps no bar current for the adjusted series, and refuses it
+    kept up to date in these words."""
     w, c = _client()
     c.req_historical_data(
         3, _spy(), end_date_time="", duration_str="1 D",
         bar_size_setting="5 mins", what_to_show="ADJUSTED_LAST", use_rth=0,
         keep_up_to_date=True,
     )
-    assert [e for e in w.errors if "kept up to date" in e[2]], w.errors
+    assert (3, 321, "Source price not supported with live updates") in w.errors, w.errors
+
+
+def test_what_a_gateway_refuses_before_asking_is_refused_in_its_words():
+    """An end date or a bar longer than a day on the adjusted series, and an end
+    date, a combination or a series with no live bar on a request kept up to
+    date: each refused with the gateway's reason, as on the other surface."""
+    w, c = _client()
+    combo = _spy()
+    combo.secType = "BAG"
+    cases = [
+        (4, _spy(), "20250101 00:00:00", "1 day", "ADJUSTED_LAST", False,
+         "End date not supported with adjusted last"),
+        (5, _spy(), "", "1 week", "ADJUSTED_LAST", False,
+         "Multi day bar size not supported with adjusted last"),
+        (6, _spy(), "20250101 00:00:00", "5 mins", "TRADES", True,
+         "End date not supported with live updates"),
+        (7, combo, "", "5 mins", "TRADES", True, "Live updates for combos are not supported"),
+        (8, _spy(), "", "5 mins", "BID_ASK", True, "Source price not supported with live updates"),
+    ]
+    for req_id, contract, end, size, series, keep, reason in cases:
+        c.req_historical_data(
+            req_id, contract, end_date_time=end, duration_str="1 M",
+            bar_size_setting=size, what_to_show=series, use_rth=1, keep_up_to_date=keep,
+        )
+        assert (req_id, 321, reason) in w.errors, (reason, w.errors)
+    # A week and a month are kept up to date.
+    for req_id, size in [(9, "1 week"), (10, "1 month")]:
+        c.req_historical_data(
+            req_id, _spy(), end_date_time="", duration_str="1 Y",
+            bar_size_setting=size, what_to_show="TRADES", use_rth=1, keep_up_to_date=True,
+        )
+        assert not [e for e in w.errors if e[0] == req_id], w.errors

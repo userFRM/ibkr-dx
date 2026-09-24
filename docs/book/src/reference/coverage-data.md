@@ -30,7 +30,7 @@ that did not run.
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
 | **EClient methods** | 80 | 80 impl, 0 stub | 80 impl, 0 stub |
-| **EWrapper callbacks** | 90 | 87 impl, 3 stub | 87 impl, 3 stub |
+| **EWrapper callbacks** | 90 | 88 impl, 2 stub | 88 impl, 2 stub |
 
 ## EClient Methods
 
@@ -200,7 +200,7 @@ that did not run.
 |  | `replace_fa_end` | Y | Y | yes |
 | Display Groups | `display_group_list` | Y | Y | yes |
 |  | `display_group_updated` | Y | Y | yes |
-| Other | `delta_neutral_validation` | STUB | STUB | yes |
+| Other | `delta_neutral_validation` | Y | Y | no |
 | WSH | `wsh_meta_data` | Y | Y | yes |
 |  | `wsh_event_data` | Y | Y | yes |
 | Market Data | `reroute_mkt_data_req` | STUB | STUB | yes |

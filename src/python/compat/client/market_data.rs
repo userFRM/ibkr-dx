@@ -369,6 +369,12 @@ impl EClient {
         // wire cannot carry holds nothing, and taking the slot first left it
         // held against a request that was then refused.
         let wire = wire_req_id(req_id)?;
+        // What a gateway refuses before it looks the contract up.
+        if let Err(why) = crate::client_core::ClientCore::validate_depth_request(
+            &contract.exchange, &contract.sec_type, num_rows,
+        ) {
+            return self.report_refusal(py, req_id, why);
+        }
         // A book rides the quote feed, so a feed given up on serves none. The
         // other surface refuses this and this one did not: a book asked for
         // here took a slot, reached a sender with no connection to write it to,
@@ -771,6 +777,57 @@ impl EClient {
             return Ok(Vec::new());
         };
         Ok(shared.market.stated_rows(instrument, series))
+    }
+
+    /// What one of the option model's chain series last stated for a
+    /// subscription on an underlying.
+    ///
+    /// A list with one dict per class of the underlying's options: the
+    /// underlying's price, the dividends expected, and per expiry the yield,
+    /// the interest rate, the forward and the at-the-money volatilities the
+    /// model works from. Ask for series 687 for the standing set, or 691 for
+    /// the set as the chain closed, in the generic tick list of a subscription
+    /// on the underlying.
+    ///
+    /// The documented API has no call for either: a gateway reads them for its
+    /// own option model and hands none of it on. Empty where the request names
+    /// no subscription, or the series has stated nothing for it.
+    #[pyo3(signature = (req_id, series))]
+    fn chain_model_parameters(&self, req_id: i64, series: u32) -> PyResult<Vec<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        let found = shared.market.chain_model_parameters(instrument, series);
+        Python::attach(|py| {
+            let mut out = Vec::with_capacity(found.len());
+            for set in found {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("productId", set.product_id)?;
+                dict.set_item("classes", set.classes)?;
+                dict.set_item("underlyingPrice", set.underlying_price)?;
+                dict.set_item("dividends", set.dividends)?;
+                dict.set_item("indexStyleDividends", set.index_style_dividends)?;
+                let mut terms = Vec::with_capacity(set.terms.len());
+                for term in set.terms {
+                    let at = pyo3::types::PyDict::new(py);
+                    at.set_item("lastTradeDate", term.last_trade_date)?;
+                    at.set_item("modelYield", term.model_yield)?;
+                    at.set_item("interestRate", term.interest_rate)?;
+                    at.set_item("forward", term.forward)?;
+                    at.set_item("callAtmVol", term.call_atm_vol)?;
+                    at.set_item("putAtmVol", term.put_atm_vol)?;
+                    at.set_item("attributes", term.attributes)?;
+                    terms.push(at);
+                }
+                dict.set_item("terms", terms)?;
+                dict.set_item("timestampMillis", set.timestamp_millis)?;
+                dict.set_item("attributes", set.attributes)?;
+                out.push(dict.into_any().unbind());
+            }
+            Ok(out)
+        })
     }
 
     /// Which series have stated paired figures for a subscription, in order.

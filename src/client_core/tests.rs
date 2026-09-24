@@ -656,9 +656,13 @@ fn a_shared_order_reports_its_filled_quantity() {
     assert_eq!(tracked.remaining, 6.0, "and what is left of the order");
     }
 
+/// A contract in slot 0 whose acknowledgement named BBO exchange `a6`, and
+/// the map the venue stated for it.
 fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {
     let s = SharedState::new();
-    s.reference.set_smart_components(
+    s.reference.note_bbo_exchange(0, "a6", "STK");
+    s.reference.set_smart_components_of(
+        0, "STK",
         comps.into_iter().map(|(bit, letter)| SmartComponent {
             bit_number: bit,
             exchange: format!("EX{bit}"),
@@ -671,14 +675,14 @@ fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {
 #[test]
 fn render_exchange_mask_zero_is_empty() {
     let s = shared_with_components(vec![(0, "Q"), (1, "N")]);
-    assert_eq!(render_exchange_mask(0, &s), "");
+    assert_eq!(render_exchange_mask(0, 0, &s), "");
 }
 
 #[test]
 fn render_exchange_mask_single_bit() {
     let s = shared_with_components(vec![(0, "Q"), (1, "N"), (2, "P")]);
-    assert_eq!(render_exchange_mask(0b001, &s), "Q");
-    assert_eq!(render_exchange_mask(0b100, &s), "P");
+    assert_eq!(render_exchange_mask(0b001, 0, &s), "Q");
+    assert_eq!(render_exchange_mask(0b100, 0, &s), "P");
 }
 
 #[test]
@@ -687,14 +691,14 @@ fn render_exchange_mask_multiple_bits() {
         (0, "Q"), (1, "N"), (2, "P"), (3, "Z"),
     ]);
     // bits 0, 2, 3 set → letters in bit-order: Q, P, Z
-    assert_eq!(render_exchange_mask(0b1101, &s), "QPZ");
+    assert_eq!(render_exchange_mask(0b1101, 0, &s), "QPZ");
 }
 
 #[test]
 fn render_exchange_mask_unknown_bit_skipped() {
     let s = shared_with_components(vec![(0, "Q")]);
     // bit 5 set, no component at bit 5 — skipped
-    assert_eq!(render_exchange_mask(0b100000, &s), "");
+    assert_eq!(render_exchange_mask(0b100000, 0, &s), "");
 }
 
 // ── what a P&L poll reports ──
@@ -1511,6 +1515,81 @@ fn a_delayed_subscription_numbers_its_ticks_as_delayed() {
     assert!(polled.delayed, "and the timestamp goes out under the delayed number");
 }
 
+/// A chargeable snapshot's answer reaches the snapshot's own request and no
+/// stream watching the same contract, and the snapshot ends once it has, as a
+/// gateway ends it: the answer carries no open, so waiting for every kind an
+/// ordinary snapshot is made of ran it to the sweep every time.
+#[test]
+fn a_chargeable_snapshot_is_answered_to_itself_and_ends_there() {
+    use crate::types::{SeriesTick, SeriesValue};
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    // A stream holds the contract, and the snapshot watches it beside it.
+    core.req_to_instrument.lock().unwrap().extend([(4, 0), (5, 0)]);
+    core.instrument_to_req.lock().unwrap().insert(0, 4);
+    core.instrument_followers.lock().unwrap().insert(0, vec![5]);
+    core.chargeable_snapshot_reqs.lock().unwrap().insert(5);
+    core.snapshot_reqs.lock().unwrap().insert(5, (std::time::Instant::now(), 0));
+
+    core.poll_instrument_ticks(&shared, 0, 4);
+    assert!(!core.check_snapshot_done(5), "nothing answered yet");
+
+    shared.market.push_snapshot_answer(0, vec![
+        SeriesTick { instrument: 0, tick_type: 1, value: SeriesValue::Price(150.25) },
+        SeriesTick { instrument: 0, tick_type: 0, value: SeriesValue::Size(3.0) },
+        SeriesTick { instrument: 0, tick_type: 85, value: SeriesValue::Text("1790000000000".into()) },
+    ]);
+    let polled = core.poll_instrument_ticks(&shared, 0, 4);
+    let said: Vec<(i64, i32, f64, bool)> = polled.snapshot_ticks.iter()
+        .map(|t| (t.req_id, t.tick_type, t.value, t.is_price))
+        .collect();
+    assert_eq!(said, [(5, 1, 150.25, true), (5, 0, 3.0, false)], "the snapshot's, and no one else's");
+    let stamped: Vec<(i64, i32, &str)> = polled.snapshot_strings.iter()
+        .map(|t| (t.req_id, t.tick_type, t.value.as_str()))
+        .collect();
+    assert_eq!(stamped, [(5, 85, "1790000000000")]);
+    assert!(polled.ticks.is_empty() && polled.string_ticks.is_empty(), "the stream hears none of it");
+    assert!(core.check_snapshot_done(5), "the answer is the whole of it");
+}
+
+/// A bond's yields on a delayed feed go out under the delayed numbers.
+///
+/// A gateway publishes a delayed feed's bid and ask yields on 103 and 104 and
+/// publishes no last yield on one; they had gone out on 50, 51 and 52 whatever
+/// the feed, where a program that asked for delayed data does not look.
+#[test]
+fn a_delayed_feed_states_its_yields_under_the_delayed_numbers() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    let push_yields = |shared: &SharedState| {
+        for (tick_type, value) in [(50, 7.1752), (51, 7.2), (52, 7.1)] {
+            shared.market.push_series_tick(crate::types::SeriesTick {
+                instrument: 0, tick_type, value: crate::types::SeriesValue::Price(value),
+            });
+        }
+    };
+    let yields = |polled: &QuotePollResult| -> Vec<(i32, f64, bool)> {
+        polled.ticks.iter().map(|t| (t.tick_type, t.value, t.is_price)).collect()
+    };
+
+    push_yields(&shared);
+    let live = core.poll_instrument_ticks(&shared, 0, 11);
+    assert_eq!(
+        yields(&live),
+        [(50, 7.1752, true), (51, 7.2, true), (52, 7.1, true)],
+        "a live feed's yields are the live numbers",
+    );
+
+    core.mark_feed_delayed_for_test(0);
+    push_yields(&shared);
+    let delayed = core.poll_instrument_ticks(&shared, 0, 11);
+    assert_eq!(
+        yields(&delayed),
+        [(103, 7.1752, true), (104, 7.2, true)],
+        "bid and ask yields on 103 and 104, and no last yield",
+    );
+}
+
 /// A holding that moves by less than a whole unit is a change.
 ///
 /// The change key held the quantity as a whole number, so a fractional
@@ -1779,21 +1858,6 @@ mod contract_gate_tests {
 
 }
 mod exchange_mask_provenance_tests {
-    use crate::bridge::SharedState;
-
-    /// The letters a quote's bid, ask and last are attributed to come from bit
-    /// numbers the venue assigns. This client's own list can only guess at
-    /// them, and the guess must be marked as one: a table that renders
-    /// confidently is indistinguishable from one that knows.
-    #[test]
-    fn the_built_in_exchange_table_is_marked_as_a_guess() {
-        let shared = SharedState::new();
-        // Nothing has been received, so nothing claims to have been.
-        assert!(!shared.reference.smart_components_are_provisional());
-
-        shared.reference.note_smart_components_provisional(true);
-        assert!(shared.reference.smart_components_are_provisional());
-    }
 
     /// Two contracts a caller would call different have to look different
     /// here, or an order on one is sent under the other's id.
@@ -2420,7 +2484,7 @@ fn an_exchange_mask_is_rendered_once_the_venue_names_its_bits() {
         "nothing names those bits yet, so nothing is stated about them",
     );
 
-    shared.reference.set_smart_components(vec![
+    shared.reference.set_smart_components_of(0, "STK", vec![
         SmartComponent { bit_number: 0, exchange: "ARCA".into(), exchange_letter: "P".into() },
         SmartComponent { bit_number: 2, exchange: "NASDAQ".into(), exchange_letter: "Q".into() },
     ]);

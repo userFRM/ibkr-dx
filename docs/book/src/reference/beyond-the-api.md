@@ -118,6 +118,10 @@ client.stated_figures(1, 504)           # [383820.0, 1.0]  what one contract del
 client.stated_figures(1, 407)           # [24340.8, 18338.7, 34772.6, 26198.1]
 ```
 
+Six of them state the volatility a contract has shown over 10, 50, 75, 100,
+150 and 200 days, one figure each: 511 and 513 to 517 (`stated_figures(1, 511)`
+and on).
+
 The figures arrive in the venue's order and at its widths, and a figure it holds
 nothing for arrives as the largest number its field carries. Nothing is
 republished under a tick number of this client's own choosing.
@@ -143,6 +147,25 @@ including several the API has no field for:
 client.paired_figures(1, 546)           # [(coordinate, volatility), …]
 client.closing_option_model(1)          # {'delta': …, 'rho': …, 'fugit': …, …}
 ```
+
+Two more state what the venue's option model works an underlying's chain from,
+per class of its options and per expiry: 687 as it stands, and 691 as the chain
+closed. Each is asked for on a subscription on the underlying, and this client
+asks the venue for it on the option model's name, as a gateway does:
+
+```python
+client.req_mkt_data(1, underlying, "687", False, False, [])
+client.chain_model_parameters(1, 687)   # [{'productId': …, 'classes': [('SPY', [100.0])],
+                                        #   'underlyingPrice': …, 'dividends': [(yyyymmdd, amount)],
+                                        #   'terms': [{'lastTradeDate': …, 'modelYield': …,
+                                        #              'interestRate': …, 'forward': …,
+                                        #              'callAtmVol': …, 'putAtmVol': …}], …}]
+```
+
+A gateway reads both for its own model and hands none of it on. The two
+volatilities are per trading day; the venue states no unit for the yield and
+the rate. What a series stated goes when the series is withdrawn, as a gateway
+forgets it.
 
 ### Series that are acknowledged and state nothing
 
@@ -194,5 +217,6 @@ Two consequences worth stating plainly:
 | `client.paired_figures(req_id, series)` | `client.paired_figures(req_id, series)` |
 | `client.paired_figures_series(req_id)` | `client.paired_figures_series(req_id)` |
 | `client.closing_option_model(req_id)` | `client.closing_option_model(req_id)` |
+| `client.chain_model_parameters(req_id, series)` | `client.chain_model_parameters(req_id, series)` |
 | `client.req_ping()` | `client.req_ping()` |
 | `client.last_rtt_ms()` | `client.shared_state().last_ccp_rtt()`, a `Duration` |

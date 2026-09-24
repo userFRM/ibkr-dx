@@ -386,12 +386,12 @@ One row per capability, one column per client — every one of the 80 calls and 
 | TWS API | 80 / 80 | 90 / 90 | nothing missing |
 | ibapi | 73 / 80 | 85 / 90 | 7 absent, 5 callbacks absent |
 | ib_async | 79 / 80 | 78 / 90 | 1 absent, 12 callbacks absent |
-| **ibkr-dx Rust** | **80 / 80** | **87 / 90** | 3 callbacks declared, not fired |
-| **ibkr-dx Python** | **80 / 80** | **87 / 90** | 3 callbacks declared, not fired |
+| **ibkr-dx Rust** | **80 / 80** | **88 / 90** | 2 callbacks declared, not fired |
+| **ibkr-dx Python** | **80 / 80** | **88 / 90** | 2 callbacks declared, not fired |
 
-**Every call and callback on that list is present on both surfaces.** 3 callbacks are declared and not fired: nothing this connection receives has been seen to state a reroute to another contract, or a delta-neutral pairing. Each says so where it is declared, so a program that implements one still compiles and runs. 6 more are declared by the TWS API and never fire on a gateway — the four steps of the verification handshake, the exchange-for-physical quote, and `win_error`, which no message on the wire carries — so they fire here exactly as often as there: never.
+**Every call and callback on that list is present on both surfaces.** 2 callbacks are declared and not fired: a gateway reroutes a request to another contract for a contract for difference whose definition asks for it, and this client does not read a definition's flags for that before subscribing: the request goes to the venue as asked. Each says so where it is declared, so a program that implements one still compiles and runs. 7 more are declared by the TWS API and never fire on a gateway — the four steps of the verification handshake, the exchange-for-physical quote, the delta-neutral validation, which a gateway never sends, and `win_error`, which no message on the wire carries — so they fire here exactly as often as there: never.
 
-**And 82 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
+**And 83 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
@@ -605,7 +605,7 @@ What the venue says back. `ib_async` delivers these as events as well as methods
 |  | `replace_fa_end` | ● | yes | ● | · | ● | ● |
 | Display Groups | `display_group_list` | ● | yes | ● | · | ● | ● |
 |  | `display_group_updated` | ● | yes | ● | · | ● | ● |
-| Other | `delta_neutral_validation` | ● | yes | ● | ● | ◐ | ◐ |
+| Other | `delta_neutral_validation` | ● | no | ● | ● | ● | ● |
 | WSH | `wsh_meta_data` | ● | yes | · | ● | ● | ● |
 |  | `wsh_event_data` | ● | yes | · | ● | ● | ● |
 | Market Data | `reroute_mkt_data_req` | ● | yes | ● | · | ◐ | ◐ |
@@ -647,6 +647,7 @@ ib_async's transport, has a method by that name.
 | `cancel_historical_news` | venue | · | · | · | ● | · |
 | `cancelOrderByPermId` | venue | · | · | · | ● | ● |
 | `ccpSessionId` | venue | · | · | · | ● | ● |
+| `chainModelParameters` | venue | · | · | · | ● | ● |
 | `checkConnected` | this client | · | · | · | · | ● |
 | `closingOptionModel` | venue | · | · | · | ● | ● |
 | `closingOptionModelByInstrument` | venue | · | · | · | ● | ● |
@@ -761,7 +762,8 @@ list, so nobody has to discover it by finding an empty result.
 > digits where the name is four characters or fewer, as a gateway writes it),
 > and the permission number the venue gives the request (0 nothing stated, 1 no
 > top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available
-> through the API; any other number is read as 0, as a gateway reads it).
+> through the API; any other number is not kept, as a gateway keeps none). The
+> exchange is the name `req_smart_components` answers to.
 > Whether that number differs between a series the account is not entitled to
 > and one with nothing to say has not been seen yet, and a gateway may report 0
 > for some contracts whatever the venue stated; until a capture settles both,
@@ -771,8 +773,8 @@ And two things this client does not read or fire:
 
 | | Why |
 | --- | --- |
-| Three series | Declared by the venue and not read here. What arrives on one of them, tick 230, is kept as unread rather than dropped. |
-| Three callbacks | Declared so a program written against the TWS API still compiles, and not fired: nothing this connection receives has been seen to state a reroute or a delta-neutral pairing. |
+| One series | 230, a portfolio figure, is declared by the venue and read by neither this client nor a gateway: a gateway has no reader for it and refuses it in a generic tick list. What arrives on it is kept as unread rather than dropped. |
+| Two callbacks | Declared so a program written against the TWS API still compiles, and not fired: a gateway reroutes a request for a contract for difference whose definition asks for its underlying's data, and this client does not read a definition's flags for that before subscribing — the request goes to the venue as asked. |
 
 ## Running an existing program
 
@@ -824,8 +826,10 @@ saying so — rather than as a zero that reads like a price. Where this client
 works something out itself, the call that does it says so: the P&L figures,
 worked out from the venue's figures against the session's prices; the bars
 that continue a `keepUpToDate` request, formed from the venue's five-second
-bars; a book kept at the size asked for; and the answer to a price or a
-volatility the caller supplies, solved against the venue's published model.
+bars, a week and a month on the calendar, starting from the stream rather than
+from the venue's current bar; a book kept at the size asked for; and the answer
+to a price or a volatility the caller supplies, solved against the venue's
+published model.
 
 ### Second factor and sessions
 
@@ -952,8 +956,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,748 | No |
-| Python | 869 | No |
+| Rust, unit and integration | 2,787 | No |
+| Python | 871 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

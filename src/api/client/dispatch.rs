@@ -564,6 +564,7 @@ impl EClient {
             let delivering = result.delivered
                 || !result.generic_ticks.is_empty()
                 || !result.string_ticks.is_empty()
+                || !result.snapshot_ticks.is_empty()
                 || result.timestamp.is_some();
             for id in std::iter::once(req_id).chain(watchers.iter().copied()) {
                 if let Some(mdt) = self.core.check_mdt_needed(id, delivering) {
@@ -606,6 +607,21 @@ impl EClient {
                 for id in std::iter::once(ts.req_id).chain(watchers.iter().copied()) {
                     wrapper.tick_string(id, if result.delayed { 88 } else { 45 }, &ts_secs.to_string());
                 }
+            }
+            // The answer to a chargeable snapshot, to the snapshot's own
+            // requests alone.
+            for tick in &result.snapshot_ticks {
+                if tick.is_price {
+                    let attrib = crate::types::quote_attributes(
+                        tick.tick_type, result.eligible_mask, result.quote_state_mask,
+                    );
+                    wrapper.tick_price(tick.req_id, tick.tick_type, tick.value, &attrib);
+                } else {
+                    wrapper.tick_size(tick.req_id, tick.tick_type, tick.value);
+                }
+            }
+            for st in &result.snapshot_strings {
+                wrapper.tick_string(st.req_id, st.tick_type, &st.value);
             }
             // The holder and everyone watching it. A caller that asked for a
             // snapshot of a contract somebody was already watching is recorded
@@ -926,9 +942,18 @@ impl EClient {
         // it to the caller: this side never drained it, so the callback the
         // Python surface fires had no counterpart here and the rows simply
         // accumulated.
-        let depth_exchanges = self.shared.reference.drain_depth_exchanges();
-        if !depth_exchanges.is_empty() {
+        if let Some(depth_exchanges) = self.shared.reference.drain_depth_exchanges() {
             wrapper.mkt_depth_exchanges(&depth_exchanges);
+        }
+
+        // Maps of venues asked for before they arrived: answered once they
+        // have, or refused once the wait a gateway allows has run out.
+        let now = std::time::Instant::now();
+        for (req_id, answer) in self.shared.reference.drain_smart_component_answers(now) {
+            match answer {
+                Ok(components) => wrapper.smart_components(req_id, &components),
+                Err(why) => wrapper.error(req_id, i64::from(why.code), &why.message, ""),
+            }
         }
 
         // The calendar's answers, as the venue wrote them.

@@ -132,7 +132,7 @@ def test_req_market_rule_signature():
 
 
 # ═══════════════════════════════════════════════════════════
-# Smart Components (fires empty callback)
+# Smart Components (answered per BBO exchange)
 # ═══════════════════════════════════════════════════════════
 
 class SmartComponentsCapture(EWrapper):
@@ -140,20 +140,38 @@ class SmartComponentsCapture(EWrapper):
         super().__init__()
         self.req_id = None
         self.components = None
+        self.errors = []
 
     def smart_components(self, req_id, smart_component_map):
         self.req_id = req_id
         self.components = smart_component_map
 
+    def error(self, reqId, errorTime, errorCode, errorString, advancedOrderRejectJson=""):
+        self.errors.append((reqId, errorCode, errorString))
 
-def test_req_smart_components_fires_callback():
+
+def test_req_smart_components_refuses_a_bbo_exchange_nothing_named():
+    """A gateway refuses a BBO exchange no subscription was acknowledged under,
+    and answers no map for it."""
     w = SmartComponentsCapture()
     c = EClient(w)
     c._test_connect()
     c.req_smart_components(1, "a]AMEX")
     c._test_dispatch_once()
-    assert w.req_id == 1
-    assert len(w.components) == 0  # Empty map (gateway-local data not available)
+    assert w.req_id is None, "no map for a name nothing stated"
+    assert (1, 321, "Invalid BBO exchange/security type code") in w.errors, w.errors
+
+
+def test_req_smart_components_answers_the_map_its_bbo_exchange_names():
+    """The map stated for the BBO exchange `tick_req_params` names."""
+    w = SmartComponentsCapture()
+    c = EClient(w)
+    c._test_connect()
+    c._test_note_reference_data(3, "ISLAND", "I", "tier", "val", "brand")
+    c.req_smart_components(2, "a60001")
+    c._test_dispatch_once()
+    assert w.req_id == 2
+    assert [x.exchange for x in w.components] == ["ISLAND"]
 
 
 def test_req_smart_components_signature():
