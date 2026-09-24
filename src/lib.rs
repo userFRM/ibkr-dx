@@ -88,6 +88,8 @@ pub mod gateway;
 #[doc(hidden)]
 pub mod logging;
 #[doc(hidden)]
+pub mod options;
+#[doc(hidden)]
 pub mod protocol;
 
 #[cfg(feature = "python")]

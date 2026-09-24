@@ -955,7 +955,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,810 | No |
+| Rust, unit and integration | 2,820 | No |
 | Python | 949 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
