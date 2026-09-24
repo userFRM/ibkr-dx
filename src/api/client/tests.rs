@@ -1509,7 +1509,7 @@ fn req_mkt_data_defaults_to_realtime_mode() {
 fn req_mkt_data_ex_propagates_mode_9887() {
     for mode in [1_i32, 2, 3] {
         let (client, rx, _shared) = test_client();
-        let _ = client.req_mkt_data_ex(1, &spy(), "", false, false, mode);
+        let _ = client.req_mkt_data_ex(1, &spy(), "", false, false, mode, &[]);
         let _register = rx.try_recv().unwrap();
         match rx.try_recv().unwrap() {
             ControlCommand::Subscribe { contract: ContractRef { con_id, .. }, mode_9887, .. } => {
@@ -9305,7 +9305,7 @@ fn a_chargeable_snapshot_is_asked_for_even_where_the_contract_is_watched() {
     );
 
     // The chargeable one does not.
-    let _ = client.req_mkt_data_ex(3, &spy(), "", false, true, 0);
+    let _ = client.req_mkt_data_ex(3, &spy(), "", false, true, 0, &[]);
     assert!(
         rx.try_iter().any(|c| matches!(
             c, ControlCommand::Subscribe { regulatory_snapshot: true, .. }
@@ -10353,6 +10353,105 @@ fn the_acknowledged_increment_reaches_the_caller_on_tick_req_params() {
     assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01::0"), "{:?}", w.events);
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_req_params:")).count(), 1, "once");
+}
+
+/// The quote's two acknowledgements and the copy owed to a new follower
+/// still state each request's parameters once, including a reused number.
+#[test]
+fn tick_req_params_is_once_per_request_and_a_reused_number_is_told_again() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    let params = crate::bridge::TickReqParams {
+        min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+    };
+    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+        snapshot_permissions: 1, ..params.clone()
+    });
+    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    shared.market.push_tick_req_params(0, params.clone());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for req_id in [1, 2] {
+        let event = format!("tick_req_params:{req_id}:0.01:9c0001:3");
+        assert_eq!(w.events.iter().filter(|e| **e == event).count(), 1, "{:?}", w.events);
+    }
+    shared.market.push_tick_req_params(0, params);
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_req_params:")).count(), 2);
+
+    client.cancel_mkt_data(2).unwrap();
+    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_req_params:2:")).count(), 2);
+}
+
+/// A request withdrawn before its parameters were delivered is told
+/// nothing, and its number, used again, is told the new request's.
+#[test]
+fn tick_req_params_withdrawn_before_delivery_go_to_the_number_used_again() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+        min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+    });
+    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    client.cancel_mkt_data(2).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let told = |w: &RecordingWrapper| w.events.iter().filter(|e| e.starts_with("tick_req_params:2:")).count();
+    assert_eq!(told(&w), 0, "the withdrawn request: {:?}", w.events);
+    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    client.process_msgs(&mut w);
+    assert_eq!(told(&w), 1, "the request under the same number: {:?}", w.events);
+}
+
+/// A number is told again once the engine has taken its slot back, or the
+/// session has been reset, and it is used for a new request.
+#[test]
+fn tick_req_params_are_told_again_after_a_released_slot_or_a_reset() {
+    let (client, _rx, shared) = test_client();
+    let hold = || {
+        client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    };
+    let params = crate::bridge::TickReqParams {
+        min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+    };
+    let mut w = RecordingWrapper::default();
+    let told = |w: &RecordingWrapper| w.events.iter().filter(|e| e.starts_with("tick_req_params:1:")).count();
+    hold();
+    shared.market.push_tick_req_params(0, params.clone());
+    client.process_msgs(&mut w);
+    assert_eq!(told(&w), 1);
+
+    shared.market.note_released_slot(0, u64::MAX);
+    client.core.forget_released_slots(&shared);
+    hold();
+    shared.market.push_tick_req_params(0, params.clone());
+    client.process_msgs(&mut w);
+    assert_eq!(told(&w), 2, "after the slot was taken back: {:?}", w.events);
+
+    client.core.reset();
+    hold();
+    shared.market.push_tick_req_params(0, params);
+    client.process_msgs(&mut w);
+    assert_eq!(told(&w), 3, "after a reset: {:?}", w.events);
+}
+
+/// With no session, a per-request list is not looked at: the request is
+/// refused for that first, as the other surface refuses it.
+#[test]
+fn market_data_asked_for_with_no_session_is_refused_for_that_first() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_session_over("the trading connection");
+    let options = [ApiTagValue { tag: "foo".into(), value: "1".into() }];
+    for options in [&options[..], &[]] {
+        let refused = client.req_mkt_data_ex(7, &spy(), "", false, false, 0, options).unwrap_err();
+        assert_eq!(refused.code, Refusal::NOT_CONNECTED, "{refused:?}");
+    }
+    assert!(rx.try_recv().is_err());
 }
 
 /// And the exchange and permission number the acknowledgement stated beside
@@ -11561,10 +11660,14 @@ fn a_description_asking_for_headlines_by_provider_is_named_first() {
     let sent: Vec<_> = rx.try_iter().collect();
     assert!(!named_first(&sent), "1292 asks for no headlines: {sent:?}");
 
-    // Over, so the naming returns at once rather than waiting out its deadline.
-    shared.reference.set_session_over("the test ended it");
-    let _ = client.req_mkt_data(2, &aapl, "mdoff,292:BRFG+DJNL", false, false);
-    let sent: Vec<_> = rx.try_iter().collect();
+    let sent = std::thread::scope(|s| {
+        let asking = s.spawn(|| client.req_mkt_data(2, &aapl, "mdoff,292:BRFG+DJNL", false, false));
+        let sent = rx.recv_timeout(std::time::Duration::from_secs(5)).into_iter().collect::<Vec<_>>();
+        // Over, so the naming returns rather than waiting out its deadline.
+        shared.reference.set_session_over("the test ended it");
+        let _ = asking.join();
+        sent
+    });
     assert!(named_first(&sent), "the description went unnamed: {sent:?}");
 }
 
@@ -11826,4 +11929,107 @@ fn the_series_that_stated_rows_are_named_by_the_subscription() {
     shared.market.note_stated_rows(1, 491, vec![(0.0, 265598.0, 1.0)]);
     assert_eq!(client.stated_rows_series(1), vec![320, 547]);
     assert!(client.stated_rows_series(2).is_empty(), "a number naming no subscription");
+}
+
+#[test]
+fn per_request_market_data_options_are_checked_before_contract_lookup() {
+    let (client, rx, shared) = test_client();
+    for (tag, value, code) in [("foo", "1", 10337), ("manual", "2", 10338), ("manual", "", 320)] {
+        let options = [ApiTagValue { tag: tag.into(), value: value.into() }];
+        let why = client.req_mkt_data_ex(7, &Contract::default(), "", false, false, 2, &options).unwrap_err();
+        assert_eq!(why.code, code);
+        assert!(rx.try_recv().is_err());
+    }
+    shared.reference.set_enabled_features(vec!["NOAPIMISCVLD".into()]);
+    let options = [ApiTagValue { tag: "foo".into(), value: "1".into() }];
+    let engine = std::thread::spawn(move || {
+        while let Ok(command) = rx.recv() {
+            if let ControlCommand::Subscribe { mode_9887, reply_tx: Some(reply), .. } = command {
+                assert_eq!(mode_9887, 2);
+                reply.send(Ok(0)).unwrap();
+                break;
+            }
+        }
+    });
+    client.req_mkt_data_ex(8, &spy(), "", false, false, 2, &options).unwrap();
+    engine.join().unwrap();
+    let options = [ApiTagValue { tag: "manual".into(), value: "2".into() }];
+    assert_eq!(client.req_mkt_data_ex(9, &spy(), "", false, false, 2, &options).unwrap_err().code, 321);
+}
+
+#[test]
+fn configuration_requests_report_unavailable_under_the_request_id() {
+    let (client, rx, shared) = test_client();
+    client.req_config(219);
+    client.update_config(221);
+    client.req_config(-1);
+    let mut wrapper = RecordingWrapper::default();
+    client.process_msgs(&mut wrapper);
+    assert_eq!(wrapper.events.iter().filter(|event| event.starts_with("error:")).cloned().collect::<Vec<_>>(), vec![
+        format!("error:219:10357:{}", crate::error_codes::CONFIGURATION_ACCESS_MESSAGE),
+        format!("error:221:10357:{}", crate::error_codes::CONFIGURATION_ACCESS_MESSAGE),
+        format!("error:-1:10357:{}", crate::error_codes::CONFIGURATION_ACCESS_MESSAGE),
+    ]);
+    assert!(rx.try_recv().is_err());
+    shared.reference.set_session_over("the session ended");
+    wrapper.events.clear();
+    client.update_config(7);
+    client.process_msgs(&mut wrapper);
+    assert!(wrapper.events.iter().any(|event| event == "error:7:504:Not connected"));
+}
+
+#[test]
+fn retired_order_instructions_are_refused_or_warned_on_the_order_number() {
+    let (client, rx, shared) = test_client();
+    let mut order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, e_trade_only: true, firm_quote_only: true,
+        nbbo_price_cap: 0.0, ..Default::default()
+    };
+    shared.reference.set_enabled_features(vec!["DEPRETFQNC".into()]);
+    assert_eq!(client.place_order(9810, &spy(), &order).unwrap_err().code, 10268);
+    order.e_trade_only = false;
+    assert_eq!(client.place_order(9810, &spy(), &order).unwrap_err().code, 10269);
+    order.firm_quote_only = false;
+    assert_eq!(client.place_order(9810, &spy(), &order).unwrap_err().code, 10270);
+    assert!(rx.try_recv().is_err(), "the refused order never reaches the engine");
+    order.e_trade_only = true;
+    order.firm_quote_only = true;
+    shared.reference.set_enabled_features(Vec::new());
+    client.place_order(9810, &spy(), &order).expect("placed without retired instructions");
+    assert!(matches!(next_command(&rx), Some(ControlCommand::Order(OrderRequest::SubmitEx { .. }))));
+    let warnings = shared.orders.drain_order_notices();
+    assert_eq!(warnings.iter().map(|(id, code, _)| (*id, *code)).collect::<Vec<_>>(),
+        [(9810, 2168), (9810, 2169), (9810, 2170)]);
+    let placed = client.core.tracked_order(9810).expect("held order");
+    assert!(!placed.e_trade_only && !placed.firm_quote_only);
+    assert_eq!(placed.nbbo_price_cap, f64::MAX);
+}
+
+#[test]
+fn retired_order_warnings_precede_a_later_instruction_refusal() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_enabled_features(vec!["DEPRPREFBEST".into()]);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, e_trade_only: true, firm_quote_only: true,
+        nbbo_price_cap: 0.0, opt_out_smart_routing: true, ..Default::default()
+    };
+    assert_eq!(client.place_order(9811, &spy(), &order).unwrap_err().code, 10348);
+    assert_eq!(shared.orders.drain_order_notices().iter()
+        .map(|(id, code, _)| (*id, *code)).collect::<Vec<_>>(),
+        [(9811, 2168), (9811, 2169), (9811, 2170)]);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn an_orders_option_list_is_checked_before_its_destination() {
+    let (client, rx, _) = test_client();
+    let order = Order {
+        order_misc_options: vec![crate::types::model::TagValue {
+            tag: "unknown".into(), value: "1".into(),
+        }], ..Default::default()
+    };
+    assert_eq!(client.place_order(9812, &Contract::default(), &order).unwrap_err().code, 10337);
+    assert!(rx.try_recv().is_err());
 }

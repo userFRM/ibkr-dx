@@ -34,17 +34,13 @@ impl EClient {
         regulatory_snapshot: bool,
         mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
-            return self.report_refusal(py, req_id, why);
-        }
         // The mode set by `req_market_data_type`, which names the type once for
         // every subscription that follows. Passing zero here subscribes at
         // realtime regardless, which answers nothing on an account without the
         // realtime entitlement. `req_mkt_data_ex` states the mode per
         // request.
         let mode = self.core.subscription_mode();
-        self.req_mkt_data_ex(py, req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode)
+        self.req_mkt_data_ex(py, req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode, mkt_data_options)
     }
 
     /// Like `req_mkt_data`, but names the market-data mode on the request
@@ -64,7 +60,7 @@ impl EClient {
     /// account without it is refused by the venue, which names the request
     /// type back through `error`. It ends the way an ordinary snapshot does,
     /// so `tickSnapshotEnd` fires either way.
-    #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mode_9887=0))]
+    #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mode_9887=0, mkt_data_options=None))]
     fn req_mkt_data_ex(
         &self,
         py: Python<'_>,
@@ -74,8 +70,12 @@ impl EClient {
         snapshot: bool,
         regulatory_snapshot: bool,
         mode_9887: i32,
+        mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
 
         // A contract's news is asked for by the venue's id for the contract,
         // and the caller may have stated a description instead. Resolved only

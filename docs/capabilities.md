@@ -296,6 +296,7 @@ ib_async's transport, has a method by that name.
 | `quote` | venue | · | · | · | ● | ● |
 | `quoteByInstrument` | venue | · | · | · | ● | ● |
 | `reqAdjustments` | venue | · | · | · | ● | ● |
+| `req_config` / `req_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `reqMktDataEx` | venue | · | · | · | ● | ● |
 | `reqPing` | venue | · | · | · | ● | ● |
 | `reqSpreadScan` | venue | · | · | · | ● | ● |
@@ -316,6 +317,7 @@ ib_async's transport, has a method by that name.
 | `statedRowsSeries` | venue | · | · | · | ● | ● |
 | `twsConnectionTime` | venue | ● | ● | · | ● | ● |
 | `unreadWire` | this client | · | · | · | ● | ● |
+| `update_config` / `update_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `valuesElsewhere` | venue | · | · | · | ● | ● |
 | `waitForData` | this client | · | · | · | ● | ● |
 | `whatIfOrder` | venue | · | · | ● | ● | ● |

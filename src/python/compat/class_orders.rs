@@ -61,6 +61,12 @@ pub struct Order {
     #[pyo3(get, set)]
     pub sweep_to_fill: bool,
     #[pyo3(get, set)]
+    pub e_trade_only: bool,
+    #[pyo3(get, set)]
+    pub firm_quote_only: bool,
+    #[pyo3(get, set)]
+    pub nbbo_price_cap: f64,
+    #[pyo3(get, set)]
     pub all_or_none: bool,
     #[pyo3(get, set)]
     pub trigger_method: i32,
@@ -359,6 +365,9 @@ impl Clone for Order {
             transmit: self.transmit,
             discretionary_amt: self.discretionary_amt,
             sweep_to_fill: self.sweep_to_fill,
+            e_trade_only: self.e_trade_only,
+            firm_quote_only: self.firm_quote_only,
+            nbbo_price_cap: self.nbbo_price_cap,
             all_or_none: self.all_or_none,
             trigger_method: self.trigger_method,
             adjusted_order_type: self.adjusted_order_type.clone(),
@@ -521,6 +530,9 @@ impl Default for Order {
             transmit: true,
             discretionary_amt: 0.0,
             sweep_to_fill: false,
+            e_trade_only: false,
+            firm_quote_only: false,
+            nbbo_price_cap: f64::MAX,
             all_or_none: false,
             trigger_method: 0,
             adjusted_order_type: String::new(),
@@ -935,6 +947,9 @@ impl Order {
             transmit: a.transmit,
             discretionary_amt: a.discretionary_amt,
             sweep_to_fill: a.sweep_to_fill,
+            e_trade_only: a.e_trade_only,
+            firm_quote_only: a.firm_quote_only,
+            nbbo_price_cap: a.nbbo_price_cap,
             all_or_none: a.all_or_none,
             trigger_method: a.trigger_method,
             adjusted_order_type: a.adjusted_order_type.clone(),
@@ -1122,6 +1137,9 @@ impl Order {
             transmit: self.transmit,
             discretionary_amt: self.discretionary_amt,
             sweep_to_fill: self.sweep_to_fill,
+            e_trade_only: self.e_trade_only,
+            firm_quote_only: self.firm_quote_only,
+            nbbo_price_cap: self.nbbo_price_cap,
             all_or_none: self.all_or_none,
             trigger_method: self.trigger_method,
             adjusted_order_type: self.adjusted_order_type.clone(),
@@ -1986,6 +2004,9 @@ camel_aliases_copy! {
         get_stock_range_upper_alias set_stock_range_upper_alias stockRangeUpper stock_range_upper f64;
         get_stock_ref_price_alias set_stock_ref_price_alias stockRefPrice stock_ref_price f64;
         get_sweep_to_fill_alias set_sweep_to_fill_alias sweepToFill sweep_to_fill bool;
+        get_e_trade_only_alias set_e_trade_only_alias eTradeOnly e_trade_only bool;
+        get_firm_quote_only_alias set_firm_quote_only_alias firmQuoteOnly firm_quote_only bool;
+        get_nbbo_price_cap_alias set_nbbo_price_cap_alias nbboPriceCap nbbo_price_cap f64;
         get_trail_stop_price_alias set_trail_stop_price_alias trailStopPrice trail_stop_price f64;
         get_trailing_percent_alias set_trailing_percent_alias trailingPercent trailing_percent f64;
         get_trigger_method_alias set_trigger_method_alias triggerMethod trigger_method i32;

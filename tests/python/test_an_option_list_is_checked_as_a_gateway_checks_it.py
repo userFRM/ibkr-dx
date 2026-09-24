@@ -55,6 +55,7 @@ def _scan():
 # (the request as a gateway names it, a call that sends it under `n` with `options`)
 REQUESTS = [
     ("ReqMktData(1)", lambda c, n, o: c.reqMktData(n, _spy(), "", False, False, o)),
+    ("ReqMktData(1)", lambda c, n, o: c.req_mkt_data_ex(n, _spy(), "", False, False, 2, o)),
     ("ReqMktDepth(10)", lambda c, n, o: c.reqMktDepth(n, _spy(), 5, False, o)),
     ("ReqHistoricalData(20)", lambda c, n, o: c.reqHistoricalData(
         n, _spy(), "", "1 D", "1 hour", "TRADES", 1, 1, False, o)),
@@ -157,3 +158,17 @@ def test_no_list_is_an_empty_one():
     c.reqMktData(1, _spy(), "", False, False, None)
     c.reqHistoricalData(2, _spy(), "", "1 D", "1 hour", "TRADES", 1, 1, False, None)
     assert _refusals(w) == []
+
+
+def test_enabled_features_replace_the_session_list_and_change_option_checks():
+    w, c = _client()
+    c._test_set_enabled_features(["NOAPIMISCVLD", "DEPRETFQNC"])
+    assert c.enabled_features() == ["NOAPIMISCVLD", "DEPRETFQNC"]
+    c.req_mkt_data_ex(1, _spy(), mkt_data_options=[TagValue("foo", "1")])
+    assert _refusals(w) == []
+    assert c._test_take_commands()
+    c._test_set_enabled_features([])
+    assert c.enabled_features() == []
+    c.req_mkt_data_ex(2, _spy(), mkt_data_options=[TagValue("foo", "1")])
+    assert [(r, code) for r, code, _ in _refusals(w)] == [(2, 10337)]
+    assert c._test_take_commands() == []

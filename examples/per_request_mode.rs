@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let each = Duration::from_secs((duration / 3).max(1));
     for (req_id, mode, label) in [(1i64, 0i32, "realtime"), (2, 2, "frozen"), (3, 3, "delayed_frozen")] {
         println!("Subscribing to {symbol} (con_id={con_id}) as {label}...");
-        client.req_mkt_data_ex(req_id, &contract, "", false, false, mode)?;
+        client.req_mkt_data_ex(req_id, &contract, "", false, false, mode, &[])?;
         let deadline = Instant::now() + each;
         while Instant::now() < deadline {
             client.process_msgs(&mut wrapper);

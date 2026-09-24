@@ -202,6 +202,18 @@ share. These are the venue's rules, and a gateway meets the same refusals.
 | Price | On the venue's grid. One that is not is refused as a price, *"Invalid Price"*, rather than rounded — this client sends prices as they were given |
 | Quantity | A fraction, counted in hundred-millionths. A thousandth of a coin is an ordinary size |
 
+# Account values
+
+Account values and per-currency ledger values are separate rows, even when
+their key and currency match. A full account subscription can receive both;
+`req_account_updates_multi` with `ledger_and_nlv=True` receives only ledger
+rows. An account-only change does not update a ledger-only subscription.
+Unchanged rows are not repeated.
+
+An `AccountCode` used only to identify an account delta does not overwrite the
+account value. A frame that states `AccountType` before `AccountCode` supplies
+the account value, including an explicitly empty one.
+
 # Sessions
 
 ## What authenticates a farm connection

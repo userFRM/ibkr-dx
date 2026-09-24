@@ -84,12 +84,22 @@ impl EClient {
         }
         let Some(tx) = self.tx_or_report_for_trading(order_id)? else { return Ok(()) };
 
+        let session = self.order_session();
+        let mut api_order = order.to_api();
+        api_order.order_misc_options = match order.convert_misc_options(py) {
+            Ok(options) => options,
+            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+        };
+        if let Err(why) = ClientCore::read_option_list(
+            &crate::client_core::ORDER_OPTIONS,
+            &ClientCore::written_options(&api_order.order_misc_options), &session.features,
+        ) {
+            return self.report_refusal(py, order_id, why);
+        }
         if let Err(why) = ClientCore::validate_order_destination(&contract.exchange) {
             return self.report_refusal(py, order_id, why.into());
         }
 
-        // Convert and validate order params first (fail fast, no connection needed)
-        let mut api_order = order.to_api();
         api_order.conditions = match order.convert_conditions(py) {
             Ok(conditions) => conditions,
             Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
@@ -102,10 +112,6 @@ impl EClient {
         // for stating it.
         api_order.order_combo_legs = match order.convert_order_combo_legs(py) {
             Ok(legs) => legs,
-            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
-        };
-        api_order.order_misc_options = match order.convert_misc_options(py) {
-            Ok(options) => options,
             Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
         };
         api_order.algo_params = match order.convert_algo_params(py) {
@@ -159,8 +165,15 @@ impl EClient {
         };
         // Checked against the session as a gateway checks it: which accounts
         // the login holds and what the venue enabled.
-        let session = self.order_session();
+        let (warnings, refused) = ClientCore::retired_instructions(&api_order, &session);
         if let Err(why) = ClientCore::validate_order(&api_order, &session) {
+            // Where a retired instruction is refused, the ones before it were
+            // warned about first.
+            if refused.is_some_and(|r| r.code == why.code) {
+                for warning in warnings {
+                    self.report_refusal(py, order_id, warning)?;
+                }
+            }
             return self.report_refusal(py, order_id, why);
         }
         // From here on, the order as this session sends it.
@@ -454,10 +467,10 @@ impl EClient {
         // What a gateway says about an order it places anyway, on the order's
         // number, as it says it. Said once the order has gone or is held, so
         // an order that could not be sent draws the failure alone.
-        if let Some(warning) = ClientCore::order_warning(&api_order, &session)
-            && let Some(shared) = venue_now
-        {
-            shared.orders.push_order_notice(oid, warning.code, warning.message);
+        if let Some(shared) = venue_now {
+            for warning in warnings {
+                shared.orders.push_order_notice(oid, warning.code, warning.message);
+            }
         }
 
         Ok(())

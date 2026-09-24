@@ -2851,11 +2851,7 @@ fn build_tbt_query(
     /// envelope, the subtype that names this withdrawal, and the id the query
     /// went out under.
     ///
-    /// Answers whether there was one to withdraw, and says nothing itself: the
-    /// bar withdrawal calls this to sweep up the actions query an adjusted
-    /// series may have out under the same number, and an ordinary series has
-    /// none -- so reporting from in here would answer every bar withdrawal
-    /// with a refusal beside its own. The caller's own arm decides.
+    /// Answers whether there was one to withdraw, and says nothing itself.
     pub(crate) fn send_adjustments_cancel(
         &mut self,
         req_id: u32,
@@ -2863,17 +2859,30 @@ fn build_tbt_query(
         hb: &mut HeartbeatState,
     ) -> bool {
         let named = self.pending_adjustments.iter()
-            .position(|(_, rid, _)| *rid == req_id)
-            .map(|pos| self.pending_adjustments.remove(pos).0);
-        // Whether anything was held is answered before the connection is
-        // looked at, as the two withdrawals beside this one do: this client
-        // holds nothing under that number whether or not there is a socket.
+            .find(|(qid, rid, _)| *rid == req_id && !self.held.iter()
+                .any(|a| a.actions_query.as_deref() == Some(qid.as_str())))
+            .map(|(qid, ..)| qid.clone());
         let Some(query_id) = named else {
             log::debug!("corporate-actions withdrawal for req_id={req_id}, which is not waiting");
             return false;
         };
+        self.send_adjustments_query_cancel(&query_id, hmds_conn, hb)
+    }
+
+    /// A historical series owns its actions query by the name sent to the
+    /// venue. A standalone request may use the same caller number.
+    pub(crate) fn send_adjustments_query_cancel(
+        &mut self,
+        query_id: &str,
+        hmds_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) -> bool {
+        let Some(pos) = self.pending_adjustments.iter()
+            .position(|(qid, ..)| qid == query_id)
+        else { return false };
+        let (_, req_id, _) = self.pending_adjustments.remove(pos);
         let Some(conn) = hmds_conn.as_mut() else { return true };
-        let xml = crate::control::xml::cancel_query(&query_id);
+        let xml = crate::control::xml::cancel_query(query_id);
         let ts = chrono_free_timestamp();
         let _ = conn.send_fix(&[
             (fix::TAG_MSG_TYPE, "U"),

@@ -523,13 +523,16 @@ impl EClient {
     // ── Quote Dispatch ──
 
     fn dispatch_quotes(&self, wrapper: &mut impl Wrapper) {
-        // What each subscription was acknowledged with — the increment, the
-        // exchange the best bid and offer come from, and the permission number
-        // the venue gives the request — to everyone watching the contract,
-        // once: the reference client delivers it on `tick_req_params` ahead of
-        // the first tick.
-        for (req_id, p) in self.shared.market.drain_tick_req_params_direct() {
-            wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
+        // The contract's latest increment, exchange and permission number,
+        // once per request ahead of its first tick. Each acknowledgement
+        // replaces them, so delivery reads the stored values at that moment.
+        for (req_id, _) in self.shared.market.drain_tick_req_params_direct() {
+            if let Some(p) = self.core.watching(req_id)
+                .and_then(|instrument| self.shared.market.tick_req_params_for_follower(instrument))
+                && self.core.should_send_tick_req_params(req_id)
+            {
+                wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
+            }
         }
         // A request that joined a contract the venue had already refused. The
         // refusal it joined was drained and told once, to whoever held the
@@ -537,9 +540,13 @@ impl EClient {
         for (req_id, reason) in self.shared.market.drain_subscription_failures_direct() {
             wrapper.error(req_id, NO_SECURITY_DEFINITION, &reason, "");
         }
-        for (instrument, p) in self.shared.market.drain_tick_req_params() {
+        for (instrument, _) in self.shared.market.drain_tick_req_params() {
             for req_id in self.core.watchers_of(instrument) {
-                wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
+                if let Some(p) = self.shared.market.tick_req_params_for_follower(instrument)
+                    && self.core.should_send_tick_req_params(req_id)
+                {
+                    wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
+                }
             }
         }
         // Quote polling → tick_price / tick_size (via ClientCore)

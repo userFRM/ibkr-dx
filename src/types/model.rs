@@ -197,6 +197,28 @@ pub struct Order {
     /// Take liquidity from several venues at once rather than
     /// resting.
     pub sweep_to_fill: bool,
+    /// A retired instruction.
+    ///
+    /// **Taken and not sent.** No gateway sends it. Where the venue has
+    /// withdrawn it (`DEPRETFQNC` at logon) a gateway refuses the order under
+    /// 10268; otherwise it warns under 2168 and places the order without it.
+    /// This client does the same.
+    pub e_trade_only: bool,
+    /// A retired instruction.
+    ///
+    /// **Taken and not sent.** No gateway sends it. Where the venue has
+    /// withdrawn it (`DEPRETFQNC` at logon) a gateway refuses the order under
+    /// 10269; otherwise it warns under 2169 and places the order without it.
+    /// This client does the same.
+    pub firm_quote_only: bool,
+    /// A retired instruction. `f64::MAX`, or a value that is not finite,
+    /// states none.
+    ///
+    /// **Taken and not sent.** No gateway sends it. Where the venue has
+    /// withdrawn it (`DEPRETFQNC` at logon) a gateway refuses the order under
+    /// 10270; otherwise it warns under 2170 and places the order without it.
+    /// This client does the same.
+    pub nbbo_price_cap: f64,
     /// Fill in full or not at all.
     pub all_or_none: bool,
     /// What price trips a stop: 0 the venue's default, 1 double bid or
@@ -756,6 +778,9 @@ impl Default for Order {
             transmit: true,
             discretionary_amt: 0.0,
             sweep_to_fill: false,
+            e_trade_only: false,
+            firm_quote_only: false,
+            nbbo_price_cap: f64::MAX,
             all_or_none: false,
             trigger_method: 0,
             adjusted_order_type: String::new(),

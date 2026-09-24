@@ -23,6 +23,7 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         Err(_) => return,
     };
     let mut key: Option<&str> = None;
+    let mut account_type_stated = false;
     // The venue states which currency a figure is in, and it is not always the
     // account's own. Read per group, and carried rather than assumed.
     let mut currency: &str = "";
@@ -38,6 +39,15 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
             key = Some(val);
         } else if let Some(val) = part.strip_prefix("8004=")
             && let Some(k) = key {
+                if k == "AccountType" {
+                    account_type_stated = true;
+                }
+                // An account code without a preceding account type identifies
+                // the update's account; it does not replace its stated code.
+                if k == "AddAccountCode" || (k == "AccountCode" && !account_type_stated) {
+                    key = None;
+                    continue;
+                }
                 // Kept whether or not anything below names it. A figure nobody
                 // named is still a figure about the account, and dropping it
                 // left no trace that the venue had stated it.

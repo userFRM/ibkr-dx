@@ -130,6 +130,12 @@ pub const REQUEST_NOT_PROCESSED: i32 = 322;
 /// that is not written `key=value`.
 pub const REQUEST_NOT_READ: i32 = 320;
 
+/// The code a configuration read or update is refused under.
+pub const CONFIGURATION_ACCESS_UNAVAILABLE: i32 = 10357;
+
+/// What a configuration read or update is refused with.
+pub(crate) const CONFIGURATION_ACCESS_MESSAGE: &str = "Configuration access via API is not available. Please refer to the application interface to view or update your settings.";
+
 /// The code an order stating a discretionary amount below nought is refused
 /// under.
 pub const DISCRETIONARY_AMOUNT_INVALID: i32 = 168;
@@ -157,6 +163,25 @@ pub const MISC_OPTION_KEY_INVALID: i32 = 10337;
 /// The code an option in a request's free-form list, with a value its key does
 /// not take, is refused under.
 pub const MISC_OPTION_VALUE_INVALID: i32 = 10338;
+
+/// The code an order stating `e_trade_only` is refused under, where the
+/// venue has withdrawn it.
+pub const E_TRADE_ONLY_WITHDRAWN: i32 = 10268;
+/// The code an order stating `firm_quote_only` is refused under, where the
+/// venue has withdrawn it.
+pub const FIRM_QUOTE_ONLY_WITHDRAWN: i32 = 10269;
+/// The code an order stating `nbbo_price_cap` is refused under, where the
+/// venue has withdrawn it.
+pub const NBBO_PRICE_CAP_WITHDRAWN: i32 = 10270;
+/// The code an order stating `e_trade_only` is warned under, where the
+/// venue has not withdrawn it and the order goes without it.
+pub const E_TRADE_ONLY_DROPPED: i32 = 2168;
+/// The code an order stating `firm_quote_only` is warned under, where the
+/// venue has not withdrawn it and the order goes without it.
+pub const FIRM_QUOTE_ONLY_DROPPED: i32 = 2169;
+/// The code an order stating `nbbo_price_cap` is warned under, where the
+/// venue has not withdrawn it and the order goes without it.
+pub const NBBO_PRICE_CAP_DROPPED: i32 = 2170;
 
 /// The code an order declining smart routing is refused under, where the
 /// venue has withdrawn that choice.

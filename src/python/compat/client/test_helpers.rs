@@ -26,6 +26,13 @@ fn a_recent_second() -> u64 {
 
 #[pymethods]
 impl EClient {
+    /// Set the session features stated at logon (test-only).
+    #[doc(hidden)]
+    fn _test_set_enabled_features(&self, features: Vec<String>) -> PyResult<()> {
+        self.shared_state()?.reference.set_enabled_features(features);
+        Ok(())
+    }
+
     /// Seed the venue's model for a contract, as a market-data subscription
     /// does when it publishes tick 13.
     #[doc(hidden)]

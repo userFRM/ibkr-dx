@@ -134,6 +134,14 @@ impl EClient {
     /// its own dispatch loop for that time. Pass a contract carrying `con_id`
     /// — from `qualify_contract`, or from any contract-details answer — and
     /// nothing is resolved and nothing waits.
+    ///
+    /// Where an order is refused for a retired instruction the session has
+    /// withdrawn, the retired instructions it states before that one are
+    /// warned about. Those warnings are queued under the order's number and
+    /// reach [`Wrapper::error`] on the next
+    /// [`process_msgs`](EClient::process_msgs), after this call has returned
+    /// the refusal. A number below zero names no order, and nothing is queued
+    /// under it.
     pub fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), Refusal> {
         // Gated on the trading connection's own state rather than the
         // session's. The session flag is set by any transport ending, the
@@ -145,11 +153,28 @@ impl EClient {
         // sent while never reaching the venue.
         self.refuse_if_trading_is_over("an order")?;
         self.core.refuse_if_readonly("an order").map_err(Refusal::validation)?;
+        let session = self.order_session();
+        ClientCore::read_option_list(
+            &crate::client_core::ORDER_OPTIONS,
+            &ClientCore::written_options(&order.order_misc_options), &session.features,
+        )?;
         ClientCore::validate_order_destination(&contract.exchange)?;
 
         // Validate order params and contract before registering instrument (fail fast).
-        let session = self.order_session();
-        ClientCore::validate_order(order, &session)?;
+        let (warnings, refused) = ClientCore::retired_instructions(order, &session);
+        if let Err(why) = ClientCore::validate_order(order, &session) {
+            // Where a retired instruction is refused, the ones before it were
+            // warned about. The warnings are queued under the order's number
+            // and delivered on the next dispatch, after this error.
+            if refused.is_some_and(|r| r.code == why.code)
+                && let Ok(oid) = u64::try_from(order_id)
+            {
+                for warning in warnings {
+                    self.shared.orders.push_order_notice(oid, warning.code, warning.message);
+                }
+            }
+            return Err(why);
+        }
         // From here on, the order as this session sends it.
         let sent = ClientCore::as_sent(order, &session);
         let order: &Order = &sent;
@@ -414,7 +439,7 @@ impl EClient {
         // What a gateway says about an order it places anyway, on the order's
         // number, as it says it. Said once the order has gone or is held, so
         // an order that could not be sent draws the failure alone.
-        if let Some(warning) = ClientCore::order_warning(order, &session) {
+        for warning in warnings {
             self.shared.orders.push_order_notice(oid, warning.code, warning.message);
         }
         Ok(())

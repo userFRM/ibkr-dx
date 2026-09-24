@@ -1030,7 +1030,7 @@ def req_mkt_data(req_id, contract, generic_tick_list="", snapshot=False, regulat
 Like `req_mkt_data`, but names the market-data mode on the request itself (0=realtime, 1=delayed, 2=frozen, 3=delayed-frozen) rather than taking the one the session is set to. The frozen one keeps thinly-traded names quoting after hours, when the realtime feed is silent.  A contract holds one subscription at a time, so this states the mode for that subscription rather than adding a second alongside it: a later request for a contract already subscribed follows the one that is up and is handed its quotes. To compare two modes on one contract, withdraw between them.  `regulatory_snapshot` asks for the venue's own chargeable one-shot snapshot: a request type of its own rather than a mode on an ordinary quote. It needs the entitlement, and an account without it is refused by the venue, which names the request type back through `error`. It ends the way an ordinary snapshot does, so `tickSnapshotEnd` fires either way.
 
 ```python
-def req_mkt_data_ex(req_id, contract, generic_tick_list="", snapshot=False, regulatory_snapshot=False, mode_9887=0)
+def req_mkt_data_ex(req_id, contract, generic_tick_list="", snapshot=False, regulatory_snapshot=False, mode_9887=0, mkt_data_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1041,6 +1041,7 @@ def req_mkt_data_ex(req_id, contract, generic_tick_list="", snapshot=False, regu
 | `snapshot` | `bool` | If `true`, delivers one quote then auto-cancels. |
 | `regulatory_snapshot` | `bool` | If `true`, request a regulatory snapshot (additional fees may apply). |
 | `mode_9887` | `int` |  |
+| `mkt_data_options` | `list` |  |
 
 ---
 
@@ -1905,6 +1906,34 @@ def req_historical_schedule(req_id, contract, end_date_time="", duration_str="1 
 ---
 
 ## Gateway-Local & Stubs
+
+#### `req_config_proto_buf`
+
+Request configuration. Reports 10357 on the request's error callback.
+
+```python
+def req_config_proto_buf(config_request_proto)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config_request_proto` | `Bound<'_, PyAny>` |  |
+
+---
+
+#### `update_config_proto_buf`
+
+Request a configuration update. Reports 10357 on the request's error callback.
+
+```python
+def update_config_proto_buf(update_config_request_proto)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `update_config_request_proto` | `Bound<'_, PyAny>` |  |
+
+---
 
 #### `order_permissions`
 

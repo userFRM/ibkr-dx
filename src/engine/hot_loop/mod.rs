@@ -2070,12 +2070,15 @@ impl HotLoop {
                         let (query_id, _) = self.hmds.pending_historical.remove(pos);
                         self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
                     }
-                    // The request's held pages go with the withdrawal, and so
-                    // does the actions query an adjusted one may have out under
-                    // this same number — or the pages are left for the life of
-                    // the session and the actions query keeps being served.
-                    self.hmds.held.retain(|a| a.req_id != req_id);
-                    self.hmds.send_adjustments_cancel(req_id, &mut self.hmds_conn, &mut self.hb);
+                    // The held pages and their actions query go together.
+                    // The caller's number may also name a standalone actions
+                    // request, so only the query this series sent is withdrawn.
+                    if let Some(pos) = self.hmds.held.iter().position(|a| a.req_id == req_id) {
+                        let held = self.hmds.held.remove(pos);
+                        if let Some(query_id) = held.actions_query {
+                            self.hmds.send_adjustments_query_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
+                        }
+                    }
                 }
                 ControlCommand::FetchHeadTimestamp { contract, req_id, what_to_show, use_rth, include_expired, .. } => {
                     let ContractRef { con_id, .. } = contract;
@@ -8893,6 +8896,94 @@ mod tests {
         );
     }
 
+    /// An actions request of the caller's own can use the same number as
+    /// historical bars. The bars withdraw only the query that folds them.
+    #[test]
+    fn historical_cancellation_withdraws_only_its_actions_query() {
+        use std::io::Read;
+        for historical_first in [false, true] {
+            let shared = Arc::new(SharedState::new());
+            let mut hl = HotLoop::new(shared.clone(), None, None);
+            let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+            hl.hmds_conn = Some(conn);
+            hl.hmds.pending_adjustments = vec![
+                ("adj_standalone".into(), 7, 265598),
+                ("adj_historical".into(), 7, 756733),
+                ("adj_other".into(), 8, 756733),
+            ];
+            if historical_first {
+                hl.hmds.pending_adjustments.swap(0, 1);
+            }
+            hl.hmds.held.push(hmds::HeldSeries {
+                req_id: 7, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
+                bars: Vec::new(), timezone: String::new(), actions_asked: true,
+                actions_query: Some("adj_historical".into()), fold: hmds::Fold::Adjusted,
+                actions: None, complete: true,
+            });
+            let (tx, rx) = std::sync::mpsc::sync_channel(4);
+            hl.set_control_rx(rx);
+            tx.send(ControlCommand::CancelHistorical { req_id: 7 }).unwrap();
+            hl.poll_control_commands();
+            assert!(hl.hmds.held.is_empty());
+            assert!(shared.reference.drain_historical_errors().is_empty());
+            assert_eq!(hl.hmds.pending_adjustments, [
+                ("adj_standalone".into(), 7, 265598), ("adj_other".into(), 8, 756733),
+            ]);
+            let mut sent = Vec::new();
+            loop {
+                let mut byte = [0];
+                peer.read_exact(&mut byte).unwrap();
+                sent.push(byte[0]);
+                if sent.ends_with(b"</ListOfCancelQueries>\x01") { break; }
+            }
+            let sent = String::from_utf8(sent).unwrap();
+            assert!(sent.contains("6040=10021\x01"), "{sent}");
+            assert!(sent.contains("<id>adj_historical</id>"), "{sent}");
+            assert!(!sent.contains("adj_standalone"), "{sent}");
+        }
+    }
+
+    #[test]
+    fn historical_cancellation_without_an_actions_query_leaves_standalone_actions() {
+        for has_bars in [false, true] {
+            let shared = Arc::new(SharedState::new());
+            let mut hl = HotLoop::new(shared.clone(), None, None);
+            hl.hmds.pending_adjustments.push(("adj_standalone".into(), 7, 756733));
+            if has_bars {
+                hl.hmds.pending_historical.push(("hist_1".into(), 7));
+            }
+            let (tx, rx) = std::sync::mpsc::sync_channel(4);
+            hl.set_control_rx(rx);
+            tx.send(ControlCommand::CancelHistorical { req_id: 7 }).unwrap();
+            hl.poll_control_commands();
+            assert_eq!(hl.hmds.pending_adjustments, [("adj_standalone".into(), 7, 756733)]);
+            let errors = shared.reference.drain_historical_errors();
+            assert_eq!(errors.len(), usize::from(!has_bars));
+            if !has_bars { assert_eq!((errors[0].0, errors[0].1), (7, 366)); }
+        }
+    }
+
+    #[test]
+    fn standalone_actions_cancellation_leaves_the_historical_actions_query() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        hl.hmds.pending_adjustments = vec![
+            ("adj_historical".into(), 7, 756733), ("adj_standalone".into(), 7, 265598),
+        ];
+        hl.hmds.held.push(hmds::HeldSeries {
+            req_id: 7, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
+            bars: Vec::new(), timezone: String::new(), actions_asked: true,
+            actions_query: Some("adj_historical".into()), fold: hmds::Fold::Adjusted,
+            actions: None, complete: true,
+        });
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::CancelCorporateActions { req_id: 7 }).unwrap();
+        hl.poll_control_commands();
+        assert_eq!(hl.hmds.pending_adjustments, [("adj_historical".into(), 7, 756733)]);
+        assert_eq!(hl.hmds.held.len(), 1);
+        assert!(hl.shared.reference.drain_historical_errors().is_empty());
+    }
+
     /// A bar-stream withdrawal does not take the stream half of a request
     /// kept up to date: that stream belongs to the historical request, and a
     /// caller withdrawing bars under the number is told no stream is running.
@@ -9946,10 +10037,10 @@ mod withdrawal_tests {
 
     /// And a withdrawal that does name something says nothing beside it.
     ///
-    /// The bar withdrawal sweeps up the corporate-actions query an adjusted
-    /// series may have out under the same number, and an ordinary series has
-    /// none -- so reporting from inside that sweep would answer every
-    /// ordinary bar withdrawal with a refusal it did not earn.
+    /// The bar withdrawal also withdraws the corporate-actions query an
+    /// adjusted series holds, by that query's own name, and an ordinary
+    /// series holds none -- so reporting from inside that withdrawal would
+    /// answer every ordinary bar withdrawal with a refusal it did not earn.
     #[test]
     fn withdrawing_bars_says_nothing_about_the_actions_query_it_sweeps() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);

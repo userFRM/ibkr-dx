@@ -12,6 +12,12 @@ ask and last.
 
 ## What comes back
 
+`tick_req_params` (`tickReqParams` in Python) states the contract's price
+increment, exchange and snapshot permission once per request. It reads the
+latest stored parameters when the callback is delivered. A follower sharing
+the subscription gets its own callback; cancelling and reusing its request id
+starts a new request. A request cancelled before delivery receives no callback.
+
 `tick_price` and `tick_size` for as long as the subscription runs.
 
 `tick_generic` fires for the halt state the venue states on tick 49: 0 while the
@@ -77,6 +83,15 @@ Delayed and frozen data are requested. Name the mode once with
 state it per request with `req_mkt_data_ex(..., mode_9887=)`, where the mode is
 0 realtime, 1 delayed, 2 frozen, 3 delayed-frozen. Frozen keeps thinly traded
 names quoting after hours, when the realtime feed is silent.
+
+`req_mkt_data_ex` takes `mkt_data_options=None` after `mode_9887`, with the
+same option checks as `req_mkt_data`. With no session, both report 504,
+*Not connected*, before checking the request.
+
+The list accepts `manual=0` or `manual=1`. An unknown key is refused under
+10337, an invalid value under 10338, and a malformed list under 320.
+`NOAPIMISCVLD` at logon lifts the key and value checks; the later check that
+`manual` is zero or one remains.
 
 ## Reading without the callbacks
 

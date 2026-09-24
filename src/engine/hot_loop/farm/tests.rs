@@ -5215,6 +5215,77 @@ mod depth_position_tests {
         );
     }
 
+    /// The bid/ask and last entries each receive an acknowledgement. Generic
+    /// entries have their own acknowledgements beside them, and a request is
+    /// told its parameters once across all of those replies.
+    #[test]
+    fn paired_quote_acknowledgements_state_tick_req_params_once() {
+        for reverse in [false, true] {
+            let (client, _rx, shared) = crate::api::client::tests::test_client();
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(756733);
+            context.market.set_routing(instrument, "STK", "SMART");
+            client.core.req_to_instrument.lock().unwrap().insert(1, instrument);
+            client.core.instrument_to_req.lock().unwrap().insert(instrument, 1);
+            farm.send_mktdata_subscribe(
+                756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+                false, &mut None, &mut hb,
+            );
+            let mut requests = farm.md_req_to_instrument.clone();
+            if reverse { requests.reverse(); }
+            let mut wrapper = crate::api::wrapper::tests::RecordingWrapper::default();
+            for (req_id, _) in requests {
+                let generic = farm.generic_tick_reqs.iter().any(|(id, _)| *id == req_id);
+                let permission = if generic { 0 } else { 3 };
+                let server_tag = if generic { 800 + req_id } else { 777 };
+                let ack = format!("35=Q\x01{server_tag},{req_id},0.01,0,{permission},9c,,1,1");
+                farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+                client.process_msgs(&mut wrapper);
+            }
+            assert_eq!(wrapper.events.iter().filter(|e| e.starts_with("tick_req_params:")).count(), 1,
+                "{:?}", wrapper.events);
+            assert!(wrapper.events.iter().any(|e| e == "tick_req_params:1:0.01:9c0001:3"));
+            assert!(farm.md_req_to_instrument.is_empty(), "every acknowledgement was consumed");
+        }
+    }
+
+    /// Dispatch reads the last acknowledgement's permission, in either
+    /// arrival order, once for the request.
+    #[test]
+    fn tick_req_params_reads_the_latest_btc_acknowledgement() {
+        for reverse in [false, true] {
+            let (client, _rx, shared) = crate::api::client::tests::test_client();
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(479624278);
+            context.market.set_routing(instrument, "CRYPTO", "PAXOS");
+            client.core.req_to_instrument.lock().unwrap().insert(1, instrument);
+            client.core.instrument_to_req.lock().unwrap().insert(instrument, 1);
+            farm.next_md_req_id = 17;
+            farm.send_mktdata_subscribe(
+                479624278, "BTC", "PAXOS", "CRYPTO", "", 0.0, "", "", instrument, 0,
+                false, &mut None, &mut hb,
+            );
+            let mut acknowledgements = [
+                "35=Q\x0157921,18,0.25,0,1,ffffffff,,1,1e-08",
+                "35=Q\x0157924,17,0.25,0,3,ffffffff,,1,1e-08",
+            ];
+            if reverse { acknowledgements.reverse(); }
+            for acknowledgement in acknowledgements {
+                farm.handle_subscription_ack(acknowledgement.as_bytes(), &mut context, &shared);
+            }
+            let mut wrapper = crate::api::wrapper::tests::RecordingWrapper::default();
+            client.process_msgs(&mut wrapper);
+            let parameters: Vec<_> = wrapper.events.iter()
+                .filter(|e| e.starts_with("tick_req_params:")).collect();
+            let permission = if reverse { 1 } else { 3 };
+            assert_eq!(parameters, [&format!("tick_req_params:1:0.25:ffffffff:{permission}")]);
+        }
+    }
+
     /// Both are taken as a gateway takes them: a permission that is none of
     /// its five numbers is nothing stated, an exchange longer than four
     /// characters is handed on alone, and neither is trimmed.

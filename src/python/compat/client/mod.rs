@@ -2026,12 +2026,98 @@ def tick_params(*args):
     w.calls.append(('tickReqParams',) + args)
 w.tickReqParams = tick_params
 ", Some(&g), None).unwrap();
-            shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams {
+            client.get().core.req_to_instrument.lock().unwrap().extend([(7, 0), (8, 0)]);
+            let params = crate::bridge::TickReqParams {
                 min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
-            });
+            };
+            shared.market.push_tick_req_params(0, params.clone());
+            shared.market.push_tick_req_params_for(7, params);
             client.call_method0(py, "poll").unwrap();
             py.run(c"
 assert w.calls == [('tickReqParams', 7, 0.01, '9c0001', 3)], w.calls
+", Some(&g), None).unwrap();
+        });
+    }
+
+    #[test]
+    fn tick_req_params_is_once_per_request_and_a_reused_number_is_told_again() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, w) = wired_client(py);
+            let c = client.get();
+            c.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
+            c.core.req_to_instrument.lock().unwrap().insert(1, 0);
+            c.core.instrument_to_req.lock().unwrap().insert(0, 1);
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            g.set_item("c", &client).unwrap();
+            g.set_item("contract", Py::new(py, Contract {
+                con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
+                exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+            }).unwrap()).unwrap();
+            py.run(c"
+def tick_params(*args):
+    w.calls.append(('tickReqParams',) + args)
+w.tickReqParams = tick_params
+", Some(&g), None).unwrap();
+            let params = crate::bridge::TickReqParams {
+                min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+            };
+            shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+                snapshot_permissions: 1, ..params.clone()
+            });
+            py.run(c"c.reqMktData(2, contract, '', False, False)", Some(&g), None).unwrap();
+            shared.market.push_tick_req_params(0, params.clone());
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"
+for req_id in (1, 2):
+    assert w.calls.count(('tickReqParams', req_id, 0.01, '9c0001', 3)) == 1, w.calls
+", Some(&g), None).unwrap();
+            shared.market.push_tick_req_params(0, params);
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"
+assert len([x for x in w.calls if x[0] == 'tickReqParams']) == 2, w.calls
+c.cancelMktData(2)
+c.reqMktData(2, contract, '', False, False)
+c.poll()
+assert w.calls.count(('tickReqParams', 2, 0.01, '9c0001', 3)) == 2, w.calls
+", Some(&g), None).unwrap();
+        });
+    }
+
+    /// A request withdrawn before its parameters were delivered is told
+    /// nothing, and its number, used again, is told the new request's.
+    #[test]
+    fn tick_req_params_withdrawn_before_delivery_go_to_the_number_used_again() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, w) = wired_client(py);
+            let c = client.get();
+            c.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
+            c.core.req_to_instrument.lock().unwrap().insert(1, 0);
+            c.core.instrument_to_req.lock().unwrap().insert(0, 1);
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            g.set_item("c", &client).unwrap();
+            g.set_item("contract", Py::new(py, Contract {
+                con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
+                exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+            }).unwrap()).unwrap();
+            shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+                min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+            });
+            py.run(c"
+def tick_params(*args):
+    w.calls.append(('tickReqParams',) + args)
+w.tickReqParams = tick_params
+told = lambda: w.calls.count(('tickReqParams', 2, 0.01, '9c0001', 3))
+c.reqMktData(2, contract, '', False, False)
+c.cancelMktData(2)
+c.poll()
+assert told() == 0, w.calls
+c.reqMktData(2, contract, '', False, False)
+c.poll()
+assert told() == 1, w.calls
 ", Some(&g), None).unwrap();
         });
     }
@@ -2057,6 +2143,8 @@ def tick_params(req_id, *args):
     client.disconnect()
 w.tickReqParams = tick_params
 ", Some(&g), None).unwrap();
+                    client.get().core.req_to_instrument.lock().unwrap().extend([(7, 0), (8, 0)]);
+                    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
                     shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
                     shared.market.push_tick_req_params_for(8, crate::bridge::TickReqParams { min_tick: 0.02, ..Default::default() });
 
@@ -2093,6 +2181,8 @@ def tick_params(req_id, *args):
     raise failure
 w.tickReqParams = tick_params
 ", Some(&g), None).unwrap();
+                    client.get().core.req_to_instrument.lock().unwrap().extend([(7, 0), (8, 0)]);
+                    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
                     shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
                     shared.market.push_tick_req_params_for(8, crate::bridge::TickReqParams { min_tick: 0.02, ..Default::default() });
 
@@ -3421,7 +3511,10 @@ setattr(w, boundary, replace_session)
                 if boundary == "managedAccounts" {
                     client.call_method0(py, "req_managed_accts").unwrap();
                 } else {
-                    client.get().shared_state().unwrap().market.push_tick_req_params_for(1, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
+                    let market = &client.get().shared_state().unwrap().market;
+                    let params = crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() };
+                    market.push_tick_req_params(0, params.clone());
+                    market.push_tick_req_params_for(1, params);
                 }
                 client.call_method0(py, "poll").unwrap();
                 assert_eq!(client.get().core.watching(9), Some(0), "the callback installs the new subscription");
@@ -3522,6 +3615,8 @@ def managed(accounts):
 w.managedAccounts = managed
 client.req_managed_accts()
 ", Some(&g), None).unwrap();
+            client.get().core.req_to_instrument.lock().unwrap().extend([(7, 0), (8, 0)]);
+            shared.market.push_tick_req_params(0, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
             shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
             for expected in 1..=4 {
                 client.call_method0(py, "poll").unwrap();

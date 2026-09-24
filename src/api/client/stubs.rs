@@ -8,6 +8,23 @@ use super::EClient;
 
 
 impl EClient {
+    /// Request configuration. Reports 10357 through [`Wrapper::error`].
+    pub fn req_config(&self, req_id: i64) {
+        self.report_reason(req_id, &if self.session_over() {
+            Refusal::not_connected("Not connected")
+        } else {
+            Refusal::stated(
+                crate::error_codes::CONFIGURATION_ACCESS_UNAVAILABLE,
+                crate::error_codes::CONFIGURATION_ACCESS_MESSAGE,
+            )
+        });
+    }
+
+    /// Request a configuration update. Reports 10357 through [`Wrapper::error`].
+    pub fn update_config(&self, req_id: i64) {
+        self.req_config(req_id);
+    }
+
     // ── Smart Components ──
 
     /// Request smart routing components for a BBO exchange. Matches

@@ -50,6 +50,10 @@ releasing the interpreter lock while it waits. Do not run `run()` beside it on
 the same client: `run()` drains every queue rather than only its own, so the two
 compete for the answer. Pick the callbacks or pick this.
 
+Cancelling historical data also withdraws the corporate-actions query held
+by that request. A separate corporate-actions request keeps running, even
+when it uses the same caller request id.
+
 ## Limits
 
 `bar_size_setting` and `what_to_show` are checked before anything is sent, so a

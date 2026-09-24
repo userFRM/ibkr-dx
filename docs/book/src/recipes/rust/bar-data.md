@@ -52,6 +52,10 @@ hours, ending now. It asks for MIDPOINT instead of TRADES on instruments that
 are quoted rather than traded (`CASH`, `CFD`, `CMDTY`), which answer a TRADES
 request with no history at all.
 
+Cancelling historical data also withdraws the corporate-actions query held
+by that request. A separate corporate-actions request keeps running, even
+when it uses the same caller request id.
+
 ## Limits
 
 `bar_size` and `what_to_show` are checked before anything is sent, so a

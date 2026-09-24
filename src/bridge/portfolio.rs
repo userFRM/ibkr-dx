@@ -15,13 +15,9 @@ pub struct PortfolioState {
     /// arrived, with nothing to say they had come. The venue states a great
     /// many more than any client names, and a figure nobody named is still a
     /// figure about the account.
-    stated_account_values: Mutex<Vec<(String, String, String)>>,
-    /// Which of those the per-currency ledger stated, by name and currency.
-    ///
-    /// A request that asks for the ledger alone is given these and no other.
-    /// A figure the ledger and the account's other messages both state stays a
-    /// ledger figure.
-    ledger_stated: Mutex<std::collections::HashSet<(String, String)>>,
+    /// The first field distinguishes per-currency ledger rows from account
+    /// rows. The same name and currency can carry a different figure in each.
+    stated_account_values: Mutex<Vec<(bool, String, String, String)>>,
     /// True once the CCP init burst has been fully processed.
     account_download_complete: AtomicBool,
     /// Position info (conId -> PositionInfo) for reqPositions and P&L.
@@ -73,7 +69,6 @@ impl PortfolioState {
         Self {
             account: Mutex::new(AccountState::default()),
             stated_account_values: Mutex::new(Vec::new()),
-            ledger_stated: Mutex::new(std::collections::HashSet::new()),
             account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
             awaiting_restatement: Mutex::new(std::collections::HashSet::new()),
@@ -141,33 +136,33 @@ impl PortfolioState {
 
     // ── Hot-loop-side writers ──
 
-    /// Record a figure the venue stated, replacing any earlier statement of
+    /// Record an account figure, replacing an earlier account statement of
     /// the same name in the same currency.
     #[doc(hidden)]
     pub fn note_account_value(&self, key: &str, value: &str, currency: &str) {
+        self.note_value(false, key, value, currency);
+    }
+
+    fn note_value(&self, ledger: bool, key: &str, value: &str, currency: &str) {
         let mut all = self.stated_account_values.lock().unwrap();
-        match all.iter_mut().find(|(k, _, c)| k == key && c == currency) {
-            Some(slot) => slot.1 = value.to_string(),
-            None => all.push((key.to_string(), value.to_string(), currency.to_string())),
+        match all.iter_mut().find(|(l, k, _, c)| *l == ledger && k == key && c == currency) {
+            Some(slot) => slot.2 = value.to_string(),
+            None => all.push((ledger, key.to_string(), value.to_string(), currency.to_string())),
         }
     }
 
-    /// Record a figure the per-currency ledger stated, as above, and that the
-    /// ledger stated it.
+    /// Record a per-currency ledger figure separately from account figures
+    /// with the same name and currency.
     #[doc(hidden)]
     pub fn note_ledger_value(&self, key: &str, value: &str, currency: &str) {
-        self.note_account_value(key, value, currency);
-        self.ledger_stated.lock().unwrap().insert((key.to_string(), currency.to_string()));
+        self.note_value(true, key, value, currency);
     }
 
-    /// Every figure the venue has stated about the account, as it stated them.
-    pub fn stated_account_values(&self) -> Vec<(String, String, String)> {
+    /// Every figure the venue has stated about the account, as it stated them:
+    /// whether the per-currency ledger stated it, then name, value and
+    /// currency.
+    pub fn stated_account_values(&self) -> Vec<(bool, String, String, String)> {
         self.stated_account_values.lock().unwrap().clone()
-    }
-
-    /// The figures the per-currency ledger stated, by name and currency.
-    pub fn stated_by_the_ledger(&self) -> std::collections::HashSet<(String, String)> {
-        self.ledger_stated.lock().unwrap().clone()
     }
 
     /// Publish the account as this connection has stated it.

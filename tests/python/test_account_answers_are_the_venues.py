@@ -15,9 +15,15 @@ class Recording(ibkr_dx.EWrapper):
         self.multi = []
         self.summary = []
         self.reports = []
+        self.values = []
+        self.multi_by_req = []
 
     def accountUpdateMulti(self, reqId, account, modelCode, key, value, currency):
         self.multi.append((key, value, currency))
+        self.multi_by_req.append((reqId, key, value, currency))
+
+    def updateAccountValue(self, key, value, currency, account):
+        self.values.append((key, value, currency))
 
     def accountSummary(self, reqId, account, tag, value, currency):
         self.summary.append((tag, value, currency))
@@ -98,3 +104,40 @@ def test_a_fill_is_charged_in_the_contracts_own_currency():
     c._test_dispatch_once()
     assert w.reports, "no cost reached the caller"
     assert w.reports[-1].currency == "EUR", w.reports[-1].currency
+
+
+def test_account_and_ledger_accrued_cash_are_separate_values():
+    w, c = _connected()
+    c._test_note_account_value("AccruedCash", "-2580.38", "CHF")
+    c._test_note_account_value("Currency", "CHF", "CHF", ledger=True)
+    c._test_note_account_value("AccruedCash", "-238.28", "CHF", ledger=True)
+    c._test_finish_account_download()
+    c.reqAccountUpdates(True, "DU1")
+    c.reqAccountUpdatesMulti(1, "DU1", "", True)
+    c.reqAccountUpdatesMulti(2, "DU1", "", False)
+    c._test_dispatch_once()
+    both = [("AccruedCash", "-2580.38", "CHF"), ("AccruedCash", "-238.28", "CHF")]
+    assert [row for row in w.values if row[0] == "AccruedCash"] == both
+    assert [row[1:] for row in w.multi_by_req if row[0] == 2 and row[1] == "AccruedCash"] == both
+    assert [row[1:] for row in w.multi_by_req if row[0] == 1] == [
+        ("Currency", "CHF", "CHF"), ("AccruedCash", "-238.28", "CHF")]
+    w.values.clear()
+    w.multi_by_req.clear()
+    c._test_dispatch_once()
+    assert not w.values and not w.multi_by_req
+
+    c._test_note_account_value("AccruedCash", "-2579.70", "CHF")
+    c._test_dispatch_once()
+    assert w.values == [("AccruedCash", "-2579.70", "CHF")]
+    assert w.multi_by_req == [(2, "AccruedCash", "-2579.70", "CHF")]
+    w.values.clear()
+    w.multi_by_req.clear()
+    c._test_note_account_value("AccruedCash", "-238.28", "CHF", ledger=True)
+    c._test_dispatch_once()
+    assert not w.values and not w.multi_by_req
+
+    c._test_note_account_value("AccruedCash", "-237.00", "CHF", ledger=True)
+    c._test_dispatch_once()
+    assert w.values == [("AccruedCash", "-237.00", "CHF")]
+    assert sorted(w.multi_by_req) == [
+        (1, "AccruedCash", "-237.00", "CHF"), (2, "AccruedCash", "-237.00", "CHF")]

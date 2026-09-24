@@ -81,7 +81,8 @@ LOCAL = {
     "checkconnected", "eventslost", "instrumentof", "lastrtt", "lastrttms",
     "nextorderid", "nextsharedid", "parsealgoparams", "poll", "reset", "run",
     "serverversion", "sessionover", "setconnectoptions",
-    "unreadwire", "waitfordata",
+    "unreadwire", "waitfordata", "reqconfig", "reqconfigprotobuf",
+    "updateconfig", "updateconfigprotobuf",
 }
 
 #: One capability each surface names in its own words: the Rust spelling, then
@@ -97,6 +98,8 @@ COUNTERPARTS = {
     "account_id": "get_account_id",
     "last_rtt": "last_rtt_ms",
     "option_chain": "option_chains",
+    "req_config": "req_config_proto_buf",
+    "update_config": "update_config_proto_buf",
     "schedule": "trading_schedule",
 }
 

@@ -391,7 +391,7 @@ One row per capability, one column per client — every one of the 87 calls and 
 
 **Every call and callback on that list is present on both surfaces.** 2 callbacks are declared and not fired: a gateway reroutes a request to another contract for a contract for difference whose definition asks for it, and this client does not read a definition's flags for that before subscribing: the request goes to the venue as asked. Each says so where it is declared, so a program that implements one still compiles and runs. 7 more are declared by the TWS API and never fire on a gateway — the four steps of the verification handshake, the exchange-for-physical quote, the delta-neutral validation, which a gateway never sends, and `win_error`, which no message on the wire carries — so they fire here exactly as often as there: never.
 
-**And 74 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
+**And 76 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
@@ -693,6 +693,7 @@ ib_async's transport, has a method by that name.
 | `quote` | venue | · | · | · | ● | ● |
 | `quoteByInstrument` | venue | · | · | · | ● | ● |
 | `reqAdjustments` | venue | · | · | · | ● | ● |
+| `req_config` / `req_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `reqMktDataEx` | venue | · | · | · | ● | ● |
 | `reqPing` | venue | · | · | · | ● | ● |
 | `reqSpreadScan` | venue | · | · | · | ● | ● |
@@ -713,6 +714,7 @@ ib_async's transport, has a method by that name.
 | `statedRowsSeries` | venue | · | · | · | ● | ● |
 | `twsConnectionTime` | venue | ● | ● | · | ● | ● |
 | `unreadWire` | this client | · | · | · | ● | ● |
+| `update_config` / `update_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `valuesElsewhere` | venue | · | · | · | ● | ● |
 | `waitForData` | this client | · | · | · | ● | ● |
 | `whatIfOrder` | venue | · | · | ● | ● | ● |
@@ -857,6 +859,11 @@ instead, and nothing here does either).
 
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 
+Configuration read and update requests through `reqConfigProtoBuf` and
+`updateConfigProtoBuf` (Rust: `req_config` and `update_config`) report 10357
+on every connected session. Configuration payloads are never applied; see
+[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html#configuration-requests).
+
 ## Documentation
 
 * [The book](https://userfrm.github.io/ibkr-dx/) — guides, recipes and the generated API reference
@@ -901,8 +908,10 @@ login.
 Probably not. An empty result means one of two things: the venue holds nothing
 for that contract, or the account is not entitled to that series. Such a
 subscription is acknowledged and then nothing is stated, with no error to read.
-The acknowledgement reaches `tick_req_params` with the exchange the best bid and
-offer come from and the permission number the venue gives the request (0
+`tick_req_params` fires once per request, including a follower sharing another
+request's subscription. It reads the contract's latest stored parameters when
+delivered: the price increment, the exchange the best bid and offer come from,
+and the permission number the venue gives the request (0
 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4
 snapshots not available through the API). Whether that number differs between
 a series the account is not entitled to and one with nothing to say has not

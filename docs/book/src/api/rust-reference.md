@@ -929,7 +929,7 @@ pub fn order_presets(&self) -> Vec<(String, String, String)>
 
 #### `place_order`
 
-Place an order. An order names its contract by the venue's id. A caller who states a description instead of an id — which every example written against the reference client does — has it resolved here, once the order itself is known to be one the venue would take: an order that names no contract is one the venue has nothing to match, and answers with nothing at all. Resolving it costs a request and an answer the first time, so this call does not return until the venue has named the contract — up to the answer timeout. Once per description: the answer is kept, and later orders on the same contract are sent without asking again. The reference client never waits here, because a gateway resolved the contract before the order reached it; this client is the gateway, so the work happens somewhere, and today it happens on the caller's thread. A caller placing orders from inside a callback stalls its own dispatch loop for that time. Pass a contract carrying `con_id` — from `qualify_contract`, or from any contract-details answer — and nothing is resolved and nothing waits.
+Place an order. An order names its contract by the venue's id. A caller who states a description instead of an id — which every example written against the reference client does — has it resolved here, once the order itself is known to be one the venue would take: an order that names no contract is one the venue has nothing to match, and answers with nothing at all. Resolving it costs a request and an answer the first time, so this call does not return until the venue has named the contract — up to the answer timeout. Once per description: the answer is kept, and later orders on the same contract are sent without asking again. The reference client never waits here, because a gateway resolved the contract before the order reached it; this client is the gateway, so the work happens somewhere, and today it happens on the caller's thread. A caller placing orders from inside a callback stalls its own dispatch loop for that time. Pass a contract carrying `con_id` — from `qualify_contract`, or from any contract-details answer — and nothing is resolved and nothing waits. Where an order is refused for a retired instruction the session has withdrawn, the retired instructions it states before that one are warned about. Those warnings are queued under the order's number and reach `Wrapper::error` on the next `process_msgs`, after this call has returned the refusal. A number below zero names no order, and nothing is queued under it.
 
 ```rust
 pub fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), Refusal>
@@ -1205,7 +1205,7 @@ pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list:
 Like `req_mkt_data`, but names the market-data mode on the request itself, through FIX field 9887, rather than taking the one the session is set to: | `mode_9887` | mode             | wire shape | |-------------|------------------|---| | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 | | `1`         | DELAYED          | `264=442` + `264=443`, each with `9887=1` | | `2`         | FROZEN           | `264=442` + `264=443`, each with `9887=2` | | `3`         | DELAYED_FROZEN   | `264=442` + `264=443`, each with `9887=3` | The frozen mode keeps thinly-traded names quoting after-hours, when the realtime feed is silent. A contract holds one subscription at a time, so this states the mode for that subscription rather than adding a parallel one — to compare modes on one contract, cancel between them. To set the mode for every subscription instead of naming it per request, call `req_market_data_type`. `regulatory_snapshot` asks for the venue's own chargeable one-shot snapshot: a request type of its own rather than a mode on an ordinary quote, asked for under the snapshot action and with no feed named beside it. It needs the entitlement — an account without it is refused by the venue, which names the request type back. Whether it also costs something is between the account and the broker, and is not on this wire. It ends the way an ordinary snapshot does, so a caller hears `tick_snapshot_end` either way. Its default is false.
 
 ```rust
-pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, mode_9887: i32, ) -> Result<(), Refusal>
+pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, mode_9887: i32, mkt_data_options: &[crate::types::model::TagValue], ) -> Result<(), Refusal>
 ```
 
 | Parameter | Type | Description |
@@ -1216,6 +1216,7 @@ pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_li
 | `snapshot` | `bool` | If `true`, delivers one quote then auto-cancels. |
 | `regulatory_snapshot` | `bool` | If `true`, request a regulatory snapshot (additional fees may apply). |
 | `mode_9887` | `i32` |  |
+| `mkt_data_options` | `&[crate::types::model::TagValue]` |  |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -2289,6 +2290,34 @@ pub fn req_historical_schedule( &self, req_id: i64, contract: &Contract, end_dat
 ---
 
 ## Gateway-Local & Stubs
+
+#### `req_config`
+
+Request configuration. Reports 10357 through `Wrapper::error`.
+
+```rust
+pub fn req_config(&self, req_id: i64)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `update_config`
+
+Request a configuration update. Reports 10357 through `Wrapper::error`.
+
+```rust
+pub fn update_config(&self, req_id: i64)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
 
 #### `req_smart_components`
 

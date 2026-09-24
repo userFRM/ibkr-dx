@@ -1305,7 +1305,6 @@ def _status_icon(name: str, impl_set: set[str], stub_names: set[str]) -> str:
 #: replies are read, which is a callback that does not fire and is recorded as
 #: one below. Anything added here has to be a call that genuinely sends
 #: nothing, and a call whose answer goes unread is not one of them.
-#: Empty, and kept so the next one has somewhere to go.
 #:
 #: `set_server_log_level` was the last of them to leave. The protocol carries no
 #: message asking the venue to change how loudly it talks; a gateway applies the
@@ -1320,6 +1319,8 @@ STUB_METHODS: set[str] = {
     # set one and heard nothing has a session that is not the one they asked
     # for and no way to learn it.
     "set_connect_options",
+    # Configuration reads and updates always report 10357.
+    "req_config", "update_config", "req_config_proto_buf", "update_config_proto_buf",
 }
 
 #: Callbacks a gateway sends and nothing here fires. What each is and why is on

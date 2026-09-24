@@ -213,6 +213,21 @@ client asks the venue whatever the permission, and waits up to eleven seconds.
 | `cancel_mkt_depth` | `is_smart_depth` | Says whether the book is found among the smart books or the exchange books, and one naming the wrong kind is answered with 310 and leaves the book running | The request id alone finds the book. Stated as the book was asked for, both withdraw the same one |
 | `req_auto_open_orders` | `b_auto_bind` | Turns binding on or off for client 0 | What binding asks for is already the default: every session is told about every order on the account, so it changes nothing. A client other than 0 is refused, as a gateway refuses one |
 
+## Configuration requests
+
+`reqConfigProtoBuf(configRequestProto)` and
+`updateConfigProtoBuf(updateConfigRequestProto)` report 10357 under the request
+id on every connected session: *Configuration access via API is not available.
+Please refer to the application interface to view or update your settings.*
+Their snake spellings are `req_config_proto_buf(config_request_proto)` and
+`update_config_proto_buf(update_config_request_proto)`. `None` makes no request;
+configuration payloads are never applied. A request without a session reports
+504.
+
+Rust's `req_config(req_id)` and `update_config(req_id)` take only the request
+id and deliver the same refusal through `process_msgs` and `Wrapper::error`.
+They accept no configuration payload.
+
 ## Connect options
 
 `set_connect_options` answers a caller that states options on `error`, under
@@ -268,16 +283,16 @@ model arrives or the call is cancelled.
 
 ## Order fields
 
-An order carries 155 fields. 123 go out under a tag. 20 are taken and not
+An order carries 158 fields. 123 go out under a tag. 23 are taken and not
 sent: a gateway reads each and sends nothing for it on the orders this client
 places, and neither does this client. 5 are not carried by this client, and
 each says so on itself rather than being quietly dropped. 6 more are what the
 venue fills in on the way back, which an order being placed does not carry
 out.
 
-The 20 are a basis-point offset and its kind, a bond's accrued interest, an
-auction strategy, a shareholder, a parent's permanent id and the percentage
-constraints an order would set aside — which a gateway reads and sends nothing
+The 23 include the three retired instructions described below, a basis-point
+offset and its kind, a bond's accrued interest, an auction strategy, a
+shareholder, a parent's permanent id and the percentage constraints an order would set aside — which a gateway reads and sends nothing
 for — together with the order options, the prices on a combination's legs,
 the choice to decline smart routing and the kind of preview, which it checks
 and sends nothing for, in the same words: an unknown option under 10337, a bad
@@ -313,6 +328,31 @@ sizes and starting position.
 None is silently dropped, and that is checked rather than claimed:
 `python scripts/gen_order_field_reach.py` recounts every figure from the
 order builders and exits non-zero if any field becomes settable and unread.
+
+## Retired order instructions
+
+Both `Order` surfaces accept `e_trade_only`, `firm_quote_only` and
+`nbbo_price_cap`; Python also accepts `eTradeOnly`, `firmQuoteOnly` and
+`nbboPriceCap`. Their defaults are false, false and `f64::MAX` (`UNSET_DOUBLE`
+in Python). An unset or non-finite cap states no instruction; zero and other
+finite values do.
+
+With `DEPRETFQNC` enabled at logon, the first stated instruction is refused
+under 10268, 10269 or 10270, in that order. Otherwise each produces warning
+2168, 2169 or 2170 and the accepted order goes without it. The caller's order
+object keeps its values. Preview and algorithm orders follow the same rule.
+
+The option list is read first, then the order fields are validated, then the
+retired instructions are checked. A stop order with no trigger price and
+`e_trade_only=true` therefore receives 403 before 10268. `NOAPIMISCVLD`
+lifts option key and value checks while reading, but the later numeric check
+on `manual` remains after preview and trailing-percent validation.
+
+Declining smart routing is checked after these three instructions. If that
+produces refusal 10348 after earlier warnings, Python delivers the warnings
+before the refusal. Rust returns the refusal from `place_order` and queues
+the earlier warnings under the order id for `Wrapper::error` on the next
+`process_msgs`; a negative order id receives no queued warnings.
 
 ## A price of nought on an order
 
@@ -374,9 +414,11 @@ calculations itself, from the model the venue states for the contract. A
 request for a fundamental report takes a list and a gateway reads none of it;
 neither does this client, and nothing in it is checked or sent.
 
-The Rust client takes a free-form list on an order alone. From Python, `None`
-is no list, and an entry that is not a tag and a value is written as its own
-text, as the reference client writes it — refused under 320 where that text is
+The Rust client takes a free-form list on an order and on `req_mkt_data_ex`,
+whose final argument is `mkt_data_options: &[TagValue]`. Pass `&[]` for no
+options. Python's `req_mkt_data_ex` appends `mkt_data_options=None` after
+`mode_9887` and checks it as `req_mkt_data` does. From Python, `None` is no
+list, and an entry that is not a tag and a value is written as its own text, as the reference client writes it — refused under 320 where that text is
 not `key=value`.
 
 The checks are the ones a gateway makes on a list written in the text

@@ -4580,6 +4580,143 @@ mod as_a_gateway_checks_it {
         assert_eq!(refused(&order, &session(&["NOAPIMISCVLD"])).0, 320);
     }
 
+    #[test]
+    fn retired_order_instructions_follow_the_session_and_check_order() {
+        let mut retired = ApiOrder {
+            e_trade_only: true, firm_quote_only: true, nbbo_price_cap: 0.0,
+            opt_out_smart_routing: true, ..order()
+        };
+        let enabled = session(&["DEPRETFQNC", "DEPRPREFBEST"]);
+        assert_eq!(refused(&retired, &enabled), (10268, "The 'EtradeOnly' order attribute is not supported.".into()));
+        retired.e_trade_only = false;
+        assert_eq!(refused(&retired, &enabled), (10269, "The 'FirmQuoteOnly' order attribute is not supported.".into()));
+        retired.firm_quote_only = false;
+        assert_eq!(refused(&retired, &enabled), (10270, "The 'NbboPriceCap' order attribute is not supported.".into()));
+        retired.nbbo_price_cap = f64::MAX;
+        assert_eq!(refused(&retired, &enabled).0, 10348);
+
+        for cap in [0.0, -1.0, 100.0] {
+            retired.nbbo_price_cap = cap;
+            assert_eq!(refused(&retired, &enabled).0, 10270, "{cap} states a cap");
+        }
+        retired.opt_out_smart_routing = false;
+        for cap in [f64::MAX, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            retired.nbbo_price_cap = cap;
+            ClientCore::validate_order(&retired, &enabled).expect("no finite cap stated");
+        }
+
+        retired.e_trade_only = true;
+        retired.order_misc_options = vec![crate::types::model::TagValue { tag: "other".into(), value: "1".into() }];
+        assert_eq!(refused(&retired, &enabled).0, 10337, "the list is read first");
+        retired.action.clear();
+        assert_eq!(refused(&retired, &enabled).0, 10337, "before ordinary order checks too");
+        retired.order_misc_options.clear();
+        assert_ne!(refused(&retired, &enabled).0, 10268, "ordinary fields precede retired instructions");
+        retired.action = "BUY".into();
+        retired.what_if = true;
+        retired.transmit = false;
+        assert_eq!(refused(&retired, &enabled).0, 321, "preview checks precede retired instructions");
+    }
+
+    /// Field errors precede retired instructions, including a missing trigger.
+    #[test]
+    fn retired_order_instructions_follow_the_trigger_price_check() {
+        let mut stopped = ApiOrder {
+            order_type: "STP".into(), aux_price: 0.0, e_trade_only: true, ..order()
+        };
+        let enabled = session(&["DEPRETFQNC"]);
+        assert_eq!(refused(&stopped, &enabled).0, 403);
+        stopped.aux_price = 10.0;
+        assert_eq!(refused(&stopped, &enabled).0, 10268);
+    }
+
+    /// A preview is not held to the trigger price the order it previews
+    /// needs, and an algorithm's order may leave its type unnamed.
+    #[test]
+    fn previews_and_algorithms_skip_the_trigger_and_type_checks() {
+        let preview = ApiOrder { what_if: true, order_type: "STP".into(), aux_price: 0.0, ..order() };
+        ClientCore::validate_order(&preview, &session(&[])).expect("a preview of a stop without its trigger");
+        let algorithm = ApiOrder { algo_strategy: "Adaptive".into(), order_type: String::new(), ..order() };
+        ClientCore::validate_order(&algorithm, &session(&[])).expect("an algorithm's order with its type unnamed");
+    }
+
+    #[test]
+    fn retired_order_instructions_are_checked_for_previews_and_algorithms() {
+        for (what_if, strategy) in [(true, ""), (false, "Adaptive")] {
+            let stated = ApiOrder {
+                what_if, algo_strategy: strategy.into(), e_trade_only: true, ..order()
+            };
+            assert_eq!(refused(&stated, &session(&["DEPRETFQNC"])).0, 10268);
+        }
+    }
+
+    #[test]
+    fn an_orders_manual_value_is_checked_after_its_preview_and_trail() {
+        let mut stated = ApiOrder {
+            order_misc_options: vec![crate::types::model::TagValue {
+                tag: "manual".into(), value: "2".into(),
+            }], what_if: true, transmit: false, e_trade_only: true, ..order()
+        };
+        let lifted = session(&["NOAPIMISCVLD", "DEPRETFQNC"]);
+        assert_eq!(refused(&stated, &lifted), (321,
+            "What-If order should have transmit flag set to TRUE ".into()));
+        stated.transmit = true;
+        stated.order_type = "TRAIL".into();
+        stated.trailing_percent = 150.0;
+        assert_eq!(refused(&stated, &lifted), (321,
+            "Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.".into()));
+        stated.trailing_percent = 1.0;
+        assert_eq!(refused(&stated, &lifted), (321,
+            "Order: 'manual' has wrong value=2, expected [1 or 0]".into()));
+        assert_eq!(refused(&stated, &session(&["DEPRETFQNC"])).0, 10338,
+            "without the feature, the value is refused while reading");
+    }
+
+    #[test]
+    fn an_orders_option_list_is_read_before_its_fields() {
+        let order = ApiOrder {
+            order_misc_options: vec![crate::types::model::TagValue {
+                tag: "unknown".into(), value: "1".into(),
+            }], ..Default::default()
+        };
+        assert_eq!(refused(&order, &session(&[])).0, 10337);
+    }
+
+    #[test]
+    fn retired_order_instructions_are_warned_in_order_and_removed() {
+        let retired = ApiOrder {
+            e_trade_only: true, firm_quote_only: true, nbbo_price_cap: 0.0,
+            opt_out_smart_routing: true, account: "DU1".into(), ..order()
+        };
+        let held = session(&[]);
+        ClientCore::validate_order(&retired, &held).expect("accepted with warnings");
+        let (warnings, refused_by) = ClientCore::retired_instructions(&retired, &held);
+        assert!(refused_by.is_none());
+        assert_eq!(warnings.iter().map(|w| w.code).collect::<Vec<_>>(), [2168, 2169, 2170, 2181]);
+        for (warning, name) in warnings.iter().zip(["EtradeOnly", "FirmQuoteOnly", "NbboPriceCap", "OptOutFromSmartRouting"]) {
+            assert_eq!(warning.message, format!("The '{name}' order attribute is not supported."));
+        }
+        let sent = ClientCore::as_sent(&retired, &held);
+        assert!(!sent.e_trade_only && !sent.firm_quote_only);
+        assert_eq!(sent.nbbo_price_cap, f64::MAX);
+        assert!(sent.account.is_empty());
+        assert!(retired.e_trade_only && retired.firm_quote_only, "the caller's order stands");
+        assert_eq!(retired.nbbo_price_cap, 0.0);
+        assert_eq!(ClientCore::retired_instructions(&order(), &held), (vec![], None));
+
+        // A cap that is not finite states none: nothing is warned and
+        // nothing refused, with or without the feature.
+        for cap in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let capped = ApiOrder { nbbo_price_cap: cap, ..order() };
+            for features in [&[][..], &["DEPRETFQNC"][..]] {
+                assert_eq!(ClientCore::retired_instructions(&capped, &session(features)), (vec![], None), "{cap}");
+            }
+        }
+        // A cap stated alone still leaves the order without it.
+        let capped = ApiOrder { nbbo_price_cap: 5.0, ..order() };
+        assert_eq!(ClientCore::as_sent(&capped, &held).nbbo_price_cap, f64::MAX);
+    }
+
     /// Declining smart routing: refused where the venue withdrew it, and
     /// otherwise placed without it and warned about.
     #[test]
@@ -4588,9 +4725,9 @@ mod as_a_gateway_checks_it {
         let text = "The 'OptOutFromSmartRouting' order attribute is not supported.".to_string();
         assert_eq!(refused(&declining, &session(&["DEPRPREFBEST"])), (10348, text.clone()));
         ClientCore::validate_order(&declining, &session(&[])).expect("placed without it");
-        let warned = ClientCore::order_warning(&declining, &session(&[])).expect("and warned");
+        let warned = ClientCore::retired_instructions(&declining, &session(&[])).0.pop().expect("and warned");
         assert_eq!((warned.code, warned.message), (2181, text));
-        assert!(ClientCore::order_warning(&order(), &session(&[])).is_none(), "an ordinary order is not warned");
+        assert!(ClientCore::retired_instructions(&order(), &session(&[])).0.is_empty(), "an ordinary order is not warned");
     }
 
     /// The kinds of preview a released gateway takes, and its words for the
@@ -4873,4 +5010,23 @@ fn executions_are_answered_for_the_days_asked() {
     let filter = ExecutionFilter { specific_dates: vec![20260231], ..Default::default() };
     let Err(refused) = core.executions_for_request(&utc, &[], &filter, now) else { panic!("answered") };
     assert_eq!(refused.code, 320);
+}
+
+#[test]
+fn account_summary_keeps_account_and_ledger_figures_apart() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    shared.portfolio.note_account_value("AccruedCash", "-2580.38", "CHF");
+    shared.portfolio.note_ledger_value("AccruedCash", "-238.28", "CHF");
+    shared.portfolio.account_download_is_settled();
+    core.subscribe_account_summary(1, "All").unwrap();
+    let initial = core.prepare_account_summary(&shared, "DU1").unwrap();
+    assert_eq!(initial.entries.iter().map(|entry| entry.value.as_str()).collect::<Vec<_>>(), ["-2580.38", "-238.28"]);
+    core.last_account_summary.lock().unwrap().get_mut(&1).unwrap().0 -= std::time::Duration::from_secs(180);
+    assert!(core.prepare_account_summary(&shared, "DU1").is_none(), "unchanged account and ledger rows do not repeat");
+    shared.portfolio.note_account_value("AccruedCash", "-2579.70", "CHF");
+    core.last_account_summary.lock().unwrap().get_mut(&1).unwrap().0 -= std::time::Duration::from_secs(180);
+    let moved = core.prepare_account_summary(&shared, "DU1").unwrap();
+    assert_eq!(moved.entries.len(), 1);
+    assert_eq!(moved.entries[0].value, "-2579.70");
 }

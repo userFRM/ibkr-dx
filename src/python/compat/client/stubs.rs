@@ -10,6 +10,16 @@ use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDol
 
 #[pymethods]
 impl EClient {
+    /// Request configuration. Reports 10357 on the request's error callback.
+    fn req_config_proto_buf(&self, py: Python<'_>, config_request_proto: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.configuration_refused(py, config_request_proto, 0)
+    }
+
+    /// Request a configuration update. Reports 10357 on the request's error callback.
+    fn update_config_proto_buf(&self, py: Python<'_>, update_config_request_proto: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.configuration_refused(py, update_config_request_proto, i64::from(i32::MAX))
+    }
+
     // ── What the venue permits ──
 
     /// Security type → the order types the venue permits for it, as stated at
@@ -933,6 +943,22 @@ pub(crate) fn smart_components_list<'py>(
     pyo3::types::PyList::new(py, components)
 }
 
+impl EClient {
+    fn configuration_refused(&self, py: Python<'_>, request: &Bound<'_, PyAny>, unstated: i64) -> PyResult<()> {
+        if request.is_none() { return Ok(()) }
+        let req_id = if request.call_method1("HasField", ("reqId",))?.extract::<bool>()? {
+            Some(request.getattr("reqId")?.extract::<i64>()?)
+        } else {
+            None
+        };
+        let Some(_tx) = self.tx_or_report(req_id.unwrap_or(-1))? else { return Ok(()) };
+        self.report_refusal(py, req_id.unwrap_or(unstated), Refusal::stated(
+            crate::error_codes::CONFIGURATION_ACCESS_UNAVAILABLE,
+            crate::error_codes::CONFIGURATION_ACCESS_MESSAGE,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod advisor_partition_tests {
     use super::advisor_partition;
@@ -1162,4 +1188,3 @@ mod calendar_request_tests {
         });
     }
 }
-

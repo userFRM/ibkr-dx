@@ -113,7 +113,8 @@ def classify(name: str, all_bodies: dict[str, str], seen: set[str] | None = None
     # Stating a reason on a failure path is not refusing: a call that serves
     # the request and reports why it could not this once still serves it, and
     # counting it as refused understates what reaches the venue.
-    refuses_outright = "report_unserviceable" in body or "unserviceable(" in body
+    refuses_outright = ("report_unserviceable" in body or "unserviceable(" in body
+                        or "CONFIGURATION_ACCESS_UNAVAILABLE" in body)
     states_a_reason = "report_reason(" in body and "if let Err" not in body
     if refuses_outright or states_a_reason:
         return "refused"

@@ -113,7 +113,7 @@ impl EClient {
         // the type once for every subscription that follows. `req_mkt_data_ex`
         // states it per request instead.
         let mode = self.core.subscription_mode();
-        self.req_mkt_data_ex(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode)
+        self.req_mkt_data_ex(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode, &[])
     }
 
     /// Like [`req_mkt_data`](EClient::req_mkt_data), but names the market-data
@@ -147,8 +147,20 @@ impl EClient {
     pub fn req_mkt_data_ex(
         &self, req_id: i64, contract: &Contract,
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
-        mode_9887: i32,
+        mode_9887: i32, mkt_data_options: &[crate::types::model::TagValue],
     ) -> Result<(), Refusal> {
+        // No session is said before anything about the request, as the
+        // reference client says it and as the other surface does.
+        if self.session_over() {
+            return Err(Refusal::not_connected("Not connected"));
+        }
+        if !mkt_data_options.is_empty() {
+            crate::client_core::ClientCore::check_option_list(
+                &crate::client_core::MKT_DATA_OPTIONS,
+                &crate::client_core::ClientCore::written_options(mkt_data_options),
+                &self.shared.reference.enabled_features(),
+            )?;
+        }
         // A contract's news is asked for by the venue's id for the contract,
         // and the caller may have stated a description instead. Resolved only
         // when news is what was asked for: a quote on a description is asked

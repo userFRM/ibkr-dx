@@ -1503,8 +1503,8 @@ fn the_per_currency_figures_are_read_off_their_bucket() {
     let held = shared.portfolio.stated_account_values();
     let read = |name: &str, currency: &str| {
         held.iter()
-            .find(|(k, _, c)| k == name && c == currency)
-            .map(|(_, v, _)| v.clone())
+            .find(|(_, k, _, c)| k == name && c == currency)
+            .map(|(_, _, v, _)| v.clone())
     };
     assert_eq!(
         read("CashBalance", "EUR").as_deref(), Some("5250.00"),
@@ -1525,14 +1525,13 @@ fn the_per_currency_figures_are_read_off_their_bucket() {
     );
     // Each kept as the ledger's, which is all a request for the ledger and
     // net liquidation is given.
-    let ledger = shared.portfolio.stated_by_the_ledger();
     for (name, currency) in [
         ("Currency", "EUR"), ("CashBalance", "EUR"), ("ExchangeRate", "EUR"),
         ("NetLiquidationByCurrency", "BASE"),
     ] {
         assert!(
-            ledger.contains(&(name.to_string(), currency.to_string())),
-            "{name} in {currency} was stated by the ledger: {ledger:?}",
+            held.iter().any(|(ledger, k, _, c)| *ledger && k == name && c == currency),
+            "{name} in {currency} was stated by the ledger: {held:?}",
         );
     }
 }
@@ -6040,7 +6039,7 @@ fn the_maintenance_margin_is_the_plain_spelling() {
     assert_eq!(account.maint_margin_req, crate::types::price_from_f64(10.0), "the plain figure");
     assert_eq!(account.init_margin_req, crate::types::price_from_f64(5.0), "as its sibling");
     assert!(
-        shared.portfolio.stated_account_values().iter().any(|(k, v, c)| k == "FullMaintMarginReq" && v == "20.00" && c == "USD"),
+        shared.portfolio.stated_account_values().iter().any(|(_, k, v, c)| k == "FullMaintMarginReq" && v == "20.00" && c == "USD"),
         "and the full figure stays reachable by name",
     );
 }
@@ -6093,7 +6092,7 @@ mod stated_account_value_tests {
 
         let stated = shared.portfolio.stated_account_values();
         assert_eq!(stated.len(), 2);
-        assert!(stated.iter().any(|(k, v, c)| k == "SomethingNobodyNames" && v == "42" && c == "EUR"));
+        assert!(stated.iter().any(|(_, k, v, c)| k == "SomethingNobodyNames" && v == "42" && c == "EUR"));
     }
 
     /// The same figure in two currencies is two figures. Collapsing them would
@@ -6115,7 +6114,7 @@ mod stated_account_value_tests {
         shared.portfolio.note_account_value("BuyingPower", "200", "USD");
         let stated = shared.portfolio.stated_account_values();
         assert_eq!(stated.len(), 1);
-        assert_eq!(stated[0].1, "200");
+        assert_eq!(stated[0].2, "200");
     }
 }
 
@@ -9158,7 +9157,7 @@ fn the_full_margin_spellings_do_not_overwrite_the_plain_ones() {
     assert_eq!(account.available_funds, 300 * PRICE_SCALE);
     assert_eq!(account.excess_liquidity, 500 * PRICE_SCALE);
     assert!(
-        shared.portfolio.stated_account_values().iter().any(|(k, v, _)| k == "FullInitMarginReq" && v == "200.00"),
+        shared.portfolio.stated_account_values().iter().any(|(_, k, v, _)| k == "FullInitMarginReq" && v == "200.00"),
         "and the full spelling stays reachable by name",
     );
 }
@@ -10153,4 +10152,84 @@ fn a_held_request_is_named_by_what_a_gateway_reads_of_it() {
     assert!(!asked(Some(expired(false)), None).contains("|6320="));
     let msg = asked(None, Some(PendingSubscribe { filters: named.clone(), ..spy_by_symbol(3) }));
     assert!(msg.contains("|55=SPY|") && !msg.contains("|48=") && !msg.contains("|6454="), "{msg}");
+}
+
+#[test]
+fn account_and_ledger_figures_with_the_same_name_and_currency_stay_separate() {
+    let shared = SharedState::new();
+    let mut context = Context::new();
+    let core = crate::client_core::ClientCore::new();
+    core.subscribe_account_updates(true);
+    core.ledger_only_for(1, true);
+    let account = b"35=UM\x018001=AccruedCash\x0115=CHF\x018004=-2580.38\x01";
+    let ledger = b"35=RL\x018001=LedgerList\x018002=CHF\x0115=CHF\x016242=-238.28\x01";
+    super::positions::handle_account_update(account, &mut context, &shared);
+    super::positions::handle_ledger_update(ledger, &shared);
+    let accrued = |rows: Vec<crate::client_core::AccountFieldUpdate>| {
+        rows.into_iter().filter(|row| row.key == "AccruedCash")
+            .map(|row| (row.value, row.currency)).collect::<Vec<_>>()
+    };
+    let both = vec![("-2580.38".to_string(), "CHF".to_string()), ("-238.28".to_string(), "CHF".to_string())];
+    assert_eq!(accrued(core.prepare_account_updates(&shared).unwrap().fields), both);
+    assert_eq!(accrued(core.account_figures_that_moved(&shared, 2)), both);
+    assert_eq!(accrued(core.account_figures_that_moved(&shared, 1)), vec![("-238.28".to_string(), "CHF".to_string())]);
+    assert!(core.prepare_account_updates(&shared).unwrap().fields.is_empty());
+    assert!(core.account_figures_that_moved(&shared, 1).is_empty());
+    assert!(core.account_figures_that_moved(&shared, 2).is_empty());
+
+    super::positions::handle_account_update(
+        b"35=UM\x018001=AccruedCash\x0115=CHF\x018004=-2579.70\x01", &mut context, &shared,
+    );
+    assert!(core.account_figures_that_moved(&shared, 1).is_empty(), "an account move is not a ledger move");
+    let account_move = vec![("-2579.70".to_string(), "CHF".to_string())];
+    assert_eq!(accrued(core.account_figures_that_moved(&shared, 2)), account_move);
+    assert_eq!(accrued(core.prepare_account_updates(&shared).unwrap().fields), account_move);
+    super::positions::handle_ledger_update(ledger, &shared);
+    assert!(core.account_figures_that_moved(&shared, 1).is_empty(), "restating the ledger does not change it");
+    assert!(core.account_figures_that_moved(&shared, 2).is_empty());
+    assert!(core.prepare_account_updates(&shared).unwrap().fields.is_empty());
+
+    super::positions::handle_ledger_update(
+        b"35=RL\x018001=LedgerList\x018002=CHF\x0115=CHF\x016242=-237\x01", &shared,
+    );
+    let ledger_move = vec![("-237.00".to_string(), "CHF".to_string())];
+    assert_eq!(accrued(core.account_figures_that_moved(&shared, 1)), ledger_move);
+    assert_eq!(accrued(core.account_figures_that_moved(&shared, 2)), ledger_move);
+    assert_eq!(accrued(core.prepare_account_updates(&shared).unwrap().fields), ledger_move);
+    assert_eq!(context.account().accrued_cash, crate::types::price_from_f64(-2579.70));
+}
+
+#[test]
+fn an_account_code_is_a_value_only_after_the_frames_account_type() {
+    let shared = SharedState::new();
+    let mut context = Context::new();
+    let core = crate::client_core::ClientCore::new();
+    core.subscribe_account_updates(true);
+    super::positions::handle_account_update(
+        b"35=UT\x018001=AccountType\x018004=INDIVIDUAL\x018001=AccountCode\x018004=DU1\x01", &mut context, &shared,
+    );
+    let initial = core.account_figures_that_moved(&shared, 1);
+    assert!(initial.iter().any(|row| row.key == "AccountCode" && row.value == "DU1"));
+    core.prepare_account_updates(&shared).unwrap();
+    for frame in [
+        &b"35=UT\x018001=AccountCode\x018004=\x01"[..],
+        &b"35=UT\x018001=AccountCode\x018004=DU2\x01"[..],
+        &b"35=UT\x018001=AccountCode\x018004=DU3\x018001=AccountType\x018004=INDIVIDUAL\x01"[..],
+        &b"35=UT\x018001=AccountType\x018004=INDIVIDUAL\x018001=AddAccountCode\x018004=DU4\x01"[..],
+    ] {
+        super::positions::handle_account_update(frame, &mut context, &shared);
+        assert!(core.account_figures_that_moved(&shared, 1).is_empty());
+        assert!(core.prepare_account_updates(&shared).unwrap().fields.is_empty());
+    }
+    super::positions::handle_account_update(
+        b"35=UT\x018001=AccountType\x018004=INDIVIDUAL\x018001=AccountCode\x018004=DU5\x01", &mut context, &shared,
+    );
+    let changed = core.account_figures_that_moved(&shared, 1);
+    assert_eq!(changed.len(), 1);
+    assert_eq!((&*changed[0].key, &*changed[0].value), ("AccountCode", "DU5"));
+    super::positions::handle_account_update(
+        b"35=UT\x018001=AccountType\x018004=\x018001=AccountCode\x018004=\x01", &mut context, &shared,
+    );
+    assert!(core.account_figures_that_moved(&shared, 1).iter()
+        .any(|row| row.key == "AccountCode" && row.value.is_empty()), "a code in the account image is stated even when empty");
 }

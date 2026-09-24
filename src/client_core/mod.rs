@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 use crate::error_codes::{
     CHANGE_CANNOT_CHANGE_TYPE, COMBINATION_LEG_INVALID, COMBINATION_NEEDS_LEGS, COMBO_AND_LEG_PRICES,
     CONDITION_CONTRACT_INCOMPLETE, DISCRETIONARY_AMOUNT_INVALID, DUPLICATE_TICKER_ID, GOOD_TILL_DATE_INVALID,
+    E_TRADE_ONLY_DROPPED, E_TRADE_ONLY_WITHDRAWN, FIRM_QUOTE_ONLY_DROPPED, FIRM_QUOTE_ONLY_WITHDRAWN,
+    NBBO_PRICE_CAP_DROPPED, NBBO_PRICE_CAP_WITHDRAWN,
     MISC_OPTION_KEY_INVALID, MISC_OPTION_VALUE_INVALID, NO_SUCH_BOOK, OCA_GROUP_REVISION,
     OCA_TYPE_REVISION, OPT_OUT_SMART_ROUTING_DROPPED, OPT_OUT_SMART_ROUTING_WITHDRAWN,
     MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, PER_LEG_PRICES_UNSUPPORTED,
@@ -314,9 +316,9 @@ pub struct PortfolioUpdateEntry {
     pub realized_pnl: f64,
 }
 
-/// One summary's last pass: when it ran, and what it stated then, keyed by the
-/// figure and the currency it was stated in.
-type SummaryPass = (std::time::Instant, HashMap<(String, String), String>);
+/// One summary's last pass: when it ran, and what it stated then, keyed by
+/// ledger membership, figure and currency.
+type SummaryPass = (std::time::Instant, AccountFiguresTold);
 
 /// Fold the risk levels modelled here to the venue's names. Anything else
 /// travels as text in the parameter list; the venue owns that vocabulary.
@@ -1068,8 +1070,8 @@ impl Ownership<'_> {
     }
 }
 
-/// What one request has been told of the account, by figure and currency.
-pub type AccountFiguresTold = HashMap<(String, String), String>;
+/// What one request has been told, by ledger membership, figure and currency.
+pub type AccountFiguresTold = HashMap<(bool, String, String), String>;
 
 pub struct ClientCore {
     /// How long a caller waits for the engine to name an instrument.
@@ -1227,9 +1229,9 @@ pub struct ClientCore {
     // Account updates subscription
     /// Whether the account's own figures were asked for.
     pub account_updates_subscribed: AtomicBool,
-    /// What has already been delivered of what the venue stated, by figure and
+    /// What has already been delivered, by ledger membership, figure and
     /// currency, so each is delivered once and again when it changes.
-    pub last_stated_account: Mutex<HashMap<(String, String), String>>,
+    pub last_stated_account: Mutex<AccountFiguresTold>,
     /// The same record for the multi-account subscription, per request.
     ///
     /// Kept apart from the one above: the two are asked for and withdrawn
@@ -1281,6 +1283,8 @@ pub struct ClientCore {
     pub market_data_type: AtomicI32,
     /// Which requests have already been told which feed they are on.
     pub mdt_sent: Mutex<HashSet<i64>>,
+    /// Requests already told the parameters of their market-data subscription.
+    tick_req_params_sent: Mutex<HashSet<i64>>,
     /// The type sent with each instrument's subscription. Every watcher reads
     /// that feed, even when it asked for another type or takes over as holder.
     mdt_by_instrument: Mutex<HashMap<InstrumentId, i32>>,
@@ -1554,6 +1558,7 @@ impl ClientCore {
             depth_reqs: std::sync::Arc::new(Mutex::new(HashSet::new())),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
+            tick_req_params_sent: Mutex::new(HashSet::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
             held_orders: Mutex::new(Vec::new()),
@@ -1943,6 +1948,7 @@ impl ClientCore {
         self.depth_reqs.lock().unwrap().clear();
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
+        self.tick_req_params_sent.lock().unwrap().clear();
         self.mdt_by_instrument.lock().unwrap().clear();
         self.historical_asks.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
@@ -2219,6 +2225,19 @@ impl ClientCore {
         held_under
     }
 
+    /// A gateway states these parameters once per request. The bid/ask and
+    /// last subscriptions are acknowledged separately, and a follower can
+    /// join while the first acknowledgement is still waiting for delivery.
+    ///
+    /// Only a request still watching is told. Marked after it was withdrawn,
+    /// a number reused for a new request would never be told that request's
+    /// parameters. Read under the map a withdrawal clears, so a withdrawal
+    /// lands wholly before or wholly after.
+    pub fn should_send_tick_req_params(&self, req_id: i64) -> bool {
+        let watching = self.req_to_instrument.lock().unwrap();
+        watching.contains_key(&req_id) && self.tick_req_params_sent.lock().unwrap().insert(req_id)
+    }
+
     /// What a request that joins a subscription somebody else opened is owed.
     ///
     /// It asked the venue for nothing, so the venue answers it with nothing:
@@ -2312,6 +2331,7 @@ impl ClientCore {
             self.con_id_to_instrument.lock().unwrap().retain(|_, held| *held != instrument);
             for req_id in &watching {
                 self.mdt_sent.lock().unwrap().remove(req_id);
+                self.tick_req_params_sent.lock().unwrap().remove(req_id);
                 // The slot going back ends the request, and a number that
                 // outlives its request with its marks still standing is read as
                 // the request it was: reused for an ordinary stream it was
@@ -3056,6 +3076,7 @@ impl ClientCore {
             // removed, and the number was left standing for a request watching
             // nothing at all.
             own.epoch.remove(&req_id);
+            self.tick_req_params_sent.lock().unwrap().remove(&req_id);
             let Some(instrument) = own.by_req.remove(&req_id) else {
                 own.series.remove(&req_id);
                 return WhatAWithdrawalLeaves {
@@ -5275,12 +5296,12 @@ impl ClientCore {
 
         let mut already = self.last_stated_account.lock().unwrap();
         let mut fields = Vec::new();
-        for (key, value, currency) in stated {
-            let held = already.get(&(key.clone(), currency.clone()));
+        for (ledger, key, value, currency) in stated {
+            let held = already.get(&(ledger, key.clone(), currency.clone()));
             if held.map(String::as_str) == Some(value.as_str()) {
                 continue;
             }
-            already.insert((key.clone(), currency.clone()), value.clone());
+            already.insert((ledger, key.clone(), currency.clone()), value.clone());
             fields.push(AccountFieldUpdate { key, value, currency });
         }
 
@@ -5323,20 +5344,19 @@ impl ClientCore {
         &self, shared: &SharedState, req_id: i64,
     ) -> Vec<AccountFieldUpdate> {
         let ledger_only = self.ledger_only_multi.lock().unwrap().contains(&req_id);
-        let ledger = ledger_only.then(|| shared.portfolio.stated_by_the_ledger());
         let mut held = self.last_stated_account_multi.lock().unwrap();
         let already = held.entry(req_id).or_default();
         let mut moved = Vec::new();
-        for (key, value, currency) in shared.portfolio.stated_account_values() {
-            if ledger.as_ref().is_some_and(|l| !l.contains(&(key.clone(), currency.clone()))) {
+        for (ledger, key, value, currency) in shared.portfolio.stated_account_values() {
+            if ledger_only && !ledger {
                 continue;
             }
-            if already.get(&(key.clone(), currency.clone())).map(String::as_str)
+            if already.get(&(ledger, key.clone(), currency.clone())).map(String::as_str)
                 == Some(value.as_str())
             {
                 continue;
             }
-            already.insert((key.clone(), currency.clone()), value.clone());
+            already.insert((ledger, key.clone(), currency.clone()), value.clone());
             moved.push(AccountFieldUpdate { key, value, currency });
         }
         moved
@@ -5487,11 +5507,11 @@ impl ClientCore {
             let wants_all = tags.is_empty() || tags.iter().any(|t| t == "All");
             let entries: Vec<_> = stated
                 .iter()
-                .filter(|(key, _, currency)| {
+                .filter(|(_, key, _, currency)| {
                     wants_all || tags.iter().any(|t| Self::answers_tag(t, key, currency))
                 })
-                .filter_map(|(key, value, currency)| {
-                    let previous = already.insert((key.clone(), currency.clone()), value.clone());
+                .filter_map(|(ledger, key, value, currency)| {
+                    let previous = already.insert((*ledger, key.clone(), currency.clone()), value.clone());
                     if previous.as_ref() == Some(value) {
                         return None;
                     }
@@ -5573,6 +5593,15 @@ impl ClientCore {
     /// `manual` is the only key any request takes, the two option calculations
     /// take none, and an accepted one changes nothing a gateway sends or does.
     pub fn check_option_list(list: &OptionList, text: &str, features: &[String]) -> Result<(), Refusal> {
+        let read = Self::read_option_list(list, text, features)?;
+        Self::check_manual_option(list, &read)
+    }
+
+    /// Read the option field and check its keys and values. An order checks
+    /// the manual value later, after its preview and trailing values.
+    pub(crate) fn read_option_list<'a>(
+        list: &OptionList, text: &'a str, features: &[String],
+    ) -> Result<Vec<(&'a str, &'a str)>, Refusal> {
         let mut read: Vec<(&str, &str)> = Vec::new();
         for entry in text.split(';').filter(|e| !e.is_empty()) {
             let mut part = entry.split('=').filter(|p| !p.is_empty());
@@ -5621,6 +5650,10 @@ impl ClientCore {
                 }
             }
         }
+        Ok(read)
+    }
+
+    fn check_manual_option(list: &OptionList, read: &[(&str, &str)]) -> Result<(), Refusal> {
         // The later check, made once the request is read, on a value trimmed
         // of whatever sorts at or below a space and read as a number.
         // ponytail: ASCII digits only. A gateway reads any script's digits, so
@@ -5647,6 +5680,10 @@ impl ClientCore {
     /// reason. This client answers under the same number with the same reason,
     /// without the name.
     pub fn validate_order(order: &ApiOrder, session: &OrderSession) -> Result<(), Refusal> {
+        // An option list that cannot be read, or names an unknown key or
+        // value, is refused before anything else about the order.
+        let written_options = Self::written_options(&order.order_misc_options);
+        let options = Self::read_option_list(&ORDER_OPTIONS, &written_options, &session.features)?;
         order.side()?;
 
         // An execution condition names a symbol, an exchange and a security
@@ -5894,11 +5931,6 @@ impl ClientCore {
                  it unset to place the order.",
             ));
         }
-        // The one option a gateway knows on an order, checked the way every
-        // request's list is.
-        Self::check_option_list(
-            &ORDER_OPTIONS, &Self::written_options(&order.order_misc_options), &session.features,
-        )?;
         // What kind of preview is asked for. A released gateway previews the
         // ordinary kind alone; an unset kind is nought.
         let what_if_type = if order.what_if_type == i32::MAX { 0 } else { order.what_if_type };
@@ -5923,16 +5955,10 @@ impl ClientCore {
         if !session.advisor && session.holds_several_accounts() && order.account.is_empty() {
             return Err(Refusal::validation("You must specify an account."));
         }
-        // Declining smart routing, where the venue has withdrawn it. Where it
-        // has not, the order goes without it and the caller is warned: see
-        // `order_warning`.
-        if order.opt_out_smart_routing && session.enables("DEPRPREFBEST") {
-            return Err(Refusal::stated(
-                OPT_OUT_SMART_ROUTING_WITHDRAWN,
-                "The 'OptOutFromSmartRouting' order attribute is not supported.",
-            ));
-        }
-
+        // NOAPIMISCVLD lifts the key and value checks; a manual value other
+        // than 0 or 1 is still refused, after the preview and trailing-percent
+        // checks.
+        Self::check_manual_option(&ORDER_OPTIONS, &options)?;
 
         // Held until a stated moment. Unreadable, the delay used to be dropped
         // and the order filled at once, which is the opposite of what was asked.
@@ -6092,6 +6118,9 @@ impl ClientCore {
                     order.algo_strategy, order.order_type, order.lmt_price,
                 ).into());
             }
+            if let (_, Some(why)) = Self::retired_instructions(order, session) {
+                return Err(why);
+            }
             return Ok(());
         }
         // A preview asks about an order this client could send, so it answers
@@ -6102,6 +6131,9 @@ impl ClientCore {
             return Err(Self::not_an_order_type(order));
         }
         if order.what_if {
+            if let (_, Some(why)) = Self::retired_instructions(order, session) {
+                return Err(why);
+            }
             return Ok(());
         }
 
@@ -6145,6 +6177,10 @@ impl ClientCore {
             _ => {}
         }
 
+        // Retired instructions are processed after all the order fields.
+        if let (_, Some(why)) = Self::retired_instructions(order, session) {
+            return Err(why);
+        }
         Ok(())
     }
 
@@ -6157,15 +6193,34 @@ impl ClientCore {
         )
     }
 
-    /// What a gateway warns about an order it places anyway, on the order's
-    /// own number: declining smart routing, which the order goes without.
-    pub fn order_warning(order: &ApiOrder, session: &OrderSession) -> Option<Refusal> {
-        (order.opt_out_smart_routing && !session.enables("DEPRPREFBEST")).then(|| {
-            Refusal::stated(
-                OPT_OUT_SMART_ROUTING_DROPPED,
-                "The 'OptOutFromSmartRouting' order attribute is not supported.",
-            )
-        })
+    /// The retired instructions an order states, walked in the order a
+    /// gateway walks them: `e_trade_only`, `firm_quote_only`,
+    /// `nbbo_price_cap`, then `opt_out_smart_routing`. Where the session has
+    /// withdrawn one, the walk stops there with its refusal; otherwise the
+    /// order goes without it and the caller is warned. Returns the warnings
+    /// given before the walk ended, and the refusal that ended it.
+    pub fn retired_instructions(order: &ApiOrder, session: &OrderSession) -> (Vec<Refusal>, Option<Refusal>) {
+        let cap = order.nbbo_price_cap != f64::MAX && order.nbbo_price_cap.is_finite();
+        let mut warned = Vec::new();
+        for (stated, feature, refused, warning, name) in [
+            (order.e_trade_only, "DEPRETFQNC", E_TRADE_ONLY_WITHDRAWN, E_TRADE_ONLY_DROPPED, "EtradeOnly"),
+            (order.firm_quote_only, "DEPRETFQNC", FIRM_QUOTE_ONLY_WITHDRAWN, FIRM_QUOTE_ONLY_DROPPED, "FirmQuoteOnly"),
+            (cap, "DEPRETFQNC", NBBO_PRICE_CAP_WITHDRAWN, NBBO_PRICE_CAP_DROPPED, "NbboPriceCap"),
+            (
+                order.opt_out_smart_routing, "DEPRPREFBEST",
+                OPT_OUT_SMART_ROUTING_WITHDRAWN, OPT_OUT_SMART_ROUTING_DROPPED, "OptOutFromSmartRouting",
+            ),
+        ] {
+            if !stated {
+                continue;
+            }
+            let why = format!("The '{name}' order attribute is not supported.");
+            if session.enables(feature) {
+                return (warned, Some(Refusal::stated(refused, why)));
+            }
+            warned.push(Refusal::stated(warning, why));
+        }
+        (warned, None)
     }
 
     /// The order as it goes out on this session.
@@ -6175,11 +6230,19 @@ impl ClientCore {
     /// record of the order. A login holding several states the one the order
     /// names.
     pub fn as_sent<'a>(order: &'a ApiOrder, session: &OrderSession) -> std::borrow::Cow<'a, ApiOrder> {
-        if order.account.is_empty() || session.holds_several_accounts() {
+        let clear_account = !order.account.is_empty() && !session.holds_several_accounts();
+        if !clear_account && !order.e_trade_only && !order.firm_quote_only
+            && order.nbbo_price_cap == f64::MAX
+        {
             return std::borrow::Cow::Borrowed(order);
         }
         let mut sent = order.clone();
-        sent.account.clear();
+        if clear_account {
+            sent.account.clear();
+        }
+        sent.e_trade_only = false;
+        sent.firm_quote_only = false;
+        sent.nbbo_price_cap = f64::MAX;
         std::borrow::Cow::Owned(sent)
     }
 
