@@ -234,8 +234,10 @@ impl EClient {
         // venue has not named this one yet — a program keeping its own numbers
         // off `next_valid_id`, which is the reference client's own idiom, then
         // asked for one and was given a number it had put on the market
-        // moments before.
-        self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+        // moments before. A preview's own number is not one of those.
+        if !super::a_question_of_ours(oid) {
+            self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+        }
 
         // Before the slot a tracked order holds is compared with the one this
         // contract is cached under: the engine may have given that slot back.
@@ -510,14 +512,25 @@ impl EClient {
 
     /// Cancel an order. Matches `cancelOrder` in C++.
     ///
-    /// A cancel names five fields on this wire and no time among them, so a
-    /// stated `manual_order_cancel_time` cannot travel. The cancel goes anyway
-    /// and the caller is told the record did not: a live order left standing
-    /// because a regulatory annotation has nowhere to go is the worse of the
-    /// two, and the client this one stands in for withdraws it — it states the
-    /// time on every cancel it sends. Taken in silence, as this did, the order
-    /// came back under nobody's name while the caller had given one.
-    pub fn cancel_order(&self, order_id: i64, manual_order_cancel_time: &str) -> Result<(), Refusal> {
+    /// The second argument is what the withdrawal states about itself —
+    /// [`OrderCancel`](crate::types::model::OrderCancel), or a time alone;
+    /// `""` states nothing. Who is withdrawing it and whether a person
+    /// entered it travel on the cancel, as a gateway writes them: from the
+    /// withdrawal, not from the placement.
+    ///
+    /// A time does not travel. A gateway sends it only where the venue has
+    /// turned that record on for the login, and this client does not read
+    /// whether it has. The cancel goes anyway and the caller is told the time
+    /// did not: a live order left standing because a regulatory annotation
+    /// has nowhere to go is the worse of the two. Taken in silence, the order
+    /// would come back without the record while the caller had given one. A time a
+    /// gateway cannot read is refused as a gateway refuses it, under 10301,
+    /// and nothing is withdrawn.
+    pub fn cancel_order(
+        &self, order_id: i64, order_cancel: impl Into<crate::types::model::OrderCancel>,
+    ) -> Result<(), Refusal> {
+        let order_cancel = order_cancel.into();
+        let manual_order_cancel_time = order_cancel.manual_order_cancel_time.as_str();
         self.refuse_if_trading_is_over("a withdrawal")?;
         self.core.refuse_if_readonly("a cancel").map_err(Refusal::validation)?;
         // Tag 11 order ids start at 1. A negative id cast unchecked becomes a
@@ -527,6 +540,8 @@ impl EClient {
                 "order_id {order_id} is not an order number: they start at one",
             ))
         })?;
+        ClientCore::check_cancel_time(manual_order_cancel_time)?;
+        super::wire_text("a withdrawal's operator", &order_cancel.ext_operator)?;
         // Said for a withdrawal that happens — after a held order is
         // forgotten, or before the cancel goes — and not for one refused
         // below as spent or unknown, which withdrew nothing.
@@ -541,10 +556,11 @@ impl EClient {
                     order_id,
                     Refusal::VALIDATION,
                     format!(
-                        "a withdrawal states a time, and this protocol carries no field for \
-                         it: the cancel names five and none of them is that one, so the order \
-                         is withdrawn without it. State it where the order was placed to have \
-                         it recorded. (stated: {manual_order_cancel_time})",
+                        "a withdrawal states a time, and this client does not send it: a \
+                         gateway sends one only where the venue has turned that record on \
+                         for the login, and this client does not read whether it has, so \
+                         the order is withdrawn without it. State it where the order was \
+                         placed to have it recorded. (stated: {manual_order_cancel_time})",
                     ),
                 );
         };
@@ -595,7 +611,7 @@ impl EClient {
             ));
         }
         annotate();
-        self.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
+        self.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: order_cancel }))
     }
 
     /// Cancel an order identified by `permId` — stable across sessions.
@@ -647,9 +663,19 @@ impl EClient {
     /// given a slot in this client's instrument table — the engine holds no
     /// record of such an order, so no cancel here names it and it goes on
     /// working at the venue.
-    pub fn req_global_cancel(&self) -> Result<(), Refusal> {
+    ///
+    /// What the withdrawal states — who is withdrawing and whether a person
+    /// entered it — travels on every cancel, as a gateway states it on every
+    /// order it withdraws. A time does not: the reference client writes none
+    /// on a withdrawal of everything, so a gateway never reads one, and one
+    /// stated here goes the same way.
+    pub fn req_global_cancel(
+        &self, order_cancel: impl Into<crate::types::model::OrderCancel>,
+    ) -> Result<(), Refusal> {
+        let stated = order_cancel.into();
         self.refuse_if_trading_is_over("a withdrawal of every order")?;
         self.core.refuse_if_readonly("a global cancel").map_err(Refusal::validation)?;
+        super::wire_text("a withdrawal's operator", &stated.ext_operator)?;
         // Everything held goes with everything working: an order the venue was
         // never given is withdrawn by forgetting it, and left queued it would
         // go out behind the next thing that transmits — after the caller had
@@ -665,7 +691,8 @@ impl EClient {
         // was not told how many went.
         let mut unsent = 0usize;
         for instrument in 0..count {
-            if self.send(ControlCommand::Order(OrderRequest::CancelAll { instrument })).is_err() {
+            let cancel = OrderRequest::CancelAll { instrument, stated: stated.clone() };
+            if self.send(ControlCommand::Order(cancel)).is_err() {
                 unsent += 1;
             }
         }

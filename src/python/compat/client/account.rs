@@ -227,20 +227,7 @@ impl EClient {
         // it did not. Taken here, and given below to the per-request watchers,
         // which have not been answered and would otherwise never hear of them.
         let already_stated = shared.portfolio.drain_position_changes();
-        let waited_from = std::time::Instant::now();
-        let mut positions = shared.portfolio.position_infos();
-        loop {
-            let unnamed = positions.iter().any(|pi| {
-                pi.position != 0.0
-                    && pi.symbol.is_empty()
-                    && self.core.get_contract(pi.con_id, &shared).is_none()
-            });
-            if !unnamed || waited_from.elapsed() > std::time::Duration::from_secs(2) {
-                break;
-            }
-            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(20)));
-            positions = shared.portfolio.position_infos();
-        }
+        let positions = self.core.named_positions(&shared, |d| py.detach(|| std::thread::sleep(d)));
         for pi in &positions {
             let c_py = Py::new(py, self.position_contract(py, pi, &shared)?)?.into_any();
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;

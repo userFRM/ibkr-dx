@@ -188,7 +188,7 @@ fn cancel_order_naming_nothing_is_answered_rather_than_sent() {
 #[test]
 fn req_global_cancel_no_instruments_no_commands() {
     let (client, rx, _shared) = test_client();
-    client.req_global_cancel().unwrap();
+    client.req_global_cancel("").unwrap();
     assert!(rx.try_recv().is_err());
 }
 

@@ -278,6 +278,14 @@ pub(super) fn stated_action(
 /// start of the stretch it asked about found no such field.
 type TradingSchedule = (String, String, String, Vec<(String, String, String)>);
 
+/// A holding as `position` states it: the account, the contract, the position
+/// and its average cost.
+type Holding = (String, Py<Contract>, f64, f64);
+
+/// A scan's row as `scannerData` states it: its rank, the contract's details,
+/// and the distance, benchmark and projection the venue states beside it.
+type ScannedRow = (i32, Py<ContractDetails>, String, String, String);
+
 #[pymethods]
 impl EClient {
     /// Everything the venue knows about the contracts matching a description.
@@ -352,7 +360,7 @@ impl EClient {
         self.paired_sender(&shared)?;
         self.req_historical_data(
             py, req_id, contract, end_date_time, duration_str, bar_size_setting,
-            what_to_show, use_rth, 1, false, Vec::new(),
+            what_to_show, use_rth, 1, false, None,
         )?;
 
         // The venue may answer in parts. Keep what each part carries and stop
@@ -497,7 +505,7 @@ impl EClient {
         self.paired_sender(&shared)?;
         self.req_historical_news(
             py, req_id, con_id, provider_codes, start_date_time, end_date_time,
-            total_results, Vec::new(),
+            total_results, None,
         )?;
         let what = format!("the headlines for contract {con_id}");
         let (headlines, _) = wait_for(py, &shared, req_id, &what, |sh| {
@@ -648,11 +656,128 @@ impl EClient {
         // landing between them is refused rather than sending the request
         // where nobody is waiting.
         self.paired_sender(&shared)?;
-        self.req_fundamental_data(py, req_id, contract, report_type, Vec::new())?;
+        self.req_fundamental_data(py, req_id, contract, report_type, None)?;
         let what = format!("a {report_type} report for {}", contract.symbol);
         wait_for(py, &shared, req_id, &what, |sh| {
             sh.reference.take_fundamental_for(req_id as u32)
         })
+    }
+
+    /// Every holding in the account: one tuple per holding, its account, its
+    /// contract, the position and its average cost — what `position` states,
+    /// handed back rather than delivered.
+    ///
+    /// Read once the account has finished stating its holdings, as
+    /// `req_positions` reads them; where it had not within the wait, what this
+    /// session already held is answered and the log says so. A holding named
+    /// by id alone is given a moment for its definition to land, as there.
+    /// Nothing is subscribed: asking again reads again.
+    fn positions(&self, py: Python<'_>) -> PyResult<Vec<Holding>> {
+        let shared = self.connected_shared()?;
+        let held = py.detach(|| self.core.held_positions(&shared, std::thread::sleep))
+            .map_err(|why| PyRuntimeError::new_err(format!("{} ({})", why.message, why.code)))?;
+        let account = self.account();
+        held.iter()
+            .map(|pi| Ok((
+                account.clone(),
+                Py::new(py, self.position_contract(py, pi, &shared)?)?,
+                pi.position,
+                pi.avg_cost as f64 / crate::types::model::PRICE_SCALE_F,
+            )))
+            .collect()
+    }
+
+    /// What the venue says an order would cost, without placing it: the
+    /// order's own placement with the question marked on it, answered with
+    /// the state the venue states for it.
+    ///
+    /// Numbered in the band these calls take, so the answer is this call's and
+    /// the dispatch loop leaves it, with anything said about it. A placement
+    /// this client refuses raises at once, with the refusal's words.
+    fn what_if_order(
+        &self, py: Python<'_>, contract: &Contract, order: &super::super::contract::Order,
+    ) -> PyResult<super::super::contract::OrderState> {
+        let shared = self.connected_shared()?;
+        let _answering = crate::api::client::Answering::begin();
+        let asked = ask_id(&shared);
+        let order_id = asked.get();
+        self.paired_sender(&shared)?;
+        let mut preview = order.clone();
+        preview.what_if = true;
+        self.place_order(py, order_id, contract, &preview)?;
+        let what = format!("a preview of {} {} {}", preview.action, preview.total_quantity, contract.symbol);
+        let answered = wait_for(py, &shared, order_id, &what, |sh| {
+            sh.orders.take_what_if_for(order_id as u64).map(Ok)
+                .or_else(|| sh.orders.take_order_inactive_for(order_id as u64).map(Err))
+        });
+        // A preview reaches nothing, so its record is taken back whichever way
+        // it ended; left standing, it read as a working order and its number
+        // as spent. What was said about it goes with it: the other surface
+        // hears it inside the call, and a program never used the number.
+        self.core.untrack_order(order_id as u64);
+        drop(shared.orders.drain_order_notices_for_dispatch(|id| id != order_id as u64));
+        match answered? {
+            Ok(answer) => Ok(super::super::contract::OrderState::from_api(
+                &crate::types::model::OrderState::from(&answer),
+            )),
+            Err((code, message)) => Err(PyRuntimeError::new_err(format!("{message} ({code})"))),
+        }
+    }
+
+    /// Run a scan and hand back what it found: one tuple per row, its rank and
+    /// the contract's details, then the distance, benchmark and projection the
+    /// venue states beside it, empty where it states none.
+    ///
+    /// The subscription is withdrawn before this returns: a scan asked for once
+    /// is a question, and left running it keeps answering into a session
+    /// nobody is reading. A scan the venue will not run raises with its words.
+    fn scan(
+        &self, py: Python<'_>, instrument: &str, location_code: &str, scan_code: &str, most: u32,
+    ) -> PyResult<Vec<ScannedRow>> {
+        let shared = self.connected_shared()?;
+        let _answering = crate::api::client::Answering::begin();
+        let asked = ask_id(&shared);
+        let req_id = asked.get();
+        let tx = self.paired_sender(&shared)?;
+        Self::send_control(py, &tx, crate::types::commands::ControlCommand::SubscribeScanner {
+            req_id: req_id as u32,
+            instrument: instrument.to_string(),
+            location_code: location_code.to_string(),
+            scan_code: scan_code.to_string(),
+            max_items: most,
+            filters: Vec::new(),
+        })?;
+        let found = wait_for(py, &shared, req_id, &format!("a {scan_code} scan"), |sh| {
+            sh.reference.take_scanner_data_for(req_id as u32).into_iter().next()
+        });
+        // Withdrawn, and said so when it is not: this call states that it
+        // does not leave a scan running.
+        if let Err(e) = Self::send_control(
+            py, &tx, crate::types::commands::ControlCommand::CancelScanner { req_id: req_id as u32 },
+        ) {
+            log::warn!("scan {req_id} was not withdrawn: {e}");
+        }
+        let found = found?;
+        if !found.error_text.is_empty() {
+            return Err(PyRuntimeError::new_err(format!("{} ({})", found.error_text, Refusal::VALIDATION)));
+        }
+        found.entries.iter().enumerate()
+            .map(|(rank, entry)| Ok((
+                rank as i32,
+                self.scanned_details(py, entry, &shared)?,
+                String::new(), String::new(), String::new(),
+            )))
+            .collect()
+    }
+
+    /// What the corporate-events calendar says it carries, as the venue's JSON.
+    fn calendar_schema(&self, py: Python<'_>) -> PyResult<String> {
+        self.ask_calendar(py, None)
+    }
+
+    /// The calendar's events for one contract, as the venue's JSON.
+    fn calendar_events(&self, py: Python<'_>, con_id: i64) -> PyResult<String> {
+        self.ask_calendar(py, Some(con_id))
     }
 
     /// Fill in what the venue knows about a contract, above all its id.
@@ -708,6 +833,28 @@ impl EClient {
 /// raising — uses these, because picking a code for itself is how a session
 /// that ended mid-lookup comes out as a contract that does not exist.
 impl EClient {
+    /// The calendar asked for its schema, or for one contract's events, and
+    /// waited on. As the venue's JSON: it states a schema of its own that
+    /// changes without notice, and a shape imposed here would be one to keep
+    /// in step with it.
+    fn ask_calendar(&self, py: Python<'_>, con_id: Option<i64>) -> PyResult<String> {
+        let shared = self.connected_shared()?;
+        let _answering = crate::api::client::Answering::begin();
+        let asked = ask_id(&shared);
+        let req_id = asked.get();
+        let tx = self.paired_sender(&shared)?;
+        let request = match con_id {
+            None => crate::types::commands::ControlCommand::FetchCalendarMetaData { req_id: req_id as u32 },
+            Some(con_id) => crate::types::commands::ControlCommand::FetchCalendarEvents {
+                req_id: req_id as u32,
+                query: Box::new(crate::types::CalendarQuery { con_id: Some(con_id), ..Default::default() }),
+            },
+        };
+        Self::send_control(py, &tx, request)?;
+        let what = if con_id.is_some() { "calendar events" } else { "the calendar's schema" };
+        wait_for(py, &shared, req_id, what, |sh| sh.reference.take_calendar_for(req_id as u32))
+    }
+
     pub(crate) fn contract_details_stated(
         &self,
         py: Python<'_>,

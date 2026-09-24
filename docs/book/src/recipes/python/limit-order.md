@@ -11,8 +11,12 @@ Connect, take an id, place, read status, cancel, disconnect.
   is what lets it be acknowledged outside regular hours.
 - `order_status` callbacks. `PreSubmitted` then `Submitted` while it rests,
   `Cancelled` once the cancel lands.
-- `cancel_order(order_id, manual_order_cancel_time)`. Pass `""` for the second
-  argument unless you are stating a manual cancel time.
+- `cancel_order(order_id, order_cancel)`. The second argument is what the
+  withdrawal states about itself: an `OrderCancel` (who is withdrawing it,
+  whether a person entered it, a manual time), or a time alone; `""` states
+  nothing. The operator and who entered it travel on the cancel. A time does
+  not, and the caller is told so on `error`; a time a gateway cannot read is
+  refused under 10301 and the order keeps working.
 
 ## What comes back
 

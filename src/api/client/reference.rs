@@ -150,6 +150,20 @@ impl EClient {
         })
     }
 
+    /// Withdraw a contract lookup. Matches `cancelContractData` in C++.
+    ///
+    /// Nothing is sent and nothing answers, and `req_id` names nothing to
+    /// withdraw. A gateway asks the venue nothing for this either: it only
+    /// stops re-sending a lookup it held back while its connection to the
+    /// venue was down, and this client holds none back — a lookup made with no
+    /// connection is refused there and then. A lookup already asked for is
+    /// still answered, as it is through a gateway.
+    pub fn cancel_contract_data(&self, req_id: i64) -> Result<(), Refusal> {
+        let _ = req_id;
+        if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
+        Ok(())
+    }
+
     /// Request available exchanges for market depth.
     pub fn req_mkt_depth_exchanges(&self) -> Result<(), Refusal> {
         self.send(ControlCommand::FetchMktDepthExchanges)
@@ -452,9 +466,10 @@ impl EClient {
         self.send(ControlCommand::CancelFundamentalData { req_id: wire_req_id(req_id)? })
     }
 
-    /// Withdraw a historical news query. Matches `cancelHistoricalNews` in C++.
+    /// Withdraw a historical news query.
     ///
-    /// One message carrying the id the query went out under, which is the whole
+    /// The TWS API has no call for this; the venue has a message for it. One
+    /// message carrying the id the query went out under, which is the whole
     /// of what a withdrawal states. Sent whether or not the query has been
     /// answered: the venue serves it past the reply, so a withdrawal gated on
     /// this client's own pending list would send nothing in the case that
@@ -529,6 +544,21 @@ impl EClient {
             use_rth,
             include_expired: contract.include_expired,
         })
+    }
+
+    /// Withdraw a historical ticks request. Matches `cancelHistoricalTicks` in
+    /// C++.
+    ///
+    /// Nothing is sent and nothing answers, and `req_id` names nothing to
+    /// withdraw, as for [`cancel_contract_data`](EClient::cancel_contract_data):
+    /// a gateway only stops re-sending a request it held back while its
+    /// connection to the venue was down, which this client never does. Ticks
+    /// already asked for still arrive, and a request waiting for its contract
+    /// to be named still goes once it is, as through a gateway.
+    pub fn cancel_historical_ticks(&self, req_id: i64) -> Result<(), Refusal> {
+        let _ = req_id;
+        if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
+        Ok(())
     }
 
     // ── Historical Schedule ──

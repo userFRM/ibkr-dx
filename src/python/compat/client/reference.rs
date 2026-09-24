@@ -12,10 +12,11 @@ use crate::client_core::ClientCore;
 impl EClient {
     /// Request historical bar data.
     ///
-    /// `chart_options` is taken and not applied. This protocol's request
-    /// carries no free-form option list, so what a caller puts in one cannot be
-    /// sent. The reference client's own list is empty on every ordinary call.
-    #[pyo3(signature = (req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=false, chart_options=Vec::new()))]
+    /// `chart_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=false, chart_options=None))]
     pub(crate) fn req_historical_data(
         &self,
         py: Python<'_>,
@@ -28,15 +29,18 @@ impl EClient {
         use_rth: i32,
         format_date: i32,
         keep_up_to_date: bool,
-        chart_options: Vec<Py<PyAny>>,
+        chart_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        // Before anything is noted, so a refused request leaves nothing behind.
+        if let Some(why) = self.options_refused(py, &crate::client_core::CHART_OPTIONS, chart_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         // How this request wants its bar times written, as on the other
         // surface: the venue states one form and the caller may want the other.
         self.core.note_date_format(req_id, format_date);
         // And what its range is counted from, which the reply does not state.
         self.core.note_historical_span(req_id, end_date_time, duration_str, bar_size_setting);
-        let _ = chart_options;
         // Whatever finished under this id before, this is a new request.
         if let Ok(wire) = wire_req_id(req_id) {
             self.core.historical_request_is_new(wire);
@@ -152,6 +156,19 @@ impl EClient {
         Ok(())
     }
 
+    /// Withdraw a contract lookup.
+    ///
+    /// Nothing is sent and nothing answers: there is nothing to withdraw. A
+    /// gateway asks the venue nothing for this either: it only stops
+    /// re-sending a lookup it held back while its connection to the venue was
+    /// down, and this client holds none back — a lookup made with no
+    /// connection is refused there and then. A lookup already asked for is
+    /// still answered, as it is through a gateway.
+    fn cancel_contract_data(&self, req_id: i64) -> PyResult<()> {
+        let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        Ok(())
+    }
+
     /// Request available exchanges for market depth.
     fn req_mkt_depth_exchanges(&self, py: Python<'_>) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
@@ -211,19 +228,18 @@ impl EClient {
 
     /// Request scanner subscription.
     ///
-    /// `scanner_subscription_options` is taken and not applied. This protocol's
-    /// request carries no free-form option list, so what a caller puts in one
-    /// cannot be sent. The reference client's own list is empty on every
-    /// ordinary call.
-    #[pyo3(signature = (req_id, subscription, scanner_subscription_options=Vec::new(), scanner_subscription_filter_options=Vec::new()))]
+    /// `scanner_subscription_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, subscription, scanner_subscription_options=None, scanner_subscription_filter_options=None))]
     fn req_scanner_subscription(
         &self,
         req_id: i64,
         subscription: Py<PyAny>,
-        scanner_subscription_options: Vec<Py<PyAny>>,
-        scanner_subscription_filter_options: Vec<Py<PyAny>>,
+        scanner_subscription_options: Option<Vec<Py<PyAny>>>,
+        scanner_subscription_filter_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let _ = scanner_subscription_options;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         Python::attach(|py| {
             // An absent attribute takes the default. One that is present and
@@ -258,10 +274,14 @@ impl EClient {
             // picks, and so does its absence here.
             let rows = stated!("numberOfRows", i64, -1);
             let max_items = if rows < 0 { 50 } else { rows.min(u32::MAX as i64) as u32 };
-            let filters = match scanner_filters(py, &subscription, &scanner_subscription_filter_options) {
+            let filters = match scanner_filters(py, &subscription, &scanner_subscription_filter_options.unwrap_or_default()) {
                 Ok(filters) => filters,
                 Err(why) => return self.report_refusal(py, req_id, why),
             };
+            // Read after the filters, as a gateway reads the list after them.
+            if let Some(why) = self.options_refused(py, &crate::client_core::SCANNER_OPTIONS, scanner_subscription_options)? {
+                return self.report_refusal(py, req_id, why);
+            }
             Self::send_control(py, &tx, ControlCommand::SubscribeScanner {
                 req_id: wire_req_id(req_id)?, instrument, location_code, scan_code, max_items, filters,
             })
@@ -288,20 +308,23 @@ impl EClient {
 
     /// Request a news article.
     ///
-    /// `news_article_options` is taken and not applied. This protocol's request
-    /// carries no free-form option list, so what a caller puts in one cannot be
-    /// sent. The reference client's own list is empty on every ordinary call.
-    #[pyo3(signature = (req_id, provider_code, article_id, news_article_options=Vec::new()))]
+    /// `news_article_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, provider_code, article_id, news_article_options=None))]
     fn req_news_article(
         &self,
         py: Python<'_>,
         req_id: i64,
         provider_code: &str,
         article_id: &str,
-        news_article_options: Vec<Py<PyAny>>,
+        news_article_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let _ = news_article_options;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Some(why) = self.options_refused(py, &crate::client_core::NEWS_ARTICLE_OPTIONS, news_article_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchNewsArticle {
                 req_id: wire_req_id(req_id)?,
                 provider_code: provider_code.to_string(),
@@ -318,11 +341,11 @@ impl EClient {
     /// optionally with fractional seconds. Empty bounds are omitted; unreadable
     /// ones are refused so the window is not lost.
     ///
-    /// `historical_news_options` is taken and not applied. This protocol's
-    /// request carries no free-form option list, so what a caller puts in one
-    /// cannot be sent. The reference client's own list is empty on every
-    /// ordinary call.
-    #[pyo3(signature = (req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options=Vec::new()))]
+    /// `historical_news_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options=None))]
     pub(crate) fn req_historical_news(
         &self,
         py: Python<'_>,
@@ -332,10 +355,12 @@ impl EClient {
         start_date_time: &str,
         end_date_time: &str,
         total_results: i32,
-        historical_news_options: Vec<Py<PyAny>>,
+        historical_news_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let _ = historical_news_options;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Some(why) = self.options_refused(py, &crate::client_core::HISTORICAL_NEWS_OPTIONS, historical_news_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = crate::control::news::validate_news_window(
             start_date_time, end_date_time,
         ) {
@@ -356,6 +381,21 @@ impl EClient {
         Ok(())
     }
 
+
+    /// Withdraw a historical news query.
+    ///
+    /// The TWS API has no call for this; the venue has a message for it. One
+    /// message carrying the number the query went out under, sent whether or
+    /// not the query has been answered: the venue serves it past the reply.
+    fn cancel_historical_news(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelHistoricalNews {
+                req_id: wire_req_id(req_id)?,
+            }) {
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        }
+        Ok(())
+    }
 
     /// Ask for a contract's corporate actions over a range of days.
     ///
@@ -469,18 +509,17 @@ impl EClient {
 
     /// Request fundamental data.
     ///
-    /// `fundamental_data_options` is taken and not applied. This protocol's
-    /// request carries no free-form option list, so what a caller puts in one
-    /// cannot be sent. The reference client's own list is empty on every
-    /// ordinary call.
-    #[pyo3(signature = (req_id, contract, report_type, fundamental_data_options=Vec::new()))]
+    /// `fundamental_data_options` is taken and nothing in it is checked or
+    /// applied, as through a gateway: a gateway reads no option list on this
+    /// request.
+    #[pyo3(signature = (req_id, contract, report_type, fundamental_data_options=None))]
     pub(crate) fn req_fundamental_data(
         &self,
         py: Python<'_>,
         req_id: i64,
         contract: &Contract,
         report_type: &str,
-        fundamental_data_options: Vec<Py<PyAny>>,
+        fundamental_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let _ = fundamental_data_options;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
@@ -505,10 +544,14 @@ impl EClient {
 
     /// Request historical tick data.
     ///
-    /// `ignore_size` and `misc_options` are taken and not applied. The request
-    /// has no field for suppressing size-only changes, and none for a free-form
-    /// option list.
-    #[pyo3(signature = (req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=false, misc_options=Vec::new()))]
+    /// `ignore_size` is taken and not applied: the request has no field for
+    /// suppressing size-only changes.
+    ///
+    /// `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=false, misc_options=None))]
     fn req_historical_ticks(
         &self,
         py: Python<'_>,
@@ -520,10 +563,13 @@ impl EClient {
         what_to_show: &str,
         use_rth: i32,
         ignore_size: bool,
-        misc_options: Vec<Py<PyAny>>,
+        misc_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let _ = (ignore_size, misc_options);
+        let _ = ignore_size;
+        if let Some(why) = self.options_refused(py, &crate::client_core::HISTORICAL_TICKS_OPTIONS, misc_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = crate::control::historical::tick_data_type(what_to_show)
             .map(|_| ())
             .and_then(|()| crate::control::historical::validate_tick_window(
@@ -550,6 +596,19 @@ impl EClient {
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
+        Ok(())
+    }
+
+    /// Withdraw a historical ticks request.
+    ///
+    /// Nothing is sent and nothing answers: there is nothing to withdraw, as
+    /// for `cancel_contract_data`. A gateway only stops re-sending a request
+    /// it held back while its connection to the venue was down, which this
+    /// client never does. Ticks already asked for still arrive, and a request
+    /// waiting for its contract to be named still goes once it is, as through
+    /// a gateway.
+    fn cancel_historical_ticks(&self, req_id: i64) -> PyResult<()> {
+        let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         Ok(())
     }
 
@@ -824,7 +883,7 @@ mod tests {
             };
 
             client.req_historical_data(
-                py, 7, &contract, "", "1 M", "1 day", "ADJUSTED_LAST", 1, 1, false, Vec::new(),
+                py, 7, &contract, "", "1 M", "1 day", "ADJUSTED_LAST", 1, 1, false, None,
             ).unwrap();
 
             let ControlCommand::FetchHistorical {
@@ -994,7 +1053,7 @@ mod tests {
             *client.control_tx.lock().unwrap() = Some(tx);
 
             let err = client
-                .req_historical_news(py, 1, 0, "BRFG", "", "", 10, Vec::new())
+                .req_historical_news(py, 1, 0, "BRFG", "", "", 10, None)
                 .expect_err("a contract id of zero names no contract");
             assert!(err.to_string().contains("is not one"), "{err}");
         });

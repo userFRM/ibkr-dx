@@ -8,7 +8,8 @@ Run: pytest tests/python/test_scanners.py -v -s
 
 import os, threading, time
 import pytest
-from ibkr_dx import EWrapper, EClient
+from conftest import inside_the_session, liquid_hours
+from ibkr_dx import Contract, EWrapper, EClient
 
 
 pytestmark = pytest.mark.skipif(
@@ -45,6 +46,8 @@ class MultiScannerWrapper(EWrapper):
         self.symbol_matches = []
         self.got_symbols = threading.Event()
 
+        self.errors = []  # (req_id, code, message)
+
     def next_valid_id(self, order_id):
         self.connected.set()
 
@@ -75,6 +78,8 @@ class MultiScannerWrapper(EWrapper):
         self.got_symbols.set()
 
     def error(self, req_id, error_time, error_code, error_string, advanced_order_reject_json=""):
+        with self.lock:
+            self.errors.append((req_id, error_code, error_string))
         if error_code not in (2104, 2106, 2158, 162):
             print(f"  [error] reqId={req_id} code={error_code}: {error_string}")
 
@@ -165,14 +170,29 @@ class TestMultiScanner:
         sub.aboveVolume = 1000000
 
         self.client.req_scanner_subscription(req_id, sub)
-        got = self.wrapper.got_scanner_end[req_id].wait(timeout=30)
+        deadline = time.monotonic() + 30
+        while (time.monotonic() < deadline and not self.wrapper.got_scanner_end[req_id].is_set()
+               and not [e for e in self.wrapper.errors if e[0] == req_id]):
+            time.sleep(0.1)
+        # The venue's refusal of a scan arrives in the shape of a finished one,
+        # its words and then the end; one this client makes has no end.
+        got = self.wrapper.got_scanner_end[req_id].wait(2)
         self.client.cancel_scanner_subscription(req_id)
 
-        if not got:
-            pytest.skip("Filtered scanner returned no data")
+        refused = [e for e in self.wrapper.errors if e[0] == req_id]
+        assert got, f"the filtered scan never ended within 30s: {refused}"
+        if refused:
+            pytest.skip(f"the venue refused the filtered scan: {refused[0]}")
 
         results = self.wrapper.scanner_results.get(req_id, [])
         print(f"  Filtered scanner: {len(results)} results")
+        spy = Contract()
+        spy.con_id, spy.symbol, spy.sec_type, spy.exchange, spy.currency = 756733, "SPY", "STK", "SMART", "USD"
+        if not results and not inside_the_session(self.client, spy):
+            pytest.skip(
+                "the filtered scan ended with no rows, and the venue's own liquid hours "
+                f"say the US session is shut ({liquid_hours(self.client, spy)})"
+            )
 
         # The end marker arrived, so the venue ran the scan. Nothing here
         # looked at what came back, so a filtered scan that answered with

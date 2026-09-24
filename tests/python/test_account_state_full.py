@@ -8,7 +8,8 @@ Run: pytest tests/python/test_account_state_full.py -v -s
 
 import os, threading, time
 import pytest
-from ibkr_dx import EWrapper, EClient, Contract
+from conftest import declined, give_back, inside_the_session, liquid_hours, wait_for
+from ibkr_dx import EWrapper, EClient, Contract, Order
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),
@@ -50,8 +51,17 @@ class AccountDeepWrapper(EWrapper):
         self.histogram = []
         self.got_histogram = threading.Event()
 
+        self.next_id = 0
+        self.statuses = {}  # order_id -> [status, ...]
+        self.errors = []  # (req_id, code, message)
+
     def next_valid_id(self, order_id):
+        self.next_id = order_id
         self.connected.set()
+
+    def order_status(self, order_id, status, filled, remaining, avg_fill_price, perm_id,
+                     parent_id, last_fill_price, client_id, why_held, mkt_cap_price):
+        self.statuses.setdefault(order_id, []).append(status)
 
     def managed_accounts(self, accounts_list):
         self.account_id = accounts_list
@@ -121,6 +131,7 @@ class AccountDeepWrapper(EWrapper):
         self.got_histogram.set()
 
     def error(self, req_id, error_time, error_code, error_string, advanced_order_reject_json=""):
+        self.errors.append((req_id, error_code, error_string))
         if error_code not in (2104, 2106, 2158):
             print(f"  [error] reqId={req_id} code={error_code}: {error_string}")
 
@@ -214,8 +225,11 @@ class TestAccountDeep:
         got = self.wrapper.got_pnl.wait(timeout=15)
         self.client.cancel_pnl(8001)
 
-        if not got:
-            pytest.skip("No P&L data — may need open positions")
+        # Reported whether or not the account holds anything: a flat account
+        # states its figures at nought. A refusal is this client's to explain.
+        refused = [e for e in self.wrapper.errors if e[0] == 8001]
+        assert not refused, f"the profit request was refused: {refused}"
+        assert got, "the account was asked for its running profit and stated none"
 
         pnl = self.wrapper.pnl_data
         print(f"  Account P&L: daily={pnl['daily_pnl']:.2f} "
@@ -224,34 +238,47 @@ class TestAccountDeep:
         assert isinstance(pnl["daily_pnl"], float)
 
     def test_pnl_single_per_position(self):
-        """ReqPnLSingle for each position."""
-        self.client.req_positions()
-        self.wrapper.got_position_end.wait(timeout=15)
+        """ReqPnLSingle on a holding the test makes for itself: one share of
+        SPY, bought inside the venue's hours and sold back afterwards."""
+        spy = Contract()
+        spy.con_id, spy.symbol, spy.sec_type, spy.exchange, spy.currency = SPY_CON_ID, "SPY", "STK", "SMART", "USD"
+        if not inside_the_session(self.client, spy):
+            pytest.skip(
+                "a market order fills inside the venue's liquid hours, and they say "
+                f"SPY's session is shut ({liquid_hours(self.client, spy)})"
+            )
 
-        if not self.wrapper.positions:
-            pytest.skip("No positions — cannot test pnlSingle")
+        def market(action):
+            o = Order()
+            o.action, o.order_type, o.total_quantity = action, "MKT", 1
+            return o
 
         acct = self.client.get_account_id()
-        req_ids = []
-        for i, pos in enumerate(self.wrapper.positions[:3]):  # Test up to 3
-            req_id = 8100 + i
-            req_ids.append((req_id, pos))
-            self.client.req_pnl_single(req_id, acct, "", pos["con_id"])
-
-        time.sleep(10)
-        answered = []
-        for req_id, pos in req_ids:
-            self.client.cancel_pnl_single(req_id)
-            data = self.wrapper.pnl_single_data.get(req_id)
-            if data:
-                answered.append(req_id)
-                print(f"    {pos['symbol']}: pos={data['pos']} daily={data['daily_pnl']:.2f} "
-                      f"unrealized={data['unrealized_pnl']:.2f} value={data['value']:.2f}")
-        # Printed and never checked, so a per-position P&L path that delivers
-        # nothing at all passed the test named after it.
-        assert answered, (
-            f"none of the {len(req_ids)} per-position P&L requests was answered"
-        )
+        self.client.req_positions()
+        bought, sold = self.wrapper.next_id, self.wrapper.next_id + 1
+        self.client.place_order(bought, spy, market("BUY"))
+        try:
+            assert wait_for(lambda: "Filled" in self.wrapper.statuses.get(bought, []), 30), (
+                f"one share bought at market inside the session did not fill: "
+                f"{self.wrapper.statuses.get(bought)}"
+            )
+            assert wait_for(lambda: any(
+                p["con_id"] == SPY_CON_ID and p["position"] >= 1 for p in self.wrapper.positions
+            ), 15), "the holding the fill made was not reported"
+            self.client.req_pnl_single(8100, acct, "", SPY_CON_ID)
+            answered = wait_for(lambda: 8100 in self.wrapper.pnl_single_data, 15)
+            self.client.cancel_pnl_single(8100)
+            refused = [e for e in self.wrapper.errors if e[0] == 8100]
+            assert not refused, f"the position's profit request was refused: {refused}"
+            assert answered, "the account holds SPY and no profit was reported on it"
+            data = self.wrapper.pnl_single_data[8100]
+            print(f"    SPY: pos={data['pos']} daily={data['daily_pnl']:.2f} "
+                  f"unrealized={data['unrealized_pnl']:.2f} value={data['value']:.2f}")
+            assert data["pos"] >= 1
+        finally:
+            give_back(self.client, lambda oid: self.wrapper.statuses.get(oid, []),
+                      bought, sold, spy, market("SELL"))
+            self.client.cancel_positions()
 
     def test_histogram_data(self):
         """ReqHistogramData for SPY (1 week)."""
@@ -264,11 +291,17 @@ class TestAccountDeep:
 
         self.client.req_histogram_data(8200, spy, False, "1 week")
 
-        got = self.wrapper.got_histogram.wait(timeout=30)
+        wait_for(lambda: self.wrapper.got_histogram.is_set()
+                 or [e for e in self.wrapper.errors if e[0] == 8200], 30)
+        got = self.wrapper.got_histogram.is_set()
         self.client.cancel_histogram_data(8200)
 
-        if not got:
-            pytest.skip("No histogram data")
+        # A historical-service question, answered at any hour: only the
+        # venue declining it is a reason to have no answer.
+        refused = declined(self.wrapper.errors, 8200)
+        if not got and refused:
+            pytest.skip(f"the venue declined the histogram: {refused[0]}")
+        assert got, f"no histogram within 30s: {[e for e in self.wrapper.errors if e[0] == 8200]}"
 
         print(f"  Histogram: {len(self.wrapper.histogram)} price points")
         assert len(self.wrapper.histogram) > 0, "Should have histogram data"

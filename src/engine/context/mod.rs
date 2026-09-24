@@ -354,12 +354,12 @@ impl Context {
     }
 
     pub fn cancel(&mut self, order_id: OrderId) {
-        self.pending_orders.push(OrderRequest::Cancel { order_id });
+        self.pending_orders.push(OrderRequest::Cancel { order_id, stated: Default::default() });
     }
 
     pub fn cancel_all(&mut self, instrument: InstrumentId) {
         self.pending_orders
-            .push(OrderRequest::CancelAll { instrument });
+            .push(OrderRequest::CancelAll { instrument, stated: Default::default() });
     }
 
     /// `outside_rth` is asserted on the replace: the tracked record has no

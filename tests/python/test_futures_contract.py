@@ -11,6 +11,8 @@ import os, threading, time
 import pytest
 from ibkr_dx import EWrapper, EClient, Contract, Order
 
+from conftest import declined
+
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),
     reason="IB_USERNAME and IB_PASSWORD not set",
@@ -165,16 +167,33 @@ class TestFutures:
         assert cd.contract.exchange == "CME"
 
     def test_market_data(self):
-        """Subscribe to ES market data (triggers usfuture farm)."""
-        es = make_es()
+        """A quote on the front-month ES, named by the venue first.
+
+        Skipped only where the venue declined the quote under the request,
+        quoted, or where the engine's own market-data connection dropped; a
+        refusal this client makes fails.
+        Anything else that ends without a price is silence, and fails: the
+        venue states a price for a listed future at any hour, or says why not.
+        """
+        found = self.client.contract_details(make_es())
+        assert found, "the venue named no front-month ES; reference data answers at any hour"
+        es = found[0].contract
         self.client.req_mkt_data(4002, es, "", False)
 
-        got = self.wrapper.got_tick.wait(timeout=30)
-        time.sleep(5)  # Collect a few ticks
+        def said():
+            return [e for e in self.wrapper.errors if e[0] == 4002] or declined(self.wrapper.errors, 4002)
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not self.wrapper.got_tick.is_set() and not said():
+            time.sleep(0.1)
+        got = self.wrapper.got_tick.is_set()
+        if got:
+            time.sleep(5)  # Collect a few ticks
         self.client.cancel_mkt_data(4002)
 
-        if not got:
-            pytest.skip("No ES tick data — usfuture farm may not be available")
+        if not got and declined(self.wrapper.errors, 4002):
+            pytest.skip(f"the venue declined the quote or its connection dropped: {declined(self.wrapper.errors, 4002)[0]}")
+        assert got, f"no price on a listed future within 30s: {said()}"
 
         print(f"  ES ticks: bid={self.wrapper.bid}, ask={self.wrapper.ask}, "
               f"last={self.wrapper.last}, ticks={self.wrapper.tick_count}")
@@ -208,7 +227,8 @@ class TestFutures:
         assert 1000 < bar.close < 20000, f"ES close {bar.close} out of range"
 
     def test_order_rejected_no_perms(self):
-        """Place ES LMT order — expect rejection (no futures perms on paper)."""
+        """Place ES LMT far from the market: the venue refuses it by number, or
+        works it and it is withdrawn. Either way something is said."""
         es = make_es()
         oid = self.wrapper.next_order_id
 
@@ -221,15 +241,25 @@ class TestFutures:
         order.outside_rth = True
 
         self.client.place_order(oid, es, order)
-        time.sleep(5)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            refused = [e for e in self.wrapper.errors if e[0] == oid and e[1] not in (2104, 2106, 2119, 2158)]
+            working = [s for s in self.wrapper.order_statuses.get(oid, []) if s in ("Submitted", "PreSubmitted")]
+            if refused or working:
+                break
+            time.sleep(0.1)
 
-        # Expect error 460 (no trading permissions) for futures
-        reject_errors = [e for e in self.wrapper.errors if e[1] == 460]
-        if reject_errors:
-            print(f"  Order rejected as expected: {reject_errors[0][2]}")
-        else:
-            # If it was accepted, cancel it
-            statuses = self.wrapper.order_statuses.get(oid, [])
-            print(f"  Order statuses: {statuses}")
-            self.client.cancel_order(oid, "")
-            time.sleep(2)
+        if refused:
+            print(f"  Order refused: {refused[0]}")
+            return
+        assert working, (
+            f"the venue said nothing about order {oid} within 20s: "
+            f"statuses {self.wrapper.order_statuses.get(oid, [])}"
+        )
+        self.client.cancel_order(oid, "")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and "Cancelled" not in self.wrapper.order_statuses.get(oid, []):
+            time.sleep(0.1)
+        assert "Cancelled" in self.wrapper.order_statuses.get(oid, []), (
+            f"a working order was withdrawn and not cancelled: {self.wrapper.order_statuses.get(oid, [])}"
+        )

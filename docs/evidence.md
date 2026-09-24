@@ -18,18 +18,18 @@ Verification runs against a paper account on IBKR production servers, and the or
 
 | | |
 | --- | --- |
-| Requests | 82. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
+| Requests | 85. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 155. 124 are sent; 19 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 3,658 offline, and 184 more that live in the suites run against a broker session |
+| Tests | 3,726 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
 | Measure | Count |
 | --- | --- |
-| Canonical calls | 80 |
-| Served, Rust | 80 |
-| Served, Python | 80 |
+| Canonical calls | 87 |
+| Served, Rust | 87 |
+| Served, Python | 87 |
 | Taken and not applied, Rust | 0 |
 | Taken and not applied, Python | 0 |
 | Canonical callbacks | 90 |
@@ -70,10 +70,10 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,787 | No |
+| Rust unit and integration | 2,795 | No |
 | Rust, live | 9 | Yes |
-| Python | 871 | No |
-| Python, live | 124 | Yes |
+| Python | 931 | No |
+| Python, live | 131 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
 Counted rather than stated: `scripts/check_status_counts.py` names every test
@@ -103,13 +103,13 @@ Every figure above is measured on each commit, and the build fails if one moves.
 
 | Capability | Status | Verification |
 | --- | :---: | --- |
-| Top of book | ✅ Supported | Streaming and snapshot; US equities and FX; `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx). Concurrent subscribers on one contract share one wire subscription |
+| Top of book | ✅ Supported | Streaming and snapshot; US equities and FX; `scripts/sdk_sweep.py`. Concurrent subscribers on one contract share one wire subscription |
 | Market depth (L2) | ✅ Supported | A book is asked for once, at the venue named, and every level names it; inserts, updates and deletes are delivered as the venue states them. Which venues answer depends on the account's entitlements — see the note below. `tests/python/test_live_depth.py`, `src/bin/capture_depth.rs` |
 | Historical bars | ✅ Supported | 9 markets in one session (`src/bin/capture_global.rs`); `keepUpToDate` verified in `tests/python/test_historical_and_scanner.py` |
-| Historical ticks and schedules | ✅ Supported | `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx); unsupported tick types return an error rather than substituting another series |
+| Historical ticks and schedules | ✅ Supported | `scripts/sdk_sweep.py`; unsupported tick types return an error rather than substituting another series |
 | Tick-by-tick quotes | ✅ Supported | FX and US equities, concurrent streams, each record carrying its request id; `tests/python/test_live_python_wrappers.py` |
 | Tick-by-tick trades | ✅ Supported | 67,785 trades over a 20-minute session; 327 in the first twenty seconds of one subscription. A stream is asked for by the venue's id for the contract, which is resolved first when the caller states a description, and by the name the caller used: `Last` and `AllLast` are two queries the venue answers apart, and which trades are on which is the venue's to say — measured on a liquid future, 104 and 139 records over two windows of the same length |
-| Real-time bars | ✅ Supported | Five-second bars streaming during regular hours, each carrying open, high, low, close and volume, alongside a book on the same session |
+| Real-time bars | ✅ Supported | Five-second bars streaming during regular hours, each carrying open, high, low, close and volume, alongside a book on the same session; `tests/python/test_live_python_wrappers.py::TestFiveSecondBars` |
 | Trading halt status | ✅ Supported | Tick 437 decoded from status mask and status index; `src/bin/capture_status.rs` |
 | Tick attributes | ✅ Supported | Per-trade `unreported` and `pastLimit`, read from the marks the venue writes beside a print, not from the size. A frame the venue sent is kept in the tests: on it no mark is set and the sizes are 1, 2, 1, 4, 1 |
 | Venue map behind the exchange mask | ✅ Supported | Asked for beside the quote and answered at regular trading hours with 18 venues, each with the letter the mask's bits refer to. Outside those hours the venue states none, to a gateway as to this client, and a venue's letter is empty until it does |
@@ -127,13 +127,13 @@ nothing.
 | PEG BEST and BOX TOP | 🔬 Implemented | Built and checked by the order builder's offline tests, `src/engine/hot_loop/order_builder/tests.rs`; no suite here places them against the venue |
 | Order fields | ✅ Supported | An order has 155 fields. 124 are sent. 19 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 5 are not carried by this client, and each says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
-| Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn) in [ib_async-dx](https://github.com/userFRM/ib_async-dx); `tests/ib_paper_compat` Phase 9 / 9b |
+| Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn); `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |
 | Conditions | ✅ Supported | All 6 types (price, volume, percent change, margin, execution, time) accepted and held by the server; `tests/ib_paper_compat` Phase 60 |
 | Order acceptance | ✅ Supported | Every change to an order answers with the order as this client sent it and the status it is now in, which is the pair the protocol answers a change with. 45 orders placed, modified and withdrawn over a 15-cycle session, every one reaching Cancelled, with no error |
 | Executions and fills | ✅ Supported | Fill reported and position reconciled; execution report retains server fields including unnamed tags; `tests/ib_paper_compat` Phase 97 |
 | A round trip on a funded account | ✅ Supported | One same-day option bought and sold on a funded account during regular hours: limit in, filled, limit out, position and account values reconciled, and nothing left open. Run once by hand rather than by a phase, a funded account being one the suite may not trade — so unlike every row beside it this one records a session rather than something a reader can repeat |
-| Option exercise and lapse | ✅ Supported | Both submitted for a resolved option contract; server response 399 *"You have not got the number of options requested to be exercised"* delivered to the caller |
+| Option exercise and lapse | ✅ Supported | Both submitted for a resolved option contract; server response 399 *"You have not got the number of options requested to be exercised"* delivered to the caller; `tests/python/test_option_greeks_stream.py::test_an_option_not_held_is_neither_exercised_nor_lapsed` |
 
 ## Account
 
@@ -149,12 +149,12 @@ nothing.
 | Capability | Status | Verification |
 | --- | :---: | --- |
 | Contract details | ✅ Supported | 12 lookups across 9 countries: 11 resolved to one contract, and the 12th matched 2 and was refused as ambiguous rather than resolved to one, as ib_async's `qualifyContracts` declines to pick one; `src/bin/capture_global.rs` |
-| Option chains, symbol search | ✅ Supported | `scripts/sdk_sweep.py` in [ib_async-dx](https://github.com/userFRM/ib_async-dx) |
-| Scanners, fundamentals | ✅ Supported | 697 KB scanner parameter set, fundamental report; `tests/python/test_historical_and_scanner.py` |
+| Option chains, symbol search | ✅ Supported | `scripts/sdk_sweep.py` |
+| Scanners, fundamentals | ✅ Supported | 697 KB scanner parameter set, `tests/python/test_historical_and_scanner.py`; fundamental report, `tests/rust_api_live.rs::the_calls_no_other_live_test_names` and `tests/ib_paper_compat` Phases 83 and 93 |
 | News | ✅ Supported | 117 providers parsed. Headline retrieval requires a news subscription; this account holds none, and every provider returns an empty result set |
 | Exchange directory | ✅ Supported | 203 exchanges, in the two sections the venue states them in: shares and derivatives. What each carries and which group each aggregates into are not stated by the venue and are not stated here |
-| Corporate events calendar | ✅ Supported | 43 event types with their field schemas, 179 KB, over the security-definition connection; an event query is answered with a well-formed result and can be withdrawn. Event content needs a subscription — see the note below. `src/bin/capture_calendar.rs` |
-| Implied volatility, option price | ✅ Supported | The venue computes the model and publishes it per option on a subscription of its own, and that is what a caller asking for volatility or greeks is given. A hypothetical the caller supplies — a price, or a volatility — is solved against that model where the call is made, as a gateway solves it, and is answered with nothing where no model has been published; solved here it reproduces the venue's price to the cent on 2 contracts. `src/bin/capture_option_model.rs` |
+| Corporate events calendar | ✅ Supported | 43 event types with their field schemas, 179 KB, over the security-definition connection; an event query is answered with a well-formed result and can be withdrawn. Event content needs a subscription — see the note below. `src/bin/capture_calendar.rs`, `tests/python/test_live_python_wrappers.py::TestCorporateEventsCalendar` |
+| Implied volatility, option price | ✅ Supported | The venue computes the model and publishes it per option on a subscription of its own, and that is what a caller asking for volatility or greeks is given. A hypothetical the caller supplies — a price, or a volatility — is solved against that model where the call is made, as a gateway solves it, and is answered with nothing where no model has been published; solved here it reproduces the venue's price to the cent on 2 contracts. `src/bin/capture_option_model.rs`, `tests/python/test_option_greeks_stream.py::test_the_calculations_are_answered_from_the_venues_model` |
 
 **Corporate events data.** Event content requires a Wall Street Horizon
 subscription; this account holds none, so every query — by contract and by
@@ -170,7 +170,7 @@ stops holding.
 
 | What is guaranteed | Where it stands |
 | --- | --- |
-| A call never returns success having sent nothing | 82 requests, none silent |
+| A call never returns success having sent nothing | 85 requests, none silent |
 | A field a caller sets is never quietly ignored | 155 order fields, none dropped |
 | A field the server sends is never thrown away | What this client has no name for is kept under its tag number — 49 such fields on an equity definition, 46 on a bond |
 
@@ -274,8 +274,9 @@ These are this client's own.
   combination in ways not all established here. Each is refused when stated.
 - **An exercise is sent without the moneyness check a gateway makes when
   `override` is false.** A gateway waits for the venue's word on where the
-  option stands and refuses an exercise out of the money or a lapse in it; how
-  long it waits is not bounded, and this client has not chosen a bound.
+  option stands and refuses an exercise out of the money or a lapse in it.
+  This client does not ask for that word: it sends the exercise as given, and
+  says so in the log where `override` is false.
 - **A preview under the number of a working order is refused.** A gateway
   prices it as a new order and leaves the working one alone; this client keys
   both on the number, and does not yet keep the two apart.

@@ -682,6 +682,42 @@ impl EClient {
         Ok(())
     }
 
+    /// Push one batch of a scan's rows, or its refusal, into SharedState.
+    #[doc(hidden)]
+    #[pyo3(signature = (req_id, con_ids, error_text=""))]
+    fn _test_push_scanner_data(&self, req_id: u32, con_ids: Vec<u32>, error_text: &str) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.reference.push_scanner_data(req_id, crate::control::scanner::ScannerResult {
+            entries: con_ids.iter().map(|&con_id| crate::control::scanner::ScannerEntry { con_id }).collect(),
+            con_ids,
+            scan_time: String::new(),
+            error_text: error_text.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Push the calendar's answer to one request into SharedState: its schema,
+    /// or with `events` its events.
+    #[doc(hidden)]
+    #[pyo3(signature = (req_id, json, events=false))]
+    fn _test_push_calendar(&self, req_id: u32, json: &str, events: bool) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        if events {
+            shared.reference.push_calendar_events(req_id, json.to_string());
+        } else {
+            shared.reference.push_calendar_meta_data(req_id, json.to_string());
+        }
+        Ok(())
+    }
+
+    /// Push the venue's refusal of an order into SharedState.
+    #[doc(hidden)]
+    fn _test_push_order_inactive(&self, order_id: u64, code: i32, message: &str) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.orders.push_order_inactive(order_id, code, message.to_string());
+        Ok(())
+    }
+
     /// Push a venue refusal of one request into SharedState.
     #[doc(hidden)]
     fn _test_push_historical_error(&self, req_id: u32, code: i32, message: &str) -> PyResult<()> {

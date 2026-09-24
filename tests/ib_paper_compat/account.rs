@@ -114,7 +114,7 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
         }
         if let Ok(Event::OrderUpdate(update)) = event_rx.recv_timeout(Duration::from_millis(100)) {
             if matches!(update.status, OrderStatus::Submitted | OrderStatus::PreSubmitted) {
-                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
             }
             if matches!(update.status, OrderStatus::Cancelled | OrderStatus::Rejected) {
                 probe_done = true;
@@ -338,7 +338,7 @@ pub(super) fn phase_completed_orders(conns: Conns) -> Conns {
         if let Ok(Event::OrderUpdate(update)) = event_rx.recv_timeout(Duration::from_millis(100)) {
             println!("  OrderUpdate: id={} status={:?}", update.order_id, update.status);
             if matches!(update.status, OrderStatus::Submitted | OrderStatus::PreSubmitted) && !cancel_sent {
-                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                 cancel_sent = true;
             }
             // A rejection is not this phase's outcome: the order never worked, so
@@ -447,7 +447,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     while Instant::now() < deadline && !terminal {
         if let Ok(Event::OrderUpdate(update)) = event_rx.recv_timeout(Duration::from_millis(100)) {
             if matches!(update.status, OrderStatus::Submitted | OrderStatus::PreSubmitted) && !cancel_sent {
-                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                 cancel_sent = true;
             }
             if update.status == OrderStatus::Rejected {
@@ -662,7 +662,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     }
 
     // Cancel the order
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
@@ -1014,7 +1014,7 @@ pub(super) fn phase_pnl_subscription(conns: Conns) -> Conns {
                 println!("  UnrealizedPnL: {:.2}", acct.unrealized_pnl as f64 / PRICE_SCALE as f64);
                 println!("  RealizedPnL:   {:.2}", acct.realized_pnl as f64 / PRICE_SCALE as f64);
                 pnl_checked = true;
-                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
             }
         }
         if pnl_checked && order_submitted { break; }

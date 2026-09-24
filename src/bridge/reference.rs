@@ -786,6 +786,12 @@ impl ReferenceState {
         self.calendar_events.lock().unwrap().drain(..).collect()
     }
 
+    /// The calendar's answer to one request, of either shape, leaving the rest.
+    pub fn take_calendar_for(&self, req_id: u32) -> Option<String> {
+        Self::take_one(&self.calendar_meta_data, req_id)
+            .or_else(|| Self::take_one(&self.calendar_events, req_id))
+    }
+
     /// Take every matching symbols waiting, leaving none.
     pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
         self.matching_symbols.lock().unwrap().drain(..).collect()

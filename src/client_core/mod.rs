@@ -16,7 +16,7 @@ use crate::error_codes::{
     CONDITION_CONTRACT_INCOMPLETE, DUPLICATE_TICKER_ID, GOOD_TILL_DATE_INVALID,
     MISC_OPTION_KEY_INVALID, MISC_OPTION_VALUE_INVALID, NO_SUCH_BOOK, OCA_GROUP_REVISION,
     OCA_TYPE_REVISION, OPT_OUT_SMART_ROUTING_DROPPED, OPT_OUT_SMART_ROUTING_WITHDRAWN,
-    ORDER_TYPE_UNSUPPORTED, REQUEST_NOT_PROCESSED, Refusal,
+    MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, REQUEST_NOT_PROCESSED, Refusal,
     SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -1376,6 +1376,45 @@ pub(crate) fn years_to_expiry(expiry: &str) -> Option<f64> {
 /// What it overstates is listed on `EClient::server_version`, which is the
 /// call a program reads it through.
 pub const PROTOCOL_LEVEL: i32 = 217;
+
+/// A request a gateway reads a free-form option list on: its name for the
+/// request, and the words its later check of `manual` puts in front of a bad
+/// value. `manual` is the one key every such request takes.
+#[derive(Debug)]
+pub struct OptionList {
+    /// The request as a gateway names it in a refusal.
+    pub request: &'static str,
+    /// What the later check of `manual` calls the request.
+    pub checked_as: &'static str,
+}
+
+/// An order's options.
+pub const ORDER_OPTIONS: OptionList =
+    OptionList { request: "PlaceOrder(3)", checked_as: "Order" };
+/// A quote subscription's options.
+pub const MKT_DATA_OPTIONS: OptionList =
+    OptionList { request: "ReqMktData(1)", checked_as: "Market data" };
+/// A book's options.
+pub const MKT_DEPTH_OPTIONS: OptionList =
+    OptionList { request: "ReqMktDepth(10)", checked_as: "Market data" };
+/// Historical bars' options.
+pub const CHART_OPTIONS: OptionList =
+    OptionList { request: "ReqHistoricalData(20)", checked_as: "Historical data" };
+/// A scan's options.
+pub const SCANNER_OPTIONS: OptionList =
+    OptionList { request: "ReqScannerSubscription(22)", checked_as: "Historical data" };
+/// Real-time bars' options.
+pub const REAL_TIME_BARS_OPTIONS: OptionList =
+    OptionList { request: "ReqRealTimeBars(50)", checked_as: "Historical data" };
+/// A news article's options.
+pub const NEWS_ARTICLE_OPTIONS: OptionList =
+    OptionList { request: "ReqNewsArticle(84)", checked_as: "Historical data" };
+/// Historical news' options.
+pub const HISTORICAL_NEWS_OPTIONS: OptionList =
+    OptionList { request: "ReqHistoricalNews(86)", checked_as: "Historical data" };
+/// Historical ticks' options.
+pub const HISTORICAL_TICKS_OPTIONS: OptionList =
+    OptionList { request: "ReqHistoricalTicks(96)", checked_as: "Market data" };
 
 /// What an exercise states beyond the instruction itself.
 ///
@@ -3182,6 +3221,56 @@ impl ClientCore {
     /// Remember what the venue named a description, for the next order on it.
     pub fn remember_named(&self, key: String, contract: ApiContract) {
         self.named_by_description.lock().unwrap().insert(key, contract);
+    }
+
+    /// The account's holdings, each given a moment for its definition to land.
+    ///
+    /// A holding arrives as a contract id and a quantity, and its definition
+    /// is fetched separately; handed over before that lands it names no
+    /// instrument a caller can identify. The set is read inside the wait and
+    /// answered as read: waiting on one set and answering another hands back
+    /// a holding that arrived between the two, which no lookup has named.
+    /// `pause` is how the wait sleeps, so a caller holding an interpreter can
+    /// let it go.
+    pub fn named_positions(&self, shared: &SharedState, pause: impl Fn(std::time::Duration)) -> Vec<PositionInfo> {
+        let from = std::time::Instant::now();
+        let mut held = shared.portfolio.position_infos();
+        while from.elapsed() < std::time::Duration::from_secs(2)
+            && held.iter().any(|pi| {
+                pi.position != 0.0 && pi.symbol.is_empty() && self.get_contract(pi.con_id, shared).is_none()
+            })
+        {
+            pause(std::time::Duration::from_millis(20));
+            held = shared.portfolio.position_infos();
+        }
+        held
+    }
+
+    /// The account's holdings, asked as a question: read once the account has
+    /// finished stating them, as `req_positions` reads them, and named as
+    /// [`named_positions`](Self::named_positions) names them. Where it had not
+    /// finished within the ten seconds `req_positions` gives it, what this
+    /// session already held is answered and the log says so. Refused under
+    /// 504 where the session ends first. Nothing is subscribed.
+    pub fn held_positions(
+        &self, shared: &SharedState, pause: impl Fn(std::time::Duration),
+    ) -> Result<Vec<PositionInfo>, Refusal> {
+        for _ in 0..1000 {
+            if shared.portfolio.account_download_complete() || shared.reference.session_over().is_some() {
+                break;
+            }
+            pause(std::time::Duration::from_millis(10));
+        }
+        if let Some(why) = shared.reference.session_over() {
+            return Err(Refusal::not_connected(format!("the session is over: {why}")));
+        }
+        if !shared.portfolio.account_download_complete() {
+            log::warn!(
+                "the account had not finished stating its holdings within the wait, so what \
+                 follows is what this session already held rather than what the account holds",
+            );
+        }
+        Ok(self.named_positions(shared, pause))
     }
 
     /// Cache a contract for later enrichment.
@@ -5417,6 +5506,127 @@ impl ClientCore {
 
     // ── Order routing ──
 
+    /// Whether a gateway can read the manual time a withdrawal states, as it
+    /// reads it before it withdraws anything: refused under 10301 in its
+    /// words where it cannot, and the withdrawal with it.
+    ///
+    /// A gateway takes the UTC form, `yyyymmdd-hh:mm:ss`, and otherwise the
+    /// local one — `yyyymmdd hh:mm:ss`, the date optional, with any words after
+    /// a space read as a zone and set aside. What fails both is refused.
+    ///
+    /// Only the reading is made here. A gateway then turns what it read into
+    /// a time and refuses one it cannot place, and one in a zone that is
+    /// neither UTC nor its own machine's, which depends on where the gateway
+    /// runs; neither is refused here.
+    // ponytail: ASCII only. A gateway reads other scripts' digits too, so a
+    // time holding anything else is let through rather than refused here.
+    pub fn check_cancel_time(time: &str) -> Result<(), Refusal> {
+        if time.is_empty() || !time.is_ascii() || utc_time_reads(time) || local_time_reads(time) {
+            return Ok(());
+        }
+        Err(Refusal::stated(
+            MANUAL_CANCEL_TIME_INVALID,
+            "Manual Order Cancel Time: The date, time, or time-zone entered is invalid.\n\
+             The correct format is yyyymmdd hh:mm:ss xx/xxxx\n\
+             where yyyymmdd and xx/xxxx are optional.\n\
+             E.g.: 20031126 15:59:00 US/Eastern\n\n\
+             Note that there is a space between the date and time,\n\
+             and between the time and time-zone.\n\n\
+             If no date is specified, current date is assumed.\n\
+             If no time-zone is specified, local time-zone is assumed(deprecated).\n\n\
+             You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
+             Note that there is a dash between the date and time in UTC notation.",
+        ))
+    }
+
+    /// A request's free-form option list, as the reference clients write it:
+    /// one field, each entry `tag=value;`.
+    pub fn written_options(options: &[crate::types::model::TagValue]) -> String {
+        options.iter().map(|o| format!("{}={};", o.tag, o.value)).collect()
+    }
+
+    /// A request's free-form option list, as written, checked as a gateway
+    /// reads and checks it.
+    ///
+    /// A gateway reads the list back from the one field it is written in: split on `;`
+    /// and then on `=`, empty pieces dropped and nothing trimmed. An entry
+    /// with no key or no value is a request it cannot read, refused under 320
+    /// whatever else the venue has allowed. A key named twice keeps the last
+    /// value. Unless the venue has lifted the checks at logon, each entry is
+    /// then checked in the order a gateway holds them — its table's, not the
+    /// caller's — a key the request does not take refused under 10337 and a
+    /// value other than `0` or `1` under 10338. The later check of `manual`
+    /// refuses a value that is not the number nought or one under 321, which
+    /// is reached only where the checks were lifted.
+    ///
+    /// `manual` is the only key any request takes, and an accepted one changes
+    /// nothing a gateway sends or does.
+    pub fn check_option_list(list: &OptionList, text: &str, features: &[String]) -> Result<(), Refusal> {
+        let mut read: Vec<(&str, &str)> = Vec::new();
+        for entry in text.split(';').filter(|e| !e.is_empty()) {
+            let mut part = entry.split('=').filter(|p| !p.is_empty());
+            let (Some(key), Some(value)) = (part.next(), part.next()) else {
+                return Err(Refusal::stated(
+                    REQUEST_NOT_READ,
+                    "Error reading request:Please use 'Key=Value' format for Misc Options",
+                ));
+            };
+            match read.iter_mut().find(|(k, _)| *k == key) {
+                Some(held) => held.1 = value,
+                None => read.push((key, value)),
+            }
+        }
+        if !features.iter().any(|f| f == "NOAPIMISCVLD") {
+            // The order a gateway's table walks its entries in: by bucket of
+            // the key's hash, and in the order the keys were first put
+            // within one. The table starts at sixteen buckets and doubles
+            // past three quarters full.
+            // ponytail: exact while no bucket holds nine keys, where the
+            // table would reshape itself; no list here comes near that.
+            let mut buckets = 16;
+            while read.len() > buckets * 3 / 4 {
+                buckets *= 2;
+            }
+            let bucket = |key: &str| {
+                let h = key.encode_utf16().fold(0u32, |h, u| h.wrapping_mul(31).wrapping_add(u32::from(u)));
+                (h ^ (h >> 16)) as usize & (buckets - 1)
+            };
+            let mut walked = read.clone();
+            walked.sort_by_key(|(key, _)| bucket(key));
+            for (key, value) in walked {
+                if key != "manual" {
+                    return Err(Refusal::stated(MISC_OPTION_KEY_INVALID, format!(
+                        "Misc options key={key} is invalid in {} request. Valid keys are: manual",
+                        list.request,
+                    )));
+                }
+                if !matches!(value, "0" | "1") {
+                    return Err(Refusal::stated(MISC_OPTION_VALUE_INVALID, format!(
+                        "Misc options value={value} is invalid for key={key} in {} request. \
+                         Valid values are: 0, 1",
+                        list.request,
+                    )));
+                }
+            }
+        }
+        // The later check, made once the request is read, on a value trimmed
+        // of whatever sorts at or below a space and read as a number.
+        // ponytail: ASCII digits only. A gateway reads any script's digits, so
+        // a value holding another script's is let through rather than refused
+        // on a reading a gateway may not share; an accepted `manual` changes
+        // nothing sent. Read them when a caller writes them.
+        if let Some((_, value)) = read.iter().find(|(key, _)| *key == "manual")
+            && !value.chars().any(|c| !c.is_ascii() && c.is_numeric())
+            && !matches!(value.trim_matches(|c: char| c <= ' ').parse::<i32>(), Ok(0 | 1))
+        {
+            return Err(Refusal::validation(format!(
+                "{}: 'manual' has wrong value={value}, expected [1 or 0]",
+                list.checked_as,
+            )));
+        }
+        Ok(())
+    }
+
     /// Pre-validate order fields that don't depend on instrument ID.
     /// Call this before `find_or_register_instrument` to fail fast.
     ///
@@ -5664,36 +5874,11 @@ impl ClientCore {
                  it unset to place the order.",
             ));
         }
-        // The one option a gateway knows on an order, and what it takes. Where
-        // the venue has lifted the checks on these, only the value of the one
-        // it knows is checked, and later.
-        let options_checked = !session.enables("NOAPIMISCVLD");
-        for option in &order.order_misc_options {
-            let known = option.tag == "manual";
-            let takes = matches!(option.value.as_str(), "0" | "1");
-            // Read as a number, the later check takes `01`, ` 1` and `+1`.
-            let reads = matches!(option.value.trim().parse::<i32>(), Ok(0 | 1));
-            if options_checked && !known {
-                return Err(Refusal::stated(MISC_OPTION_KEY_INVALID, format!(
-                    "Misc options key={} is invalid in PlaceOrder(3) request. \
-                     Valid keys are: manual",
-                    option.tag,
-                )));
-            }
-            if options_checked && known && !takes {
-                return Err(Refusal::stated(MISC_OPTION_VALUE_INVALID, format!(
-                    "Misc options value={} is invalid for key=manual in PlaceOrder(3) \
-                     request. Valid values are: 0, 1",
-                    option.value,
-                )));
-            }
-            if known && !option.value.is_empty() && !reads {
-                return Err(Refusal::validation(format!(
-                    "Order: 'manual' has wrong value={}, expected [1 or 0]",
-                    option.value,
-                )));
-            }
-        }
+        // The one option a gateway knows on an order, checked the way every
+        // request's list is.
+        Self::check_option_list(
+            &ORDER_OPTIONS, &Self::written_options(&order.order_misc_options), &session.features,
+        )?;
         // What kind of preview is asked for. A released gateway previews the
         // ordinary kind alone; an unset kind is nought.
         let what_if_type = if order.what_if_type == i32::MAX { 0 } else { order.what_if_type };
@@ -6902,6 +7087,72 @@ impl ClientCore {
         })
     }
 
+}
+
+
+/// A whole number as a gateway reads one: an optional sign, then digits,
+/// within thirty-two bits.
+fn gateway_int(text: &str) -> Option<i32> {
+    text.parse().ok()
+}
+
+/// `yyyymmdd-hh:mm:ss`, read strictly, as a gateway reads the UTC form.
+fn utc_time_reads(time: &str) -> bool {
+    let b = time.as_bytes();
+    let digits = |from: usize, to: usize| b[from..to].iter().all(u8::is_ascii_digit);
+    let n = |from: usize, to: usize| time[from..to].parse::<u32>().unwrap_or(u32::MAX);
+    b.len() == 17 && b[8] == b'-' && b[11] == b':' && b[14] == b':'
+        && digits(0, 8) && digits(9, 11) && digits(12, 14) && digits(15, 17)
+        && n(0, 4) >= 1
+        && (1..=12).contains(&n(4, 6))
+        // A day past the month's end is moved back to it, and midnight may be
+        // written as the end of the day before, when the parse is read.
+        && (1..=31).contains(&n(6, 8))
+        && (n(9, 11) <= 23 || (n(9, 11) == 24 && n(12, 14) == 0 && n(15, 17) == 0))
+        && n(12, 14) <= 59 && n(15, 17) <= 59
+}
+
+/// `[yyyymmdd ]hh:mm:ss[ zone]`, read as a gateway reads the local form.
+///
+/// The string is trimmed, and every word after a space that does not start
+/// with a digit is taken as the zone. That many characters, and one more,
+/// are cut from the end; what is left is a date and a time where it holds a
+/// space, and a time alone where it does not.
+fn local_time_reads(time: &str) -> bool {
+    let time = time.trim_matches(|c: char| c <= ' ');
+    let mut zone = String::new();
+    let mut rest = time;
+    while let Some(at) = rest.rfind(' ') {
+        let word = &rest[at + 1..];
+        rest = rest[..at].trim_matches(|c: char| c <= ' ');
+        if !word.starts_with(|c: char| c.is_ascii_digit()) {
+            zone = if zone.is_empty() { word.to_string() } else { format!("{word} {zone}") };
+        }
+    }
+    let time = if zone.is_empty() { time } else { &time[..time.len() - zone.len() - 1] };
+    match time.split_once(' ') {
+        Some((date, clock)) => clock_reads(clock) && date_reads(date),
+        None => clock_reads(time),
+    }
+}
+
+/// `hh:mm:ss`, each a number in range, the pieces between colons read with
+/// empty ones skipped.
+fn clock_reads(clock: &str) -> bool {
+    let mut pieces = clock.split(':').filter(|p| !p.is_empty());
+    let mut next = || pieces.next().and_then(gateway_int);
+    let (Some(h), Some(m), Some(s)) = (next(), next(), next()) else { return false };
+    (0..=23).contains(&h) && (0..=59).contains(&m) && (0..=59).contains(&s) && pieces.next().is_none()
+}
+
+/// `yyyymmdd`: eight characters, the year 1978 to 3000, the month 1 to 12 and
+/// the day 0 to 31, each read as a number.
+fn date_reads(date: &str) -> bool {
+    let n = |from: usize, to: usize| date.get(from..to).and_then(gateway_int);
+    date.len() == 8
+        && n(0, 4).is_some_and(|y| (1978..=3000).contains(&y))
+        && n(4, 6).is_some_and(|m| (1..=12).contains(&m))
+        && n(6, 8).is_some_and(|d| (0..=31).contains(&d))
 }
 
 #[cfg(test)]

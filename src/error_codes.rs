@@ -87,6 +87,11 @@ impl Refusal {
 /// under.
 pub const DUPLICATE_TICKER_ID: i32 = 102;
 
+/// The code the reference client answers a verification request under, which
+/// it answers itself rather than sending: intent to authenticate is stated on
+/// the initial connect, and it never states it.
+pub const BAD_MESSAGE: i32 = 508;
+
 /// The code a combination naming no legs is refused under.
 pub const COMBINATION_NEEDS_LEGS: i32 = 314;
 
@@ -121,7 +126,8 @@ pub const REQUEST_NOT_PROCESSED: i32 = 322;
 /// The code a request the venue's front end could not read is refused under.
 /// The reason follows `Error reading request:`. A trailing order naming both
 /// an amount and a percentage is refused under it, as a gateway refuses one
-/// while it reads the order.
+/// while it reads the order, and so is an entry in a free-form option list
+/// that is not written `key=value`.
 pub const REQUEST_NOT_READ: i32 = 320;
 
 /// The code a change naming a one-cancels-all group other than the order's
@@ -132,12 +138,12 @@ pub const OCA_GROUP_REVISION: i32 = 10326;
 /// own is refused under.
 pub const OCA_TYPE_REVISION: i32 = 10327;
 
-/// The code an order option under a key the venue does not know is refused
-/// under.
+/// The code an option in a request's free-form list, under a key the request
+/// does not take, is refused under.
 pub const MISC_OPTION_KEY_INVALID: i32 = 10337;
 
-/// The code an order option with a value its key does not take is refused
-/// under.
+/// The code an option in a request's free-form list, with a value its key does
+/// not take, is refused under.
 pub const MISC_OPTION_VALUE_INVALID: i32 = 10338;
 
 /// The code an order declining smart routing is refused under, where the
@@ -176,6 +182,10 @@ pub const ORDER_DOES_NOT_MATCH: i32 = 105;
 /// The code a withdrawal of an order no longer in a cancellable state is
 /// refused under.
 pub const NOT_CANCELLABLE: i32 = 161;
+
+/// The code a withdrawal is refused under, and not made, when a gateway
+/// cannot read the manual time it states.
+pub const MANUAL_CANCEL_TIME_INVALID: i32 = 10301;
 
 /// The code a log level outside the range the client carries is refused under.
 pub const LOG_LEVEL_INVALID: i32 = 319;

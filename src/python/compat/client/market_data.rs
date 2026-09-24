@@ -17,10 +17,11 @@ impl EClient {
 
     /// Request market data for a contract.
     ///
-    /// `mkt_data_options` is taken and not applied. This protocol's request
-    /// carries no free-form option list, so what a caller puts in one cannot be
-    /// sent. The reference client's own list is empty on every ordinary call.
-    #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=Vec::new()))]
+    /// `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=None))]
     pub(crate) fn req_mkt_data(
         &self,
         py: Python<'_>,
@@ -29,9 +30,12 @@ impl EClient {
         generic_tick_list: &str,
         snapshot: bool,
         regulatory_snapshot: bool,
-        mkt_data_options: Vec<Py<PyAny>>,
+        mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let _ = mkt_data_options;
+        let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         // The mode set by `req_market_data_type`, which names the type once for
         // every subscription that follows. Passing zero here subscribes at
         // realtime regardless, which answers nothing on an account without the
@@ -346,10 +350,11 @@ impl EClient {
 
     /// Request market depth (L2 order book).
     ///
-    /// `mkt_depth_options` is taken and not applied. This protocol's request
-    /// carries no free-form option list, so what a caller puts in one cannot be
-    /// sent. The reference client's own list is empty on every ordinary call.
-    #[pyo3(signature = (req_id, contract, num_rows=5, is_smart_depth=false, mkt_depth_options=Vec::new()))]
+    /// `mkt_depth_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, contract, num_rows=5, is_smart_depth=false, mkt_depth_options=None))]
     fn req_mkt_depth(
         &self,
         py: Python<'_>,
@@ -357,14 +362,16 @@ impl EClient {
         contract: &Contract,
         num_rows: i32,
         is_smart_depth: bool,
-        mkt_depth_options: Vec<Py<PyAny>>,
+        mkt_depth_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let _ = mkt_depth_options;
         // As the caller stated it. The reference client sends a book request's
         // secType and exchange straight off the contract, so a contract naming
         // only an id was subscribed here to a US stock on SMART: a book for an
         // instrument nobody asked about, under their own request id.
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DEPTH_OPTIONS, mkt_depth_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         // The number is checked before the book slot is taken: a number the
         // wire cannot carry holds nothing, and taking the slot first left it
         // held against a request that was then refused.
@@ -443,9 +450,11 @@ impl EClient {
     /// seconds, and the venue's request carries no bar size. A gateway reads
     /// the number and does not use it.
     ///
-    /// `real_time_bars_options` is taken and not applied. This protocol's
-    /// request carries no free-form option list.
-    #[pyo3(signature = (req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=Vec::new()))]
+    /// `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
+    /// taken and changes nothing a gateway sends; any other key is refused
+    /// under 10337, another value under 10338, and an entry not written
+    /// `key=value` under 320.
+    #[pyo3(signature = (req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=None))]
     fn req_real_time_bars(
         &self,
         py: Python<'_>,
@@ -454,10 +463,13 @@ impl EClient {
         bar_size: i32,
         what_to_show: &str,
         use_rth: i32,
-        real_time_bars_options: Vec<Py<PyAny>>,
+        real_time_bars_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let _ = (bar_size, real_time_bars_options);
+        let _ = bar_size;
+        if let Some(why) = self.options_refused(py, &crate::client_core::REAL_TIME_BARS_OPTIONS, real_time_bars_options)? {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = crate::control::historical::BarDataType::from_api_str(what_to_show) {
             return self.report_refusal(py, req_id, why.into());
         }
@@ -715,7 +727,7 @@ impl EClient {
         // made: the series goes out through the same path every other does, and
         // that path reads the scan from here rather than carrying it.
         self.shared_state()?.reference.note_spread_scan(con_id as u32, scan.stated());
-        self.req_mkt_data(py, req_id, contract, "481", false, false, Vec::new())
+        self.req_mkt_data(py, req_id, contract, "481", false, false, None)
     }
 
     /// The strategies a spread scan stated for a request, as the venue stated

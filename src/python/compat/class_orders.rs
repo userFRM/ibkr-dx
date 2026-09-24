@@ -856,7 +856,7 @@ impl Order {
     pub fn convert_misc_options(
         &self, py: Python<'_>,
     ) -> Result<Vec<crate::types::model::TagValue>, String> {
-        tag_values(&self.order_misc_options.bound(py), "option")
+        tag_values(self.order_misc_options.bound(py).iter(), "option")
     }
 
     /// The parameters of the algo the order runs under.
@@ -867,7 +867,7 @@ impl Order {
     pub fn convert_algo_params(
         &self, py: Python<'_>,
     ) -> Result<Vec<crate::types::model::TagValue>, String> {
-        tag_values(&self.algo_params.bound(py), "algo parameter")
+        tag_values(self.algo_params.bound(py).iter(), "algo parameter")
     }
 
     /// How a combination routed through the smart router is to be handled.
@@ -878,7 +878,7 @@ impl Order {
     pub fn convert_smart_combo_routing_params(
         &self, py: Python<'_>,
     ) -> Result<Vec<crate::types::model::TagValue>, String> {
-        tag_values(&self.smart_combo_routing_params.bound(py), "routing parameter")
+        tag_values(self.smart_combo_routing_params.bound(py).iter(), "routing parameter")
     }
 
 
@@ -1303,11 +1303,11 @@ impl OrderComboLegPy {
 /// place in the list: the caller put it there, and an algo run without a
 /// parameter the caller stated runs on the venue's default for it with
 /// nothing said.
-fn tag_values(
-    list: &Bound<'_, PyList>,
+pub(crate) fn tag_values<'py>(
+    list: impl IntoIterator<Item = Bound<'py, PyAny>>,
     what: &str,
 ) -> Result<Vec<crate::types::model::TagValue>, String> {
-    list.iter()
+    list.into_iter()
         .enumerate()
         .map(|(at, obj)| {
             let read = |name: &str| -> Result<String, String> {

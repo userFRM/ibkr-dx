@@ -79,6 +79,29 @@ macro_rules! call_wrapper {
 }
 
 impl EClient {
+    /// A scan's row as a contract's details: the contract the row names, filled
+    /// in from what this session holds about it.
+    pub(crate) fn scanned_details(
+        &self, py: Python<'_>, entry: &crate::control::scanner::ScannerEntry, shared: &SharedState,
+    ) -> PyResult<Py<ContractDetails>> {
+        let cd = ContractDetails::new_default(py);
+        {
+            let mut contract = cd.contract.borrow_mut(py);
+            contract.con_id = entry.con_id as i64;
+            // Look up cached contract for symbol info
+            if let Some(ac) = self.core.get_contract(entry.con_id as i64, shared) {
+                contract.symbol = ac.symbol;
+                contract.sec_type = ac.sec_type;
+                contract.exchange = ac.exchange;
+                contract.currency = ac.currency;
+                contract.local_symbol = ac.local_symbol;
+                contract.primary_exchange = ac.primary_exchange;
+                contract.trading_class = ac.trading_class;
+            }
+        }
+        Py::new(py, cd)
+    }
+
     /// Single iteration of event dispatch: drain all shared queues and fire Python
     /// callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
@@ -274,8 +297,11 @@ impl EClient {
         }
         // What was said about an order that went anyway, on its number. Ahead
         // of anything the venue says about the order, as a gateway says it
-        // before the order goes out.
-        for (order_id, code, msg) in shared.orders.drain_order_notices() {
+        // before the order goes out. A preview's are the call's, under a
+        // number the program never used.
+        for (order_id, code, msg) in shared.orders.drain_order_notices_for_dispatch(
+            |id| shared.reference.is_ours(crate::bridge::RecordKind::Answer, id as i64),
+        ) {
             call_wrapper!(self, py, shared, "error", (order_id as i64, 0i64, code as i64, msg.as_str(), ""));
         }
         let mut paired: Vec<crate::types::OrderUpdate> = shared.orders.drain_order_updates();
@@ -694,7 +720,9 @@ impl EClient {
         }
 
         // Drain inactive-order reasons -> error
-        for (order_id, code, msg) in shared.orders.drain_order_inactive() {
+        // A preview's refusal is left for the call that asked for the preview.
+        let answering = |id: u64| shared.reference.is_ours(crate::bridge::RecordKind::Answer, id as i64);
+        for (order_id, code, msg) in shared.orders.drain_order_inactive_for_dispatch(answering) {
             // A refusal is the end of a preview: it states what an order would
             // have cost, and nothing reached the book. Left standing, as it
             // was on this surface alone, the record read as a working order —
@@ -968,7 +996,10 @@ impl EClient {
         // Drain what-if responses -> open_order(contract, order, OrderState) +
         // order_status
         // (iso with official ibapi: server delivers margin via openOrder.orderState)
-        let what_ifs = shared.orders.drain_what_if_responses();
+        // And its answer, for the same call.
+        let what_ifs = shared.orders.drain_what_if_responses_for_dispatch(
+            |id| shared.reference.is_ours(crate::bridge::RecordKind::Answer, id as i64),
+        );
         for wi in what_ifs {
             let state = OrderState::from_api(&crate::types::model::OrderState::from(&wi));
 
@@ -1173,7 +1204,10 @@ impl EClient {
         }
 
         // Drain scanner data -> scannerData + scannerDataEnd
-        let scanner_results = shared.reference.drain_scanner_data();
+        // Leaving a scan a call that answers is running under its own number.
+        let scanner_results = shared.reference.drain_scanner_data_for_dispatch(
+            |id| shared.reference.is_ours(crate::bridge::RecordKind::Answer, i64::from(id)),
+        );
         for (req_id, result) in scanner_results {
             // A refused scan arrives in the shape of a completed one and
             // carries the reason, as on the other surface. Reported against
@@ -1184,22 +1218,7 @@ impl EClient {
                     (req_id as i64, 0i64, 321i64, result.error_text.as_str(), ""));
             }
             for (rank, entry) in result.entries.iter().enumerate() {
-                let cd = ContractDetails::new_default(py);
-                {
-                    let mut contract = cd.contract.borrow_mut(py);
-                    contract.con_id = entry.con_id as i64;
-                    // Look up cached contract for symbol info
-                    if let Some(ac) = self.core.get_contract(entry.con_id as i64, shared) {
-                        contract.symbol = ac.symbol;
-                        contract.sec_type = ac.sec_type;
-                        contract.exchange = ac.exchange;
-                        contract.currency = ac.currency;
-                        contract.local_symbol = ac.local_symbol;
-                        contract.primary_exchange = ac.primary_exchange;
-                        contract.trading_class = ac.trading_class;
-                    }
-                }
-                let cd_py = Py::new(py, cd)?.into_any();
+                let cd_py = self.scanned_details(py, entry, shared)?.into_any();
                 call_wrapper!(self, py, shared, "scanner_data", (req_id as i64, rank as i32, &cd_py, "", "", "", ""));
             }
             call_wrapper!(self, py, shared, "scanner_data_end", (req_id as i64,));

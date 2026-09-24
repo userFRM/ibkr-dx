@@ -12,7 +12,7 @@ Canonical IB API methods vs ibkr-dx implementation status.
 - **-** = Not present
 
 The callback table also says whether each callback fires at all for a
-program on a gateway. Six declared by the TWS API never do, so they fire
+program on a gateway. Seven declared by the TWS API never do, so they fire
 neither there nor here.
 
 The evidence column says how each status was established, and is
@@ -20,16 +20,11 @@ derived rather than asserted: a call is credited to the live session
 only when a suite that runs against a real account names it, and to
 the offline suites only when a test names it.
 
-One caveat it cannot express: the suite that compares against recorded
-captures skips when those captures are absent, and they are not kept in
-this repository. A call named only by that suite is named by something
-that did not run.
-
 ## Summary
 
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
-| **EClient methods** | 80 | 80 impl, 0 stub | 80 impl, 0 stub |
+| **EClient methods** | 87 | 87 impl, 0 stub | 87 impl, 0 stub |
 | **EWrapper callbacks** | 90 | 88 impl, 2 stub | 88 impl, 2 stub |
 
 ## EClient Methods
@@ -39,9 +34,14 @@ that did not run.
 | Connection | `connect` | `eConnect` | Y | Y | Live session |
 |  | `disconnect` | `eDisconnect` | Y | Y | Live session |
 |  | `is_connected` | `isConnected` | Y | Y | Live session |
+|  | `start_api` | `startApi` | Y | Y | Offline suites |
 |  | `set_server_log_level` | `setServerLogLevel` | Y | Y | Live session |
 |  | `req_current_time` | `reqCurrentTime` | Y | Y | Live session |
 |  | `req_current_time_in_millis` | `reqCurrentTimeInMillis` | Y | Y | Live session |
+|  | `verify_request` | `verifyRequest` | Y | Y | Offline suites |
+|  | `verify_message` | `verifyMessage` | Y | Y | Offline suites |
+|  | `verify_and_auth_request` | `verifyAndAuthRequest` | Y | Y | Offline suites |
+|  | `verify_and_auth_message` | `verifyAndAuthMessage` | Y | Y | Offline suites |
 | Market Data | `req_mkt_data` | `reqMktData` | Y | Y | Live session |
 |  | `cancel_mkt_data` | `cancelMktData` | Y | Y | Live session |
 |  | `req_market_data_type` | `reqMarketDataType` | Y | Y | Live session |
@@ -51,13 +51,14 @@ that did not run.
 |  | `cancel_mkt_depth` | `cancelMktDepth` | Y | Y | Live session |
 |  | `req_mkt_depth_exchanges` | `reqMktDepthExchanges` | Y | Y | Live session |
 |  | `req_smart_components` | `reqSmartComponents` | Y | Y | Live session |
-|  | `req_real_time_bars` | `reqRealTimeBars` | Y | Y | Offline suites |
+|  | `req_real_time_bars` | `reqRealTimeBars` | Y | Y | Live session |
 |  | `cancel_real_time_bars` | `cancelRealTimeBars` | Y | Y | Live session |
 | Historical Data | `req_historical_data` | `reqHistoricalData` | Y | Y | Live session |
 |  | `cancel_historical_data` | `cancelHistoricalData` | Y | Y | Live session |
 |  | `req_head_time_stamp` | `reqHeadTimeStamp` | Y | Y | Live session |
 |  | `cancel_head_time_stamp` | `cancelHeadTimestamp` | Y | Y | Live session |
 |  | `req_historical_ticks` | `reqHistoricalTicks` | Y | Y | Live session |
+|  | `cancel_historical_ticks` | `cancelHistoricalTicks` | Y | Y | Offline suites |
 |  | `req_histogram_data` | `reqHistogramData` | Y | Y | Live session |
 |  | `cancel_histogram_data` | `cancelHistogramData` | Y | Y | Live session |
 |  | `req_historical_schedule` | `reqHistoricalSchedule` | Y | Y | Live session |
@@ -85,6 +86,7 @@ that did not run.
 |  | `req_positions_multi` | `reqPositionsMulti` | Y | Y | Live session |
 |  | `cancel_positions_multi` | `cancelPositionsMulti` | Y | Y | Live session |
 | Contract | `req_contract_details` | `reqContractDetails` | Y | Y | Live session |
+|  | `cancel_contract_data` | `cancelContractData` | Y | Y | Offline suites |
 |  | `req_matching_symbols` | `reqMatchingSymbols` | Y | Y | Live session |
 |  | `req_market_rule` | `reqMarketRule` | Y | Y | Live session |
 | Scanner | `req_scanner_parameters` | `reqScannerParameters` | Y | Y | Live session |
@@ -97,11 +99,11 @@ that did not run.
 |  | `cancel_news_bulletins` | `cancelNewsBulletins` | Y | Y | Live session |
 | Fundamental | `req_fundamental_data` | `reqFundamentalData` | Y | Y | Live session |
 |  | `cancel_fundamental_data` | `cancelFundamentalData` | Y | Y | Live session |
-| Options | `calculate_implied_volatility` | `calculateImpliedVolatility` | Y | Y | Offline suites |
-|  | `cancel_calculate_implied_volatility` | `cancelCalculateImpliedVolatility` | Y | Y | Offline suites |
-|  | `calculate_option_price` | `calculateOptionPrice` | Y | Y | Offline suites |
-|  | `cancel_calculate_option_price` | `cancelCalculateOptionPrice` | Y | Y | Offline suites |
-|  | `exercise_options` | `exerciseOptions` | Y | Y | Offline suites |
+| Options | `calculate_implied_volatility` | `calculateImpliedVolatility` | Y | Y | Live session |
+|  | `cancel_calculate_implied_volatility` | `cancelCalculateImpliedVolatility` | Y | Y | Live session |
+|  | `calculate_option_price` | `calculateOptionPrice` | Y | Y | Live session |
+|  | `cancel_calculate_option_price` | `cancelCalculateOptionPrice` | Y | Y | Live session |
+|  | `exercise_options` | `exerciseOptions` | Y | Y | Live session |
 |  | `req_sec_def_opt_params` | `reqSecDefOptParams` | Y | Y | Live session |
 | Reference | `req_soft_dollar_tiers` | `reqSoftDollarTiers` | Y | Y | Live session |
 |  | `req_family_codes` | `reqFamilyCodes` | Y | Y | Live session |
@@ -112,10 +114,10 @@ that did not run.
 |  | `subscribe_to_group_events` | `subscribeToGroupEvents` | Y | Y | Live session |
 |  | `unsubscribe_from_group_events` | `unsubscribeFromGroupEvents` | Y | Y | Live session |
 |  | `update_display_group` | `updateDisplayGroup` | Y | Y | Live session |
-| WSH | `req_wsh_meta_data` | `reqWshMetaData` | Y | Y | Offline suites |
-|  | `cancel_wsh_meta_data` | `cancelWshMetaData` | Y | Y | Offline suites |
-|  | `req_wsh_event_data` | `reqWshEventData` | Y | Y | Offline suites |
-|  | `cancel_wsh_event_data` | `cancelWshEventData` | Y | Y | Offline suites |
+| WSH | `req_wsh_meta_data` | `reqWshMetaData` | Y | Y | Live session |
+|  | `cancel_wsh_meta_data` | `cancelWshMetaData` | Y | Y | Live session |
+|  | `req_wsh_event_data` | `reqWshEventData` | Y | Y | Live session |
+|  | `cancel_wsh_event_data` | `cancelWshEventData` | Y | Y | Live session |
 
 ## EWrapper Callbacks
 

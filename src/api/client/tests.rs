@@ -3375,7 +3375,7 @@ fn a_staged_revision_does_not_hide_the_order_the_venue_is_working() {
 
     client.cancel_order(88, "").expect("withdrawn");
     match rx.try_recv().expect("the cancel travels") {
-        ControlCommand::Order(OrderRequest::Cancel { order_id }) => assert_eq!(order_id, 88),
+        ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 88),
         other => panic!("expected a cancel, got {other:?}"),
     }
     assert!(!client.core.is_held(88), "and the change that was kept goes with it");
@@ -3603,7 +3603,7 @@ fn cancel_order_sends_cancel_command() {
     client.cancel_order(42, "").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::Cancel { order_id }) => assert_eq!(order_id, 42),
+        ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 42),
         _ => panic!("expected Cancel"),
     }
 }
@@ -3630,7 +3630,7 @@ fn a_cancel_time_note_names_the_order_it_belongs_to() {
     assert_eq!(notes.len(), 1, "the note is recorded once");
     assert_eq!(notes[0].0, 17, "against the order named");
     match rx.try_recv().expect("the cancel is sent anyway") {
-        ControlCommand::Order(OrderRequest::Cancel { order_id }) => assert_eq!(order_id, 17),
+        ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 17),
         other => panic!("expected a cancel, got {other:?}"),
     }
 }
@@ -3805,10 +3805,10 @@ fn req_global_cancel_sends_cancel_all_for_each_instrument() {
     let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
     shared.market.set_instrument_count(2);
-    client.req_global_cancel().unwrap();
+    client.req_global_cancel("").unwrap();
     let mut cancel_instruments = vec![];
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::CancelAll { instrument }) = cmd {
+        if let ControlCommand::Order(OrderRequest::CancelAll { instrument, .. }) = cmd {
             cancel_instruments.push(instrument);
         }
     }
@@ -3821,7 +3821,7 @@ fn req_global_cancel_sends_cancel_all_for_each_instrument() {
 fn req_global_cancel_no_instruments_no_commands() {
     let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
-    client.req_global_cancel().unwrap();
+    client.req_global_cancel("").unwrap();
     assert!(rx.try_recv().is_err());
 }
 
@@ -3842,7 +3842,7 @@ fn a_global_cancel_frees_the_ids_of_orders_never_sent() {
     assert!(rx.try_recv().is_err(), "nothing was sent for it");
 
     shared.orders.set_replay_done();
-    client.req_global_cancel().expect("everything withdrawn");
+    client.req_global_cancel("").expect("everything withdrawn");
     assert!(!client.core.is_order_tracked(84), "the record goes with the command");
 
     let order = Order { transmit: true, ..held };
@@ -3878,7 +3878,7 @@ fn a_global_cancel_keeps_the_order_a_staged_revision_belongs_to() {
     assert!(next_command(&rx).is_none(), "nothing goes to the venue for a change that is held");
 
     shared.orders.set_replay_done();
-    client.req_global_cancel().expect("everything withdrawn");
+    client.req_global_cancel("").expect("everything withdrawn");
     assert!(!client.core.is_held(85), "the change that was never sent is forgotten");
     assert!(
         client.core.is_working_at_the_venue(85, Some(&client.shared)),
@@ -3899,12 +3899,12 @@ fn a_global_cancel_says_when_the_venue_has_not_finished_naming() {
     // was named nothing at all is the other case, and says nothing — there is
     // no uncovered order to warn about.
     shared.orders.note_naming_began();
-    let refusal = client.req_global_cancel().expect_err(
+    let refusal = client.req_global_cancel("").expect_err(
         "a withdrawal composed before the naming finished says so rather than returning",
     );
     let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(
-        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0 })]),
+        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
         "what had been named is still withdrawn: {sent:?}",
     );
     assert_eq!(
@@ -3969,12 +3969,12 @@ fn a_global_cancel_says_when_an_order_has_no_slot_in_the_instrument_table() {
     shared.orders.set_replay_done();
     shared.market.set_instrument_count(1);
     shared.orders.note_an_order_without_a_slot();
-    let refusal = client.req_global_cancel().expect_err(
+    let refusal = client.req_global_cancel("").expect_err(
         "a withdrawal that cannot reach every working order says so rather than returning",
     );
     let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(
-        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0 })]),
+        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
         "what the book does hold is still withdrawn: {sent:?}",
     );
     assert_eq!(
@@ -7265,7 +7265,7 @@ fn cancel_during_modify_no_panic() {
 
     let mut has_cancel = false;
     while let Ok(cmd) = rx.try_recv() {
-        if matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 99 })) {
+        if matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 99, .. })) {
             has_cancel = true;
         }
     }
@@ -9524,10 +9524,10 @@ fn a_global_cancel_waits_for_the_venue_to_name_the_working_orders() {
         venue.market.set_instrument_count(1);
         venue.orders.set_replay_done();
     });
-    client.req_global_cancel().unwrap();
+    client.req_global_cancel("").unwrap();
     let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(
-        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0 })]),
+        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
         "the order the venue named is withdrawn: {sent:?}",
     );
 }
@@ -9636,7 +9636,7 @@ fn a_withdrawal_against_an_account_working_nothing_says_nothing() {
     let (client, _rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     // The venue named nothing at all: no naming began, and none finished.
-    client.req_global_cancel().expect(
+    client.req_global_cancel("").expect(
         "an account the venue named nothing for is withdrawn without complaint",
     );
 }
@@ -10645,7 +10645,7 @@ fn a_withdrawal_by_permanent_id_waits_for_the_venue_to_name_the_working_set() {
     client.cancel_order_by_perm_id(777_001).expect("the order the venue names is withdrawn");
     naming.join().unwrap();
     assert!(
-        matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { order_id: 4242 }))),
+        matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { order_id: 4242, .. }))),
         "the withdrawal names the order the venue named",
     );
 }
@@ -10793,7 +10793,7 @@ fn a_global_cancel_says_how_many_instruments_it_reached() {
     shared.orders.set_replay_done();
     shared.market.set_instrument_count(3);
     drop(rx);
-    let refused = client.req_global_cancel().expect_err("nothing reached the engine");
+    let refused = client.req_global_cancel("").expect_err("nothing reached the engine");
     assert!(refused.message.contains("reached the engine for 0 of 3"), "{refused}");
 }
 
@@ -11685,4 +11685,172 @@ fn a_preview_warned_about_is_still_answered() {
     client.process_msgs(&mut w);
     let at = |prefix: &str| w.events.iter().position(|e| e.starts_with(prefix));
     assert!(at("error:7:2181").unwrap() < at("open_order:7:").unwrap(), "{:?}", w.events);
+}
+
+/// The level this client implements, the time the venue stamped the logon
+/// with, and a start that has nothing to begin: answered while the session
+/// stands, and as the reference client answers with none once it is gone.
+#[test]
+fn the_connection_is_described_as_the_reference_client_describes_it() {
+    let (mut client, _rx, shared) = test_client();
+    assert_eq!(client.server_version(), Some(217));
+    assert_eq!(client.tws_connection_time(), None, "nothing stamped this session");
+    client.logged_in_at = "20260924-13:30:00".into();
+    assert_eq!(client.tws_connection_time().as_deref(), Some("20260924-13:30:00"));
+
+    #[derive(Default)]
+    struct Heard(Vec<(i64, i64)>);
+    impl Wrapper for Heard {
+        fn error(&mut self, req_id: i64, code: i64, _msg: &str, _json: &str) { self.0.push((req_id, code)); }
+    }
+    let mut w = Heard::default();
+    client.start_api();
+    client.process_msgs(&mut w);
+    assert!(w.0.is_empty(), "nothing to begin while the session stands: {:?}", w.0);
+
+    // A lost connection the engine is recovering is not the session's end.
+    shared.set_connection_lost();
+    client.process_msgs(&mut w);
+    assert!(!client.is_connected());
+    assert_eq!(client.server_version(), Some(217), "held while the connection is recovered");
+    assert_eq!(client.tws_connection_time().as_deref(), Some("20260924-13:30:00"));
+
+    shared.reference.set_session_over("the session ended");
+    assert_eq!(client.server_version(), None);
+    assert_eq!(client.tws_connection_time(), None);
+    client.start_api();
+    client.process_msgs(&mut w);
+    assert!(w.0.contains(&(-1, 504)), "{:?}", w.0);
+}
+
+/// The two verification requests are answered as the reference client
+/// answers them, under 508, and the two messages and the two withdrawals a
+/// gateway takes without asking the venue anything send nothing here.
+#[test]
+fn the_verification_calls_and_the_two_quiet_cancels_are_answered_as_a_gateway_answers_them() {
+    let (client, rx, shared) = test_client();
+    #[derive(Default)]
+    struct Heard(Vec<(i64, i64, String)>);
+    impl Wrapper for Heard {
+        fn error(&mut self, req_id: i64, code: i64, msg: &str, _json: &str) {
+            self.0.push((req_id, code, msg.to_string()));
+        }
+    }
+    let said = "Bad message  Intent to authenticate needs to be expressed during initial connect request.";
+    let mut w = Heard::default();
+    client.verify_request("app", "1");
+    client.verify_and_auth_request("app", "1", "key");
+    client.verify_message("data");
+    client.verify_and_auth_message("data", "response");
+    client.cancel_contract_data(5).unwrap();
+    client.cancel_historical_ticks(6).unwrap();
+    client.process_msgs(&mut w);
+    assert_eq!(w.0, vec![(-1, 508, said.to_string()), (-1, 508, said.to_string())]);
+    assert!(rx.try_recv().is_err(), "nothing reaches the engine");
+
+    shared.reference.set_session_over("the session ended");
+    let mut w = Heard::default();
+    client.verify_request("app", "1");
+    client.verify_message("data");
+    assert_eq!(client.cancel_contract_data(5).unwrap_err().code, 504);
+    assert_eq!(client.cancel_historical_ticks(6).unwrap_err().code, 504);
+    client.process_msgs(&mut w);
+    assert_eq!(
+        w.0.iter().map(|(id, code, _)| (*id, *code)).collect::<Vec<_>>(),
+        vec![(-1, 504), (-1, 504)],
+    );
+}
+
+/// What a withdrawal states about itself reaches the cancel: who is
+/// withdrawing it and whether a person entered it, on one order and on every
+/// order. A time alone is still what the second argument takes.
+#[test]
+fn a_withdrawal_carries_its_operator_and_indicator() {
+    use crate::types::model::OrderCancel;
+    let (client, rx, _shared) = test_client();
+    client.shared.orders.set_replay_done();
+    client.core.track_order(42, spy(), Order::default(), 0);
+    let stated = OrderCancel { ext_operator: "OP1".into(), manual_order_indicator: 1, ..Default::default() };
+    client.cancel_order(42, &stated).unwrap();
+    match rx.try_recv().expect("the cancel") {
+        ControlCommand::Order(OrderRequest::Cancel { order_id: 42, stated: carried }) => {
+            assert_eq!(carried, stated);
+        }
+        other => panic!("expected a cancel, got {other:?}"),
+    }
+    let time = String::new();
+    client.cancel_order(42, &time).unwrap();
+    client.cancel_order(42, time).unwrap();
+    for _ in 0..2 {
+        match rx.try_recv().expect("the cancel") {
+            ControlCommand::Order(OrderRequest::Cancel { stated, .. }) => {
+                assert_eq!(stated, OrderCancel::default(), "a time alone states neither");
+            }
+            other => panic!("expected a cancel, got {other:?}"),
+        }
+    }
+    // A time a gateway cannot read withdraws nothing, and neither does an
+    // operator carrying the byte that separates fields.
+    for unread in ["garbage", "2026-09-24 14:30:00", "20260924 14:30", "20260924-25:00:00"] {
+        assert_eq!(client.cancel_order(42, unread).unwrap_err().code, 10301, "{unread}");
+    }
+    let spliced = OrderCancel { ext_operator: "OP1\u{1}11=7".into(), ..Default::default() };
+    assert_eq!(client.cancel_order(42, &spliced).unwrap_err().code, 321);
+    assert_eq!(client.req_global_cancel(&spliced).unwrap_err().code, 321);
+    assert!(rx.try_recv().is_err(), "nothing was withdrawn");
+    // The forms a gateway reads, the date and the zone optional.
+    for read in ["20260924-14:30:00", "20260924 14:30:00", "20260924 14:30:00 US/Eastern", "14:30:00"] {
+        client.cancel_order(42, read).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { .. }))), "{read}");
+    }
+    client.shared.market.set_instrument_count(1);
+    let everything = OrderCancel { ext_operator: "OP2".into(), manual_order_indicator: 0, ..Default::default() };
+    client.req_global_cancel(&everything).unwrap();
+    match rx.try_recv().expect("the withdrawal of every order") {
+        ControlCommand::Order(OrderRequest::CancelAll { stated, .. }) => {
+            assert_eq!(stated, everything);
+        }
+        other => panic!("expected a withdrawal of every order, got {other:?}"),
+    }
+}
+
+/// A preview's number is the question's own, and the numbers handed out after
+/// it go on from where they were. Spent like a caller's, it moved the
+/// allocator into the band the calls that answer number themselves in, and
+/// every number handed out after a preview was one no request can carry.
+#[test]
+fn a_preview_spends_no_number_a_caller_is_handed() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.set_replay_done();
+    let before = client.next_order_id();
+    {
+        let _answering = super::Answering::begin();
+        let asked = i64::from(crate::bridge::ReferenceState::ASK_ID_BASE) + 7;
+        let preview = Order { what_if: true, ..Order::limit("BUY", 1.0, 1.0) };
+        client.place_order(asked, &spy(), &preview).unwrap();
+    }
+    assert_eq!(client.next_order_id(), before + 1, "the preview took no caller's number");
+}
+
+/// The holdings asked as a question are read, and nothing is left watching:
+/// a program that asked once is not handed every later move, and the moves its
+/// own per-request watchers wait on are left for them.
+#[test]
+fn the_holdings_are_read_and_nothing_is_left_watching() {
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.set_position_info(crate::types::PositionInfo {
+        con_id: 756733, symbol: "SPY".into(), position: 3.0,
+        avg_cost: 412 * crate::types::PRICE_SCALE, ..Default::default()
+    });
+    shared.portfolio.set_account_download_complete("AR.1");
+    shared.portfolio.account_download_is_settled();
+    let held = client.positions().expect("the holdings");
+    assert_eq!(
+        held.iter().map(|r| (r.contract.con_id, r.position, r.avg_cost)).collect::<Vec<_>>(),
+        vec![(756733, 3.0, 412.0)],
+    );
+    assert!(!client.positions_requested.load(std::sync::atomic::Ordering::Acquire), "nothing subscribed");
+
+    shared.reference.set_session_over("the session ended");
+    assert_eq!(client.positions().unwrap_err().code, 504);
 }

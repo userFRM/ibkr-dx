@@ -2,7 +2,7 @@
 //! gateway answers itself rather than asking the venue.
 
 use crate::api::wrapper::Wrapper;
-use crate::error_codes::{LOG_LEVEL_INVALID, Refusal};
+use crate::error_codes::{BAD_MESSAGE, LOG_LEVEL_INVALID, Refusal};
 
 use super::EClient;
 
@@ -359,6 +359,52 @@ impl EClient {
     pub fn update_display_group(&self, req_id: i64, contract_info: &str) -> Result<(), Refusal> {
         self.core.update_display_group(req_id, contract_info)
             .map_err(Refusal::from)
+    }
+
+    // ── Verification ──
+    //
+    // A handshake between a gateway and a program linking to it. The
+    // reference client answers the two requests itself, because intent to
+    // authenticate is stated on the initial connect and it never states it;
+    // the two messages it does send, a gateway reads and discards.
+
+    /// Answered as the reference client answers it: on `error`, under 508 and
+    /// no request, because intent to authenticate is stated on the initial
+    /// connect and was not. Nothing is sent, so `api_name` and `api_version`
+    /// reach nothing.
+    pub fn verify_request(&self, api_name: &str, api_version: &str) {
+        let _ = (api_name, api_version);
+        self.refuse_verification();
+    }
+
+    /// As [`verify_request`](Self::verify_request): `api_name`, `api_version`
+    /// and `opaque_isv_key` reach nothing.
+    pub fn verify_and_auth_request(&self, api_name: &str, api_version: &str, opaque_isv_key: &str) {
+        let _ = (api_name, api_version, opaque_isv_key);
+        self.refuse_verification();
+    }
+
+    /// Nothing is sent and nothing answers. A gateway reads this message and
+    /// discards it, so a program on one is answered by nothing either, and
+    /// `api_data` reaches nothing there or here.
+    pub fn verify_message(&self, api_data: &str) {
+        let _ = api_data;
+        if self.session_over() { self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+    }
+
+    /// As [`verify_message`](Self::verify_message): `api_data` and
+    /// `xyz_response` reach nothing.
+    pub fn verify_and_auth_message(&self, api_data: &str, xyz_response: &str) {
+        let _ = (api_data, xyz_response);
+        if self.session_over() { self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+    }
+
+    fn refuse_verification(&self) {
+        if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+        self.report_reason(-1, &Refusal::stated(
+            BAD_MESSAGE,
+            "Bad message  Intent to authenticate needs to be expressed during initial connect request.",
+        ));
     }
 
     // ── Soft Dollar Tiers ──

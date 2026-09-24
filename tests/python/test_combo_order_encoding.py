@@ -12,7 +12,7 @@ Run: pytest tests/python/test_combo_order_encoding.py -v -s
 import os, threading, time
 import pytest
 
-from conftest import next_option_expiry
+from conftest import declined, next_option_expiry
 from ibkr_dx import EWrapper, EClient, Contract
 
 pytestmark = pytest.mark.skipif(
@@ -92,9 +92,18 @@ class TestComboSpread:
         self.client.disconnect()
         self.thread.join(timeout=5)
 
+    def _said(self, *req_ids):
+        """Anything said under one of these requests, or a data connection
+        dropping."""
+        return [e for e in self.wrapper.errors if e[0] in req_ids] or declined(self.wrapper.errors, *req_ids)
+
     def test_vertical_spread_legs(self):
-        """Get market data for two option legs of a bull call spread."""
-        # Get SPY underlying price
+        """Get market data for two option legs of a bull call spread.
+
+        The legs are named by the venue before they are quoted, so a quote is
+        never asked of a contract nobody listed. After that, silence fails: a
+        listed option carries a price at any hour, or the venue says why not.
+        """
         spy = Contract()
         spy.con_id = SPY_CON_ID
         spy.symbol = "SPY"
@@ -105,35 +114,37 @@ class TestComboSpread:
         self.client.req_mkt_data(1000, spy, "", False)
         got = self.wrapper.got_underlying.wait(timeout=30)
         self.client.cancel_mkt_data(1000)
-        if not got:
-            pytest.skip("No SPY price — market may be closed")
+        # Outside the session a stock still carries a bid, an ask and the close.
+        if not got and declined(self.wrapper.errors, 1000):
+            pytest.skip(f"the venue declined the quote or its connection dropped: {declined(self.wrapper.errors, 1000)[0]}")
+        assert got, f"a quote on SPY delivered no price: {self._said(1000)}"
 
         price = self.wrapper.underlying_price
-        # ATM and OTM strikes (round to nearest integer)
-        atm_strike = round(price)
-        otm_strike = atm_strike + 3
+        chains = self.client.option_chains("SPY", "", "STK", SPY_CON_ID)
+        expiries = sorted({e for c in chains for e in c.expirations if e >= next_option_expiry()})
+        assert expiries, "the venue listed no expiries for SPY"
+        expiry = expiries[0]
+        strikes = sorted({k for c in chains if expiry in c.expirations for k in c.strikes})
+        atm_strike = min(strikes, key=lambda k: abs(k - price))
+        otm_strike = min((k for k in strikes if k >= atm_strike + 3), default=None)
+        assert otm_strike is not None, f"no strike listed three above {atm_strike} on {expiry}"
         print(f"  SPY: {price}, buy leg strike: {atm_strike}, sell leg strike: {otm_strike}")
 
-        # Build option contracts for both legs
-        buy_leg = Contract()
-        buy_leg.symbol = "SPY"
-        buy_leg.sec_type = "OPT"
-        buy_leg.exchange = "SMART"
-        buy_leg.currency = "USD"
-        buy_leg.right = "C"
-        buy_leg.strike = float(atm_strike)
-        buy_leg.last_trade_date_or_contract_month = next_option_expiry()
-        buy_leg.multiplier = "100"
+        def named(strike):
+            leg = Contract()
+            leg.symbol = "SPY"
+            leg.sec_type = "OPT"
+            leg.exchange = "SMART"
+            leg.currency = "USD"
+            leg.right = "C"
+            leg.strike = float(strike)
+            leg.last_trade_date_or_contract_month = expiry
+            leg.multiplier = "100"
+            found = self.client.contract_details(leg)
+            assert found, f"the venue named no SPY {strike} call on {expiry}"
+            return found[0].contract
 
-        sell_leg = Contract()
-        sell_leg.symbol = "SPY"
-        sell_leg.sec_type = "OPT"
-        sell_leg.exchange = "SMART"
-        sell_leg.currency = "USD"
-        sell_leg.right = "C"
-        sell_leg.strike = float(otm_strike)
-        sell_leg.last_trade_date_or_contract_month = next_option_expiry()
-        sell_leg.multiplier = "100"
+        buy_leg, sell_leg = named(atm_strike), named(otm_strike)
 
         # Subscribe to both legs
         self.wrapper.got_tick[3001] = threading.Event()
@@ -142,8 +153,13 @@ class TestComboSpread:
         self.client.req_mkt_data(3001, buy_leg, "", False)
         self.client.req_mkt_data(3002, sell_leg, "", False)
 
-        got_buy = self.wrapper.got_tick[3001].wait(timeout=30)
-        got_sell = self.wrapper.got_tick[3002].wait(timeout=30)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not self._said(3001, 3002) and not (
+            self.wrapper.got_tick[3001].is_set() and self.wrapper.got_tick[3002].is_set()
+        ):
+            time.sleep(0.1)
+        got_buy = self.wrapper.got_tick[3001].is_set()
+        got_sell = self.wrapper.got_tick[3002].is_set()
 
         # Wait for bid/ask to populate
         time.sleep(5)
@@ -151,8 +167,11 @@ class TestComboSpread:
         self.client.cancel_mkt_data(3001)
         self.client.cancel_mkt_data(3002)
 
-        if not got_buy and not got_sell:
-            pytest.skip("No option tick data — usopt farm may not be available")
+        if not (got_buy and got_sell) and declined(self.wrapper.errors, 3001, 3002):
+            pytest.skip(f"the venue declined a leg's quote or its connection dropped: {declined(self.wrapper.errors, 3001, 3002)[0]}")
+        assert got_buy and got_sell, (
+            f"a listed option gave no price within 30s: buy {got_buy}, sell {got_sell}: {self._said(3001, 3002)}"
+        )
 
         buy_data = self.wrapper.ticks.get(3001, {})
         sell_data = self.wrapper.ticks.get(3002, {})

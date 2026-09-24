@@ -272,6 +272,39 @@ impl OrderState {
         self.what_if_responses.lock().unwrap().drain(..).collect()
     }
 
+    /// The refusals and previews a dispatch loop should deliver, leaving
+    /// those a call that answers is waiting on under its own number.
+    pub fn drain_order_inactive_for_dispatch(&self, mine: impl Fn(u64) -> bool) -> Vec<(u64, i32, String)> {
+        let mut held = self.order_inactive.lock().unwrap();
+        let (out, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held).into_iter().partition(|e| !mine(e.0));
+        *held = kept;
+        out
+    }
+
+    /// As [`drain_order_inactive_for_dispatch`](Self::drain_order_inactive_for_dispatch),
+    /// for the previews.
+    pub fn drain_what_if_responses_for_dispatch(&self, mine: impl Fn(u64) -> bool) -> Vec<WhatIfResponse> {
+        let mut held = self.what_if_responses.lock().unwrap();
+        let (out, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held).into_iter().partition(|w| !mine(w.order_id));
+        *held = kept;
+        out
+    }
+
+    /// The preview answering one order, if it has arrived, leaving the rest.
+    pub fn take_what_if_for(&self, order_id: u64) -> Option<WhatIfResponse> {
+        let mut held = self.what_if_responses.lock().unwrap();
+        let at = held.iter().position(|w| w.order_id == order_id)?;
+        Some(held.remove(at))
+    }
+
+    /// The refusal of one order, if it has arrived, leaving the rest.
+    pub fn take_order_inactive_for(&self, order_id: u64) -> Option<(i32, String)> {
+        let mut held = self.order_inactive.lock().unwrap();
+        let at = held.iter().position(|(id, _, _)| *id == order_id)?;
+        let (_, code, message) = held.remove(at);
+        Some((code, message))
+    }
+
     /// Take the one question of what the account has finished that this
     /// session may have outstanding, if it is free.
     ///
@@ -514,6 +547,15 @@ impl OrderState {
     /// Take every notice waiting, leaving none.
     pub fn drain_order_notices(&self) -> Vec<(u64, i32, String)> {
         self.order_notices.lock().unwrap().drain(..).collect()
+    }
+
+    /// As [`drain_order_inactive_for_dispatch`](Self::drain_order_inactive_for_dispatch),
+    /// for the notices.
+    pub fn drain_order_notices_for_dispatch(&self, mine: impl Fn(u64) -> bool) -> Vec<(u64, i32, String)> {
+        let mut held = self.order_notices.lock().unwrap();
+        let (out, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held).into_iter().partition(|e| !mine(e.0));
+        *held = kept;
+        out
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {

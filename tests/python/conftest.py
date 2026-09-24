@@ -56,3 +56,89 @@ def wait_for(held, timeout=30.0):
             return True
         time.sleep(0.05)
     return bool(held())
+
+
+def inside_the_session(client, contract):
+    """Whether the venue says this contract's own session is open right now.
+
+    Asked of the venue rather than worked out from a clock here: it states the
+    liquid hours on the contract, in the contract's own zone, and those are the
+    hours a trade stream carries prints for. A quote is no evidence — outside
+    the session a contract carries a bid, an ask and the price of the last trade
+    there ever was.
+
+    The contract is looked up with the call that answers, so this reads nothing
+    off a test's own wrapper. A contract the venue does not name is a failure,
+    not a closed session: reference data is answered at any hour.
+    """
+    import datetime
+    import zoneinfo
+
+    found = client.contract_details(contract)
+    assert found, f"the venue named no contract for {contract.symbol}"
+    details = found[0]
+    hours = getattr(details, "liquid_hours", "") or ""
+    zone = getattr(details, "time_zone_id", "") or "US/Eastern"
+    now = datetime.datetime.now(zoneinfo.ZoneInfo(zone))
+    for span in hours.split(";"):
+        if "-" not in span or "CLOSED" in span:
+            continue
+        opens, shuts = span.split("-", 1)
+        try:
+            a = datetime.datetime.strptime(opens, "%Y%m%d:%H%M")
+            b = datetime.datetime.strptime(shuts, "%Y%m%d:%H%M")
+        except ValueError:
+            continue
+        if a.replace(tzinfo=now.tzinfo) <= now <= b.replace(tzinfo=now.tzinfo):
+            return True
+    return False
+
+
+def liquid_hours(client, contract):
+    """The hours the venue states for a contract, to name in a skip."""
+    found = client.contract_details(contract)
+    return getattr(found[0], "liquid_hours", "") if found else ""
+
+
+# What the engine says, under no request, when one of its data connections
+# drops: market data, then historical.
+FEED_DOWN = (2103, 2105)
+# What it reports the venue declining a request under: data the account is not
+# subscribed to (354), and the historical service's refusal (162). A
+# subscription the venue refused is reported under 200, and a request riding
+# beside a quote under 321, each in words saying the venue refused it.
+VENUE_DECLINED = (354, 162)
+
+
+def declined(errors, *req_ids):
+    """The venue declining one of these requests, or a data connection
+    dropping: the only reasons a live test skips rather than fails.
+
+    `errors` holds (req_id, code, message). A refusal this client makes itself
+    -- 320, 321, 10337, 504 and the rest -- is none of these, so a regression
+    that refuses a request fails the test rather than reading as the venue's
+    choice.
+    """
+    return [
+        (r, code, msg) for r, code, msg in errors
+        if (r == -1 and code in FEED_DOWN)
+        or (r in req_ids and (code in VENUE_DECLINED or str(msg).startswith("the venue refused")))
+    ]
+
+
+def give_back(client, statuses, bought, sold, contract, sell):
+    """Leave the account as a test found it after buying one share.
+
+    A buy that has not filled is withdrawn, and a share is sold back only once
+    the buy says it filled: sold regardless, a buy that was refused or had not
+    filled left the account short, and one that filled after the sale traded
+    twice. `statuses(order_id)` lists the statuses an order has reported.
+    """
+    if "Filled" not in statuses(bought):
+        client.cancel_order(bought, "")
+        wait_for(lambda: {"Filled", "Cancelled", "ApiCancelled", "Inactive"} & set(statuses(bought)), 20)
+    if "Filled" in statuses(bought):
+        client.place_order(sold, contract, sell)
+        assert wait_for(lambda: "Filled" in statuses(sold), 30), (
+            f"the share bought was not sold back: {statuses(sold)}"
+        )

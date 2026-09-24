@@ -239,7 +239,7 @@ fn a_cancel_names_the_side_account_and_originator_but_no_transact_time() {
 
     let mut names = Vec::new();
     for _ in 0..2 {
-        context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42 });
+        context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42, stated: Default::default() });
         drain_and_send_orders(
             &mut conn,
             &mut context,
@@ -416,7 +416,7 @@ fn a_cancel_waits_for_the_recovery_to_say_what_the_broker_holds() {
     // This is the order in doubt: a write for it failed, so what the broker
     // holds for it is exactly what the recovery is about to say.
     context.set_order_status_forced(42, crate::types::OrderStatus::Uncertain);
-    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42 });
+    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42, stated: Default::default() });
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
 
@@ -440,7 +440,7 @@ fn a_cancel_waits_for_the_recovery_to_say_what_the_broker_holds() {
         b'1',
         0,
     ));
-    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 43 });
+    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 43, stated: Default::default() });
     drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, true, &None);
     let n = std::io::Read::read(&mut peer, &mut buf).unwrap_or(0);
     assert!(
@@ -3124,7 +3124,7 @@ mod outside_rth_polarity_tests {
             attrs: Default::default(),
         });
         drain(&mut context);
-        context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 9 });
+        context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 9, stated: Default::default() });
         let sent = drain(&mut context);
         assert!(!sent.contains("|38=0|"), "the cancel states no zero quantity: {sent}");
         assert!(sent.contains("|38=0.5|"), "it states the fraction instead: {sent}");
@@ -3178,7 +3178,7 @@ mod outside_rth_polarity_tests {
             21, instrument, Side::Buy, crate::types::QTY_SCALE, 100 * crate::types::PRICE_SCALE, b'2', b'0', 0,
         ));
         context.update_order_status(21, OrderStatus::Inactive, false);
-        context.pending_orders.push(crate::types::OrderRequest::CancelAll { instrument });
+        context.pending_orders.push(crate::types::OrderRequest::CancelAll { instrument, stated: Default::default() });
         let sent = drain(&mut context);
         assert!(sent.contains("|11=C21|"), "the held order was cancelled: {sent}");
     }
@@ -4252,8 +4252,8 @@ fn a_withdrawal_of_everything_that_never_went_is_said_to_the_caller() {
     let shared = Arc::new(SharedState::new());
     // One per instrument, which is how a caller asking for everything back
     // reaches the engine.
-    context.pending_orders.push(OrderRequest::CancelAll { instrument: 0 });
-    context.pending_orders.push(OrderRequest::CancelAll { instrument: 1 });
+    context.pending_orders.push(OrderRequest::CancelAll { instrument: 0, stated: Default::default() });
+    context.pending_orders.push(OrderRequest::CancelAll { instrument: 1, stated: Default::default() });
 
     refuse_what_is_left(
         &mut context, &shared, "recovery of the trading connection was given up",
@@ -4372,7 +4372,7 @@ fn a_cancel_that_does_not_go_leaves_the_change_outstanding() {
     context.modify_versions.insert(42, 1);
     context.pre_replace.insert((42, 1), (before, "42.0".to_string(), None));
 
-    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42 });
+    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42, stated: Default::default() });
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
     drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
@@ -4399,7 +4399,7 @@ fn a_request_that_names_a_slot_offers_it_back_when_it_drains() {
     let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
     let mut context = Context::new();
     let instrument = context.register_instrument(756733);
-    context.pending_orders.push(crate::types::OrderRequest::CancelAll { instrument });
+    context.pending_orders.push(crate::types::OrderRequest::CancelAll { instrument, stated: Default::default() });
 
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
@@ -4844,7 +4844,7 @@ fn an_order_for_a_model_names_it_on_the_order_and_on_the_cancel() {
         "the model the order trades against: {msg}",
     );
 
-    send_cancel(&mut conn, &mut context, &shared_for_test(), "DU123456", 79).unwrap();
+    send_cancel(&mut conn, &mut context, &shared_for_test(), "DU123456", 79, &Default::default()).unwrap();
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(
@@ -4880,7 +4880,7 @@ fn an_order_for_the_default_sleeve_names_no_model() {
         "no model tag at all: {msg}",
     );
 
-    send_cancel(&mut conn, &mut context, &shared_for_test(), "DU123456", 80).unwrap();
+    send_cancel(&mut conn, &mut context, &shared_for_test(), "DU123456", 80, &Default::default()).unwrap();
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(
@@ -5340,7 +5340,7 @@ mod as_a_gateway_sends_it {
             con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
             kind: K::Limit { price: P }, tif: b'0', attrs: OrderAttrs { account: "U2".into(), ..Default::default() },
         });
-        context.pending_orders.push(OrderRequest::Cancel { order_id: 42 });
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 42, stated: Default::default() });
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
         let mut buf = vec![0u8; 16384];
         let mut text = String::new();
@@ -5359,10 +5359,74 @@ mod as_a_gateway_sends_it {
             order_state: Default::default(),
             last_exec: Default::default(),
         });
-        send_cancel(conn.as_mut().unwrap(), &mut context, &shared, "DU1", 77).unwrap();
+        send_cancel(conn.as_mut().unwrap(), &mut context, &shared, "DU1", 77, &Default::default()).unwrap();
         let n = peer.read(&mut buf).unwrap();
         let cancel = String::from_utf8_lossy(&buf[..n]).to_string();
         assert_eq!(one(&cancel, 1).as_deref(), Some("U3"), "{cancel}");
+    }
+
+    /// A cancel states who is withdrawing the order and whether a person
+    /// entered the withdrawal, from the withdrawal and not from the placement:
+    /// a gateway replaces the order's own with the cancel's, and one the cancel
+    /// leaves empty is gone. A withdrawal of every order states them on each.
+    #[test]
+    fn a_cancel_states_its_own_operator_and_indicator() {
+        use std::io::Read;
+        use crate::types::model::OrderCancel;
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        let placed_by = OrderAttrs {
+            ext_operator: "PLACER".into(), manual_order_indicator: 1, ..Default::default()
+        };
+        for order_id in [42, 43] {
+            context.pending_orders.push(OrderRequest::SubmitEx {
+                con_id: 0, order_id, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
+                kind: K::Limit { price: P }, tif: b'0', attrs: placed_by.clone(),
+            });
+        }
+        let mut buf = vec![0u8; 16384];
+        let mut cancels = |context: &mut Context, request: OrderRequest, count: usize| {
+            context.pending_orders.push(request);
+            drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None);
+            let mut text = String::new();
+            while text.matches("35=F").count() < count {
+                let n = peer.read(&mut buf).unwrap();
+                text.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            text.split("8=FIX").filter(|m| m.contains("35=F")).map(str::to_string).collect::<Vec<_>>()
+        };
+
+        let everything = OrderCancel { ext_operator: "OP2".into(), manual_order_indicator: 1, ..Default::default() };
+        let all = cancels(&mut context, OrderRequest::CancelAll { instrument, stated: everything }, 2);
+        assert_eq!(all.len(), 2, "{all:?}");
+        for cancel in &all {
+            assert_eq!(one(cancel, 8089).as_deref(), Some("OP2"), "{cancel}");
+            assert_eq!(one(cancel, 1028).as_deref(), Some("Y"), "{cancel}");
+        }
+
+        // The time is the withdrawal's and does not travel.
+        let stated = OrderCancel {
+            ext_operator: "OP1".into(), manual_order_indicator: 0,
+            manual_order_cancel_time: "20260924-14:30:00".into(),
+        };
+        let one_cancel = cancels(&mut context, OrderRequest::Cancel { order_id: 42, stated }, 1);
+        assert_eq!(one(&one_cancel[0], 8089).as_deref(), Some("OP1"), "{}", one_cancel[0]);
+        assert_eq!(one(&one_cancel[0], 1028).as_deref(), Some("N"), "{}", one_cancel[0]);
+        assert_eq!(one(&one_cancel[0], 8352), None, "{}", one_cancel[0]);
+
+        let yes = OrderCancel { manual_order_indicator: 1, ..Default::default() };
+        let by_hand = cancels(&mut context, OrderRequest::Cancel { order_id: 42, stated: yes }, 1);
+        assert_eq!(one(&by_hand[0], 1028).as_deref(), Some("Y"), "{}", by_hand[0]);
+        assert_eq!(one(&by_hand[0], 8089), None, "an empty operator removes the placement's: {}", by_hand[0]);
+
+        let silent = cancels(&mut context, OrderRequest::Cancel { order_id: 42, stated: Default::default() }, 1);
+        assert_eq!(one(&silent[0], 8089), None, "{}", silent[0]);
+        assert_eq!(one(&silent[0], 1028), None, "an unset indicator states nothing: {}", silent[0]);
     }
 
     /// Every leg of a bracket states who originated it, as every other order

@@ -65,7 +65,7 @@ fn cancel_drains_correctly() {
 
     let orders: Vec<_> = ctx.drain_pending_orders().collect();
     match orders[0] {
-        OrderRequest::Cancel { order_id } => assert_eq!(order_id, 42),
+        OrderRequest::Cancel { order_id, .. } => assert_eq!(order_id, 42),
         _ => panic!("expected Cancel"),
     }
 }
@@ -77,7 +77,7 @@ fn cancel_all_drains_correctly() {
 
     let orders: Vec<_> = ctx.drain_pending_orders().collect();
     match orders[0] {
-        OrderRequest::CancelAll { instrument } => assert_eq!(instrument, 5),
+        OrderRequest::CancelAll { instrument, .. } => assert_eq!(instrument, 5),
         _ => panic!("expected CancelAll"),
     }
 }

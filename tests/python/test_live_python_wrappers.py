@@ -12,7 +12,7 @@ import time
 import threading
 import pytest
 from ibkr_dx import EWrapper, EClient, Contract, Order, TagValue
-from conftest import wait_for
+from conftest import declined, inside_the_session, liquid_hours, wait_for
 
 
 # Skip entire module if credentials not set
@@ -241,6 +241,13 @@ class FullWrapper(EWrapper):
     # ── Fundamental ──
     def fundamental_data(self, req_id, data):
         self._record(("fundamental_data", req_id, data))
+
+    # ── Corporate-events calendar ──
+    def wsh_meta_data(self, req_id, data_json):
+        self._record(("wsh_meta_data", req_id, data_json))
+
+    def wsh_event_data(self, req_id, data_json):
+        self._record(("wsh_event_data", req_id, data_json))
 
 
 # ── Shared Fixture ──
@@ -665,12 +672,12 @@ class TestAccount:
         got_pnl = wrapper.got_pnl.wait(timeout=15)
         client.cancel_pnl(6002)
 
-        # What a running profit is reported on is a position. Skipped for
-        # want of one — which is evidence — and failed otherwise.
-        held = [e for e in wrapper._get_events("position") if e[3] != 0]
-        if not got_pnl and not held:
-            pytest.skip("the account holds nothing, so there is no running profit")
-        assert got_pnl, "the account holds a position and no profit was reported on it"
+        # The account's running profit is reported whether or not it holds
+        # anything: a flat account states its figures, at nought. A refusal
+        # under the request is this client's to explain, so it is shown.
+        refused = [e for e in wrapper._get_events("error") if e[1] == 6002]
+        assert not refused, f"the profit request was refused: {refused}"
+        assert got_pnl, "the account was asked for its running profit and stated none"
 
         events = [e for e in wrapper._get_events("pnl") if e[1] == 6002]
         assert len(events) > 0
@@ -718,52 +725,6 @@ class TestScanner:
 # Tick-by-Tick Tests
 # ═══════════════════════════════════════
 
-def _inside_the_session(client, wrapper, contract):
-    """Whether the venue says this contract's own session is open right now.
-
-    Asked of the venue rather than worked out from a clock here: it states the
-    liquid hours on the contract, in the contract's own zone, and those are the
-    hours the trade stream carries prints for. A quote is no evidence — outside
-    the session a contract carries a bid, an ask and the price of the last trade
-    there ever was. Nor is the time of that trade: it can come from a route this
-    stream does not carry, which is what a subscription the venue accepts and
-    then says nothing on looks like at four in the morning.
-    """
-    import datetime
-    import zoneinfo
-
-    wrapper._get_events("contract_details")
-    client.req_contract_details(9911, contract)
-    for _ in range(150):
-        client.poll() if hasattr(client, "poll") else None
-        found = [e for e in wrapper._get_events("contract_details") if e[1] == 9911]
-        if found:
-            break
-        time.sleep(0.1)
-    else:
-        return False
-
-    details = found[0][2]
-    hours = getattr(details, "liquid_hours", "") or ""
-    zone = getattr(details, "time_zone_id", "") or "US/Eastern"
-    try:
-        now = datetime.datetime.now(zoneinfo.ZoneInfo(zone))
-    except Exception:
-        return False
-    for span in hours.split(";"):
-        if "-" not in span or "CLOSED" in span:
-            continue
-        opens, shuts = span.split("-", 1)
-        try:
-            a = datetime.datetime.strptime(opens, "%Y%m%d:%H%M")
-            b = datetime.datetime.strptime(shuts, "%Y%m%d:%H%M")
-        except ValueError:
-            continue
-        if a.replace(tzinfo=now.tzinfo) <= now <= b.replace(tzinfo=now.tzinfo):
-            return True
-    return False
-
-
 class TestTickByTick:
 
     def test_tbt_last(self, ib_connection):
@@ -786,10 +747,11 @@ class TestTickByTick:
         got_tbt = wrapper.got_tbt.wait(timeout=45)
         client.cancel_tick_by_tick_data(7001)
 
-        if not _inside_the_session(client, wrapper, contract):
+        if not inside_the_session(client, contract):
             pytest.skip(
-                "the venue's own liquid hours say this contract's session is shut, "
-                "and the trade stream carries the session's prints"
+                "the venue's own liquid hours say this contract's session is shut "
+                f"({liquid_hours(client, contract)}), and the trade stream carries the "
+                "session's prints"
             )
         assert got_tbt, (
             "the venue reported a trade on this contract, so it is trading, "
@@ -800,6 +762,114 @@ class TestTickByTick:
         assert len(events) > 0
         price = events[0][2]
         assert price > 0, "TBT price should be positive"
+
+
+# ═══════════════════════════════════════
+# Five-second bars
+# ═══════════════════════════════════════
+
+def _said(wrapper, req_id):
+    """Everything said under a request."""
+    return [(e[2], e[3]) for e in wrapper._get_events("error") if e[1] == req_id]
+
+
+def _refused(wrapper, req_id):
+    """The venue declining a request, or a data connection dropping."""
+    return declined([(e[1], e[2], e[3]) for e in wrapper._get_events("error")], req_id)
+
+
+class TestFiveSecondBars:
+
+    def test_bars_arrive_and_stop_when_withdrawn(self, ib_connection):
+        """Bars on a contract that is trading, and none after the withdrawal.
+
+        Skipped only on the venue's own refusal, quoted, or outside the
+        contract's liquid hours, which the bars on regular hours cover; inside
+        them, a stream that delivers nothing fails.
+        """
+        wrapper, client = ib_connection
+        wrapper.got_real_time_bar.clear()
+        contract = make_spy_contract()
+        client.req_real_time_bars(7101, contract, 5, "TRADES", True)
+        got = wrapper.got_real_time_bar.wait(timeout=30)
+        client.cancel_real_time_bars(7101)
+
+        refused = _refused(wrapper, 7101)
+        if not got and refused:
+            pytest.skip(f"the venue declined the bars: {refused[0]}")
+        if not got and not inside_the_session(client, contract):
+            pytest.skip(
+                "the venue's own liquid hours say this contract's session is shut "
+                f"({liquid_hours(client, contract)}), and bars on regular hours carry it"
+            )
+        assert got, f"the contract is trading and a bar stream on it delivered nothing: {_said(wrapper, 7101)}"
+
+        bars = [e for e in wrapper._get_events("real_time_bar") if e[1] == 7101]
+        assert any(high >= low > 0 for _, _, _, high, low, *_ in bars), bars
+        # Two whole periods after the withdrawal, and nothing more.
+        time.sleep(1)
+        seen = len([e for e in wrapper._get_events("real_time_bar") if e[1] == 7101])
+        time.sleep(11)
+        after = len([e for e in wrapper._get_events("real_time_bar") if e[1] == 7101])
+        assert after == seen, f"{after - seen} bars arrived after the withdrawal"
+
+
+# ═══════════════════════════════════════
+# Corporate-events calendar
+# ═══════════════════════════════════════
+
+class TestCorporateEventsCalendar:
+
+    def _answer(self, wrapper, kind, req_id, timeout=20.0):
+        wait_for(
+            lambda: [e for e in wrapper._get_events(kind) if e[1] == req_id] or _said(wrapper, req_id),
+            timeout,
+        )
+        answered = [e for e in wrapper._get_events(kind) if e[1] == req_id]
+        refused = _refused(wrapper, req_id)
+        if not answered and refused:
+            pytest.skip(f"the venue declined the calendar request: {refused[0]}")
+        assert answered, f"the calendar gave nothing to request {req_id} within {timeout:.0f}s: {_said(wrapper, req_id)}"
+        return answered[0][2]
+
+    def test_the_calendar_states_what_it_carries(self, ib_connection):
+        import json
+
+        wrapper, client = ib_connection
+        client.req_wsh_meta_data(7201)
+        schema = json.loads(self._answer(wrapper, "wsh_meta_data", 7201))
+        assert schema, "the schema states something"
+
+    def test_a_contracts_events_are_answered(self, ib_connection):
+        """The event set itself is not asserted: without the calendar's
+        subscription the venue answers every query with an empty one."""
+        import json
+
+        from ibkr_dx import WshEventData
+
+        wrapper, client = ib_connection
+        asked = WshEventData()
+        asked.conId = AAPL_CON_ID
+        asked.totalLimit = 20
+        client.req_wsh_event_data(7203, asked)
+        json.loads(self._answer(wrapper, "wsh_event_data", 7203))
+
+    @pytest.mark.parametrize("req_id,kind", [(7202, "wsh_meta_data"), (7204, "wsh_event_data")])
+    def test_a_withdrawn_question_is_answered_by_nothing(self, ib_connection, req_id, kind):
+        from ibkr_dx import WshEventData
+
+        wrapper, client = ib_connection
+        if kind == "wsh_meta_data":
+            client.req_wsh_meta_data(req_id)
+            client.cancel_wsh_meta_data(req_id)
+        else:
+            asked = WshEventData()
+            asked.conId = AAPL_CON_ID
+            client.req_wsh_event_data(req_id, asked)
+            client.cancel_wsh_event_data(req_id)
+        time.sleep(15)
+        assert not [e for e in wrapper._get_events(kind) if e[1] == req_id], "the answer arrived anyway"
+        assert not _said(wrapper, req_id), "a withdrawal that acted says nothing"
 
 
 # ═══════════════════════════════════════

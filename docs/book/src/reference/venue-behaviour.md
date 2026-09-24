@@ -81,6 +81,20 @@ does on a gateway: never. Trouble on a connection reaches the error callback.
 
 # Requests
 
+## Requests a gateway answers itself, or not at all
+
+`verify_request` and `verify_and_auth_request` are answered by the reference
+client itself, under 508 (*Bad message  Intent to authenticate needs to be
+expressed during initial connect request.*), and never reach a gateway; they
+are answered the same way here. `verify_message` and
+`verify_and_auth_message` reach a gateway, which reads and discards them, so
+here they send nothing and nothing answers. `cancel_contract_data` and
+`cancel_historical_ticks` ask the venue nothing on a gateway either: they only
+stop a gateway re-sending a request it held back while its connection to the
+venue was down, which this client never does. A lookup or ticks already asked
+for still arrive. Without a session — before one exists, or once it is over —
+each is refused under 504.
+
 ## A broad lookup takes longer than one contract
 
 A lookup naming a whole class is a different question from one naming a single

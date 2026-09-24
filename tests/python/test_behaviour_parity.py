@@ -25,8 +25,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: a reconnect put a request and its answer on two different sessions.
 #: `next_shared_id` sends nothing: it reads a number, the caller is waiting on
 #: the return, and where there is no number to give the request surface returns
-#: `Err` and the binding raises.
-_ANSWERS_BY_RAISING = {"connect", "corporate_actions", "next_shared_id"}
+#: `Err` and the binding raises. The holdings, a scan and the calendar are
+#: asked for and waited on in one call, as on the request surface, and send
+#: their own commands so the answer is taken under the call's own number.
+_ANSWERS_BY_RAISING = {
+    "connect", "corporate_actions", "next_shared_id",
+    "positions", "scan", "calendar_schema", "calendar_events",
+}
 
 #: Calls the request surface leaves quiet where the binding reports. Each takes
 #: a wrapper it could report on and returns after a log line. Listed as an open

@@ -9804,7 +9804,7 @@ mod queued_cancel_all_slot_tests {
     fn a_queued_cancel_all_holds_its_slot() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let instrument = hl.context.market.register(756733);
-        hl.context.pending_orders.push(crate::types::OrderRequest::CancelAll { instrument });
+        hl.context.pending_orders.push(crate::types::OrderRequest::CancelAll { instrument, stated: Default::default() });
 
         hl.try_reclaim_instrument(instrument);
 

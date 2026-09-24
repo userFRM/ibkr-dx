@@ -106,7 +106,7 @@ fn order_lifecycle_place_then_cancel() {
     // Cancel order
     client.cancel_order(50, "").unwrap();
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 50 })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 50, .. })));
 
     // Simulate cancel ack from engine
     shared.orders.push_order_update(OrderUpdate {

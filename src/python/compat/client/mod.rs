@@ -820,8 +820,10 @@ impl EClient {
     }
 
     /// The protocol level this client implements: 217, the reference client's
-    /// `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session, as
-    /// the reference client answers before its greeting.
+    /// `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session and
+    /// after one, as the reference client answers before its greeting — and
+    /// held while a lost connection is recovered, which the reference client
+    /// rides out holding the number.
     ///
     /// In the reference architecture this number is the API level of the
     /// process a program is talking to. That process was a gateway, which
@@ -840,24 +842,24 @@ impl EClient {
     /// announces.
     ///
     /// Below it, a program that believes the number is wrong about the
-    /// following, and every one fails loudly on use rather than quietly:
+    /// following, and each is said on use rather than passed over:
     ///
     /// * An order field this client does not carry, refused by name on
     ///   `error` under 321 when the order is placed: `smartComboRoutingParams`
     ///   (57).
-    /// * Requests and fields that do not exist here, an `AttributeError`: the
-    ///   four `verify*` calls (70), `cancelContractData` and
-    ///   `cancelHistoricalTicks` (215).
-    /// * A withdrawal stating a manual time, an operator or who entered it
-    ///   (169, 192): refused by name on `error`.
+    /// * A withdrawal stating a manual time (169): the withdrawal goes, with
+    ///   its operator and who entered it, and the caller is told on `error`
+    ///   that the time did not travel.
+    ///
     /// Every other gate at or below 217 names a request, field or callback
     /// that is here and does what it does through a gateway.
     fn server_version(&self) -> Option<i32> {
-        self.is_connected().then_some(crate::client_core::PROTOCOL_LEVEL)
+        self.holds_a_session().then_some(crate::client_core::PROTOCOL_LEVEL)
     }
 
     /// When the venue says this session logged in, by its own clock and in its
-    /// own spelling; `None` when there is no session.
+    /// own spelling; `None` when there is no session, and held while a lost
+    /// connection is recovered, as the level is.
     ///
     /// The reference client answers the time its gateway stamped on its
     /// greeting. The venue stamps every message it sends with the time it sent
@@ -866,7 +868,7 @@ impl EClient {
     /// the venue stamped none, `connect` holds this machine's clock instead
     /// and says so in the log.
     fn tws_connection_time(&self) -> Option<String> {
-        if self.is_connected() { self.logged_in_at.lock().unwrap().clone() } else { None }
+        if self.holds_a_session() { self.logged_in_at.lock().unwrap().clone() } else { None }
     }
 
     /// The reference client carries these on its greeting to its gateway,
@@ -901,8 +903,8 @@ impl EClient {
         Ok(())
     }
 
-    /// Raises when there is a session, as the reference client's does, with
-    /// the message `connect` refuses a second call under. Nothing otherwise.
+    /// Raises when there is a session, with the message `connect` refuses a
+    /// second call under. Nothing otherwise.
     fn check_connected(&self) -> PyResult<()> {
         if self.is_connected() {
             return Err(PyRuntimeError::new_err("Already connected"));
@@ -1018,6 +1020,34 @@ impl EClient {
     /// Get the account ID.
     fn get_account_id(&self) -> String {
         self.account()
+    }
+
+    /// Whether this session is finished rather than merely disconnected:
+    /// closed by `disconnect()`, or given up on by the engine. A loss the
+    /// engine is still working on is neither — `is_connected()` reads false
+    /// between the 1100 and the 1102, and a request made then is carried when
+    /// the transports come back.
+    fn session_over(&self) -> bool {
+        self.session_ended.load(Ordering::Acquire) || self.the_engine_gave_the_session_up()
+    }
+
+    /// Which slot a contract holds on this session, if it holds one. Read
+    /// through the lookup every other reader uses, which drops what the engine
+    /// has given back, so a slot that has gone to the next contract is not
+    /// named.
+    fn instrument_of(&self, con_id: i64) -> Option<u32> {
+        let shared = self.shared_state().ok()?;
+        self.core.cached_instrument(&shared, con_id)
+    }
+
+    /// What the venue sent this session that nothing here reads, as pairs of
+    /// the connection and what arrived: each kind of message named once, the
+    /// first time it arrives. With `IBKR_DX_CAPTURE_WIRE` set, every frame is
+    /// kept here as well, whole and as sent.
+    fn unread_wire(&self) -> Vec<(String, String)> {
+        self.shared_state()
+            .map(|shared| shared.market.unread_wire().into_iter().map(|(on, frame)| (on.to_string(), frame)).collect())
+            .unwrap_or_default()
     }
 
     /// Another session that already held this account when this one connected.
@@ -1232,7 +1262,50 @@ impl EClient {
         req_id: i64,
         refusal: crate::error_codes::Refusal,
     ) -> PyResult<()> {
+        // A call that answers took this number for its own question, so the
+        // refusal is left where that call takes the refusals of its question,
+        // which it raises as the other surface returns them — not put to the
+        // program under a number it never used.
+        if u64::try_from(req_id).is_ok_and(crate::api::client::a_question_of_ours)
+            && let Ok(shared) = self.shared_state()
+        {
+            shared.reference.push_historical_error(req_id as u32, refusal.code, refusal.message);
+            return Ok(());
+        }
         self.notify(py, "error", (req_id, raised_now(), refusal.code, refusal.message, ""))
+    }
+
+    /// A request's free-form option list, written as the reference client
+    /// writes it and checked as a gateway checks it: why it is refused, or
+    /// nothing.
+    ///
+    /// None is no list, as it is there. An entry is written `tag=value;` where
+    /// it names both, and as its own text where it does not — which is what
+    /// the reference client writes of any object, and what a gateway then
+    /// refuses as it would any entry it cannot read.
+    pub(crate) fn options_refused(
+        &self, py: Python<'_>, list: &crate::client_core::OptionList, options: Option<Vec<Py<PyAny>>>,
+    ) -> PyResult<Option<crate::error_codes::Refusal>> {
+        let Some(options) = options.filter(|o| !o.is_empty()) else { return Ok(None) };
+        let mut written = String::new();
+        for entry in &options {
+            let entry = entry.bind(py);
+            match (entry.getattr("tag"), entry.getattr("value")) {
+                (Ok(tag), Ok(value)) => written += &format!("{}={};", tag.str()?, value.str()?),
+                _ => written.push_str(&entry.str()?.to_cow()?),
+            }
+        }
+        let features = self.shared_state()
+            .map(|shared| shared.reference.enabled_features())
+            .unwrap_or_default();
+        Ok(crate::client_core::ClientCore::check_option_list(list, &written, &features).err())
+    }
+
+    /// Whether a session is held that is not over. A lost connection the
+    /// engine is still recovering is held: the reference client rides that
+    /// out on its gateway, holding what the greeting told it.
+    fn holds_a_session(&self) -> bool {
+        self.shared.lock().unwrap().is_some() && !self.session_over()
     }
 
     /// Whether the engine has given this session up for good.
@@ -1760,8 +1833,9 @@ mod tests {
         });
     }
 
-    /// The venue's stamp on the logon is the connection time, and nothing is
-    /// answered without a session.
+    /// The venue's stamp on the logon is the connection time, held while a
+    /// lost connection is recovered, and nothing is answered once the session
+    /// is over.
     #[test]
     fn the_connection_time_is_the_venues_stamp_on_the_logon() {
         Python::initialize();
@@ -1772,6 +1846,8 @@ mod tests {
             *client.logged_in_at.lock().unwrap() = Some("20260902-13:30:00".into());
             assert_eq!(client.tws_connection_time().as_deref(), Some("20260902-13:30:00"));
             client.connected.store(false, Ordering::Release);
+            assert_eq!(client.tws_connection_time().as_deref(), Some("20260902-13:30:00"));
+            client.session_ended.store(true, Ordering::Release);
             assert_eq!(client.tws_connection_time(), None);
         });
     }
@@ -2902,7 +2978,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
 
             client.call_method1(py, "cancel_order_by_perm_id", (91011i64,)).unwrap();
             match rx.try_recv().expect("a cancel must reach the engine") {
-                ControlCommand::Order(OrderRequest::Cancel { order_id }) => assert_eq!(order_id, 77),
+                ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 77),
                 other => panic!("expected a Cancel, got {other:?}"),
             }
         });
@@ -3562,7 +3638,7 @@ w.openOrder = preview
             client.get().req_mkt_data(py, 7, &Contract {
                 con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
                 exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
-            }, "", false, false, Vec::new()).unwrap();
+            }, "", false, false, None).unwrap();
             let rx = py.detach(|| engine.join().unwrap());
             assert_eq!(client.get().core.watching(7), Some(0));
 
@@ -3618,7 +3694,7 @@ w.error = lambda *a: errors.append(a)
                     client.get().req_mkt_data(py, 7, &Contract {
                         con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
                         exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
-                    }, "", false, false, Vec::new()).unwrap();
+                    }, "", false, false, None).unwrap();
                     let rx = py.detach(|| engine.join().unwrap());
                     assert_eq!(client.get().core.watching(7), Some(0));
                     let option = Py::new(py, Contract {

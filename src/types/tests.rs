@@ -105,7 +105,7 @@ fn order_buffer_push_and_drain() {
         kind: OrderKind::Limit { price: 150 * PRICE_SCALE },
         tif: b'0', attrs: OrderAttrs::default(),
     });
-    buf.push(OrderRequest::Cancel { order_id: 42 });
+    buf.push(OrderRequest::Cancel { order_id: 42, stated: Default::default() });
     assert!(!buf.is_empty());
 
     let drained: Vec<_> = buf.drain().collect();
@@ -125,7 +125,7 @@ fn order_buffer_drain_reusable() {
     assert!(buf.is_empty());
 
     // Can push again after drain
-    buf.push(OrderRequest::CancelAll { instrument: 1 });
+    buf.push(OrderRequest::CancelAll { instrument: 1, stated: Default::default() });
     assert!(!buf.is_empty());
 }
 
@@ -297,7 +297,7 @@ fn order_buffer_multiple_drain_cycles() {
     let mut buf = OrderBuffer::new();
     for cycle in 0..10 {
         for i in 0..5 {
-            buf.push(OrderRequest::Cancel { order_id: (cycle * 5 + i) as u64 });
+            buf.push(OrderRequest::Cancel { order_id: (cycle * 5 + i) as u64, stated: Default::default() });
         }
         let drained: Vec<_> = buf.drain().collect();
         assert_eq!(drained.len(), 5);
@@ -323,7 +323,7 @@ fn instrument_accessor_covers_submits() {
         kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default(),
     };
     assert_eq!(req.instrument(), Some(7));
-    assert_eq!(OrderRequest::Cancel { order_id: 1 }.instrument(), None);
+    assert_eq!(OrderRequest::Cancel { order_id: 1, stated: Default::default() }.instrument(), None);
     assert_eq!(
         OrderRequest::Modify { order_id: 1, price: 0, qty: crate::types::QTY_SCALE, outside_rth: false, ord_type: 0, tif: 0, stop_price: 0, spec: None }.instrument(),
         None
@@ -345,9 +345,9 @@ fn order_request_modify_fields() {
 
 #[test]
 fn order_request_cancel_all_fields() {
-    let req = OrderRequest::CancelAll { instrument: 7 };
+    let req = OrderRequest::CancelAll { instrument: 7, stated: Default::default() };
     match req {
-        OrderRequest::CancelAll { instrument } => assert_eq!(instrument, 7),
+        OrderRequest::CancelAll { instrument, .. } => assert_eq!(instrument, 7),
         _ => panic!("wrong variant"),
     }
 }

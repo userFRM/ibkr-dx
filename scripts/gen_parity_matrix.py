@@ -63,6 +63,10 @@ EXTRA_PATHS = [
 #: and a reader porting a program needs to tell them apart.
 SERVED, TAKEN, ABSENT = "●", "◐", "·"
 
+#: Beyond the canonical list, a call one surface has and the other has no use
+#: for. Marked apart from absent, which reads as a call that surface lacks.
+OWN = "—"
+
 #: Columns that describe a row rather than a client, and are not counted.
 NOT_A_CLIENT = {"Evidence", "Fires on a gateway", "Answered from"}
 
@@ -74,12 +78,51 @@ NOT_A_CLIENT = {"Evidence", "Fires on a gateway", "Answered from"}
 #: Hand-kept, and checked: a name here that no longer appears in that table
 #: fails the run rather than standing as a claim about nothing.
 LOCAL = {
-    "checkconnected", "connectwithevents", "eventslost", "instrumentof",
-    "keeprecord", "lastrtt", "lastrttms", "nextorderid", "nextsharedid",
-    "parsealgoparams", "poll", "reset", "run", "serverversion", "session",
-    "sessionover", "sessiontokenbytes", "setconnectoptions", "sharedstate",
-    "startapi", "unreadwire", "waitfordata",
+    "checkconnected", "eventslost", "instrumentof", "lastrtt", "lastrttms",
+    "nextorderid", "nextsharedid", "parsealgoparams", "poll", "reset", "run",
+    "serverversion", "sessionover", "setconnectoptions",
+    "unreadwire", "waitfordata",
 }
+
+#: One capability each surface names in its own words: the Rust spelling, then
+#: the Python one. Each pair is one row naming both, the Rust mark read off the
+#: Rust name and the Python mark off the Python one; as two rows, each read as a
+#: call the other surface lacks.
+#:
+#: Hand-kept, and checked as `LOCAL` is: a name no longer on its surface fails
+#: the run. `account_id` is a field on the Rust client rather than a call, so it
+#: is looked for as one.
+COUNTERPARTS = {
+    "account": "account_snapshot",
+    "account_id": "get_account_id",
+    "last_rtt": "last_rtt_ms",
+    "option_chain": "option_chains",
+    "schedule": "trading_schedule",
+}
+
+#: A reference client's method that shares a row's name and is another thing.
+#: ib_async's `schedule` runs a callback at a time of day; it asks the venue
+#: nothing about when a contract trades. Checked: a name the client no longer
+#: has fails the run.
+NOT_THE_SAME = {("ib_async", "schedule")}
+
+#: The Rust surface's own plumbing: how its session is opened, held and read,
+#: which the Python surface does its own way — `connect` with a session file,
+#: `poll` and `wait_for_data` — or has no need of: a Python call that answers
+#: waits on its own answer and takes nothing else, so there is nothing for a
+#: record to be kept of. On the Rust reference page, and out of this table,
+#: where a row reads as a capability one surface lacks. Checked as `LOCAL` is.
+PLUMBING = {"keep_record", "shared_state", "session_token_bytes", "session", "connect_with_events"}
+
+#: A call one surface has and the other has no use for, by its spelling-free
+#: name, with the surface that has no use for it: marked `OWN` there. A Rust
+#: client is connected from the moment it exists — `connect` is what makes one
+#: — so there is no moment before a session for `check_connected` to guard.
+#: Waiting on one order and reading an algorithm's parameters apart from an
+#: order are conveniences of the Rust surface's own. No reference client names
+#: any of the three. Checked as `LOCAL` is: one no longer on the surface said
+#: to have it, or now on the one said to have no use for it, fails the run.
+ONE_SURFACE = {"checkconnected": "rust", "awaitorder": "python", "parsealgoparams": "python"}
 
 
 def as_camel(snake: str) -> str:
@@ -255,6 +298,17 @@ FORMER_NAMES = {
 }
 
 
+def in_words(n: int) -> str:
+    """A count as the pages write one, by the rule the matrix's generator keeps."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import gen_api_docs
+
+        return gen_api_docs.in_words(n)
+    finally:
+        sys.path.pop(0)
+
+
 def plain(name: str) -> str:
     """A name with its spelling taken off, so two clients can be compared.
 
@@ -280,7 +334,7 @@ def mark(present):
 
 def ours(state):
     """This client's own mark, from the coverage matrix's own vocabulary."""
-    return {"Y": SERVED, "STUB": TAKEN}.get(state, ABSENT)
+    return {"Y": SERVED, "STUB": TAKEN, "OWN": OWN}.get(state, ABSENT)
 
 
 def table(rows, columns, title, intro):
@@ -485,7 +539,8 @@ def main() -> int:
             "that was read and not necessarily in the client you have."
         )
     if async_calls is not None:
-        columns.append(("ib_async", lambda r: mark(known(r, async_calls))))
+        columns.append(("ib_async", lambda r: mark(
+            "ib_async" not in r.get("not_the_same", ()) and known(r, async_calls))))
         read.append(
             f"**ib_async** — version `{async_v or 'unstated'}`, imported and "
             "enumerated across both the transport and the facade, because it "
@@ -504,7 +559,8 @@ def main() -> int:
         "by a suite that opens a session, named only by the offline suites, or "
         "not named by a test.",
         "**Fires on a gateway** — whether the callback fires at all for a program "
-        "on a gateway. The TWS API declares six that never do.",
+        f"on a gateway. The TWS API declares {in_words(sum(1 for r in backs if not r['gateway_sends']))} "
+        "that never do.",
         "**Answered from** — beyond the canonical list, whether a call asks the "
         "venue or reads what it stated, or answers from this client itself: its "
         "own state, a measurement it takes, or a helper.",
@@ -548,6 +604,7 @@ def main() -> int:
         f"| {SERVED} | Present. For ibkr-dx, also served: a call does what it names; a callback is fired whenever what it reports arrives |",
         f"| {TAKEN} | Present and not served: a call reports why on the error callback; a callback is declared and not fired here, although a gateway sends it |",
         f"| {ABSENT} | Absent |",
+        f"| {OWN} | Beyond the canonical list: not on this surface by design. The call is the other surface's own convenience, not one this surface lacks |",
         "",
         "Each column is read from the client it names, on the machine that",
         "generated this page:",
@@ -585,6 +642,27 @@ def main() -> int:
         # canonical list, in a table whose first column says "Call".
         canon = {plain(r[spelling]) for r in calls + backs for spelling in ("snake", "camel")}
         rust_plain = {plain(n) for n in (rust_extra or set())}
+        py_plain = {plain(m) for m in ours_extra}
+        # A field of the Rust client is no heading on its page, so a
+        # counterpart that is one is looked for where it is declared.
+        rust_fields = set(re.findall(
+            r"^\s*pub (\w+):", (ROOT / "src" / "api" / "client" / "mod.rs").read_text(), re.M,
+        ))
+        gone = (
+            [f"{r} (Rust)" for r in COUNTERPARTS if plain(r) not in rust_plain and r not in rust_fields]
+            + [f"{m} (Python)" for m in COUNTERPARTS.values() if plain(m) not in py_plain]
+            + [f"{n} (plumbing)" for n in PLUMBING if plain(n) not in rust_plain | py_plain]
+            + [f"{n} ({client})" for client, n in NOT_THE_SAME
+               if client == "ib_async" and async_calls is not None
+               and plain(n) not in {plain(m) for m in async_calls}]
+        )
+        if gone:
+            print(f"names this page reads no longer on their surface: {', '.join(sorted(gone))}")
+            return 1
+        leave_out = (
+            {plain(n) for pair in COUNTERPARTS.items() for n in pair}
+            | {plain(n) for n in PLUMBING}
+        )
         both = sorted(
             {n for n in ours_extra if plain(n) not in canon}
             | {n for n in (rust_extra or set()) if plain(n) not in canon},
@@ -599,37 +677,56 @@ def main() -> int:
         # the same thing in their own cases.
         seen, extra = set(), []
         for name in both:
-            if plain(name) in seen:
+            if plain(name) in seen or plain(name) in leave_out:
                 continue
             seen.add(plain(name))
             extra.append(name)
-        beyond = extra
-        if extra:
+        # Each row with the names it is read under: its own, or the Rust and
+        # the Python spelling of one capability.
+        entries = sorted(
+            [(n, [n]) for n in extra]
+            + [(f"{r}` / `{m}", [r, m]) for r, m in COUNTERPARTS.items()],
+            key=lambda entry: (plain(entry[1][0]), entry[0]),
+        )
+        beyond = [label for label, _ in entries]
+        if entries:
             # A call that exists and states why it cannot be served is not
             # carried, and the canonical table already tells the two apart.
             # Told apart only there, a call in this table read as carried while
             # the page's own key said otherwise.
             stubs = {plain(n) for n in stub_methods()}
-            rows = [{
-                "category": "", "snake": n, "camel": n, "cpp": n,
-                "rust": ("STUB" if plain(n) in stubs else "Y")
-                        if plain(n) in rust_plain else "-",
-                "python": ("STUB" if plain(n) in stubs else "Y")
-                          if plain(n) in {plain(m) for m in ours_extra} else "-",
-                # The documented surface names it after all where the TWS
-                # API's own client, or ib_async's transport, has a method by
-                # that name: the canonical list this page is built from is not
-                # the whole of that surface. A helper ib_async's facade builds
-                # on top of the messages is not a TWS API call.
-                "documented": bool(
-                    (ibapi_calls and known({"snake": n, "camel": n, "cpp": n}, ibapi_calls))
-                    or (async_wire and known({"snake": n, "camel": n, "cpp": n}, async_wire))
-                ),
-                "answered_from": "this client" if plain(n) in LOCAL else "venue",
-            } for n in extra]
-            stale = LOCAL - {plain(n) for n in extra}
+            def row(label, names):
+                rust_name, py_name = names[0], names[-1]
+                spelled = {"snake": label, "camel": py_name, "cpp": rust_name}
+                on_rust = plain(rust_name) in rust_plain or (len(names) > 1 and rust_name in rust_fields)
+                return {
+                    "category": "", **spelled,
+                    "rust": ("STUB" if plain(rust_name) in stubs else "Y") if on_rust
+                            else "OWN" if ONE_SURFACE.get(plain(rust_name)) == "rust" else "-",
+                    "python": ("STUB" if plain(py_name) in stubs else "Y")
+                              if plain(py_name) in py_plain
+                              else "OWN" if ONE_SURFACE.get(plain(py_name)) == "python" else "-",
+                    # The documented surface names it after all where the TWS
+                    # API's own client, or ib_async's transport, has a method by
+                    # that name: the canonical list this page is built from is not
+                    # the whole of that surface. A helper ib_async's facade builds
+                    # on top of the messages is not a TWS API call.
+                    "documented": bool(
+                        (ibapi_calls and known(spelled, ibapi_calls))
+                        or (async_wire and known(spelled, async_wire))
+                    ),
+                    "answered_from": "this client"
+                                     if any(plain(n) in LOCAL for n in names) else "venue",
+                    "not_the_same": {client for client, n in NOT_THE_SAME
+                                     if plain(n) in {plain(m) for m in names}},
+                }
+            rows = [row(label, names) for label, names in entries]
+            stale = LOCAL - {plain(n) for _, names in entries for n in names}
+            stale |= {n for n, surface in ONE_SURFACE.items()
+                      if not any(r[surface] == "OWN" and plain(r["cpp"]) == n for r in rows)}
             if stale:
-                print(f"LOCAL names calls this table no longer has: {', '.join(sorted(stale))}")
+                print(f"LOCAL or ONE_SURFACE names calls this table no longer has as said: "
+                      f"{', '.join(sorted(stale))}")
                 return 1
             beyond_columns = (
                 [("Answered from", lambda r: r["answered_from"])] + columns

@@ -948,45 +948,21 @@ impl EClient {
         }
     }
 
-    /// Every holding in the account.
+    /// Every holding in the account, read as it stands.
+    ///
+    /// Read, not subscribed, as the Python call reads it: nothing is left
+    /// standing to deliver later moves to a program that did not ask for
+    /// them, or to take the moves its own per-request watchers wait on.
     pub fn positions(&self) -> Result<Vec<PositionRow>, Refusal> {
-        // One question at a time: see `EClient::asking`.
-        let _turn = self.take_the_turn()?;
-        // Numbered in the band reserved for these calls, which the request
-        // surface refuses to anyone else.
-        let _answering = super::Answering::begin();
-        struct Held { state: Arc<Mutex<Pending<PositionRow>>> }
-        impl Wrapper for Held {
-            fn position(&mut self, account: &str, contract: &Contract, position: f64, avg_cost: f64) {
-                self.state.lock().unwrap().rows.push(PositionRow {
-                    account: account.to_string(),
-                    contract: contract.clone(),
-                    position,
-                    avg_cost,
-                });
-            }
-            fn position_end(&mut self) {
-                self.state.lock().unwrap().done = true;
-            }
-            // No arm for the venue's errors, deliberately. Holdings are asked
-            // for account-wide, so a refusal about them carries no request to
-            // match on — and taking every refusal that arrives while this runs
-            // takes the ones that do not belong to it: an order reject under
-            // its own id, a subscription failure, the venue's unattributed
-            // text, a farm reconnect notice. Worse, an error ends the wait,
-            // and the wait hands back its rows only on the way out — so a
-            // question that stopped on somebody else's refusal returned
-            // nothing at all where it used to return the holdings it had.
-            //
-            // The one refusal that is this question's — that the account had
-            // not finished stating its holdings — is said in the log by the
-            // call that raises it. A short list is worse than a complete one
-            // and better than none.
-        }
-        let state = Arc::new(Mutex::new(Pending::default()));
-        let mut collector = Held { state: Arc::clone(&state) };
-        self.req_positions(&mut collector);
-        self.wait_for(&mut collector, &state, "the account's holdings")
+        let held = self.core.held_positions(&self.shared, std::thread::sleep)?;
+        Ok(held.iter()
+            .map(|pi| PositionRow {
+                account: self.account_id.clone(),
+                contract: self.position_contract(pi),
+                position: pi.position,
+                avg_cost: pi.avg_cost as f64 / crate::types::model::PRICE_SCALE_F,
+            })
+            .collect())
     }
 
     /// The account values named by `tags`, as `req_account_summary` asks for

@@ -453,11 +453,28 @@ pub(super) fn phase_fundamental_data(mut conns: Conns) -> Conns {
         shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
     );
 
+    // Asked for by the venue's id for the contract, which a session that has
+    // not named the contract refuses before the venue hears of it: named first,
+    // as a caller would, so what follows is the venue's answer.
+    control_tx.send(ControlCommand::FetchContractDetails {
+        contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
+        req_id: 8299, filters: Default::default(),
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+    let named_by = Instant::now() + Duration::from_secs(20);
+    let mut named = false;
+    while Instant::now() < named_by && !named {
+        named = shared.reference.drain_contract_details().iter().any(|(id, _)| *id == 8299);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !named {
+        let _ = shutdown_and_reclaim(&control_tx, join, account_id);
+        lookup_returned_nothing("no definition came back for AAPL, so no fundamental report on it");
+    }
     control_tx.send(ControlCommand::FetchFundamentalData {
         req_id: 8300, con_id: 265598,
         report_type: "ReportSnapshot".into(),
     }).unwrap();
-    let join = run_hot_loop(hot_loop);
 
     let mut got_data = false;
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -477,7 +494,8 @@ pub(super) fn phase_fundamental_data(mut conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if !got_data {
-        skipped!("  SKIP: No fundamental data received (may require subscription)\n");
+        // Skipped only on the venue's own stated refusal; silence fails.
+        historical_silence(&shared, "no fundamental report came back for AAPL");
         return conns;
     }
     println!("  PASS\n");
@@ -934,12 +952,29 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns) -> Conns {
         shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
     );
 
+    // Asked for by the venue's id for the contract, which a session that has
+    // not named the contract refuses before the venue hears of it: named first,
+    // as a caller would, so what follows is the venue's answer.
+    control_tx.send(ControlCommand::FetchContractDetails {
+        contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
+        req_id: 7000, filters: Default::default(),
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+    let named_by = Instant::now() + Duration::from_secs(20);
+    let mut named = false;
+    while Instant::now() < named_by && !named {
+        named = shared.reference.drain_contract_details().iter().any(|(id, _)| *id == 7000);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !named {
+        let _ = shutdown_and_reclaim(&control_tx, join, account_id);
+        lookup_returned_nothing("no definition came back for AAPL, so no fundamental report on it");
+    }
     control_tx.send(ControlCommand::FetchFundamentalData {
         req_id: 7001,
         con_id: 265598,
         report_type: "ReportSnapshot".to_string(),
     }).unwrap();
-    let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut got_data = false;
@@ -961,7 +996,8 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns) -> Conns {
     if got_data {
         println!("  PASS\n");
     } else {
-        skipped!("  SKIP: No fundamental data received (may require subscription)\n");
+        // Skipped only on the venue's own stated refusal; silence fails.
+        historical_silence(&shared, "no fundamental report came back for AAPL over the channel");
     }
     conns
 }
@@ -1469,7 +1505,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns) -> Conns {
                         order_acked = true;
                         if !cancel_sent {
                             control_tx.send(ControlCommand::Order(
-                                OrderRequest::Cancel { order_id: oid }
+                                OrderRequest::Cancel { order_id: oid, stated: Default::default() }
                             )).unwrap();
                             cancel_sent = true;
                         }

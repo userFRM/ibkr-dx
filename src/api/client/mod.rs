@@ -302,6 +302,9 @@ pub struct EClient {
     pub(crate) core: ClientCore,
     pub(crate) session_token_bytes: Vec<u8>,
     pub(crate) session: crate::auth::resume::ResumableSession,
+    /// When the venue stamped this session's logon, in its own spelling:
+    /// `yyyyMMdd-HH:mm:ss`, GMT. Empty where nothing stamped one.
+    pub(crate) logged_in_at: String,
 }
 
 impl Drop for EClient {
@@ -339,6 +342,17 @@ thread_local! {
 /// Whether this thread is inside a call that answers.
 pub(crate) fn answering_now() -> bool {
     ANSWERING.with(std::cell::Cell::get)
+}
+
+/// Whether an order number is one a call that answers took for its own
+/// question — a preview's — which spends no number a caller could be handed.
+///
+/// Spent like a caller's, it moved the allocator into the band those calls
+/// number themselves in, and every number handed out after a preview was one
+/// no request can carry.
+pub(crate) fn a_question_of_ours(order_id: u64) -> bool {
+    answering_now()
+        && u32::try_from(order_id).is_ok_and(crate::bridge::ReferenceState::is_ask_id)
 }
 
 /// Mark this thread as inside a call that answers, until dropped.
@@ -616,6 +630,7 @@ impl EClient {
         let Session { gateway: gw, market_data: farm_conn, trading: ccp_conn, historical: hmds_conn, security_definition: secdef_conn } = Gateway::connect(&gw_config)?;
         let account_id = gw.account_id.clone();
         let accounts = gw.accounts.clone();
+        let logged_in_at = gw.logged_in_at.clone();
         let session = crate::client_core::remember_session(
             config.session_file.as_deref(),
             &config.password,
@@ -679,6 +694,7 @@ impl EClient {
             core,
             session_token_bytes,
             session,
+            logged_in_at,
         })
     }
 
@@ -725,6 +741,7 @@ impl EClient {
             },
             session_token_bytes: Vec::new(),
             session: Default::default(),
+            logged_in_at: String::new(),
         }
     }
 
@@ -796,6 +813,72 @@ impl EClient {
     /// came back with the session; the reference client serves that window.
     pub fn session_over(&self) -> bool {
         self.shared.reference.session_over().is_some()
+    }
+
+    /// The protocol level this client implements: 217, the reference client's
+    /// `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` once the session is
+    /// over, as the reference client answers before its greeting — and not
+    /// while a lost connection is being recovered, which the reference client
+    /// rides out holding the number.
+    ///
+    /// In the reference architecture this number is the API level of the
+    /// process a program is talking to. That process was a gateway, which
+    /// announced it and had every request gated on it; here it is this
+    /// client, so the number is a statement about this client and not a
+    /// reading off the venue, whose logon names no such level.
+    ///
+    /// 217 is the newest gate whose feature is carried here. Above it,
+    /// attached orders (218) are refused by name — a gateway builds them from
+    /// the account's order preset, which this client does not hold — and the
+    /// configuration requests (219, 221), the last price and size stated to
+    /// their precision (222, 224) and odd-lot quotes (225) are absent.
+    /// `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway
+    /// sends it; the number stays at 217 because a level claims every one
+    /// below it, and 218 is not carried. 225 is the highest level a gateway
+    /// announces.
+    ///
+    /// Below it, a program that believes the number is wrong about the
+    /// following, and each is said on use rather than passed over:
+    ///
+    /// * An order field this client does not carry, refused by name on
+    ///   `error` under 321 when the order is placed: `smartComboRoutingParams`
+    ///   (57).
+    /// * A withdrawal stating a manual time (169): the withdrawal goes, with
+    ///   its operator and who entered it, and the caller is told on `error`
+    ///   that the time did not travel.
+    ///
+    /// Every other gate at or below 217 names a request, field or callback
+    /// that is here and does what it does through a gateway.
+    pub fn server_version(&self) -> Option<i32> {
+        (!self.session_over()).then_some(crate::client_core::PROTOCOL_LEVEL)
+    }
+
+    /// When the venue says this session logged in, by its own clock and in its
+    /// own spelling; `None` once the session is over, and held while a lost
+    /// connection is recovered, as the level is.
+    ///
+    /// The reference client answers the time its gateway stamped on its
+    /// greeting. The venue stamps every message it sends with the time it sent
+    /// it, the answer to the logon included, and this is that stamp — the
+    /// clock [`competing_session`](EClient::competing_session) reads the other
+    /// session's logon off. Where the venue stamped none, the connect holds
+    /// this machine's clock instead and says so in the log.
+    pub fn tws_connection_time(&self) -> Option<String> {
+        (!self.session_over())
+            .then(|| self.logged_in_at.clone())
+            .filter(|stamp| !stamp.is_empty())
+    }
+
+    /// Nothing to start. The reference client sends its client id here and its
+    /// gateway begins the exchange on receiving it; here the session is up
+    /// and its engine running by the time [`connect`](EClient::connect)
+    /// returns, so there is nothing left to begin. Once the session is over
+    /// this is reported the way the reference client reports a call with no
+    /// session: on `error`, under 504 and no request.
+    pub fn start_api(&self) {
+        if self.session_over() {
+            self.report_reason(-1, &Refusal::not_connected("Not connected"));
+        }
     }
 
     /// Wait for the engine to signal, for at most `timeout`: true when it
@@ -930,10 +1013,11 @@ impl EClient {
         self.shared.reference.adjustments_for(con_id)
     }
 
-    /// Frames this session kept exactly as the venue sent them, by connection.
-    ///
-    /// Empty unless `IBKR_DX_CAPTURE_WIRE` is set. A reading checked only against
-    /// frames this client made up says nothing about the ones that arrive.
+    /// What the venue sent this session that nothing here reads, by
+    /// connection: each kind of message named once, the first time it
+    /// arrives. With `IBKR_DX_CAPTURE_WIRE` set, every frame is kept here as
+    /// well, whole and as sent — a reading checked only against frames this
+    /// client made up says nothing about the ones that arrive.
     pub fn unread_wire(&self) -> Vec<(&'static str, String)> {
         self.shared.market.unread_wire()
     }
@@ -1063,7 +1147,7 @@ mod readonly_tests {
         assert!(client.place_order(1, &spy, &order).is_err(), "an order is refused");
         assert!(client.cancel_order(1, "").is_err(), "a cancel is refused");
         assert!(client.cancel_order_by_perm_id(1).is_err(), "a cancel by permanent id is refused");
-        assert!(client.req_global_cancel().is_err(), "a global cancel is refused");
+        assert!(client.req_global_cancel("").is_err(), "a global cancel is refused");
         assert!(
             client.exercise_options(1, &spy, 1, 1, "", false, Default::default()).is_err(),
             "an exercise is refused",

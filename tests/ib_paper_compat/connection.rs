@@ -526,7 +526,7 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
                     order_acked = true;
                     if !cancel_sent {
                         control_tx.send(ControlCommand::Order(
-                            OrderRequest::Cancel { order_id: oid }
+                            OrderRequest::Cancel { order_id: oid, stated: Default::default() }
                         )).unwrap();
                         cancel_sent = true;
                     }
@@ -640,7 +640,7 @@ pub(super) fn phase_farm_recovers_with_credentials(
                     OrderStatus::PreSubmitted | OrderStatus::Submitted | OrderStatus::Filled);
             }
         }
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() }));
         std::thread::sleep(Duration::from_secs(2));
     }
     if order_acked {

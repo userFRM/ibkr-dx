@@ -84,6 +84,40 @@ pub fn session_over(&self) -> bool
 
 ---
 
+#### `server_version`
+
+The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` once the session is over, as the reference client answers before its greeting — and not while a lost connection is being recovered, which the reference client rides out holding the number. In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level. 217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221), the last price and size stated to their precision (222, 224) and odd-lot quotes (225) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces. Below it, a program that believes the number is wrong about the following, and each is said on use rather than passed over: * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * A withdrawal stating a manual time (169): the withdrawal goes, with its operator and who entered it, and the caller is told on `error` that the time did not travel. Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
+
+```rust
+pub fn server_version(&self) -> Option<i32>
+```
+
+**Returns:** `Option<i32>`
+
+---
+
+#### `tws_connection_time`
+
+When the venue says this session logged in, by its own clock and in its own spelling; `None` once the session is over, and held while a lost connection is recovered, as the level is. The reference client answers the time its gateway stamped on its greeting. The venue stamps every message it sends with the time it sent it, the answer to the logon included, and this is that stamp — the clock `competing_session` reads the other session's logon off. Where the venue stamped none, the connect holds this machine's clock instead and says so in the log.
+
+```rust
+pub fn tws_connection_time(&self) -> Option<String>
+```
+
+**Returns:** `Option<String>`
+
+---
+
+#### `start_api`
+
+Nothing to start. The reference client sends its client id here and its gateway begins the exchange on receiving it; here the session is up and its engine running by the time `connect` returns, so there is nothing left to begin. Once the session is over this is reported the way the reference client reports a call with no session: on `error`, under 504 and no request.
+
+```rust
+pub fn start_api(&self)
+```
+
+---
+
 #### `wait_for_data`
 
 Wait for the engine to signal, for at most `timeout`: true when it signalled, false when the wait ran out. The engine signals at the end of each pass of its loop, and when a connection goes or comes back. One waiter takes each signal. A thread that reads the session only when there may be something to read waits here and then calls `process_msgs`: true is a reason to read, not a promise that the read delivers anything.
@@ -170,7 +204,7 @@ pub fn adjustments(&self, con_id: &str) -> Option<(AdjustedContract, Vec<Adjustm
 
 #### `unread_wire`
 
-Frames this session kept exactly as the venue sent them, by connection. Empty unless `IBKR_DX_CAPTURE_WIRE` is set. A reading checked only against frames this client made up says nothing about the ones that arrive.
+What the venue sent this session that nothing here reads, by connection: each kind of message named once, the first time it arrives. With `IBKR_DX_CAPTURE_WIRE` set, every frame is kept here as well, whole and as sent — a reading checked only against frames this client made up says nothing about the ones that arrive.
 
 ```rust
 pub fn unread_wire(&self) -> Vec<(&'static str, String)>
@@ -409,7 +443,7 @@ pub fn what_if_order( &self, contract: &Contract, order: &crate::types::model::O
 
 #### `positions`
 
-Every holding in the account.
+Every holding in the account, read as it stands. Read, not subscribed, as the Python call reads it: nothing is left standing to deliver later moves to a program that did not ask for them, or to take the moves its own per-request watchers wait on.
 
 ```rust
 pub fn positions(&self) -> Result<Vec<PositionRow>, Refusal>
@@ -513,7 +547,7 @@ pub fn scan( &self, instrument: &str, location: &str, scan_code: &str, most: u32
 | `instrument` | `&str` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
 | `location` | `&str` |  |
 | `scan_code` | `&str` | Scanner code (e.g. `"TOP_PERC_GAIN"`, `"HIGH_OPT_IMP_VOLAT"`). |
-| `most` | `u32` |  |
+| `most` | `u32` | Maximum number of scanner results. |
 
 **Returns:** `Result<Vec<ScanRow>, Refusal>`
 
@@ -935,16 +969,16 @@ pub fn exercise_options( &self, req_id: i64, contract: &Contract, exercise_actio
 
 #### `cancel_order`
 
-Cancel an order. A cancel names five fields on this wire and no time among them, so a stated `manual_order_cancel_time` cannot travel. The cancel goes anyway and the caller is told the record did not: a live order left standing because a regulatory annotation has nowhere to go is the worse of the two, and the client this one stands in for withdraws it — it states the time on every cancel it sends. Taken in silence, as this did, the order came back under nobody's name while the caller had given one.
+Cancel an order. The second argument is what the withdrawal states about itself — `OrderCancel`, or a time alone; `""` states nothing. Who is withdrawing it and whether a person entered it travel on the cancel, as a gateway writes them: from the withdrawal, not from the placement. A time does not travel. A gateway sends it only where the venue has turned that record on for the login, and this client does not read whether it has. The cancel goes anyway and the caller is told the time did not: a live order left standing because a regulatory annotation has nowhere to go is the worse of the two. Taken in silence, the order would come back without the record while the caller had given one. A time a gateway cannot read is refused as a gateway refuses it, under 10301, and nothing is withdrawn.
 
 ```rust
-pub fn cancel_order(&self, order_id: i64, manual_order_cancel_time: &str) -> Result<(), Refusal>
+pub fn cancel_order( &self, order_id: i64, order_cancel: impl Into<crate::types::model::OrderCancel>, ) -> Result<(), Refusal>
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `order_id` | `i64` | Order identifier. Must be unique per session. |
-| `manual_order_cancel_time` | `&str` | Manual cancel time (empty for immediate). |
+| `order_cancel` | `impl Into<crate::types::model::OrderCancel>` | What the withdrawal states about itself: an `OrderCancel`, or a manual time alone. `""` states nothing, and so does `None` from Python. |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -968,11 +1002,15 @@ pub fn cancel_order_by_perm_id(&self, perm_id: i64) -> Result<(), Refusal>
 
 #### `req_global_cancel`
 
-Cancel every order the account is working. This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. The same where the naming did finish and an order it named could not be given a slot in this client's instrument table — the engine holds no record of such an order, so no cancel here names it and it goes on working at the venue.
+Cancel every order the account is working. This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. The same where the naming did finish and an order it named could not be given a slot in this client's instrument table — the engine holds no record of such an order, so no cancel here names it and it goes on working at the venue. What the withdrawal states — who is withdrawing and whether a person entered it — travels on every cancel, as a gateway states it on every order it withdraws. A time does not: the reference client writes none on a withdrawal of everything, so a gateway never reads one, and one stated here goes the same way.
 
 ```rust
-pub fn req_global_cancel(&self) -> Result<(), Refusal>
+pub fn req_global_cancel( &self, order_cancel: impl Into<crate::types::model::OrderCancel>, ) -> Result<(), Refusal>
 ```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `order_cancel` | `impl Into<crate::types::model::OrderCancel>` | What the withdrawal states about itself: an `OrderCancel`, or a manual time alone. `""` states nothing, and so does `None` from Python. |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -1764,6 +1802,22 @@ pub fn req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(
 
 ---
 
+#### `cancel_contract_data`
+
+Withdraw a contract lookup. Nothing is sent and nothing answers, and `req_id` names nothing to withdraw. A gateway asks the venue nothing for this either: it only stops re-sending a lookup it held back while its connection to the venue was down, and this client holds none back — a lookup made with no connection is refused there and then. A lookup already asked for is still answered, as it is through a gateway.
+
+```rust
+pub fn cancel_contract_data(&self, req_id: i64) -> Result<(), Refusal>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Result<(), Refusal>`
+
+---
+
 #### `req_mkt_depth_exchanges`
 
 Request available exchanges for market depth.
@@ -2110,7 +2164,7 @@ pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), Refusal>
 
 #### `cancel_historical_news`
 
-Withdraw a historical news query. One message carrying the id the query went out under, which is the whole of what a withdrawal states. Sent whether or not the query has been answered: the venue serves it past the reply, so a withdrawal gated on this client's own pending list would send nothing in the case that leaves one running.
+Withdraw a historical news query. The TWS API has no call for this; the venue has a message for it. One message carrying the id the query went out under, which is the whole of what a withdrawal states. Sent whether or not the query has been answered: the venue serves it past the reply, so a withdrawal gated on this client's own pending list would send nothing in the case that leaves one running.
 
 ```rust
 pub fn cancel_historical_news(&self, req_id: i64) -> Result<(), Refusal>
@@ -2176,6 +2230,22 @@ pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date
 | `number_of_ticks` | `i32` | Maximum number of ticks to return. |
 | `what_to_show` | `&str` | Data type: `"TRADES"`, `"MIDPOINT"`, `"BID"`, `"ASK"`, `"BID_ASK"`, etc. |
 | `use_rth` | `bool` | If `true`, only return data from Regular Trading Hours. |
+
+**Returns:** `Result<(), Refusal>`
+
+---
+
+#### `cancel_historical_ticks`
+
+Withdraw a historical ticks request. Nothing is sent and nothing answers, and `req_id` names nothing to withdraw, as for `cancel_contract_data`: a gateway only stops re-sending a request it held back while its connection to the venue was down, which this client never does. Ticks already asked for still arrive, and a request waiting for its contract to be named still goes once it is, as through a gateway.
+
+```rust
+pub fn cancel_historical_ticks(&self, req_id: i64) -> Result<(), Refusal>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 
 **Returns:** `Result<(), Refusal>`
 
@@ -2414,6 +2484,66 @@ pub fn update_display_group(&self, req_id: i64, contract_info: &str) -> Result<(
 | `contract_info` | `&str` | Display group contract info string. |
 
 **Returns:** `Result<(), Refusal>`
+
+---
+
+#### `verify_request`
+
+Answered as the reference client answers it: on `error`, under 508 and no request, because intent to authenticate is stated on the initial connect and was not. Nothing is sent, so `api_name` and `api_version` reach nothing.
+
+```rust
+pub fn verify_request(&self, api_name: &str, api_version: &str)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_name` | `&str` |  |
+| `api_version` | `&str` |  |
+
+---
+
+#### `verify_and_auth_request`
+
+As `verify_request`: `api_name`, `api_version` and `opaque_isv_key` reach nothing.
+
+```rust
+pub fn verify_and_auth_request(&self, api_name: &str, api_version: &str, opaque_isv_key: &str)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_name` | `&str` |  |
+| `api_version` | `&str` |  |
+| `opaque_isv_key` | `&str` |  |
+
+---
+
+#### `verify_message`
+
+Nothing is sent and nothing answers. A gateway reads this message and discards it, so a program on one is answered by nothing either, and `api_data` reaches nothing there or here.
+
+```rust
+pub fn verify_message(&self, api_data: &str)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_data` | `&str` |  |
+
+---
+
+#### `verify_and_auth_message`
+
+As `verify_message`: `api_data` and `xyz_response` reach nothing.
+
+```rust
+pub fn verify_and_auth_message(&self, api_data: &str, xyz_response: &str)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_data` | `&str` |  |
+| `xyz_response` | `&str` |  |
 
 ---
 

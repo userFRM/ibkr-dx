@@ -9187,6 +9187,25 @@ fn a_pnl_subscription_is_renewed_on_a_reconnect_unless_withdrawn() {
     assert!(!msg.contains("PLR.6"), "and the withdrawn one is not: {msg}");
 }
 
+/// A preview's answer, in each of its three shapes, spends no order id.
+///
+/// The calls that answer number their previews far above any id a caller is
+/// handed, and every id handed out is counted past the highest the venue has
+/// named. Counted as named, the answer to one preview moved every later order
+/// id into that band.
+#[test]
+fn a_previews_answer_spends_no_order_id() {
+    let not_ready = [(6826, "n/a"), (6827, "n/a"), (6828, "n/a"), (6092, "n/a"), (6093, "n/a"), (6094, "n/a")];
+    let refused = [(39, "8"), (150, "8"), (58, "no margin")];
+    for frames in [vec![&not_ready[..], &ZERO_CLOSE_FIELDS[..]], vec![&refused[..]]] {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        for fields in frames {
+            ccp.handle_exec_report(&what_if_frame(fields), b"", &mut context, &shared, &None, "");
+        }
+        assert_eq!(shared.orders.working_id_watermark(), 0, "a preview names no order");
+    }
+}
+
 /// A preview the venue refuses is a refusal of the preview and nothing else.
 ///
 /// Read through the ordinary report path it became a rejected order: a status

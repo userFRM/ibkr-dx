@@ -10,7 +10,22 @@ import os
 import time
 import pytest
 import threading
-from ibkr_dx import EWrapper, EClient, Contract
+from conftest import give_back, inside_the_session, liquid_hours, wait_for
+from ibkr_dx import EWrapper, EClient, Contract, Order
+
+SPY_CON_ID = 756733
+
+
+def _spy():
+    c = Contract()
+    c.con_id, c.symbol, c.sec_type, c.exchange, c.currency = SPY_CON_ID, "SPY", "STK", "SMART", "USD"
+    return c
+
+
+def _market(action):
+    o = Order()
+    o.action, o.order_type, o.total_quantity = action, "MKT", 1
+    return o
 
 
 pytestmark = pytest.mark.skipif(
@@ -47,8 +62,17 @@ class AccountWrapper(EWrapper):
         self.summary = {}  # tag -> (value, currency)
         self.got_summary_end = threading.Event()
 
+        self.next_id = 0
+        self.statuses = {}  # order_id -> [status, ...]
+        self.errors = []  # (req_id, code, message)
+
     def next_valid_id(self, order_id):
+        self.next_id = order_id
         self.connected.set()
+
+    def order_status(self, order_id, status, filled, remaining, avg_fill_price, perm_id,
+                     parent_id, last_fill_price, client_id, why_held, mkt_cap_price):
+        self.statuses.setdefault(order_id, []).append(status)
 
     def managed_accounts(self, accounts_list):
         self.account_id = accounts_list
@@ -120,6 +144,7 @@ class AccountWrapper(EWrapper):
         self.got_summary_end.set()
 
     def error(self, req_id, error_time, error_code, error_string, advanced_order_reject_json=""):
+        self.errors.append((req_id, error_code, error_string))
         if error_code not in (2104, 2106, 2158):
             print(f"  [error] {error_code}: {error_string}")
 
@@ -209,8 +234,11 @@ class TestAccountAndPnL:
         got = self.wrapper.got_pnl.wait(timeout=15)
         self.client.cancel_pnl(9001)
 
-        if not got:
-            pytest.skip("No P&L data — may need open positions")
+        # Reported whether or not the account holds anything: a flat account
+        # states its figures at nought. A refusal is this client's to explain.
+        refused = [e for e in self.wrapper.errors if e[0] == 9001]
+        assert not refused, f"the profit request was refused: {refused}"
+        assert got, "the account was asked for its running profit and stated none"
 
         assert self.wrapper.pnl_data is not None
         # daily_pnl can be negative, just verify it's a number
@@ -219,27 +247,39 @@ class TestAccountAndPnL:
         assert isinstance(self.wrapper.pnl_data["realized_pnl"], float)
 
     def test_pnl_single(self):
-        """Subscribe to single-position P&L (needs at least one position)."""
-        # First get positions to find a conId
-        self.client.req_positions()
-        self.wrapper.got_position_end.wait(timeout=15)
-
-        if not self.wrapper.positions:
-            pytest.skip("No positions — cannot test pnlSingle")
-
-        con_id = self.wrapper.positions[0]["con_id"]
+        """Single-position P&L on a holding the test makes for itself: one share
+        of SPY, bought inside the venue's hours and sold back afterwards."""
+        spy = _spy()
+        if not inside_the_session(self.client, spy):
+            pytest.skip(
+                "a market order fills inside the venue's liquid hours, and they say "
+                f"SPY's session is shut ({liquid_hours(self.client, spy)})"
+            )
         acct = self.client.get_account_id()
-        self.client.req_pnl_single(9002, acct, "", con_id)
+        self.client.req_positions()
+        bought, sold = self.wrapper.next_id, self.wrapper.next_id + 1
+        self.client.place_order(bought, spy, _market("BUY"))
+        try:
+            assert wait_for(lambda: "Filled" in self.wrapper.statuses.get(bought, []), 30), (
+                f"one share bought at market inside the session did not fill: "
+                f"{self.wrapper.statuses.get(bought)} {[e for e in self.wrapper.errors if e[0] == bought]}"
+            )
+            assert wait_for(lambda: any(
+                p["con_id"] == SPY_CON_ID and p["position"] >= 1 for p in self.wrapper.positions
+            ), 15), "the holding the fill made was not reported"
 
-        got = self.wrapper.got_pnl_single.wait(timeout=15)
-        self.client.cancel_pnl_single(9002)
-
-        if not got:
-            pytest.skip("No pnlSingle data received")
-
-        assert self.wrapper.pnl_single_data is not None
-        assert isinstance(self.wrapper.pnl_single_data["daily_pnl"], float)
-        assert isinstance(self.wrapper.pnl_single_data["pos"], float)
+            self.client.req_pnl_single(9002, acct, "", SPY_CON_ID)
+            got = self.wrapper.got_pnl_single.wait(timeout=15)
+            self.client.cancel_pnl_single(9002)
+            refused = [e for e in self.wrapper.errors if e[0] == 9002]
+            assert not refused, f"the position's profit request was refused: {refused}"
+            assert got, "the account holds SPY and no profit was reported on it"
+            assert self.wrapper.pnl_single_data["pos"] >= 1
+            assert isinstance(self.wrapper.pnl_single_data["daily_pnl"], float)
+        finally:
+            give_back(self.client, lambda oid: self.wrapper.statuses.get(oid, []),
+                      bought, sold, spy, _market("SELL"))
+            self.client.cancel_positions()
 
     def test_account_summary(self):
         """Request account summary with standard tags."""

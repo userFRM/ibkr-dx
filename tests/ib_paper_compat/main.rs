@@ -1079,7 +1079,7 @@ fn cross_session_recovery_phase_live() {
 
     println!("  Session B: sending Cancel(orderId={order_id})");
     let cancel_sent = Instant::now();
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }))
         .expect("Session B: send cancel failed");
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1344,7 +1344,7 @@ fn cancel_by_perm_id_phase_live() {
 
     println!("  Sending Cancel(orderId={resolved_order_id}) via permId-resolved path");
     let cancel_sent = Instant::now();
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: resolved_order_id }))
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: resolved_order_id, stated: Default::default() }))
         .expect("send cancel failed");
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1522,7 +1522,7 @@ fn a_cancel_racing_an_unacked_replace_live() {
         outside_rth: true, ord_type: 0, tif: 0, stop_price: 0,
         spec: None,
     })).expect("replace failed");
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }))
         .expect("cancel failed");
 
     let mut withdrawn = false;
@@ -1837,7 +1837,7 @@ fn what_the_venue_holds_after_a_replace_of_each_priced_shape_live() {
     // Withdrawn from the session that now holds them: each by name, and
     // whatever that leaves by contract, the way the account sweep withdraws.
     for &order_id in &remaining {
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }));
     }
     let mut swept = false;
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -1856,7 +1856,7 @@ fn what_the_venue_holds_after_a_replace_of_each_priced_shape_live() {
         if !swept && Instant::now() > deadline - Duration::from_secs(80) {
             swept = true;
             for instrument in 0..shared.market.instrument_count() {
-                let _ = control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
+                let _ = control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument, stated: Default::default() }));
             }
         }
     }
@@ -1997,7 +1997,7 @@ fn a_numeric_group_name_is_held_as_named_live() {
     for (id, group, status) in &held { println!("  order {id}: group {group:?} status {status}"); }
 
     // Withdraw the first; a held group cancels the second without being asked.
-    let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: first }));
+    let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: first, stated: Default::default() }));
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut cancelled = std::collections::HashSet::new();
     while Instant::now() < deadline && cancelled.len() < 2 {
@@ -2007,7 +2007,7 @@ fn a_numeric_group_name_is_held_as_named_live() {
         }
     }
     if !cancelled.contains(&second) {
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: second }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: second, stated: Default::default() }));
         std::thread::sleep(Duration::from_secs(3));
     }
     let _ = control_tx.send(ControlCommand::Shutdown);
@@ -2226,7 +2226,7 @@ fn fractional_order_phase_live() {
     }
 
     if acked {
-        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
+        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }))
             .expect("cancel failed");
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut withdrawn = false;
@@ -2340,8 +2340,8 @@ fn submit_ex_bracket_child_phase_live() {
 
     if let Some(oid) = rejected {
         // Best-effort cleanup of whatever did rest before failing.
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id }));
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: child_id }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id, stated: Default::default() }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: child_id, stated: Default::default() }));
         std::thread::sleep(Duration::from_secs(3));
         let _ = control_tx.send(ControlCommand::Shutdown);
         let _ = join.join();
@@ -2352,7 +2352,7 @@ fn submit_ex_bracket_child_phase_live() {
     println!("  Both acked. Cancelling parent, expecting child to cascade...");
 
     // Cancel the parent only. A linked child must cascade to Cancelled.
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id }))
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id, stated: Default::default() }))
         .expect("send parent cancel failed");
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -2369,7 +2369,7 @@ fn submit_ex_bracket_child_phase_live() {
 
     // Safety net: never leave the child resting, even on failure.
     if !child_cancelled {
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: child_id }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: child_id, stated: Default::default() }));
         std::thread::sleep(Duration::from_secs(3));
     }
     let _ = control_tx.send(ControlCommand::Shutdown);
@@ -2438,7 +2438,7 @@ fn a_good_til_crossing_order_is_sent_as_one() {
         }
     }
     if acked {
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }));
         let bye = Instant::now() + Duration::from_secs(20);
         while Instant::now() < bye {
             if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100))

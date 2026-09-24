@@ -135,7 +135,7 @@ client.asynchronous  # read-only attribute
 
 #### `server_version`
 
-The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session, as the reference client answers before its greeting.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221), the last price and size stated to their precision (222, 224) and odd-lot quotes (225) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces.  Below it, a program that believes the number is wrong about the following, and every one fails loudly on use rather than quietly:  * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * Requests and fields that do not exist here, an `AttributeError`: the four `verify*` calls (70), `cancelContractData` and `cancelHistoricalTicks` (215). * A withdrawal stating a manual time, an operator or who entered it (169, 192): refused by name on `error`. Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
+The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session and after one, as the reference client answers before its greeting — and held while a lost connection is recovered, which the reference client rides out holding the number.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221), the last price and size stated to their precision (222, 224) and odd-lot quotes (225) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces.  Below it, a program that believes the number is wrong about the following, and each is said on use rather than passed over:  * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * A withdrawal stating a manual time (169): the withdrawal goes, with its operator and who entered it, and the caller is told on `error` that the time did not travel.  Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
 
 ```python
 def server_version()
@@ -145,7 +145,7 @@ def server_version()
 
 #### `tws_connection_time`
 
-When the venue says this session logged in, by its own clock and in its own spelling; `None` when there is no session.  The reference client answers the time its gateway stamped on its greeting. The venue stamps every message it sends with the time it sent it, the answer to the logon included, and this is that stamp — the clock `competing_session` reads the other session's logon off. Where the venue stamped none, `connect` holds this machine's clock instead and says so in the log.
+When the venue says this session logged in, by its own clock and in its own spelling; `None` when there is no session, and held while a lost connection is recovered, as the level is.  The reference client answers the time its gateway stamped on its greeting. The venue stamps every message it sends with the time it sent it, the answer to the logon included, and this is that stamp — the clock `competing_session` reads the other session's logon off. Where the venue stamped none, `connect` holds this machine's clock instead and says so in the log.
 
 ```python
 def tws_connection_time()
@@ -179,7 +179,7 @@ def start_api()
 
 #### `check_connected`
 
-Raises when there is a session, as the reference client's does, with the message `connect` refuses a second call under. Nothing otherwise.
+Raises when there is a session, with the message `connect` refuses a second call under. Nothing otherwise.
 
 ```python
 def check_connected()
@@ -247,6 +247,40 @@ Get the account ID.
 
 ```python
 def get_account_id()
+```
+
+---
+
+#### `session_over`
+
+Whether this session is finished rather than merely disconnected: closed by `disconnect()`, or given up on by the engine. A loss the engine is still working on is neither — `is_connected()` reads false between the 1100 and the 1102, and a request made then is carried when the transports come back.
+
+```python
+def session_over()
+```
+
+---
+
+#### `instrument_of`
+
+Which slot a contract holds on this session, if it holds one. Read through the lookup every other reader uses, which drops what the engine has given back, so a slot that has gone to the next contract is not named.
+
+```python
+def instrument_of(con_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `con_id` | `int` | Contract ID. Unique per instrument. |
+
+---
+
+#### `unread_wire`
+
+What the venue sent this session that nothing here reads, as pairs of the connection and what arrived: each kind of message named once, the first time it arrives. With `IBKR_DX_CAPTURE_WIRE` set, every frame is kept here as well, whole and as sent.
+
+```python
+def unread_wire()
 ```
 
 ---
@@ -449,7 +483,75 @@ def fundamental_data(contract, report_type)
 
 ---
 
+#### `positions`
+
+Every holding in the account: one tuple per holding, its account, its contract, the position and its average cost — what `position` states, handed back rather than delivered.  Read once the account has finished stating its holdings, as `req_positions` reads them; where it had not within the wait, what this session already held is answered and the log says so. A holding named by id alone is given a moment for its definition to land, as there. Nothing is subscribed: asking again reads again.
+
+```python
+def positions()
+```
+
+---
+
+#### `what_if_order`
+
+What the venue says an order would cost, without placing it: the order's own placement with the question marked on it, answered with the state the venue states for it.  Numbered in the band these calls take, so the answer is this call's and the dispatch loop leaves it, with anything said about it. A placement this client refuses raises at once, with the refusal's words.
+
+```python
+def what_if_order(contract, order)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `contract` | `Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `order` | `Order` | Order parameters (action, quantity, type, price, TIF, etc.). |
+
+---
+
+#### `scan`
+
+Run a scan and hand back what it found: one tuple per row, its rank and the contract's details, then the distance, benchmark and projection the venue states beside it, empty where it states none.  The subscription is withdrawn before this returns: a scan asked for once is a question, and left running it keeps answering into a session nobody is reading. A scan the venue will not run raises with its words.
+
+```python
+def scan(instrument, location_code, scan_code, most)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `str` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+| `location_code` | `str` | Scanner location (e.g. `"STK.US.MAJOR"`). |
+| `scan_code` | `str` | Scanner code (e.g. `"TOP_PERC_GAIN"`, `"HIGH_OPT_IMP_VOLAT"`). |
+| `most` | `int` | Maximum number of scanner results. |
+
+---
+
+#### `calendar_schema`
+
+What the corporate-events calendar says it carries, as the venue's JSON.
+
+```python
+def calendar_schema()
+```
+
+---
+
+#### `calendar_events`
+
+The calendar's events for one contract, as the venue's JSON.
+
+```python
+def calendar_events(con_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `con_id` | `int` | Contract ID. Unique per instrument. |
+
+---
+
 #### `qualify_contract`
+
+Fill in what the venue knows about a contract, above all its id.  Most of what this client sends carries a contract, and a contract with an id is worth more than one without: market data is answered only for a contract named by id, and an order carrying one needs to state nothing else.  A description matching more than one contract is refused rather than resolved to whichever came back first — the same symbol on the same venue exists in more than one currency, and picking one silently is how an order reaches the wrong one.
 
 ```python
 def qualify_contract(contract)
@@ -750,7 +852,7 @@ def exercise_options(req_id, contract, exercise_action, exercise_quantity, accou
 
 #### `cancel_order`
 
-Cancel an order.  The second argument is what the reference client states about the withdrawal itself — when a person entered it, on whose authority, and whether a person entered it at all. It is taken as that object or as the time alone, which is how this client took it before.  A cancel on this wire names five fields and none of those is among them, so what the caller stated cannot travel. The cancel goes anyway and the caller is told the annotation did not: refused outright, a live order was left standing over a record the wire has no room for, and the client this one stands in for withdraws it — it states all three on every cancel it sends. Taken silently it would be withdrawn under nobody's name while the caller had given one, so it is said.
+Cancel an order.  The second argument is what the reference client states about the withdrawal itself — when a person entered it, on whose authority, and whether a person entered it at all. It is taken as that object or as the time alone.  Who is withdrawing it and whether a person entered it travel on the cancel, as a gateway writes them: from the withdrawal, not from the placement. A time does not travel. A gateway sends it only where the venue has turned that record on for the login, and this client does not read whether it has. The cancel goes anyway and the caller is told the time did not: refused outright, a live order would be left standing over a record this client does not send. Taken silently it would be withdrawn without the record while the caller had given one, so it is said. A time a gateway cannot read is refused as a gateway refuses it, under 10301, and nothing is withdrawn.
 
 ```python
 def cancel_order(order_id, order_cancel=None)
@@ -759,7 +861,7 @@ def cancel_order(order_id, order_cancel=None)
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `order_id` | `int` | Order identifier. Must be unique per session. |
-| `order_cancel` | `Py<PyAny> or None` |  |
+| `order_cancel` | `Py<PyAny> or None` | What the withdrawal states about itself: an `OrderCancel`, or a manual time alone. `""` states nothing, and so does `None` from Python. |
 
 ---
 
@@ -779,7 +881,7 @@ def cancel_order_by_perm_id(perm_id)
 
 #### `req_global_cancel`
 
-Cancel every order the account is working.  This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. The same where the naming did finish and an order it named could not be given a slot in this client's instrument table — the engine holds no record of such an order, so no cancel here names it and it goes on working at the venue.
+Cancel every order the account is working.  This wire carries no request to withdraw everything, so it is composed here: one cancel for each order held, which is what a caller asking for everything back is asking for. What is held is what the venue named as working at connect and what this session placed since. The venue names the former after the connect returns, so a global cancel issued straight away waits for that naming, as asking for the open orders does, and covers what was named. Where the naming does not finish within the wait, what had been named is still withdrawn and the call says so rather than returning as though every order were covered: a partial cancel that reads as one beats the same cancel in silence, which reads as a complete answer. The same where the naming did finish and an order it named could not be given a slot in this client's instrument table — the engine holds no record of such an order, so no cancel here names it and it goes on working at the venue.  What the withdrawal states — who is withdrawing and whether a person entered it — travels on every cancel, as a gateway states it on every order it withdraws. A time does not: the reference client writes none on a withdrawal of everything, so a gateway never reads one, and one stated here goes the same way.
 
 ```python
 def req_global_cancel(order_cancel=None)
@@ -787,7 +889,7 @@ def req_global_cancel(order_cancel=None)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `order_cancel` | `Py<PyAny> or None` |  |
+| `order_cancel` | `Py<PyAny> or None` | What the withdrawal states about itself: an `OrderCancel`, or a manual time alone. `""` states nothing, and so does `None` from Python. |
 
 ---
 
@@ -906,8 +1008,10 @@ def set_news_providers(providers)
 
 #### `req_mkt_data`
 
+Request market data for a contract.  `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+
 ```python
-def req_mkt_data(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mkt_data_options)
+def req_mkt_data(req_id, contract, generic_tick_list="", snapshot=False, regulatory_snapshot=False, mkt_data_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -942,7 +1046,7 @@ def req_mkt_data_ex(req_id, contract, generic_tick_list="", snapshot=False, regu
 
 #### `cancel_mkt_data`
 
-Cancel market data subscription.
+Cancel market data.
 
 ```python
 def cancel_mkt_data(req_id)
@@ -1022,10 +1126,10 @@ def req_market_data_type(market_data_type)
 
 #### `req_mkt_depth`
 
-Request market depth (L2 order book).  `mkt_depth_options` is taken and not applied. This protocol's request carries no free-form option list, so what a caller puts in one cannot be sent. The reference client's own list is empty on every ordinary call.
+Request market depth (L2 order book).  `mkt_depth_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
 
 ```python
-def req_mkt_depth(req_id, contract, num_rows=5, is_smart_depth=False, mkt_depth_options=[])
+def req_mkt_depth(req_id, contract, num_rows=5, is_smart_depth=False, mkt_depth_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1055,10 +1159,10 @@ def cancel_mkt_depth(req_id, is_smart_depth=False)
 
 #### `req_real_time_bars`
 
-Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  `real_time_bars_options` is taken and not applied. This protocol's request carries no free-form option list.
+Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
 
 ```python
-def req_real_time_bars(req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=[])
+def req_real_time_bars(req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1378,8 +1482,10 @@ def option_model_by_instrument(instrument)
 
 #### `req_historical_data`
 
+Request historical bar data.  `chart_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+
 ```python
-def req_historical_data(req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date, keep_up_to_date, chart_options)
+def req_historical_data(req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=False, chart_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1413,8 +1519,10 @@ def cancel_historical_data(req_id)
 
 #### `req_head_time_stamp`
 
+Request head timestamp.
+
 ```python
-def req_head_time_stamp(req_id, contract, what_to_show, use_rth, format_date)
+def req_head_time_stamp(req_id, contract, what_to_show, use_rth, format_date=1)
 ```
 
 | Parameter | Type | Description |
@@ -1443,6 +1551,8 @@ def cancel_head_time_stamp(req_id)
 
 #### `req_contract_details`
 
+Request contract details.
+
 ```python
 def req_contract_details(req_id, contract)
 ```
@@ -1451,6 +1561,20 @@ def req_contract_details(req_id, contract)
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `contract` | `Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+
+---
+
+#### `cancel_contract_data`
+
+Withdraw a contract lookup.  Nothing is sent and nothing answers: there is nothing to withdraw. A gateway asks the venue nothing for this either: it only stops re-sending a lookup it held back while its connection to the venue was down, and this client holds none back — a lookup made with no connection is refused there and then. A lookup already asked for is still answered, as it is through a gateway.
+
+```python
+def cancel_contract_data(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
 
 ---
 
@@ -1466,6 +1590,8 @@ def req_mkt_depth_exchanges()
 
 #### `req_matching_symbols`
 
+Search for matching symbols.
+
 ```python
 def req_matching_symbols(req_id, pattern)
 ```
@@ -1479,7 +1605,7 @@ def req_matching_symbols(req_id, pattern)
 
 #### `req_sec_def_opt_params`
 
-Request the expirations and strikes an underlying's options list.
+Request option chain parameters.  Every argument is stated by the caller, as the reference client requires them to be. With `underlying_sec_type` defaulted to stocks, a caller who left it off asked about the chains of a stock by that name rather than being told they had left it off.
 
 ```python
 def req_sec_def_opt_params(req_id, underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id)
@@ -1497,10 +1623,10 @@ def req_sec_def_opt_params(req_id, underlying_symbol, fut_fop_exchange, underlyi
 
 #### `req_scanner_subscription`
 
-Request scanner subscription.  `scanner_subscription_options` is taken and not applied. This protocol's request carries no free-form option list, so what a caller puts in one cannot be sent. The reference client's own list is empty on every ordinary call.
+Request scanner subscription.  `scanner_subscription_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
 
 ```python
-def req_scanner_subscription(req_id, subscription, scanner_subscription_options=[], scanner_subscription_filter_options=[])
+def req_scanner_subscription(req_id, subscription, scanner_subscription_options=None, scanner_subscription_filter_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1538,10 +1664,10 @@ def req_scanner_parameters()
 
 #### `req_news_article`
 
-Request a news article.  `news_article_options` is taken and not applied. This protocol's request carries no free-form option list, so what a caller puts in one cannot be sent. The reference client's own list is empty on every ordinary call.
+Request a news article.  `news_article_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
 
 ```python
-def req_news_article(req_id, provider_code, article_id, news_article_options=[])
+def req_news_article(req_id, provider_code, article_id, news_article_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1555,8 +1681,10 @@ def req_news_article(req_id, provider_code, article_id, news_article_options=[])
 
 #### `req_historical_news`
 
+Request historical news.  Bounds are UTC timestamps, `YYYYMMDD-HH:MM:SS` or `YYYYMMDD HH:MM:SS`, optionally with fractional seconds. Empty bounds are omitted; unreadable ones are refused so the window is not lost.  `historical_news_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
+
 ```python
-def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options)
+def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1568,6 +1696,20 @@ def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_dat
 | `end_date_time` | `str` | End date/time in `"YYYYMMDD HH:MM:SS"` format, or empty for now. |
 | `total_results` | `int` | Maximum number of news results. |
 | `historical_news_options` | `list` |  |
+
+---
+
+#### `cancel_historical_news`
+
+Withdraw a historical news query.  The TWS API has no call for this; the venue has a message for it. One message carrying the number the query went out under, sent whether or not the query has been answered: the venue serves it past the reply.
+
+```python
+def cancel_historical_news(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
 
 ---
 
@@ -1620,8 +1762,10 @@ def cancel_adjustments(req_id)
 
 #### `req_fundamental_data`
 
+Request fundamental data.  `fundamental_data_options` is taken and nothing in it is checked or applied, as through a gateway: a gateway reads no option list on this request.
+
 ```python
-def req_fundamental_data(req_id, contract, report_type, fundamental_data_options)
+def req_fundamental_data(req_id, contract, report_type, fundamental_data_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1649,10 +1793,10 @@ def cancel_fundamental_data(req_id)
 
 #### `req_historical_ticks`
 
-Request historical tick data.  `ignore_size` and `misc_options` are taken and not applied. The request has no field for suppressing size-only changes, and none for a free-form option list.
+Request historical tick data.  `ignore_size` is taken and not applied: the request has no field for suppressing size-only changes.  `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320.
 
 ```python
-def req_historical_ticks(req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=False, misc_options=[])
+def req_historical_ticks(req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=False, misc_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1666,6 +1810,20 @@ def req_historical_ticks(req_id, contract, start_date_time="", end_date_time="",
 | `use_rth` | `int` | If `true`, only return data from Regular Trading Hours. |
 | `ignore_size` | `bool` | If `true`, ignore size in tick-by-tick data. |
 | `misc_options` | `list` |  |
+
+---
+
+#### `cancel_historical_ticks`
+
+Withdraw a historical ticks request.  Nothing is sent and nothing answers: there is nothing to withdraw, as for `cancel_contract_data`. A gateway only stops re-sending a request it held back while its connection to the venue was down, which this client never does. Ticks already asked for still arrive, and a request waiting for its contract to be named still goes once it is, as through a gateway.
+
+```python
+def cancel_historical_ticks(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
 
 ---
 
@@ -1684,6 +1842,8 @@ def req_market_rule(market_rule_id)
 ---
 
 #### `req_histogram_data`
+
+Request histogram data.
 
 ```python
 def req_histogram_data(req_id, contract, use_rth, time_period)
@@ -1714,8 +1874,10 @@ def cancel_histogram_data(req_id)
 
 #### `req_historical_schedule`
 
+Request historical trading schedule.
+
 ```python
-def req_historical_schedule(req_id, contract, end_date_time, duration_str, use_rth)
+def req_historical_schedule(req_id, contract, end_date_time="", duration_str="1 M", use_rth=True)
 ```
 
 | Parameter | Type | Description |
@@ -1829,10 +1991,10 @@ def company_data_series(con_id)
 
 #### `calculate_implied_volatility`
 
-What volatility a price implies for an option, under the model the venue publishes for that contract. Answered on `tick_option_computation`.  `implied_vol_options` is taken and not applied. This protocol's request carries no free-form option list, so what a caller puts in one cannot be sent. The reference client's own list is empty on every ordinary call.
+What volatility a price implies for an option, under the model the venue publishes for that contract. Answered on `tick_option_computation`.  `implied_vol_options` is taken, and nothing in it is checked or sent: this client answers the calculation itself, from the venue's model, and sends no request that could carry it.
 
 ```python
-def calculate_implied_volatility(req_id, contract, option_price, under_price, implied_vol_options=[])
+def calculate_implied_volatility(req_id, contract, option_price, under_price, implied_vol_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -1847,10 +2009,10 @@ def calculate_implied_volatility(req_id, contract, option_price, under_price, im
 
 #### `calculate_option_price`
 
-What an option is worth at a stated volatility, under the same model. Answered on `tick_option_computation`.  `opt_prc_options` is taken and not applied. This protocol's request carries no free-form option list, so what a caller puts in one cannot be sent. The reference client's own list is empty on every ordinary call.
+What an option is worth at a stated volatility, under the same model. Answered on `tick_option_computation`.  `opt_prc_options` is taken, and nothing in it is checked or sent: this client answers the calculation itself, from the venue's model, and sends no request that could carry it.
 
 ```python
-def calculate_option_price(req_id, contract, volatility, under_price, opt_prc_options=[])
+def calculate_option_price(req_id, contract, volatility, under_price, opt_prc_options=None)
 ```
 
 | Parameter | Type | Description |
@@ -2020,6 +2182,66 @@ def update_display_group(req_id, contract_info)
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `contract_info` | `str` | Display group contract info string. |
+
+---
+
+#### `verify_request`
+
+Answered as the reference client answers it: on `error`, under 508 and no request, because intent to authenticate is stated on the initial connect and was not. Nothing is sent, so `api_name` and `api_version` reach nothing.
+
+```python
+def verify_request(api_name, api_version)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_name` | `str` |  |
+| `api_version` | `str` |  |
+
+---
+
+#### `verify_and_auth_request`
+
+As `verify_request`: `api_name`, `api_version` and `opaque_isv_key` reach nothing.
+
+```python
+def verify_and_auth_request(api_name, api_version, opaque_isv_key)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_name` | `str` |  |
+| `api_version` | `str` |  |
+| `opaque_isv_key` | `str` |  |
+
+---
+
+#### `verify_message`
+
+Nothing is sent and nothing answers. A gateway reads this message and discards it, so a program on one is answered by nothing either, and `api_data` reaches nothing there or here.
+
+```python
+def verify_message(api_data)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_data` | `str` |  |
+
+---
+
+#### `verify_and_auth_message`
+
+As `verify_message`: `api_data` and `xyz_response` reach nothing.
+
+```python
+def verify_and_auth_message(api_data, xyz_response)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_data` | `str` |  |
+| `xyz_response` | `str` |  |
 
 ---
 

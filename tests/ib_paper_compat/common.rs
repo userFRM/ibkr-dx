@@ -457,7 +457,7 @@ pub(super) fn sweep_working_orders(conns: Conns) -> Conns {
         // makes: one withdrawal per contract named.
         for instrument in 0..shared.market.instrument_count() {
             control_tx
-                .send(ControlCommand::Order(OrderRequest::CancelAll { instrument }))
+                .send(ControlCommand::Order(OrderRequest::CancelAll { instrument, stated: Default::default() }))
                 .expect("the sweep could not send its withdrawals");
         }
     }
@@ -1243,7 +1243,7 @@ pub(super) fn run_submit_cancel_phase(
                 | OrderStatus::Submitted => {
                     order_acked = true;
                     if !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                         cancel_sent = true;
                     }
                 }
@@ -1270,7 +1270,7 @@ pub(super) fn run_submit_cancel_phase(
     // went silent after an acknowledgement, cannot be shown gone; every path
     // below returns SKIP, and a GTC order would rest at the venue.
     if !(order_cancelled || order_rejected || order_filled) {
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }));
         // Long enough for the loop to write it before it is stopped.
         std::thread::sleep(Duration::from_millis(250));
     }

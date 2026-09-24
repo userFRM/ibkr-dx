@@ -105,13 +105,13 @@ impl EClient {
     /// the venue publishes for that contract. Answered on
     /// `tick_option_computation`.
     ///
-    /// `implied_vol_options` is taken and not applied. This protocol's request
-    /// carries no free-form option list, so what a caller puts in one cannot be
-    /// sent. The reference client's own list is empty on every ordinary call.
-    #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=Vec::new()))]
+    /// `implied_vol_options` is taken, and nothing in it is checked or sent: this
+    /// client answers the calculation itself, from the venue's model, and
+    /// sends no request that could carry it.
+    #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=None))]
     fn calculate_implied_volatility(
         &self, py: Python<'_>, req_id: i64, contract: &Contract, option_price: f64,
-        under_price: f64, implied_vol_options: Vec<Py<PyAny>>,
+        under_price: f64, implied_vol_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         let _ = implied_vol_options;
@@ -147,13 +147,13 @@ impl EClient {
     /// What an option is worth at a stated volatility, under the same
     /// model. Answered on `tick_option_computation`.
     ///
-    /// `opt_prc_options` is taken and not applied. This protocol's request
-    /// carries no free-form option list, so what a caller puts in one cannot be
-    /// sent. The reference client's own list is empty on every ordinary call.
-    #[pyo3(signature = (req_id, contract, volatility, under_price, opt_prc_options=Vec::new()))]
+    /// `opt_prc_options` is taken, and nothing in it is checked or sent: this
+    /// client answers the calculation itself, from the venue's model, and
+    /// sends no request that could carry it.
+    #[pyo3(signature = (req_id, contract, volatility, under_price, opt_prc_options=None))]
     fn calculate_option_price(
         &self, py: Python<'_>, req_id: i64, contract: &Contract, volatility: f64,
-        under_price: f64, opt_prc_options: Vec<Py<PyAny>>,
+        under_price: f64, opt_prc_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         let _ = opt_prc_options;
@@ -353,6 +353,47 @@ impl EClient {
         if let Err(reason) = self.core.update_display_group(req_id, contract_info) {
             report_reason(self, req_id, &Refusal::validation(reason));
         }
+        Ok(())
+    }
+
+    // ── Verification ──
+    //
+    // A handshake between a gateway and a program linking to it. The
+    // reference client answers the two requests itself, because intent to
+    // authenticate is stated on the initial connect and it never states it;
+    // the two messages it does send, a gateway reads and discards.
+
+    /// Answered as the reference client answers it: on `error`, under 508 and
+    /// no request, because intent to authenticate is stated on the initial
+    /// connect and was not. Nothing is sent, so `api_name` and `api_version`
+    /// reach nothing.
+    fn verify_request(&self, py: Python<'_>, api_name: &str, api_version: &str) -> PyResult<()> {
+        let _ = (api_name, api_version);
+        self.refuse_verification(py)
+    }
+
+    /// As `verify_request`: `api_name`, `api_version` and `opaque_isv_key`
+    /// reach nothing.
+    fn verify_and_auth_request(
+        &self, py: Python<'_>, api_name: &str, api_version: &str, opaque_isv_key: &str,
+    ) -> PyResult<()> {
+        let _ = (api_name, api_version, opaque_isv_key);
+        self.refuse_verification(py)
+    }
+
+    /// Nothing is sent and nothing answers. A gateway reads this message and
+    /// discards it, so a program on one is answered by nothing either, and
+    /// `api_data` reaches nothing there or here.
+    fn verify_message(&self, api_data: &str) -> PyResult<()> {
+        let _ = api_data;
+        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        Ok(())
+    }
+
+    /// As `verify_message`: `api_data` and `xyz_response` reach nothing.
+    fn verify_and_auth_message(&self, api_data: &str, xyz_response: &str) -> PyResult<()> {
+        let _ = (api_data, xyz_response);
+        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         Ok(())
     }
 
@@ -581,6 +622,16 @@ impl EClient {
 }
 
 impl EClient {
+    /// The reference client's answer to a verification request, which it
+    /// gives itself: 504 without a session, and 508 with one.
+    fn refuse_verification(&self, py: Python<'_>) -> PyResult<()> {
+        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        self.report_refusal(py, -1, Refusal::stated(
+            crate::error_codes::BAD_MESSAGE,
+            "Bad message  Intent to authenticate needs to be expressed during initial connect request.",
+        ))
+    }
+
     /// The venue's clock in milliseconds: this machine's, shifted by what the
     /// venue has stated about its own.
     ///
@@ -655,7 +706,7 @@ impl EClient {
             // interrupt raised in their handler for it leaves the call rather
             // than being swallowed here.
             let held_before = self.core.holds_mkt_data(req_id);
-            self.req_mkt_data(py, req_id, contract, "", false, false, Vec::new())?;
+            self.req_mkt_data(py, req_id, contract, "", false, false, None)?;
             let took = if its_own != 0 {
                 its_slot().is_some() && its_slot() == self.core.watching(req_id)
             } else {
@@ -969,7 +1020,7 @@ mod option_model_watch_tests {
         Python::attach(|py| {
             let (client, rx, wrapper) = wired(py);
             let engine = resolves_to(rx, 0);
-            client.calculate_implied_volatility(py, 7, &described("SPY"), 1.0, 100.0, Vec::new())
+            client.calculate_implied_volatility(py, 7, &described("SPY"), 1.0, 100.0, None)
                 .unwrap();
             let _rx = py.detach(|| engine.join().unwrap());
 
@@ -996,11 +1047,11 @@ mod option_model_watch_tests {
         Python::attach(|py| {
             let (client, rx, _wrapper) = wired(py);
             let engine = resolves_to(rx, 0);
-            client.calculate_implied_volatility(py, 7, &described("SPY"), 1.0, 100.0, Vec::new())
+            client.calculate_implied_volatility(py, 7, &described("SPY"), 1.0, 100.0, None)
                 .unwrap();
             let rx = py.detach(|| engine.join().unwrap());
             let engine = resolves_to(rx, 1);
-            client.calculate_implied_volatility(py, 8, &described("QQQ"), 1.0, 100.0, Vec::new())
+            client.calculate_implied_volatility(py, 8, &described("QQQ"), 1.0, 100.0, None)
                 .unwrap();
             let rx = py.detach(|| engine.join().unwrap());
 
@@ -1028,9 +1079,9 @@ mod option_model_watch_tests {
                 client.core.set_registration_timeout(std::time::Duration::from_secs(5));
                 let option = Contract { con_id: 1234, ..described("SPY") };
                 let engine = resolves_to(rx, 0);
-                client.calculate_implied_volatility(py, 7, &option, 1.0, 100.0, Vec::new()).unwrap();
+                client.calculate_implied_volatility(py, 7, &option, 1.0, 100.0, None).unwrap();
                 let rx = py.detach(|| engine.join().unwrap());
-                client.calculate_option_price(py, 8, &option, 0.2, 100.0, Vec::new()).unwrap();
+                client.calculate_option_price(py, 8, &option, 0.2, 100.0, None).unwrap();
                 assert_eq!(client.core.watching(7), Some(0));
                 assert_eq!(client.core.watching(8), Some(0));
                 assert!(!rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::Subscribe { .. })),

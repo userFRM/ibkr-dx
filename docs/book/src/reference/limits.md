@@ -123,9 +123,9 @@ established.
 
 A gateway told `override` is false waits for the venue's word on where the
 option stands and refuses an exercise of one out of the money, or a lapse of
-one in it, under 322. It sets no bound on that wait. This client sends the
-exercise as given whatever `override` says, and says so in the log, until a
-bound is chosen.
+one in it, under 322. It sets no bound on that wait. This client does not ask
+for the venue's word: it sends the exercise as given whatever `override` says,
+and says so in the log where `override` is false.
 
 ## Numbered ticks this client does not deliver
 
@@ -213,6 +213,38 @@ client asks the venue whatever the permission, and waits up to eleven seconds.
 | `cancel_mkt_depth` | `is_smart_depth` | Says whether the book is found among the smart books or the exchange books, and one naming the wrong kind is answered with 310 and leaves the book running | The request id alone finds the book. Stated as the book was asked for, both withdraw the same one |
 | `req_auto_open_orders` | `b_auto_bind` | Turns binding on or off for client 0 | What binding asks for is already the default: every session is told about every order on the account, so it changes nothing. A client other than 0 is refused, as a gateway refuses one |
 
+## Connect options
+
+`set_connect_options` answers a caller that states options on `error`, under
+321. The reference client hands these to its gateway on the greeting for the
+gateway to read, and there is no gateway between this client and the venue.
+Stating none is stating nothing.
+
+## A withdrawal's time
+
+A withdrawal states who is withdrawing the order and whether a person entered
+it, and both travel on the cancel as a gateway writes them: from the
+withdrawal, not the placement. A cancel that states neither carries neither.
+An operator holding the byte that separates fields is refused under 321 and
+nothing is withdrawn.
+
+A manual cancel time is read as a gateway reads it — `yyyymmdd-hh:mm:ss` in
+UTC, or `yyyymmdd hh:mm:ss` with the date and a zone optional — and one it
+cannot read is refused under 10301 in a gateway's words, and the order keeps
+working, as it does through a gateway. A time holding a character outside
+ASCII is let through unread. A time that is read does not travel: a gateway
+sends one only where the venue has turned that record on for the login, and
+this client does not read whether it has. The withdrawal goes, and the caller
+is told on `error` that the time did not. A gateway also refuses a time it can
+read but not place — one in a zone that is neither UTC nor that of the machine
+it runs on — and this client does not.
+
+A withdrawal of every order carries no time: the reference client writes
+none, and one stated here goes nowhere, as there. From Python, each field is
+written as its text, as the reference client writes it, and an indicator that
+does not read as a whole number is refused under 320 (*Error reading request:
+Unable to parse field: 'Manual Order Indicator' for input string: '…'*).
+
 ## Request ids
 
 This client keeps request ids at and above `0xC000_0000` for the questions it
@@ -221,6 +253,11 @@ negative id, rather than answering it. The interface this client mirrors
 encourages one counter for orders and requests, and a program that keeps one
 meets this once the account's order ids reach `0xC000_0000`: the next valid id
 is then one no request can be stated under.
+
+A preview asked with `what_if_order` spends no order id. The calls that answer
+take their numbers from that band, and the venue's answer to a preview is not
+counted as naming an order, so the ids handed out after a preview go on from
+where they were.
 
 ## A calculation asked for before the model has arrived
 
@@ -244,9 +281,11 @@ constraints an order would set aside — which a gateway reads and sends nothing
 for — together with the order options, the choice to decline smart routing
 and the kind of preview, which it checks and sends nothing for, in the same
 words: an unknown option under 10337, a bad value of `manual` under 10338,
-declining smart routing refused under 10348 where the venue withdrew it and
-warned about under 2181 otherwise — ahead of anything the venue says about
-the order, as a gateway says it before the order goes out — and a preview kind
+an entry not written `key=value` under 320 (*Error reading request:Please use
+'Key=Value' format for Misc Options*), declining smart routing refused under
+10348 where the venue withdrew it and warned about under 2181 otherwise —
+ahead of anything the venue says about the order, as a gateway says it before
+the order goes out — and a preview kind
 other than the ordinary one refused. A gateway reads the kind only from an
 order in the protobuf encoding; the text encoding ib_async uses has no field
 for it. The delta, the price randomisation and the hedging leg's
@@ -273,6 +312,35 @@ sizes and starting position.
 None is silently dropped, and that is checked rather than claimed:
 `python scripts/gen_order_field_reach.py` recounts every figure from the
 order builders and exits non-zero if any field becomes settable and unread.
+
+## A request's option list
+
+Every request that carries a free-form option list has it checked the way an
+order's is: market data, a book, historical bars, a scan, real-time bars, a
+news article, historical news and historical ticks. `manual`, `0` or `1`, is
+taken and changes nothing a gateway sends. Any other key is refused under
+10337, another value under 10338, and an entry that is not `key=value` under
+320. Two entries that could each be refused are checked in the order a
+gateway's table holds them, and a key named twice keeps its last value. Where
+the venue has lifted the checks at logon, a value of `manual` that is not the
+number nought or one is refused under 321, after `Market data:` or
+`Historical data:`; a value written in another script's digits is let
+through, since a gateway reads those digits and this client does not.
+
+The Rust client takes a free-form list on an order alone. From Python, `None`
+is no list, and an entry that is not a tag and a value is written as its own
+text, as the reference client writes it — refused under 320 where that text is
+not `key=value`. A request for a fundamental report takes a list and a gateway
+reads none of it; neither does this client. The two option calculations take
+a list and do nothing with it: this client answers them itself, from the model
+the venue states for the contract, and sends nothing that could carry the
+list, so nothing in it is checked or sent.
+
+The checks are the ones a gateway makes on a list written in the text
+encoding ib_async uses. On the protobuf encoding the reference client moves
+these requests to from level 203 on, a gateway checks only the value of
+`manual`; this client makes every check whichever client a program was
+written against.
 
 ## A refusal made while an order is checked names no request
 

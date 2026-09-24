@@ -6,7 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::types::model::{
-    ExecutionFilter,
+    ExecutionFilter, OrderCancel,
 };
 use crate::error_codes::{DUPLICATE_ORDER_ID, NOT_CANCELLABLE, ORDER_DOES_NOT_MATCH, Refusal};
 use crate::client_core::ClientCore;
@@ -14,48 +14,58 @@ use crate::types::*;
 use super::EClient;
 use super::super::contract::{Contract, Order, OrderState, CommissionAndFeesReport, Execution};
 
-/// What a withdrawal states about itself that this wire cannot carry.
+/// What a withdrawal states about itself: who is withdrawing it, whether a
+/// person entered it, and when.
 ///
-/// `None` where it states nothing — no object, or one left as it comes. The
-/// reference client's object holds three fields and a cancel on this wire names
-/// five, none of them these, so anything stated has nowhere to go. Read by
-/// attribute, as every object a caller fills in is read here, and a plain
-/// string is taken as the time on its own.
-fn withdrawal_states(py: Python<'_>, order_cancel: Option<&Py<PyAny>>) -> Option<String> {
-    let held = order_cancel?;
+/// Nothing where it states nothing — no object, or one left as it comes. Read
+/// by attribute, as every object a caller fills in is read here, and a plain
+/// string is taken as the time on its own. Each is written as its text, as the
+/// reference client writes it, and the indicator is read back as a whole
+/// number, as a gateway reads it: one that does not read as one refuses the
+/// withdrawal in a gateway's words.
+fn withdrawal_states(py: Python<'_>, order_cancel: Option<&Py<PyAny>>) -> PyResult<Result<OrderCancel, Refusal>> {
+    let Some(held) = order_cancel else { return Ok(Ok(OrderCancel::default())) };
     if let Ok(time) = held.extract::<String>(py) {
-        return (!time.is_empty()).then(|| WITHDRAWAL_CARRIES.replace("{field}", "a time"));
+        return Ok(Ok(time.into()));
     }
-    let says = |attr: &str| -> bool {
-        held.getattr(py, attr)
-            .ok()
-            .filter(|v| !v.is_none(py))
-            .and_then(|v| v.extract::<String>(py).ok())
-            .is_some_and(|text| !text.is_empty())
-    };
-    for (attr, named) in [
-        ("manualOrderCancelTime", "a time"),
-        ("extOperator", "an operator"),
-    ] {
-        if says(attr) {
-            return Some(WITHDRAWAL_CARRIES.replace("{field}", named));
+    let text = |attr: &str| -> PyResult<Option<String>> {
+        match held.getattr(py, attr).ok().filter(|v| !v.is_none(py)) {
+            Some(v) => Ok(Some(v.bind(py).str()?.to_cow()?.into_owned())),
+            None => Ok(None),
         }
-    }
-    // The indicator is a number, and the one it carries when nobody set it is
-    // the number this protocol writes for an integer nobody set.
-    let indicator = held.getattr(py, "manualOrderIndicator").ok()
-        .and_then(|v| v.extract::<i32>(py).ok());
-    match indicator {
-        Some(i) if i != i32::MAX => Some(WITHDRAWAL_CARRIES.replace("{field}", "who entered it")),
-        _ => None,
-    }
+    };
+    // Unset where nobody set it: the number this protocol writes for an
+    // integer nobody set, and nothing where the object has no such field.
+    // ponytail: ASCII digits; a gateway also reads other scripts' digits.
+    let manual_order_indicator = match text("manualOrderIndicator")? {
+        None => i32::MAX,
+        Some(written) => match written.parse::<i32>() {
+            Ok(number) => number,
+            Err(_) => return Ok(Err(Refusal::stated(
+                crate::error_codes::REQUEST_NOT_READ,
+                format!(
+                    "Error reading request: Unable to parse field: 'Manual Order Indicator' \
+                     for input string: '{written}'",
+                ),
+            ))),
+        },
+    };
+    Ok(Ok(OrderCancel {
+        manual_order_cancel_time: text("manualOrderCancelTime")?.unwrap_or_default(),
+        ext_operator: text("extOperator")?.unwrap_or_default(),
+        manual_order_indicator,
+    }))
 }
 
-/// Said whichever of the three the caller stated.
-const WITHDRAWAL_CARRIES: &str = "a withdrawal states {field}, and this protocol \
-     carries no field for it: the cancel names five and none of them is that one, so the \
-     order would be withdrawn without it. Withdraw it without stating one, or state it \
-     where the order was placed.";
+/// Said where a withdrawal states a time.
+fn time_not_sent(time: &str) -> String {
+    format!(
+        "a withdrawal states a time, and this client does not send it: a gateway sends \
+         one only where the venue has turned that record on for the login, and this \
+         client does not read whether it has, so the order is withdrawn without it. State \
+         it where the order was placed to have it recorded. (stated: {time})",
+    )
+}
 
 #[pymethods]
 impl EClient {
@@ -68,7 +78,7 @@ impl EClient {
     /// raises there. A send the engine can no longer take is reported the
     /// same way, stating what has already reached the engine and what has
     /// not.
-    fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
+    pub(crate) fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if let Err(why) = self.core.refuse_if_readonly("an order") {
             return self.report_refusal(py, order_id, Refusal::validation(why));
         }
@@ -247,8 +257,10 @@ impl EClient {
         // venue has not named this one yet — a program keeping its own numbers
         // off `next_valid_id`, which is the reference client's own idiom, then
         // asked for one and was given a number it had put on the market
-        // moments before.
-        self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+        // moments before. A preview's own number is not one of those.
+        if !crate::api::client::a_question_of_ours(oid) {
+            self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+        }
 
         // If orderId already names a working order, this is a modification —
         // emit Modify instead of Submit. Settled before anything is
@@ -535,21 +547,23 @@ impl EClient {
     /// The second argument is what the reference client states about the
     /// withdrawal itself — when a person entered it, on whose authority, and
     /// whether a person entered it at all. It is taken as that object or as
-    /// the time alone, which is how this client took it before.
+    /// the time alone.
     ///
-    /// A cancel on this wire names five fields and none of those is among
-    /// them, so what the caller stated cannot travel. The cancel goes anyway
-    /// and the caller is told the annotation did not: refused outright, a live
-    /// order was left standing over a record the wire has no room for, and the
-    /// client this one stands in for withdraws it — it states all three on
-    /// every cancel it sends. Taken silently it would be withdrawn under
-    /// nobody's name while the caller had given one, so it is said.
+    /// Who is withdrawing it and whether a person entered it travel on the
+    /// cancel, as a gateway writes them: from the withdrawal, not from the
+    /// placement. A time does not travel. A gateway sends it only where the
+    /// venue has turned that record on for the login, and this client does
+    /// not read whether it has. The cancel goes anyway and the caller is told
+    /// the time did not: refused outright, a live order would be left standing
+    /// over a record this client does not send. Taken silently it would be withdrawn
+    /// without the record while the caller had given one, so it is said. A
+    /// time a gateway cannot read is refused as a gateway refuses it, under
+    /// 10301, and nothing is withdrawn.
     #[pyo3(signature = (order_id, order_cancel=None))]
     fn cancel_order(&self, py: Python<'_>, order_id: i64, order_cancel: Option<Py<PyAny>>) -> PyResult<()> {
         if let Err(why) = self.core.refuse_if_readonly("a cancel") {
             return self.report_refusal(py, order_id, Refusal::validation(why));
         }
-        let uncarried = withdrawal_states(py, order_cancel.as_ref());
         let Some(tx) = self.tx_or_report_for_trading(order_id)? else { return Ok(()) };
         // As `place_order`. A negative id read as unsigned is a number above
         // nine quintillion, and the cancel names it.
@@ -558,6 +572,16 @@ impl EClient {
                 "cancel_order: order_id {order_id} is not an order number",
             )));
         };
+        let stated = match withdrawal_states(py, order_cancel.as_ref())?.and_then(|stated| {
+            ClientCore::check_cancel_time(&stated.manual_order_cancel_time)?;
+            crate::api::client::wire_text("a withdrawal's operator", &stated.ext_operator)?;
+            Ok(stated)
+        }) {
+            Ok(stated) => stated,
+            Err(why) => return self.report_refusal(py, order_id, why),
+        };
+        let uncarried = (!stated.manual_order_cancel_time.is_empty())
+            .then(|| time_not_sent(&stated.manual_order_cancel_time));
         // An order still held never reached the venue, so withdrawing it is
         // forgetting a command rather than sending one, as it is on the other
         // surface. Sent, the venue answers that it knows no such order and the
@@ -573,8 +597,8 @@ impl EClient {
         if self.core.withdraw_held_placement(oid) {
             // Said for a withdrawal that happens, as on the other surface, and
             // not for one refused below as spent or unknown.
-            if let Some(stated) = uncarried.clone() {
-                self.say_the_annotation_did_not_travel(py, order_id, stated)?;
+            if let Some(note) = uncarried {
+                self.say_the_annotation_did_not_travel(py, order_id, note)?;
             }
             return Ok(());
         }
@@ -610,10 +634,10 @@ impl EClient {
         }
         // Said before the cancel goes, so a caller reading its callbacks in
         // order learns what will not travel before it is told the order went.
-        if let Some(stated) = uncarried {
-            self.say_the_annotation_did_not_travel(py, order_id, stated)?;
+        if let Some(note) = uncarried {
+            self.say_the_annotation_did_not_travel(py, order_id, note)?;
         }
-        Self::send_control(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id: oid }))
+        Self::send_control(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated }))
     }
 
     /// Cancel an order identified by `permId` — stable across sessions, unlike
@@ -661,15 +685,25 @@ impl EClient {
     /// given a slot in this client's instrument table — the engine holds no
     /// record of such an order, so no cancel here names it and it goes on
     /// working at the venue.
+    ///
+    /// What the withdrawal states — who is withdrawing and whether a person
+    /// entered it — travels on every cancel, as a gateway states it on every
+    /// order it withdraws. A time does not: the reference client writes none
+    /// on a withdrawal of everything, so a gateway never reads one, and one
+    /// stated here goes the same way.
     #[pyo3(signature = (order_cancel=None))]
     fn req_global_cancel(&self, py: Python<'_>, order_cancel: Option<Py<PyAny>>) -> PyResult<()> {
         if let Err(why) = self.core.refuse_if_readonly("a global cancel") {
             return self.report_refusal(py, -1, Refusal::validation(why));
         }
-        if let Some(stated) = withdrawal_states(py, order_cancel.as_ref()) {
-            self.say_the_annotation_did_not_travel(py, -1, stated)?;
-        }
         let Some(tx) = self.tx_or_report_for_trading(-1)? else { return Ok(()) };
+        let stated = match withdrawal_states(py, order_cancel.as_ref())?.and_then(|stated| {
+            crate::api::client::wire_text("a withdrawal's operator", &stated.ext_operator)?;
+            Ok(stated)
+        }) {
+            Ok(stated) => stated,
+            Err(why) => return self.report_refusal(py, -1, why),
+        };
         // Everything held goes with everything working: an order the venue was
         // never given is withdrawn by forgetting it, and left queued it would
         // go out behind the next thing that transmits — after the caller had
@@ -686,7 +720,8 @@ impl EClient {
         // the engine withdrew nothing.
         let mut unsent = 0usize;
         for instrument in 0..count {
-            if Self::send_control(py, &tx, ControlCommand::Order(OrderRequest::CancelAll { instrument })).is_err() {
+            let cancel = OrderRequest::CancelAll { instrument, stated: stated.clone() };
+            if Self::send_control(py, &tx, ControlCommand::Order(cancel)).is_err() {
                 unsent += 1;
             }
         }
@@ -1309,7 +1344,7 @@ w = W()",
             client.req_global_cancel(py, None).unwrap();
             let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert!(
-                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0 })]),
+                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
                 "the order the venue named is withdrawn: {sent:?}",
             );
         });
@@ -1326,7 +1361,7 @@ w = W()",
             let (client, _rx, shared, _wrapper) = wired_client(py);
             shared.orders.set_replay_done();
             client.core.hold_until_transmitted(
-                7, 0, ControlCommand::Order(OrderRequest::Cancel { order_id: 7 }),
+                7, 0, ControlCommand::Order(OrderRequest::Cancel { order_id: 7, stated: Default::default() }),
             );
             client.req_global_cancel(py, None).unwrap();
             assert!(!client.core.withdraw_held(7), "nothing is still held");
@@ -1352,7 +1387,7 @@ w = W()",
             client.req_global_cancel(py, None).unwrap();
             let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert!(
-                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0 })]),
+                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
                 "what had been named is still withdrawn: {sent:?}",
             );
             let calls = wrapper.bind(py).getattr("calls").unwrap();
@@ -1476,7 +1511,7 @@ w = W()",
             client.req_global_cancel(py, None).unwrap();
             let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert!(
-                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0 })]),
+                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
                 "what the book does hold is still withdrawn: {sent:?}",
             );
             let calls = wrapper.bind(py).getattr("calls").unwrap();
@@ -1560,7 +1595,7 @@ w = W()",
             assert!(
                 matches!(
                     rx.try_recv(),
-                    Ok(ControlCommand::Order(OrderRequest::Cancel { order_id: 11 })),
+                    Ok(ControlCommand::Order(OrderRequest::Cancel { order_id: 11, .. })),
                 ),
                 "the trading connection still carries the withdrawal",
             );
@@ -1860,7 +1895,7 @@ w = W()",
                     );
                 }
                 assert!(
-                    !matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 3 })),
+                    !matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 3, .. })),
                     "and the venue is not asked to withdraw one it never had: {sent:?}",
                 );
             }

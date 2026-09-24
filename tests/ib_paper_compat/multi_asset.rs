@@ -86,7 +86,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
                     OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                         order_acked = true;
                         if !cancel_sent {
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                             cancel_sent = true;
                         }
                     }
@@ -213,7 +213,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
                     OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                         order_acked = true;
                         if !cancel_sent {
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                             cancel_sent = true;
                         }
                     }
@@ -346,7 +346,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
                     OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                         order_acked = true;
                         if !cancel_sent {
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                             cancel_sent = true;
                         }
                     }
@@ -419,7 +419,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
                         // Once all 3 are acked, cancel them all
                         if acked.iter().all(|&a| a) && !cancel_sent {
                             for &oid in &oids {
-                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                             }
                             cancel_sent = true;
                         }
@@ -682,7 +682,7 @@ pub(super) fn phase_non_usd_order(conns: Conns) -> Conns {
                         order_acked = true;
                         if !cancel_sent {
                             control_tx.send(ControlCommand::Order(
-                                OrderRequest::Cancel { order_id: oid })).unwrap();
+                                OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                             cancel_sent = true;
                         }
                     }
@@ -761,7 +761,7 @@ pub(super) fn phase_crypto_order(conns: Conns) -> Conns {
                     OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                         order_acked = true;
                         if !cancel_sent {
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                             cancel_sent = true;
                         }
                     }
@@ -838,7 +838,7 @@ pub(super) fn phase_crypto_minutes_tif(conns: Conns) -> Conns {
                 match update.status {
                     OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                         working = true;
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                     }
                     OrderStatus::Cancelled => { cancelled = true; break; }
                     OrderStatus::Rejected => { refused = Some(update.order_id); break; }

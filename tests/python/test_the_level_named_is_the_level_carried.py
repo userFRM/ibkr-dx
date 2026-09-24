@@ -30,6 +30,12 @@ def test_the_level_is_the_newest_gate_carried_and_none_before_a_session():
     # MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2 in the reference's table. The
     # exception list below it is the doc on the call.
     assert c.serverVersion() == 217
+    # A lost connection being recovered is not the end of the session; the
+    # reference client rides it out holding the number.
+    c._test_set_connection_lost()
+    c._test_dispatch_once()
+    assert not c.isConnected()
+    assert c.serverVersion() == 217
     c.disconnect()
     assert c.serverVersion() is None
 

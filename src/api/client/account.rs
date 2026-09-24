@@ -72,24 +72,7 @@ impl EClient {
         // assembled was taken by a watcher that already existed — the queue is
         // drained once for everyone — and reached this caller nowhere.
         self.positions_requested.store(true, Ordering::Release);
-        // A holding arrives as a contract id and a quantity, and its definition
-        // is fetched separately. Delivering before that lands names no
-        // instrument at all, so give it a moment to arrive rather than handing
-        // back a position in a contract the caller cannot identify.
-        // The set is read inside the wait and delivered as read. Waiting on
-        // one set and delivering another hands back a holding that arrives
-        // between the two, which no lookup has named.
-        let mut positions = self.shared.portfolio.position_infos();
-        for _ in 0..150 {
-            let unnamed = positions.iter().any(|pi| {
-                pi.position != 0.0
-                    && pi.symbol.is_empty()
-                    && self.core.get_contract(pi.con_id, &self.shared).is_none()
-            });
-            if !unnamed { break; }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            positions = self.shared.portfolio.position_infos();
-        }
+        let positions = self.core.named_positions(&self.shared, std::thread::sleep);
         for pi in &positions {
             let c = self.position_contract(pi);
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;

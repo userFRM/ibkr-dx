@@ -160,7 +160,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
                         order_acked = true;
                     }
                     if !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                         cancel_time = Some(Instant::now());
                         cancel_sent = true;
                     }
@@ -183,7 +183,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
     // Withdrawn unless terminal. An unanswered order is a skip below, and the
     // limit sent with it would rest at the venue until the close.
     if !(order_cancelled || rejected_order.is_some()) {
-        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }));
+        let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }));
         std::thread::sleep(Duration::from_millis(250));
     }
 
@@ -257,7 +257,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     if modify_sent && !modify_acked {
                         modify_acked = true;
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                     } else if !order_acked {
                         order_acked = true;
                         control_tx.send(ControlCommand::Order(OrderRequest::Modify {
@@ -455,7 +455,7 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     order_acked = true;
                     if !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                         cancel_sent = true;
                     }
                 }
@@ -522,7 +522,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     if modify_sent && !modify_acked_local {
                         modify_acked_local = true;
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                     } else if !order_acked {
                         order_acked = true;
                         control_tx.send(ControlCommand::Order(OrderRequest::Modify {
@@ -781,7 +781,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     if update.order_id == parent_id { parent_acked = true; }
                     if parent_acked && !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id, stated: Default::default() })).unwrap();
                         cancel_sent = true;
                     }
                 }
@@ -950,7 +950,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
                     if update.order_id == id1 { order1_acked = true; }
                     if update.order_id == id2 { order2_acked = true; }
                     if order1_acked && order2_acked && !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: id1 })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: id1, stated: Default::default() })).unwrap();
                         cancel_sent = true;
                     }
                 }
@@ -1404,7 +1404,7 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     order_acked = true;
                     if !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                         cancel_sent = true;
                     }
                 }
@@ -1469,7 +1469,7 @@ pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     order_acked = true;
                     if !cancel_sent {
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                         cancel_sent = true;
                     }
                 }
@@ -1584,8 +1584,8 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
                         if Some(update.order_id) == tp_id { tp_active = true; }
                         if Some(update.order_id) == sl_id { sl_active = true; }
                         if tp_active && sl_active && !cancel_sent {
-                            if let Some(t) = tp_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: t })).unwrap(); }
-                            if let Some(s) = sl_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: s })).unwrap(); }
+                            if let Some(t) = tp_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: t, stated: Default::default() })).unwrap(); }
+                            if let Some(s) = sl_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: s, stated: Default::default() })).unwrap(); }
                             cancel_sent = true;
                         }
                     }
@@ -1764,13 +1764,13 @@ pub(super) fn phase_cancel_reject(conns: Conns) -> Conns {
             Ok(Event::OrderUpdate(update)) => {
                 if matches!(update.status, OrderStatus::Submitted | OrderStatus::PreSubmitted) && !order_acked {
                     order_acked = true;
-                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                     _first_cancel_sent = true;
                 }
                 if update.status == OrderStatus::Cancelled && !first_cancelled {
                     first_cancelled = true;
                     // Cancel again — order is already dead, should produce reject
-                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                     _second_cancel_sent = true;
                 }
             }
@@ -1851,7 +1851,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
                     // Once all 5 are acked, cancel them all
                     if acked.len() == 5 && !cancel_batch_sent {
                         for &oid in &order_ids {
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                         }
                         cancel_batch_sent = true;
                     }
@@ -1930,7 +1930,7 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
                 OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                     if modify_sent && !modify_acked {
                         modify_acked = true;
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                     } else if !order_acked {
                         order_acked = true;
                         // Modify BOTH price ($1→$2) and qty (1→3) in a single Modify
@@ -2020,7 +2020,7 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
                         }
                         2 => {
                             // Second modify acked → cancel
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                             phase = 3;
                         }
                         _ => {}
@@ -2096,7 +2096,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
                                 order_id, price: 2_00_000_000, qty: ibkr_dx::types::QTY_SCALE, outside_rth: false, ord_type: 0, tif: 0, stop_price: 0,
                                 spec: None,
                             })).unwrap();
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                             race_sent = true;
                         }
                     }
@@ -2170,7 +2170,7 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
                     acked.insert(update.order_id);
                     if acked.len() >= 3 && !cancel_all_sent {
                         control_tx.send(ControlCommand::Order(
-                            OrderRequest::CancelAll { instrument: inst_id }
+                            OrderRequest::CancelAll { instrument: inst_id, stated: Default::default() }
                         )).unwrap();
                         cancel_all_sent = true;
                         println!("  CancelAll sent after {} orders acked", acked.len());
@@ -2240,7 +2240,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
                 if phase == 1 && fill.side == Side::Buy {
                     // Order filled — now try to cancel it (should fail)
                     control_tx.send(ControlCommand::Order(
-                        OrderRequest::Cancel { order_id: buy_order_id }
+                        OrderRequest::Cancel { order_id: buy_order_id, stated: Default::default() }
                     )).unwrap();
                     phase = 2;
                     println!("  Buy filled at ${:.4}, sending cancel on filled order",
@@ -2358,7 +2358,7 @@ pub(super) fn phase_replace_a_trailing_stop(conns: Conns) -> Conns {
                         // The order is working after the replace was refused,
                         // which is the whole question. Take it down.
                         working_after_the_replace = true;
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                     } else {
                         working = true;
                         // The quantity moves, which every replace carries. The
@@ -2384,7 +2384,7 @@ pub(super) fn phase_replace_a_trailing_stop(conns: Conns) -> Conns {
                     );
                     // Not the end of the phase: whether the resting order went
                     // with it is what is being asked.
-                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
                 }
                 OrderStatus::Cancelled => { cancelled = true; break; }
                 OrderStatus::Rejected => break,
@@ -2502,7 +2502,7 @@ pub(super) fn phase_replace_a_trail_amount(conns: Conns) -> Conns {
             );
         }
     }
-    let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }));
+    let _ = control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() }));
     std::thread::sleep(Duration::from_secs(2));
     shutdown_and_reclaim(&control_tx, join, account_id)
 }
@@ -2548,7 +2548,7 @@ pub(super) fn phase_all_or_none_trailing_stop(conns: Conns) -> Conns {
                 match update.status {
                     OrderStatus::Submitted | OrderStatus::PreSubmitted => {
                         working = true;
-                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
                     }
                     OrderStatus::Cancelled => { cancelled = true; break; }
                     OrderStatus::Rejected => { refused = Some(update.order_id); break; }
@@ -2686,7 +2686,7 @@ pub(super) fn phase_replace_each_refused_order(conns: Conns) -> Conns {
                 _ => {}
             }
         }
-        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
         // Silence is not an answer on its own. Withdraw the order and watch:
         // an order the venue still holds answers a withdrawal, and one it does
         // not says the replace took it.
@@ -2807,7 +2807,7 @@ pub(super) fn phase_replace_one_refused_order(
         }
     }
 
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated: Default::default() })).unwrap();
     if outcome.is_none() && replaced {
         let until = Instant::now() + Duration::from_secs(20);
         let mut answered = false;
@@ -2916,7 +2916,7 @@ pub(super) fn phase_replace_a_bracket_child(conns: Conns) -> Conns {
     }
 
     for id in [child, parent] {
-        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: id })).unwrap();
+        control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: id, stated: Default::default() })).unwrap();
     }
     std::thread::sleep(Duration::from_secs(3));
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
@@ -3015,7 +3015,7 @@ pub(super) fn phase_replace_keeps_the_directed_venue(conns: Conns) -> Conns {
     println!("  replace answered: {}", refused_after.as_deref().unwrap_or("nothing refused it"));
 
     // Withdraw it, whatever happened, so nothing is left resting.
-    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id, stated: Default::default() })).unwrap();
     std::thread::sleep(Duration::from_secs(2));
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 

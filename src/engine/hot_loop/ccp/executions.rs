@@ -1732,7 +1732,14 @@ impl CcpState {
         // its replayed history, which is exactly the record this client does
         // not keep, so the next session counted past the working set and
         // walked straight onto an id the venue would refuse.
-        shared.orders.note_the_venue_named(clord_id);
+        //
+        // Not a preview's. A preview places nothing, so its number spends
+        // nothing at the venue — and the calls that answer take theirs from a
+        // band far above any a caller is handed, so counted past, the answer
+        // to one preview put every order id handed out after it in that band.
+        if parsed.get(&6091).map(String::as_str) != Some("1") {
+            shared.orders.note_the_venue_named(clord_id);
+        }
 
         // Record the ClOrdID exactly as the server reports it so subsequent
         // cancel/modify can echo back the same string. Skip cancel-ack frames

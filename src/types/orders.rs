@@ -1475,11 +1475,16 @@ pub enum OrderRequest {
     Cancel {
         /// The caller's number for the order.
         order_id: OrderId,
+        /// What the withdrawal states about itself. The cancel carries the
+        /// operator and who entered it; the time does not travel.
+        stated: crate::types::model::OrderCancel,
     },
     /// Withdraw every order on one contract.
     CancelAll {
         /// The engine's own slot for the contract.
         instrument: InstrumentId,
+        /// What the withdrawal states about itself, stated on each cancel.
+        stated: crate::types::model::OrderCancel,
     },
     /// Replace a working order.
     ///
@@ -1527,7 +1532,7 @@ impl OrderRequest {
     /// Extract the order_id from any variant. Returns 0 for CancelAll (no order_id).
     pub fn order_id(&self) -> OrderId {
         match self {
-            Self::Cancel { order_id } => *order_id,
+            Self::Cancel { order_id, .. } => *order_id,
             Self::CancelAll { .. } => 0,
             Self::Modify { order_id, .. } => *order_id,
             | Self::SubmitEx { order_id, .. } => *order_id,
@@ -1556,7 +1561,7 @@ impl OrderRequest {
     pub fn instrument(&self) -> Option<InstrumentId> {
         match self {
             Self::Cancel { .. } | Self::Modify { .. } => None,
-            Self::CancelAll { instrument }
+            Self::CancelAll { instrument, .. }
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
         }
@@ -1660,7 +1665,7 @@ fn order_buffer_no_realloc() {
     let mut buf = OrderBuffer::new();
     let cap_before = buf.buf.capacity();
     for i in 0..MAX_PENDING_ORDERS {
-        buf.push(OrderRequest::Cancel { order_id: i as u64 });
+        buf.push(OrderRequest::Cancel { order_id: i as u64, stated: Default::default() });
     }
     // Capacity should not have grown (pre-allocated)
     assert_eq!(buf.buf.capacity(), cap_before);
@@ -1673,14 +1678,14 @@ fn order_buffer_no_realloc() {
 fn a_backlog_past_the_capacity_keeps_everything() {
     let mut buf = OrderBuffer::new();
     for i in 0..MAX_PENDING_ORDERS * 2 {
-        buf.push(OrderRequest::Cancel { order_id: i as u64 });
+        buf.push(OrderRequest::Cancel { order_id: i as u64, stated: Default::default() });
     }
-    buf.requeue_front((0..8).map(|i| OrderRequest::Cancel { order_id: 900 + i }).collect());
+    buf.requeue_front((0..8).map(|i| OrderRequest::Cancel { order_id: 900 + i, stated: Default::default() }).collect());
     assert_eq!(buf.buf.len(), MAX_PENDING_ORDERS * 2 + 8);
     let taken: Vec<_> = buf.drain().collect();
     assert_eq!(taken.len(), MAX_PENDING_ORDERS * 2 + 8);
     assert!(
-        matches!(taken[0], OrderRequest::Cancel { order_id: 900 }),
+        matches!(taken[0], OrderRequest::Cancel { order_id: 900, .. }),
         "what was put back goes at the head",
     );
 }

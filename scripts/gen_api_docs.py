@@ -70,6 +70,7 @@ PARAM_DOCS: dict[str, str] = {
     "number_of_ticks": "Maximum number of ticks to return.",
     "max_results": "Maximum number of results.",
     "max_items": "Maximum number of scanner results.",
+    "most": "Maximum number of scanner results.",
     "report_type": "Report type: `\"ReportSnapshot\"`, `\"ReportsFinSummary\"`, `\"RESC\"`, etc.",
     "instrument": "Instrument type for scanner (e.g. `\"STK\"`, `\"FUT\"`).",
     "instrument_id": "Internal instrument ID (dense, 0..256).",
@@ -90,6 +91,7 @@ PARAM_DOCS: dict[str, str] = {
     "model_code": "Model portfolio code (empty for default).",
     "group_name": "Account group name (e.g. `\"All\"`).",
     "manual_order_cancel_time": "Manual cancel time (empty for immediate).",
+    "order_cancel": "What the withdrawal states about itself: an `OrderCancel`, or a manual time alone. `\"\"` states nothing, and so does `None` from Python.",
     "config": "Connection configuration (username, password, host, paper, core_id).",
     "ib_key_timeout_secs": "Live second-factor approval timeout in seconds (default ~18 min). Lower it to fail fast on unattended live logins; ignored for paper.",
     "ib_key_token_sub_type": "Fallback second-factor token sub-type (default `\"2a\"`), used only when the server states none for the session; ignored for paper.",
@@ -455,7 +457,8 @@ def param_description(name: str, ty: str = "") -> str:
 
 def rust_type_to_py(ty: str) -> str:
     """Convert Rust type to Python display type."""
-    ty = ty.strip()
+    # A type named by its path is the type a caller passes: `Order`.
+    ty = re.sub(r"^(&?)(?:\w+::)+", r"\1", ty.strip())
     for rust, py in RUST_TO_PY_TYPE.items():
         if ty == rust:
             return py
@@ -609,7 +612,10 @@ def parse_pymethods(path: Path) -> list[dict]:
             # `CCP_HOSTS[0]` — ended the attribute early, the signature was
             # never captured, and the method was published under the names of
             # its Rust arguments instead of the ones a caller passes.
-            r'((?:\s*(?:///|//)[^\n]*\n|\s*#\[[^\n]*\n)*)\s*fn (\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)',
+            # A visibility before `fn` is part of the declaration: without it
+            # the match began at `fn`, and a method another file also calls
+            # was published with no description and none of its defaults.
+            r'((?:\s*(?:///|//)[^\n]*\n|\s*#\[[^\n]*\n)*)\s*(?:pub(?:\([^)]*\))?\s+)?fn (\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)',
             impl_body,
         ):
             preamble, name, args_str = fm.group(1), fm.group(2), fm.group(3)
@@ -938,9 +944,14 @@ IBAPI_ECLIENT: list[tuple[str, str, str]] = [
     ("Connection", "connect", "eConnect"),
     ("Connection", "disconnect", "eDisconnect"),
     ("Connection", "is_connected", "isConnected"),
+    ("Connection", "start_api", "startApi"),
     ("Connection", "set_server_log_level", "setServerLogLevel"),
     ("Connection", "req_current_time", "reqCurrentTime"),
     ("Connection", "req_current_time_in_millis", "reqCurrentTimeInMillis"),
+    ("Connection", "verify_request", "verifyRequest"),
+    ("Connection", "verify_message", "verifyMessage"),
+    ("Connection", "verify_and_auth_request", "verifyAndAuthRequest"),
+    ("Connection", "verify_and_auth_message", "verifyAndAuthMessage"),
     # Market Data
     ("Market Data", "req_mkt_data", "reqMktData"),
     ("Market Data", "cancel_mkt_data", "cancelMktData"),
@@ -959,6 +970,7 @@ IBAPI_ECLIENT: list[tuple[str, str, str]] = [
     ("Historical Data", "req_head_time_stamp", "reqHeadTimeStamp"),
     ("Historical Data", "cancel_head_time_stamp", "cancelHeadTimestamp"),
     ("Historical Data", "req_historical_ticks", "reqHistoricalTicks"),
+    ("Historical Data", "cancel_historical_ticks", "cancelHistoricalTicks"),
     ("Historical Data", "req_histogram_data", "reqHistogramData"),
     ("Historical Data", "cancel_histogram_data", "cancelHistogramData"),
     ("Historical Data", "req_historical_schedule", "reqHistoricalSchedule"),
@@ -990,6 +1002,7 @@ IBAPI_ECLIENT: list[tuple[str, str, str]] = [
     ("Account", "cancel_positions_multi", "cancelPositionsMulti"),
     # Contract
     ("Contract", "req_contract_details", "reqContractDetails"),
+    ("Contract", "cancel_contract_data", "cancelContractData"),
     ("Contract", "req_matching_symbols", "reqMatchingSymbols"),
     ("Contract", "req_market_rule", "reqMarketRule"),
     # Scanner
@@ -1344,6 +1357,12 @@ GATEWAY_SENDS_NONE = {
 }
 
 
+def in_words(n: int) -> str:
+    """A count as the pages write one: in words up to twelve."""
+    words = "zero one two three four five six seven eight nine ten eleven twelve".split()
+    return words[n] if n < len(words) else str(n)
+
+
 def generate_coverage_md(ver: str) -> str:
     rust_methods = _collect_rust_methods()
     rust_wrapper = _collect_rust_wrapper()
@@ -1365,18 +1384,14 @@ def generate_coverage_md(ver: str) -> str:
         "- **-** = Not present",
         "",
         "The callback table also says whether each callback fires at all for a",
-        "program on a gateway. Six declared by the TWS API never do, so they fire",
+        f"program on a gateway. {in_words(len(GATEWAY_SENDS_NONE)).capitalize()} declared "
+        "by the TWS API never do, so they fire",
         "neither there nor here.",
         "",
         "The evidence column says how each status was established, and is",
         "derived rather than asserted: a call is credited to the live session",
         "only when a suite that runs against a real account names it, and to",
         "the offline suites only when a test names it.",
-        "",
-        "One caveat it cannot express: the suite that compares against recorded",
-        "captures skips when those captures are absent, and they are not kept in",
-        "this repository. A call named only by that suite is named by something",
-        "that did not run.",
         "",
     ]
 

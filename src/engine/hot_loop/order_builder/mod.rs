@@ -195,12 +195,12 @@ pub(crate) fn drain_and_send_orders(
         // carries the same speculative versions.
         let waits_for_recovery = recovery_pending
             && match order_req {
-                OrderRequest::Cancel { order_id } | OrderRequest::Modify { order_id, .. } => {
+                OrderRequest::Cancel { order_id, .. } | OrderRequest::Modify { order_id, .. } => {
                     context.order(order_id).is_some_and(|o| o.status == OrderStatus::Uncertain)
                 }
                 // Scoped to the instrument this request cancels. An
                 // `Uncertain` order on another instrument does not hold it.
-                OrderRequest::CancelAll { instrument } => context
+                OrderRequest::CancelAll { instrument, .. } => context
                     .uncertain_orders()
                     .iter()
                     .any(|o| o.instrument == instrument),
@@ -218,7 +218,7 @@ pub(crate) fn drain_and_send_orders(
         // guard already knew — the submit is in the book by then. Said after
         // the match instead, an arm that leaves the loop early skipped it,
         // which is safe today only because a change carries no slot.
-        if let OrderRequest::CancelAll { instrument } = &order_req {
+        if let OrderRequest::CancelAll { instrument, .. } = &order_req {
             context.slots_to_reconsider.push(*instrument);
         }
         let oid = order_req.order_id();
@@ -465,14 +465,14 @@ pub(crate) fn drain_and_send_orders(
                 sl_fields.extend_from_slice(&identity);
                 parent_sent.and(tp_sent).and(conn.send_fix(&sl_fields))
             }
-            OrderRequest::Cancel { order_id } => {
-                let result = send_cancel(conn, context, shared, account_id, order_id);
+            OrderRequest::Cancel { order_id, stated } => {
+                let result = send_cancel(conn, context, shared, account_id, order_id, &stated);
                 if result.is_ok() {
                     synthesize_pending_cancel(context, shared, order_id, event_tx);
                 }
                 result
             }
-            OrderRequest::CancelAll { instrument } => {
+            OrderRequest::CancelAll { instrument, stated } => {
                 let open_ids: Vec<u64> =
                     context.open_orders_for(instrument).iter().map(|o| o.order_id).collect();
                 // One outcome per order. `CancelAll` carries no order id of
@@ -488,7 +488,7 @@ pub(crate) fn drain_and_send_orders(
                         report_uncertain(context, shared, event_tx, oid);
                         continue;
                     }
-                    match send_cancel(conn, context, shared, account_id, oid) {
+                    match send_cancel(conn, context, shared, account_id, oid, &stated) {
                         Ok(()) => synthesize_pending_cancel(context, shared, oid, event_tx),
                         Err(e) => {
                             log::error!(
@@ -1010,19 +1010,24 @@ pub(crate) fn drain_and_send_orders(
     context.pending_orders.requeue_front(unsent);
 }
 
-/// Convert Side to FIX tag 54 value.
 /// Everything a cancel states, in one place because the two callers stated it
 /// twice and drifted.
 ///
-/// The terminal names five fields and stops: ClOrdID, OrigClOrdID, Side,
-/// Account and Originator. It writes no TransactTime anywhere in the order
-/// path, so neither does this.
+/// The order it names, the account, the model, the quantity, the side and the
+/// contract, and then what the withdrawal states about itself: who is
+/// withdrawing it and whether a person entered it. A gateway writes those two
+/// from the cancel and not from the placement — it replaces the order's own
+/// with the cancel's, and removes one the cancel leaves empty — so a cancel
+/// stating neither carries neither. A manual time it states is not written:
+/// see `EClient::cancel_order`. No TransactTime is written anywhere in the
+/// order path, so none is here.
 fn send_cancel(
     conn: &mut Connection,
     context: &mut Context,
     shared: &SharedState,
     account_id: &str,
     order_id: u64,
+    stated: &crate::types::model::OrderCancel,
 ) -> std::io::Result<()> {
     // OrigClOrdID must match exactly what the server has on record. Prefer the
     // string last observed on the wire (see — legacy orders recorded
@@ -1092,6 +1097,15 @@ fn send_cancel(
     }
     if let Some(con_id) = con_id_str.as_deref() {
         fields.push((6008, con_id));
+    }
+    if !stated.ext_operator.is_empty() {
+        fields.push((8089, stated.ext_operator.as_str()));
+    }
+    // `Y` or `N`, as on a placement; any other number states nothing.
+    match stated.manual_order_indicator {
+        1 => fields.push((1028, "Y")),
+        0 => fields.push((1028, "N")),
+        _ => {}
     }
     conn.send_fix(&fields)
 }

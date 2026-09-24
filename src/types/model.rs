@@ -491,10 +491,11 @@ pub struct Order {
     /// Free-form options carried alongside an order.
     ///
     /// **Taken and not sent.** A gateway knows one key, `manual`, checks it
-    /// and sends nothing for it. It refuses any other key under 10337 and a
-    /// value of `manual` other than `0` or `1` under 10338; where the venue has
-    /// lifted those checks — it says so at logon — only the value of `manual`
-    /// is checked. This client does the same.
+    /// and sends nothing for it. It refuses an entry that is not written
+    /// `key=value` under 320, any other key under 10337 and a value of
+    /// `manual` other than `0` or `1` under 10338; where the venue has lifted
+    /// the last two checks — it says so at logon — only the value of `manual`
+    /// is checked, as a number. This client does the same.
     pub order_misc_options: Vec<TagValue>,
     /// The caller's own label, carried back on every message about the
     /// order.
@@ -1356,6 +1357,58 @@ pub struct TagValue {
     pub tag: String,
     /// What it is set to.
     pub value: String,
+}
+
+// ── OrderCancel ──
+
+/// What a withdrawal states about itself (ibapi-compatible).
+///
+/// A time alone converts into one, as the withdrawal took a time before it
+/// took this: `cancel_order(id, "")` states nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrderCancel {
+    /// When a person entered the withdrawal, where one did.
+    pub manual_order_cancel_time: String,
+    /// Who is withdrawing it.
+    pub ext_operator: String,
+    /// Whether a person entered it: 1 yes, 0 no, and any other number states
+    /// nothing.
+    pub manual_order_indicator: i32,
+}
+
+impl Default for OrderCancel {
+    fn default() -> Self {
+        // The number the reference client leaves in an integer nobody set.
+        Self {
+            manual_order_cancel_time: String::new(),
+            ext_operator: String::new(),
+            manual_order_indicator: i32::MAX,
+        }
+    }
+}
+
+impl From<&str> for OrderCancel {
+    fn from(manual_order_cancel_time: &str) -> Self {
+        Self { manual_order_cancel_time: manual_order_cancel_time.to_string(), ..Self::default() }
+    }
+}
+
+impl From<String> for OrderCancel {
+    fn from(manual_order_cancel_time: String) -> Self {
+        Self { manual_order_cancel_time, ..Self::default() }
+    }
+}
+
+impl From<&String> for OrderCancel {
+    fn from(manual_order_cancel_time: &String) -> Self {
+        manual_order_cancel_time.as_str().into()
+    }
+}
+
+impl From<&OrderCancel> for OrderCancel {
+    fn from(stated: &OrderCancel) -> Self {
+        stated.clone()
+    }
 }
 
 // ── OrderState ──

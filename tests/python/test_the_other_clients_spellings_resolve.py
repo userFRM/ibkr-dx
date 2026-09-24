@@ -30,8 +30,11 @@ def _reference_names():
 @pytest.mark.parametrize("ours,theirs", _reference_names())
 def test_a_call_answers_to_the_name_the_other_client_gives_it(ours, theirs):
     client = EClient(EWrapper())
-    if not hasattr(client, ours):
-        pytest.skip(f"{ours} is not carried by this client")
+    # A row this client does not carry is a gap on the page, not a case to
+    # step around: skipped, a call that left the surface read as passing.
+    assert hasattr(client, ours), (
+        f"the reference pages list {theirs}, and this client carries no {ours}"
+    )
     assert hasattr(client, theirs), (
         f"a program written against the reference client calls {theirs}, "
         f"and this client carries it as {ours}"

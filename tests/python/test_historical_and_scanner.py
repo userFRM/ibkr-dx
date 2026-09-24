@@ -11,6 +11,7 @@ import os
 import time
 import pytest
 import threading
+from conftest import inside_the_session, liquid_hours
 from ibkr_dx import EWrapper, EClient, Contract
 
 
@@ -35,6 +36,8 @@ class HistoricalScannerWrapper(EWrapper):
         # Live updating bars (keepUpToDate)
         self.live_bars = []      # (req_id, bar)
         self.got_live_bar = threading.Event()
+
+        self.errors = []  # (req_id, code, message)
 
         # Scanner
         self.scanner_params_xml = None
@@ -76,8 +79,15 @@ class HistoricalScannerWrapper(EWrapper):
         self.got_scanner_end.set()
 
     def error(self, req_id, error_time, error_code, error_string, advanced_order_reject_json=""):
+        self.errors.append((req_id, error_code, error_string))
         if error_code not in (2104, 2106, 2158):
             print(f"  [error] reqId={req_id} code={error_code}: {error_string}")
+
+
+def make_spy():
+    c = Contract()
+    c.con_id, c.symbol, c.sec_type, c.exchange, c.currency = 756733, "SPY", "STK", "SMART", "USD"
+    return c
 
 
 def make_msft():
@@ -255,15 +265,27 @@ class TestScanner:
 
         self.client.req_scanner_subscription(4, sub)
 
-        got = self.wrapper.got_scanner_end.wait(timeout=30)
-        if not got:
-            self.client.cancel_scanner_subscription(4)
-            pytest.skip("No scanner data — market may be closed")
-
+        deadline = time.monotonic() + 30
+        while (time.monotonic() < deadline and not self.wrapper.got_scanner_end.is_set()
+               and not [e for e in self.wrapper.errors if e[0] == 4]):
+            time.sleep(0.1)
+        # The venue's refusal of a scan arrives in the shape of a finished one,
+        # its words and then the end; one this client makes has no end.
+        got = self.wrapper.got_scanner_end.wait(2)
         self.client.cancel_scanner_subscription(4)
 
+        refused = [e for e in self.wrapper.errors if e[0] == 4]
+        assert got, f"the scan never ended within 30s: {refused}"
+        if refused:
+            pytest.skip(f"the venue refused the scan: {refused[0]}")
+
         results = [r for r in self.wrapper.scanner_results if r[0] == 4]
-        assert len(results) > 0, "Should have scanner results"
+        if not results and not inside_the_session(self.client, make_spy()):
+            pytest.skip(
+                "the scan ended with no rows, and the venue's own liquid hours say the "
+                f"US session is shut ({liquid_hours(self.client, make_spy())})"
+            )
+        assert len(results) > 0, "the scan ended with no rows inside the session"
         print(f"  Scanner returned {len(results)} instruments")
 
         # Verify ranking order

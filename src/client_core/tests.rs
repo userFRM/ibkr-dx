@@ -4404,6 +4404,89 @@ mod as_a_gateway_checks_it {
         }
     }
 
+    /// Every request's option list is read and checked as a gateway reads and
+    /// checks it: one rule, the request's own name and keys, and the words its
+    /// later check of `manual` uses.
+    #[test]
+    fn every_option_list_is_checked_as_a_gateway_checks_it() {
+        use crate::client_core::{
+            CHART_OPTIONS, HISTORICAL_NEWS_OPTIONS, HISTORICAL_TICKS_OPTIONS, MKT_DATA_OPTIONS,
+            MKT_DEPTH_OPTIONS, NEWS_ARTICLE_OPTIONS, ORDER_OPTIONS, OptionList,
+            REAL_TIME_BARS_OPTIONS, SCANNER_OPTIONS,
+        };
+        let list = |pairs: &[(&str, &str)]| -> Vec<crate::types::model::TagValue> {
+            pairs.iter().map(|(t, v)| crate::types::model::TagValue { tag: (*t).into(), value: (*v).into() }).collect()
+        };
+        let checked = |l: &OptionList, pairs: &[(&str, &str)]| {
+            ClientCore::check_option_list(l, &ClientCore::written_options(&list(pairs)), &[])
+                .map_err(|r| (r.code, r.message))
+        };
+        let lifted = |l: &OptionList, pairs: &[(&str, &str)]| {
+            ClientCore::check_option_list(
+                l, &ClientCore::written_options(&list(pairs)), &["NOAPIMISCVLD".to_string()],
+            )
+            .map_err(|r| (r.code, r.message))
+        };
+        let unreadable = Err((320, "Error reading request:Please use 'Key=Value' format for Misc Options".to_string()));
+        for (l, name, later) in [
+            (&ORDER_OPTIONS, "PlaceOrder(3)", "Order"),
+            (&MKT_DATA_OPTIONS, "ReqMktData(1)", "Market data"),
+            (&MKT_DEPTH_OPTIONS, "ReqMktDepth(10)", "Market data"),
+            (&CHART_OPTIONS, "ReqHistoricalData(20)", "Historical data"),
+            (&SCANNER_OPTIONS, "ReqScannerSubscription(22)", "Historical data"),
+            (&REAL_TIME_BARS_OPTIONS, "ReqRealTimeBars(50)", "Historical data"),
+            (&NEWS_ARTICLE_OPTIONS, "ReqNewsArticle(84)", "Historical data"),
+            (&HISTORICAL_NEWS_OPTIONS, "ReqHistoricalNews(86)", "Historical data"),
+            (&HISTORICAL_TICKS_OPTIONS, "ReqHistoricalTicks(96)", "Market data"),
+        ] {
+            assert_eq!(checked(l, &[]), Ok(()), "{name}");
+            assert_eq!(checked(l, &[("manual", "1")]), Ok(()), "{name}");
+            assert_eq!(checked(l, &[("manual", "0")]), Ok(()), "{name}");
+            assert_eq!(
+                checked(l, &[("foo", "1")]),
+                Err((10337, format!("Misc options key=foo is invalid in {name} request. Valid keys are: manual"))),
+            );
+            assert_eq!(
+                checked(l, &[("manual", "2")]),
+                Err((10338, format!("Misc options value=2 is invalid for key=manual in {name} request. Valid values are: 0, 1"))),
+            );
+            // An entry with no key or no value cannot be read, lifted or not.
+            for broken in [&[("manual", "")][..], &[("", "1")], &[("manual", "=")]] {
+                assert_eq!(checked(l, broken), unreadable, "{name} {broken:?}");
+                assert_eq!(lifted(l, broken), unreadable, "{name} {broken:?}");
+            }
+            // Lifted: any key is taken, and `manual` still has to read as nought
+            // or one, trimmed and read as a number.
+            assert_eq!(lifted(l, &[("foo", "1")]), Ok(()), "{name}");
+            assert_eq!(
+                lifted(l, &[("manual", "2")]),
+                Err((321, format!("{later}: 'manual' has wrong value=2, expected [1 or 0]"))),
+            );
+            for reads in [" 1", "01", "+1", "-0", "0 "] {
+                assert_eq!(lifted(l, &[("manual", reads)]), Ok(()), "{name} {reads:?}");
+                assert_eq!(checked(l, &[("manual", reads)]).unwrap_err().0, 10338, "{name} {reads:?}");
+            }
+            assert_eq!(lifted(l, &[("manual", "\u{a0}1")]).unwrap_err().0, 321, "{name}");
+            // A gateway reads any script's digits; one this client cannot read
+            // is let through rather than refused on a reading it may not share.
+            assert_eq!(lifted(l, &[("manual", "\u{661}")]), Ok(()), "{name}");
+        }
+        // Checked in the order a gateway's table holds the keys, not the
+        // caller's: `foo` is named before `manual`, and `bar` before `foo`.
+        assert_eq!(checked(&MKT_DATA_OPTIONS, &[("manual", "2"), ("foo", "1")]).unwrap_err().0, 10337);
+        assert!(checked(&MKT_DATA_OPTIONS, &[("foo", "1"), ("bar", "1")]).unwrap_err().1.contains("key=bar"));
+        // A key named twice keeps its last value.
+        assert_eq!(checked(&CHART_OPTIONS, &[("manual", "2"), ("manual", "1")]), Ok(()));
+        // What separates entries inside a value separates them there too.
+        assert!(checked(&HISTORICAL_TICKS_OPTIONS, &[("manual", "1;foo=2")]).unwrap_err().1.contains("key=foo"));
+        // And the order path is the same rule.
+        let order = ApiOrder {
+            order_misc_options: list(&[("manual", "")]),
+            ..order()
+        };
+        assert_eq!(refused(&order, &session(&["NOAPIMISCVLD"])).0, 320);
+    }
+
     /// Declining smart routing: refused where the venue withdrew it, and
     /// otherwise placed without it and warned about.
     #[test]
