@@ -12,14 +12,16 @@ use ibkr_dx::settings::GatewaySettings;
 #[test]
 fn a_session_that_states_a_level_moves_the_installed_logger() {
     assert!(ibkr_dx::logging::try_init_from_env("warn"), "this process has no logger yet");
-    let stating = |level: &str| GatewaySettings { log_level: Some(level.into()), ..Default::default() };
+    let stating =
+        |level: &str| GatewaySettings { log_level: Some(level.into()), ..Default::default() };
 
     ibkr_dx::logging::apply(&stating("debug"));
     assert_eq!(ibkr_dx::logging::current_level().as_deref(), Some("debug"));
 
     ibkr_dx::logging::apply(&stating("info=loud"));
     assert_eq!(
-        ibkr_dx::logging::current_level().as_deref(), Some("debug"),
+        ibkr_dx::logging::current_level().as_deref(),
+        Some("debug"),
         "not a level, so the level stays",
     );
 }

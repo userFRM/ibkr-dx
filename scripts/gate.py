@@ -180,6 +180,31 @@ def steps(suites):
     ]
 
 
+def new_rust_files_are_formatted():
+    """What the workflow's formatting job checks: the Rust files a change adds.
+
+    The workflow measures a push against what main was before it, so a file
+    added here and not yet on `origin/main` is one it will check. Files not yet
+    committed count too. A new test file reached main unformatted because this
+    list did not have the step, and the push that carried it went red.
+    """
+    base = subprocess.run(["git", "merge-base", "origin/main", "HEAD"],
+                          capture_output=True, text=True).stdout.strip() or "HEAD"
+    added = subprocess.run(["git", "diff", "--name-only", "--diff-filter=A", base, "--", "*.rs"],
+                           capture_output=True, text=True).stdout.split()
+    untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "--", "*.rs"],
+                               capture_output=True, text=True).stdout.split()
+    files = sorted(set(added + untracked))
+    if not files:
+        return 0
+    print(f"\n=== rustfmt --edition 2024 --check {' '.join(files)}", flush=True)
+    done = subprocess.run([*toolchain(), "rustfmt", "--edition", "2024", "--check", *files])
+    if done.returncode != 0:
+        print("\nFAILED: a Rust file this change adds is not formatted. "
+              "`rustfmt --edition 2024` on that file alone formats it.")
+    return done.returncode
+
+
 def generated_docs_are_current():
     """What the workflow checks after running the generators: nothing moved.
 
@@ -228,6 +253,9 @@ def main():
         if done.returncode != 0:
             print(f"\nFAILED: {runner} {line}")
             return done.returncode
+
+    if code := new_rust_files_are_formatted():
+        return code
 
     if code := generated_docs_are_current():
         return code
