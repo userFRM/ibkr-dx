@@ -1760,3 +1760,75 @@ fn a_handshake_that_will_not_finish_ends_when_the_attempt_does() {
     );
     let _ = held.join();
 }
+
+/// A stop reaches a trading reconnect wherever it is: before the dial, it
+/// dials nothing; inside the handshake, on a venue that accepted the socket
+/// and says nothing, the socket is closed from the stopping thread and the
+/// attempt ends at once, as taken back rather than as a broken connection.
+///
+/// One test for both, because the port the reconnect dials is one for the
+/// process.
+#[test]
+fn a_stop_reaches_a_reconnect_before_and_during_its_handshake() {
+    use crate::reliability::retry::DisconnectReason;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    RECONNECT_PORT.store(listener.local_addr().unwrap().port(), Ordering::Relaxed);
+    let auth = auth_with("127.0.0.1", "", "");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let in_flight = Arc::new(InFlight::default());
+
+    let Err(err) = reconnect_ccp(&auth, &cancel, &in_flight) else { panic!("dialled after it was taken back") };
+    assert_eq!(DisconnectReason::from_error(&err), DisconnectReason::ByDesign, "{err}");
+    listener.set_nonblocking(true).unwrap();
+    assert!(listener.accept().is_err(), "it dialled after it was taken back");
+    listener.set_nonblocking(false).unwrap();
+
+    cancel.store(false, Ordering::Relaxed);
+    let worker = {
+        let (cancel, in_flight) = (Arc::clone(&cancel), Arc::clone(&in_flight));
+        std::thread::spawn(move || reconnect_ccp(&auth, &cancel, &in_flight))
+    };
+    let (_silent, _) = listener.accept().expect("the attempt's connection");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while in_flight.0.lock().unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline, "the attempt never held its socket");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let stopping = std::time::Instant::now();
+    cancel.store(true, Ordering::Relaxed);
+    in_flight.close();
+    let Err(err) = worker.join().unwrap() else { panic!("a venue that said nothing opened a session") };
+    assert!(
+        stopping.elapsed() < Duration::from_secs(2),
+        "the stop waited {:?} on a handshake it had closed", stopping.elapsed(),
+    );
+    assert_eq!(
+        DisconnectReason::from_error(&err), DisconnectReason::ByDesign,
+        "a stop the caller asked for read as something to recover from: {err}",
+    );
+    assert!(in_flight.0.lock().unwrap().is_none(), "the socket is let go with the attempt");
+    RECONNECT_PORT.store(AUTH_PORT, Ordering::Relaxed);
+}
+
+/// Once the attempt lets go of its socket — as its logon goes out — a stop
+/// closes nothing: the session that logon opens is owed a goodbye on it, and
+/// a socket closed under it leaves nothing to say one on.
+#[test]
+fn a_socket_let_go_at_the_logon_is_not_closed_by_a_stop() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let mut socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    let in_flight = InFlight::default();
+    in_flight.hold(&socket, &std::sync::atomic::AtomicBool::new(false)).expect("not taken back");
+    in_flight.release();
+    in_flight.close();
+    socket.write_all(b"5").expect("the socket is still the session's");
+    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut said = [0u8; 1];
+    peer.read_exact(&mut said).expect("and reaches the venue");
+    assert_eq!(&said, b"5");
+}

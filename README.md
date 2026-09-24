@@ -754,10 +754,18 @@ list, so nobody has to discover it by finding an empty result.
 > been run against live data, it says so in its own documentation.
 
 > [!IMPORTANT]
-> **An empty result means one of two things** and this client cannot tell them
-> apart: the venue holds nothing for that contract, or the account cannot see
-> that series. The subscription list in account management is what separates
-> them.
+> **An empty result means one of two things:** the venue holds nothing for that
+> contract, or the account cannot see that series. `tick_req_params` carries
+> what the venue states for each request: the exchange the best bid and offer
+> come from, as written (with the contract's security type appended as four hex
+> digits where the name is four characters or fewer, as a gateway writes it),
+> and the permission number the venue gives the request (0 nothing stated, 1 no
+> top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available
+> through the API; any other number is read as 0, as a gateway reads it).
+> Whether that number differs between a series the account is not entitled to
+> and one with nothing to say has not been seen yet, and a gateway may report 0
+> for some contracts whatever the venue stated; until a capture settles both,
+> the subscription list in account management is what separates them.
 
 And two things this client does not read or fire:
 
@@ -838,10 +846,11 @@ factor included. Offering the saved session (`EClientConfig::resume`, or
 
 The gateway's configuration file is replaced by settings on the client:
 announced build, time zone, execution-report scope, and others — 17 in total,
-readable at runtime. Sixteen gateway settings are not settings here, and each says
+readable at runtime. Fifteen gateway settings are not settings here, and each says
 why or names what stands in for it (no window geometry, no local listening socket,
-no JVM heap, and no message pacing: nothing here paces outgoing messages, which the
-gateway ships with off).
+no JVM heap, and no message pacing: a gateway paces requests at the rate its logon
+states (fifty a second where it states none) unless it is set to reject them
+instead, and nothing here does either).
 
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 
@@ -886,10 +895,16 @@ login.
 <details>
 <summary><b>I asked for a series and got nothing back. Is it broken?</b></summary>
 
-Probably not. An empty result means one of two things and this client cannot
-tell them apart: the venue holds nothing for that contract, or the account is
-not entitled to that series. Such a subscription is acknowledged and then
-nothing is stated, with no error to read. The subscription list in account
+Probably not. An empty result means one of two things: the venue holds nothing
+for that contract, or the account is not entitled to that series. Such a
+subscription is acknowledged and then nothing is stated, with no error to read.
+The acknowledgement reaches `tick_req_params` with the exchange the best bid and
+offer come from and the permission number the venue gives the request (0
+nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4
+snapshots not available through the API). Whether that number differs between
+a series the account is not entitled to and one with nothing to say has not
+been seen yet, and a gateway may report 0 for some contracts whatever the venue
+stated; until a capture settles both, the subscription list in account
 management is what separates them. See
 [What is not covered](#what-is-not-covered).
 </details>
@@ -937,8 +952,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,726 | No |
-| Python | 849 | No |
+| Rust, unit and integration | 2,748 | No |
+| Python | 869 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

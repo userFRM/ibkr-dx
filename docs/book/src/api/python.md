@@ -20,11 +20,17 @@ Settings given to `connect(settings=...)` belong to that session; those given to
 falls back to. They are read when a session opens, so set them before
 `connect()`.
 
-Logging is the one settled earlier: a process has one logger and importing
-`ibkr_dx` installs it, so `IBKR_DX_LOG_LEVEL`, `IBKR_DX_LOG_DIR` and `IBKR_DX_LOG_QUEUE` belong
-in the environment before that import. Both `configure()` and
-`connect(settings=...)` refuse them rather than storing a value nothing will
-read.
+Logging is settled at import: a process has one logger and importing
+`ibkr_dx` installs it, reading `IBKR_DX_LOG_LEVEL` (with or without a log
+directory; one that is not a level is said in the log), `IBKR_DX_LOG_DIR` and
+`IBKR_DX_LOG_QUEUE`. The level can be moved afterwards:
+`configure(log_level=...)` and `connect(settings={"log_level": ...})` move
+the logger `ibkr_dx` installed, and raise where the program installed its
+own; `configure(log_level=None)` or `""` moves it back to the level it was
+installed at. A connect refused for another of its settings leaves the level
+where it was. Where the logger writes and how much it buffers are fixed once
+it runs, so `log_dir` and `log_queue` belong in the environment before the
+import, and both ways in refuse them afterwards.
 
 ## The reference
 

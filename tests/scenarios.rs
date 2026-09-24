@@ -1189,7 +1189,7 @@ fn cancel_account_summary_prevents_delivery() {
 }
 
 #[test]
-fn account_summary_empty_tags_returns_all() {
+fn account_summary_tag_all_returns_every_figure() {
     let (client, _rx, shared) = test_client();
 
     for (key, value) in [
@@ -1207,8 +1207,9 @@ fn account_summary_empty_tags_returns_all() {
     shared.portfolio.set_account_download_complete("AR.1");
     shared.portfolio.account_download_is_settled();
 
-    // Empty tags string → everything the venue has stated
-    client.req_account_summary(7, "All", "");
+    // The tag `All` → everything the venue has stated. Naming no tag at all
+    // is refused, as a gateway refuses it.
+    client.req_account_summary(7, "All", "All");
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);

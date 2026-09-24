@@ -706,10 +706,12 @@ impl EClient {
             call_wrapper!(self, py, shared, "error", (order_id as i64, 0i64, code as i64, msg.as_str(), ""));
         }
 
-        // The increment each subscription was acknowledged with, to everyone
-        // watching the contract, once, as on the other surface.
-        for (req_id, min_tick) in shared.market.drain_tick_req_params_direct() {
-            call_wrapper!(self, py, shared, "tick_req_params", (req_id, min_tick, "", 0i64));
+        // What each subscription was acknowledged with — the increment, the
+        // exchange and the permission number — to everyone watching the
+        // contract, once, as on the other surface.
+        for (req_id, p) in shared.market.drain_tick_req_params_direct() {
+            call_wrapper!(self, py, shared, "tick_req_params",
+                (req_id, p.min_tick, p.bbo_exchange.as_str(), p.snapshot_permissions));
         }
 
         // A request that joined a contract the venue had already refused. The
@@ -719,9 +721,10 @@ impl EClient {
             call_wrapper!(self, py, shared, "error",
                 (req_id, 0i64, 200i64, reason.as_str(), ""));
         }
-        for (instrument, min_tick) in shared.market.drain_tick_req_params() {
+        for (instrument, p) in shared.market.drain_tick_req_params() {
             for req_id in self.core.watchers_of(instrument) {
-                call_wrapper!(self, py, shared, "tick_req_params", (req_id, min_tick, "", 0i64));
+                call_wrapper!(self, py, shared, "tick_req_params",
+                    (req_id, p.min_tick, p.bbo_exchange.as_str(), p.snapshot_permissions));
             }
         }
         // Poll quotes for changes -> tickPrice/tickSize

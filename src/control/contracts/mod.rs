@@ -243,6 +243,38 @@ impl SecurityType {
         }
     }
 
+    /// The number a gateway gives this type, as it appends it to the
+    /// exchange named on `tickReqParams`. `None` for a type this client does
+    /// not enumerate, which a gateway writes nothing for either.
+    pub fn gateway_number(&self) -> Option<u8> {
+        Some(match self {
+            Self::Stock => 1,
+            Self::Cfd => 2,
+            Self::Option => 3,
+            Self::FutureOption => 4,
+            Self::Warrant => 5,
+            Self::Future => 6,
+            Self::Forward => 7,
+            Self::Combo => 8,
+            Self::Forex => 10,
+            Self::Index => 11,
+            Self::Bond => 12,
+            Self::Bill => 13,
+            Self::FixedIncome => 14,
+            Self::Fund => 15,
+            Self::SecuritiesLending => 16,
+            Self::News => 17,
+            Self::Commodity => 18,
+            Self::Basket => 19,
+            Self::IndexOption => 20,
+            Self::IcuContract => 21,
+            Self::IcsContract => 22,
+            Self::PhysicalSettlement => 23,
+            Self::Crypto => 24,
+            Self::Other(_) => return None,
+        })
+    }
+
     /// Convert to the wire encoding.
     pub fn to_fix(&self) -> &'static str {
         match self {

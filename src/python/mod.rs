@@ -28,6 +28,7 @@ pub(crate) fn settings_from(
 ) -> Result<crate::settings::SessionSettings, String> {
     use crate::settings::{ExecutionReportScope, GatewaySettings};
     let mut settings = GatewaySettings::default();
+    let mut level = None;
     for (name, value) in stated {
         match name.as_str() {
             "timezone" => settings.timezone = Some(value),
@@ -44,13 +45,19 @@ pub(crate) fn settings_from(
                 settings.registration_timeout_ms =
                     Some(value.parse().map_err(|_| format!("registration_timeout_ms: {value}"))?);
             }
-            // One logger per process, so these are not settled per session:
-            // taken here they were parsed, held and then dropped on the way to
-            // the session, which reads as a log level that was set and did
-            // nothing. Said plainly instead, naming where they do work — which
-            // for this client is before it is imported, because importing it
-            // installs the logger.
-            "log_level" | "log_dir" | "log_queue" => {
+            // One logger per process, and importing this client installs it.
+            // Its level can be moved while it runs, so a level stated here
+            // moves it, as `configure` does; where it is not this client's
+            // logger, or not a level, the connect says so. Moved once every
+            // other setting has been read: a connect refused for one of those
+            // leaves the level where it was.
+            "log_level" => level = Some(value),
+            // Where it writes and how much it buffers are fixed once it is
+            // installed. Taken here they were parsed, held and then dropped on
+            // the way to the session, which reads as a setting that was set
+            // and did nothing. Said plainly instead, naming where they do work
+            // — which for this client is before it is imported.
+            "log_dir" | "log_queue" => {
                 return Err(format!(
                     "{name} belongs to the process, not one session: importing ibkr_dx \
                      installs the logger, so set IBKR_DX_{} in the environment before that",
@@ -86,10 +93,52 @@ pub(crate) fn settings_from(
             other => return Err(format!("no such setting: {other}")),
         }
     }
+    if let Some(level) = level {
+        set_log_level(Some(&level))?;
+    }
     Ok(settings.resolve())
 }
 
 use pyo3::prelude::*;
+
+/// The level the logger ran at once importing this client had installed it.
+static LEVEL_AT_IMPORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Move the logger this client installed to `level`, or say why it was not.
+///
+/// `level` is a filter as `RUST_LOG` states one; `None` is the level the
+/// logger ran at once importing this client installed it. A program that
+/// installed its own logger keeps it, and is told so rather than told the
+/// level moved.
+pub(crate) fn set_log_level(level: Option<&str>) -> Result<(), String> {
+    let Some(level) = level.or(LEVEL_AT_IMPORT.get().map(String::as_str)) else {
+        return Err(not_this_clients("the level it was installed at"));
+    };
+    match crate::logging::set_level(level) {
+        Ok(()) => {
+            log::info!("logging at {level}");
+            Ok(())
+        }
+        Err(crate::logging::LevelNotMoved::NotALevel) => {
+            Err(format!("log_level: {level} is not a level this logger reads"))
+        }
+        Err(crate::logging::LevelNotMoved::NotThisClients) => Err(not_this_clients(level)),
+    }
+}
+
+fn not_this_clients(level: &str) -> String {
+    format!(
+        "log_level: {level} was not applied because ibkr_dx did not install the \
+         logger in this process; whoever did holds the level"
+    )
+}
+
+/// `configure(log_level=)`'s way to the logger.
+#[pyfunction]
+#[pyo3(signature = (level=None))]
+fn _set_log_level(level: Option<&str>) -> PyResult<()> {
+    set_log_level(level).map_err(pyo3::exceptions::PyValueError::new_err)
+}
 
 /// Python module definition.
 #[pymodule]
@@ -104,9 +153,20 @@ fn ibkr_dx(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Some(guard) = crate::logging::try_init(&settings) {
             guard.keep_for_the_process();
         }
-    } else {
-        let _ = crate::logging::try_init_from_env("warn");
+    } else if crate::logging::try_init_from_env("warn")
+        && let Some(level) = &settings.level
+        // `IBKR_DX_LOG_LEVEL` is a setting this client publishes, and it wins
+        // over `RUST_LOG` here as it does beside a log directory. Read only
+        // there, it did nothing on the ordinary path to stderr; and one that
+        // is not a level is said rather than passed over.
+        && crate::logging::set_level(level).is_err()
+    {
+        log::warn!("IBKR_DX_LOG_LEVEL {level} is not a level this logger reads, so the level stays");
     }
+    if let Some(level) = crate::logging::current_level() {
+        let _ = LEVEL_AT_IMPORT.set(level);
+    }
+    m.add_function(wrap_pyfunction!(_set_log_level, m)?)?;
     compat::register(m)?;
     m.add("FIRST_RESERVED_REQUEST_ID", crate::FIRST_RESERVED_REQUEST_ID)?;
     Ok(())

@@ -199,7 +199,7 @@ fn ccp_reconnect_with_cached_credentials() {
     let t1 = Instant::now();
     // Nothing cancels this reconnect: the test is the whole of what is running.
     let never = std::sync::atomic::AtomicBool::new(false);
-    let result = reconnect_ccp(&auth, &never);
+    let result = reconnect_ccp(&auth, &never, &Default::default());
     let reconnect_ms = t1.elapsed().as_millis();
 
     // Required, not reported. Reconnecting on the cached session is how every

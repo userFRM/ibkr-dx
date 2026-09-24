@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 82. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 155. 124 are sent; 19 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 5 are not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 3,575 offline, and 184 more that live in the suites run against a broker session |
+| Tests | 3,617 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -54,8 +54,10 @@ matrix, which CI checks against the source.
 None, and none taken and not applied either.
 
 `set_server_log_level` is served without reaching the venue, whose protocol has
-no message for it. A gateway applies the level to its own log; this client,
-which serves the caller in its place, applies it to the logger it installed.
+no message for it. 1 to 5 are a gateway's System, Error, Warning, Info and
+Detail, and this client's logger goes to error, error, warn, info and trace. A
+gateway applies the level to its own log; this client, which serves the caller
+in its place, applies it to the logger it installed.
 Where a program installed its own logger, that one is the program's, and the
 call says so rather than reporting a level it did not set.
 
@@ -68,9 +70,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,726 | No |
+| Rust unit and integration | 2,748 | No |
 | Rust, live | 9 | Yes |
-| Python | 849 | No |
+| Python | 869 | No |
 | Python, live | 124 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -94,7 +96,7 @@ Every figure above is measured on each commit, and the build fails if one moves.
 | Surface | Status | Verification |
 | --- | :---: | --- |
 | `EClient` / `EWrapper` (TWS API shape) | ✅ Supported | `tests/ib_paper_compat`, `tests/python/test_compat_tier1..3.py` |
-| Gateway settings | ✅ Supported | 17 settings carried, 16 recorded as not settings here, both lists the same on either client; `tests/python/test_gateway_settings.py`, `tests/python/test_settings_parity.py`; session opened under a stated build and time zone |
+| Gateway settings | ✅ Supported | 17 settings carried, 15 recorded as not settings here, both lists the same on either client; `tests/python/test_gateway_settings.py`, `tests/python/test_settings_parity.py`; session opened under a stated build and time zone |
 | Rust/Python equivalence | ✅ Supported | 4 static gates (settings, order fields, surface, error behaviour) plus `scripts/conformance.py --compare`, which compares 10 server responses across both clients |
 
 ## Market data
@@ -259,7 +261,7 @@ stream that did not arrive.
 
 | Gateway | This client |
 | --- | --- |
-| Configuration file and settings window | Settings on the client, read back at runtime. 16 gateway settings are not settings here, each saying why or naming what stands in for it: no window geometry, no local listening socket, no JVM heap, no message pacing, and a timestamp delivered as the venue states it |
+| Configuration file and settings window | Settings on the client, read back at runtime. 15 gateway settings are not settings here, each saying why or naming what stands in for it: no window geometry, no local listening socket, no JVM heap, no message pacing (a gateway paces by default), and a bar dated on the zone the venue names beside it |
 | Local socket for client programs | The client is in-process; there is no socket to connect to, authorise, or keep running |
 | Java runtime | None |
 
@@ -332,8 +334,9 @@ and time. Brackets, one-cancels-all, and combinations with a price per leg.
 
 **Settings.** The gateway's configuration file is replaced by settings on the
 client: announced build, time zone, execution-report scope, and others — 17 in
-total, readable at runtime. Sixteen gateway settings are not settings here, and
+total, readable at runtime. Fifteen gateway settings are not settings here, and
 each says why or names what stands in for it (no window geometry, no local
-listening socket, no JVM heap, and no message pacing: nothing here paces outgoing
-messages, which the gateway ships with off).
+listening socket, no JVM heap, and no message pacing: a gateway paces requests
+at the rate its logon states (fifty a second where it states none) unless it is
+set to reject them instead, and nothing here does either).
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.

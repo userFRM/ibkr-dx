@@ -60,6 +60,10 @@ pub(super) struct LogonAck {
     pub raw_order_permissions: String,
     pub enabled_features: String,
     pub raw_enabled_features: String,
+    /// Whether the logon names accounts `AllNonProp` leaves out, tag 8056, a
+    /// list separated by commas. A gateway takes `AllNonProp` only where it
+    /// names some.
+    pub all_non_prop_leaves_out: bool,
     pub white_branding_id: String,
     pub raw_misc_urls: String,
     /// Which farms this account is routed to. `usfarm`/`ushmds` are US names;
@@ -331,6 +335,7 @@ impl LogonAck {
                 log::info!("Enabled features: {v}");
             }
             if let Some(v) = fields.get(&6542) { keep_first(&mut ack.raw_enabled_features, v, "6542"); }
+            if let Some(v) = fields.get(&8056) { ack.all_non_prop_leaves_out |= v.split(',').any(|a| !a.is_empty()); }
             if let Some(v) = fields.get(&6571) { keep_first(&mut ack.white_branding_id, v, "6571"); }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte
             // search.
@@ -508,15 +513,21 @@ pub(super) fn send_init_sequence(
     // no executions at all — which is what asking for every one used to do.
     // Asking for every one means naming a start far enough back to cover what
     // the venue still holds.
-    let window_start = match scope {
-        ExecutionReportScope::Today => format!("{}-00:00:00", &now[..8]),
-        _ => crate::protocol::datetime::midnight_days_ago(EXECUTIONS_REACH_BACK_DAYS).to_string(),
-    };
+    let window_start = executions_asked_from(scope, now);
     send(&[(35, "U"), (52, now), (6040, "72"), (6536, &window_start), (6537, now), (6556, "today4")])?;
     send(&[(35, "U"), (52, now), (6040, "74"), (1, ""), (6544, "2")])?;
     send(&[(35, "U"), (52, now), (6040, "76"), (1, ""), (6565, "1")])?;
     w.flush()?;
     Ok(seq)
+}
+
+/// Where the executions a session opens with start, as the opening burst asks
+/// for them at `now`: today's midnight, or midnight six days ago.
+pub(super) fn executions_asked_from(scope: ExecutionReportScope, now: &str) -> String {
+    match scope {
+        ExecutionReportScope::Today => format!("{}-00:00:00", &now[..8]),
+        _ => crate::protocol::datetime::midnight_days_ago(EXECUTIONS_REACH_BACK_DAYS).to_string(),
+    }
 }
 
 /// What holds the socket once the opening burst has been answered.
@@ -1553,6 +1564,22 @@ mod tests {
         let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
         assert_eq!(ack.trading_route, "cdc1.ibllc.com/usfarm");
         assert!(ack.account_id.is_empty(), "read past the message that ended the logon");
+    }
+
+    /// Whether the logon names accounts `AllNonProp` leaves out is read off
+    /// it: a list with an account in it. A gateway takes `AllNonProp` for the
+    /// account figures only where it does.
+    #[test]
+    fn the_logon_says_whether_it_names_accounts_all_non_prop_leaves_out() {
+        for (stated, named) in [(Some("DU2,DU3"), true), (Some(","), false), (Some(""), false), (None, false)] {
+            let mut ack_fields: Vec<(u32, &str)> = vec![(35, "A"), (1, "DU111111")];
+            if let Some(v) = stated {
+                ack_fields.push((8056, v));
+            }
+            let mut wire = answered_with(&[&ack_fields]);
+            let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
+            assert_eq!(ack.all_non_prop_leaves_out, named, "8056 stated as {stated:?}");
+        }
     }
 
     /// The ACK is not always the first message the venue sends, and what it

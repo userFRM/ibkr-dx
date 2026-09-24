@@ -893,9 +893,16 @@ impl EClient {
     /// answer waits for a dispatch pass no session is there to make, and the
     /// caller hears nothing at all.
     ///
-    /// `lastNDays` and `specificDates` on the filter are refused when stated:
-    /// the executions answered are this session's, filtered by the other
-    /// fields, and a window this client cannot apply would go unapplied.
+    /// `lastNDays` and `specificDates` select days as a gateway selects them,
+    /// counted on the session's time zone. A date that does not read as a
+    /// number, or is not a day of the calendar, is refused under 320, as a
+    /// gateway refuses it. The executions answered from reach back to midnight
+    /// six days before the logon in UTC, or to the logon's own day for a
+    /// session set to today's executions, so the earliest days asked for can
+    /// be missing some; those days are named on `error` under 321 ahead of the
+    /// answer, which still comes. `acctCode` is ignored on a login holding one
+    /// account and refused on one holding several where the login does not
+    /// hold it, as a gateway does both.
     #[pyo3(signature = (req_id, exec_filter=None))]
     fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<Py<PyAny>>) -> PyResult<()> {
         let Some(_connected) = self.tx_or_report(req_id)? else { return Ok(()) };
@@ -910,26 +917,40 @@ impl EClient {
                     .and_then(|v| v.extract::<i64>(py))
                     .unwrap_or_default()
             };
-            // Two filters this session cannot apply: it answers from the
-            // executions it has seen and does not ask the venue, so a window
-            // stated in days or dates would be dropped rather than applied.
             // The reference leaves `lastNDays` at UNSET_INTEGER and
-            // `specificDates` at None; an object without them reads as 0.
-            let last_n_days = get_i64("lastNDays");
-            let dates_stated = fobj
-                .getattr(py, pyo3::types::PyString::new(py, "specificDates"))
-                .ok()
-                .is_some_and(|v| !v.is_none(py) && v.bind(py).len().is_ok_and(|n| n > 0));
-            if (last_n_days != 0 && last_n_days != i64::from(i32::MAX)) || dates_stated {
-                self.report_refusal(py, req_id, Refusal::validation(
-                    "req_executions: lastNDays and specificDates are not applied here; \
-                     executions are this session's, filtered by the other fields",
-                ))?;
-                // The end still comes, as it does for every request refused on
-                // this surface: a caller waiting on it has nothing else to wait for.
-                return self.deliver(py, "exec_details_end", (req_id,));
+            // `specificDates` at None; an object without them reads as 0 and
+            // none, which ask for no window either.
+            let last_n_days = get_i64("lastNDays").clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            // Each written onto the wire as its text, as the reference writes
+            // it, and read there as a whole number: one that does not read as
+            // one refuses the request.
+            let mut specific_dates = Vec::new();
+            let stated = fobj.getattr(py, pyo3::types::PyString::new(py, "specificDates")).ok();
+            if let Some(dates) = stated.filter(|v| !v.is_none(py)) {
+                for date in dates.bind(py).try_iter()? {
+                    let date = date?;
+                    let text = match date.extract::<i64>() {
+                        Ok(number) => number.to_string(),
+                        Err(_) => date.str()?.to_string(),
+                    };
+                    let Ok(day) = text.parse::<i32>() else {
+                        self.report_refusal(py, req_id, Refusal::stated(
+                            crate::error_codes::REQUEST_NOT_READ,
+                            format!(
+                                "Error reading request: Unable to parse field: 'Trading Days' \
+                                 for input string: '{text}'",
+                            ),
+                        ))?;
+                        // The end still comes, as it does for every request
+                        // refused on this surface.
+                        return self.deliver(py, "exec_details_end", (req_id,));
+                    };
+                    specific_dates.push(day);
+                }
             }
             ExecutionFilter {
+                last_n_days,
+                specific_dates,
                 symbol: get("symbol"),
                 sec_type: get("secType"),
                 exchange: get("exchange"),
@@ -948,7 +969,23 @@ impl EClient {
             ExecutionFilter::default()
         };
 
-        let snapshot = self.core.snapshot_executions(&filter);
+        let shared = self.shared_state()?;
+        let accounts = self.accounts.lock().unwrap().clone();
+        let (snapshot, unheld) = match self.core.executions_for_request(
+            &shared, &accounts, &filter, jiff::Timestamp::now(),
+        ) {
+            Ok(answer) => answer,
+            Err(why) => {
+                self.report_refusal(py, req_id, why)?;
+                // The end still comes, as it does for every request refused on
+                // this surface: a caller waiting on it has nothing else to wait for.
+                return self.deliver(py, "exec_details_end", (req_id,));
+            }
+        };
+        if let Some(why) = crate::client_core::ClientCore::unheld_days_notice(&unheld) {
+            log::warn!("{why}");
+            self.report_refusal(py, req_id, Refusal::validation(why))?;
+        }
         // Snapshot before any Python call: the callback runs with the GIL
         // held, and re-entering a path that locks `executions` would freeze
         // the interpreter, not just this thread.

@@ -301,6 +301,11 @@ pub struct Gateway {
     pub enabled_features: String,
     /// Raw enabled-feature token list from CCP logon tag 6542.
     pub raw_enabled_features: String,
+    /// Whether the logon names accounts `AllNonProp` leaves out.
+    pub all_non_prop_leaves_out: bool,
+    /// Where the executions this session opened with start, as the opening
+    /// burst asked for them.
+    pub executions_held_from: String,
     /// White branding ID from CCP logon (empty for standard accounts).
     pub white_branding_id: String,
     /// Logical-name → host URL map pushed by the server during logon. Empty when no
@@ -708,6 +713,64 @@ fn doors_after(host: &str) -> Vec<String> {
     doors
 }
 
+/// The socket a trading reconnect has open, for whoever takes the attempt
+/// back.
+///
+/// The attempt reads its cancel flag between the phases of the handshake, and
+/// inside one it is blocked on the socket until that read's timeout. Closing
+/// the socket from the thread that stops it returns that read at once, which is
+/// how a gateway ends one: it closes the connection from the stopping thread
+/// and the reader parked on it ends there.
+///
+/// Held only until the logon is written. From there a session may be open at
+/// the venue, and it is owed a goodbye rather than a closed socket, so the
+/// attempt is let finish and whoever receives it says the goodbye.
+#[derive(Default)]
+pub struct InFlight(std::sync::Mutex<Option<TcpStream>>);
+
+impl InFlight {
+    /// Keep a handle on the socket just opened, then read the flag: a stop
+    /// that came before this found nothing to close, so the attempt ends here
+    /// rather than going on to open a session nobody is waiting for.
+    pub(crate) fn hold(&self, socket: &TcpStream, cancel: &std::sync::atomic::AtomicBool) -> io::Result<()> {
+        *self.0.lock().unwrap() = socket.try_clone().ok();
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(cancelled_by_the_client("CCP reconnect"));
+        }
+        Ok(())
+    }
+
+    /// Close whatever the attempt has open, so a read or write in flight on it
+    /// returns now.
+    pub fn close(&self) {
+        if let Some(socket) = self.0.lock().unwrap().take() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// Let go of the socket once the attempt reaches the logon, or is over. A
+    /// session the logon opens is owed a goodbye, and a stop must not close
+    /// its socket before that goodbye is said on it.
+    fn release(&self) {
+        self.0.lock().unwrap().take();
+    }
+}
+
+/// The port a trading reconnect dials: the one the protocol fixes.
+#[cfg(not(test))]
+fn reconnect_port() -> u16 {
+    AUTH_PORT
+}
+
+/// In a test, the listener it stands in the venue's place.
+#[cfg(test)]
+static RECONNECT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(AUTH_PORT);
+
+#[cfg(test)]
+fn reconnect_port() -> u16 {
+    RECONNECT_PORT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Reconnect to the CCP (order/auth) server using cached session credentials.
 /// Performs TLS + DH + CONNECT_REQUEST, then attempts SOFT_TOKEN auth with cached K.
 /// If the server signals at AUTH_START that it requires full SRP, transparently
@@ -717,22 +780,38 @@ fn doors_after(host: &str) -> Vec<String> {
 /// `cancel` is the engine taking the attempt back — a stop, or a recovery
 /// budget that is spent. Checked between the phases of the handshake: a
 /// reconnect is what the engine schedules, and one it has stopped scheduling
-/// must not go on opening a session at the venue.
+/// must not go on opening a session at the venue. Inside a phase the attempt
+/// is on its socket, which `in_flight` holds so a stop can close it, until the
+/// logon is written. A failure after the attempt was taken back is reported as
+/// the stop it is.
 pub fn reconnect_ccp(
     auth: &ReconnectAuth,
     cancel: &std::sync::atomic::AtomicBool,
+    in_flight: &InFlight,
 ) -> io::Result<Connection> {
     let token_hash = token_short_hash(&auth.session_token);
-    let first = reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0, cancel);
-    let Err(why) = first else { return first };
-    // The host's own backups before the hosts this session was sent to: they
-    // stand in for the one that stopped answering without the session having
-    // to be routed anywhere else.
-    let mut hosts = hot_backup_peers(&auth.host);
-    hosts.extend(auth.alternate_hosts.iter().cloned());
-    failover(&auth.host, why, &hosts, |host| {
-        reconnect_ccp_attempt(auth, &token_hash, host, 0, cancel)
-    })
+    let first = reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0, cancel, in_flight);
+    let result = match first {
+        Err(why) => {
+            // The host's own backups before the hosts this session was sent
+            // to: they stand in for the one that stopped answering without the
+            // session having to be routed anywhere else.
+            let mut hosts = hot_backup_peers(&auth.host);
+            hosts.extend(auth.alternate_hosts.iter().cloned());
+            failover(&auth.host, why, &hosts, |host| {
+                reconnect_ccp_attempt(auth, &token_hash, host, 0, cancel, in_flight)
+            })
+        }
+        landed => landed,
+    };
+    in_flight.release();
+    // Whatever failed once the attempt was taken back failed because it was:
+    // a socket closed under a read reads as a broken connection, and read that
+    // way the recovery would be scheduled again for a stop the caller asked for.
+    if result.is_err() && cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(cancelled_by_the_client("CCP reconnect"));
+    }
+    result
 }
 
 /// The hosts a session reached the venue through, tried in that order when
@@ -974,6 +1053,7 @@ fn reconnect_ccp_attempt(
     host: &str,
     depth: u32,
     cancel: &std::sync::atomic::AtomicBool,
+    in_flight: &InFlight,
 ) -> io::Result<Connection> {
     if depth > 5 {
         return Err(io::Error::other("CCP reconnect: too many redirects"));
@@ -981,17 +1061,19 @@ fn reconnect_ccp_attempt(
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(cancelled_by_the_client("CCP reconnect"));
     }
-    log::info!("CCP reconnect to {}:{} (attempt {})", host, AUTH_PORT, depth + 1);
+    let port = reconnect_port();
+    log::info!("CCP reconnect to {}:{} (attempt {})", host, port, depth + 1);
     // The connection carries the venue's own stamp, absent if the
     // acknowledgement states none.
     let mut venue_stamp: Option<String> = None;
 
     // TLS + DH key exchange
-    let addr = format!("{host}:{AUTH_PORT}")
+    let addr = format!("{host}:{port}")
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_SSL_AUTH))?;
+    in_flight.hold(&tcp, cancel)?;
     // Where this machine is, as far as the venue is concerned: the address of
     // the socket that reached it. The identity announced at logon is built
     // from this in the client this replaces, rather than from a route probed
@@ -1064,7 +1146,7 @@ fn reconnect_ccp_attempt(
             // reconnect thread, and an instant re-dial chain risks the same
             // rate limiting the backoff ladder exists for.
             std::thread::sleep(Duration::from_secs(2));
-            return reconnect_ccp_attempt(auth, token_hash, &redirect_host, depth + 1, cancel);
+            return reconnect_ccp_attempt(auth, token_hash, &redirect_host, depth + 1, cancel, in_flight);
         }
         Err(e) => return Err(e),
     };
@@ -1146,7 +1228,7 @@ fn reconnect_ccp_attempt(
             // re-dial chain risks the rate limiting the backoff ladder
             // exists for.
             std::thread::sleep(Duration::from_secs(2));
-            return reconnect_ccp_attempt(auth, token_hash, &redirect_host, depth + 1, cancel);
+            return reconnect_ccp_attempt(auth, token_hash, &redirect_host, depth + 1, cancel, in_flight);
         }
     };
     tls.get_ref().set_read_timeout(None)?;
@@ -1155,6 +1237,10 @@ fn reconnect_ccp_attempt(
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(cancelled_by_the_client("CCP reconnect"));
     }
+    // And from here the socket is not the stop's to close: a stop that closed
+    // it after the logon went out cut a session the venue had just opened,
+    // and nothing was left to say the goodbye on.
+    in_flight.release();
 
     // FIX Logon
     let logon_msg = build_ccp_logon(&auth.settings, &auth.hw_info, &auth.encoded, CCP_HEARTBEAT, 1);
@@ -2033,6 +2119,7 @@ impl Gateway {
         // --- Post-logon init sequence ---
         let account = if ack.account_id.is_empty() { config.username.clone() } else { ack.account_id.clone() };
         let now = chrono_free_timestamp();
+        let executions_held_from = logon::executions_asked_from(config.settings.execution_reports, &now);
         let mut ccp_seq =
             logon::send_init_sequence(&mut tls, config.settings.execution_reports, &account, &now, 1)?;
         // Counted, not stated: the burst above has been edited before, and a
@@ -2076,6 +2163,7 @@ impl Gateway {
             raw_order_permissions,
             enabled_features,
             raw_enabled_features,
+            all_non_prop_leaves_out,
             white_branding_id,
             raw_misc_urls,
             trading_route,
@@ -2249,6 +2337,8 @@ impl Gateway {
             raw_order_permissions,
             enabled_features,
             raw_enabled_features,
+            all_non_prop_leaves_out,
+            executions_held_from,
             white_branding_id,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             hmds_host: hmds_host_for_gw,
@@ -2397,6 +2487,10 @@ impl Gateway {
         // Enabled features: a plain comma-separated token list, logon tag 6542.
         shared.reference.set_enabled_features(
             self.raw_enabled_features.split(',').filter(|t| !t.is_empty()).map(str::to_string).collect(),
+        );
+        shared.reference.set_all_non_prop_leaves_out(self.all_non_prop_leaves_out);
+        shared.reference.set_executions_held_from(
+            crate::protocol::datetime::ib_datetime_to_unix(&self.executions_held_from),
         );
 
         // White branding ID (empty for standard accounts).

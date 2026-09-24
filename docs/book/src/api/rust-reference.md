@@ -582,7 +582,7 @@ pub fn req_positions(&self, wrapper: &mut impl Wrapper)
 
 #### `req_pnl`
 
-Subscribe to account PnL updates. The venue is asked, under `account` or under the one this session opened with where none is named. What comes back is what each holding was worth at midnight and what it has realised since, and the figures reported on `pnl` are worked out from those against the prices the session is being told. Without the subscription none of that arrives, and the figures reduce to the unrealised part with nothing realised on any position. `model_code` is taken and not applied: there is no model portfolio to name here.
+Subscribe to account PnL updates. The venue is asked, under `account` or under the one this session opened with where none is named. What comes back is what each holding was worth at midnight and what it has realised since, and the figures reported on `pnl` are worked out from those against the prices the session is being told. Without the subscription none of that arrives, and the figures reduce to the unrealised part with nothing realised on any position. `account` is required, as a gateway requires it, and one the login does not hold is refused in its words. Another account the login holds is refused too: the figures are worked out from one set of midnight seeds against one book of holdings, and both belong to the account this session opened under. `model_code` is taken and not applied: there is no model portfolio to name here.
 
 ```rust
 pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str)
@@ -612,7 +612,7 @@ pub fn cancel_pnl(&self, req_id: i64)
 
 #### `req_pnl_single`
 
-Subscribe to single-position PnL updates. `account` and `model_code` are taken and not applied, as on `req_pnl`: the figures are for the account this session opened under, and a caller naming another is told so.
+Subscribe to single-position PnL updates. `account` is checked as on `req_pnl`, and for the same reasons; `model_code` is taken and not applied.
 
 ```rust
 pub fn req_pnl_single(&self, req_id: i64, account: &str, _model_code: &str, con_id: i64)
@@ -643,10 +643,10 @@ pub fn cancel_pnl_single(&self, req_id: i64)
 
 #### `req_account_summary`
 
-Request account summary. `group` is taken and not applied. One session holds one account here, and the venue states its figures for that account without being asked which, so there is no second account or model portfolio to name.
+Request account summary. `group` is checked as a gateway checks it, and refused in its words: an empty one, and on a login that is not an advisor's anything but `All` or `AllNonProp`; `All` where the venue says the login may not ask for it. Empty `tags` are refused the same way. What is answered is the account this session opened under: on a login holding several, `All` is answered for that one account, and the caller is told so on `error` under 321 ahead of the answer. Two summaries may be open at once, as on a gateway; a third is refused under 322.
 
 ```rust
-pub fn req_account_summary(&self, req_id: i64, _group: &str, tags: &str)
+pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str)
 ```
 
 | Parameter | Type | Description |
@@ -673,10 +673,10 @@ pub fn cancel_account_summary(&self, req_id: i64)
 
 #### `req_account_updates`
 
-Subscribe to account updates. `acct_code` is taken and not applied. One session holds one account here, and the venue states its figures for that account without being asked which, so there is no second account or model portfolio to name. Subscribing also asks the venue to state the figures now. It restates them on its own schedule otherwise, which is unhurried: a session that has just opened waits tens of seconds for its first set, and a caller that subscribed and then read the account got nothing.
+Subscribe to account updates. `acct_code` is checked as a gateway checks it. On a login holding one account it is ignored, as a gateway ignores it. On a login holding several, a subscription naming none, or one the login does not hold, is refused in a gateway's words. One it holds, or `All` where the login may ask for every account, is answered with the figures of the account this session opened under, which are the ones the venue states to it, and the caller is told so on `error` under 321. Subscribing also asks the venue to state the figures now. It restates them on its own schedule otherwise, which is unhurried: a session that has just opened waits tens of seconds for its first set, and a caller that subscribed and then read the account got nothing.
 
 ```rust
-pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str)
+pub fn req_account_updates(&self, subscribe: bool, acct_code: &str)
 ```
 
 | Parameter | Type | Description |
@@ -712,10 +712,10 @@ pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper)
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models. Account values for one account or model, answered on `account_update_multi`. The reference client answers this request on its own callbacks, not on the ones `req_account_updates` uses, and a caller written against it implements those and hears nothing otherwise. `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The figures are the ones the venue states for the account this session opened under, and they are labelled with that account. A login holding several is answered for that one; naming another here does not fetch the other's figures, and is said in the log rather than answered with this account's under the other's name. A model names a slice of the account, and the venue states the account whole. Naming one is said the same way and the figures are labelled with no model, rather than the account's whole balance sheet reaching a caller as one model's. The request is held open. A figure that moves after the batch below is reported again under the same number, until `EClient::cancel_account_updates_multi` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
+Request account updates for multiple accounts/models. Account values for one account or model, answered on `account_update_multi`. The reference client answers this request on its own callbacks, not on the ones `req_account_updates` uses, and a caller written against it implements those and hears nothing otherwise. `ledger_and_nlv` restricts the answer to the per-currency ledger, as a gateway does: each currency's cash, market values and `NetLiquidationByCurrency`, which is the net liquidation it means. The account's other figures — `NetLiquidation`, `BuyingPower` and the rest — are not delivered on such a request. The figures are the ones the venue states for the account this session opened under, and they are labelled with that account. A login holding several is answered for that one; naming another here does not fetch the other's figures, and is said in the log rather than answered with this account's under the other's name. A model names a slice of the account, and the venue states the account whole. Naming one is said the same way and the figures are labelled with no model, rather than the account's whole balance sheet reaching a caller as one model's. The request is held open. A figure that moves after the batch below is reported again under the same number, until `EClient::cancel_account_updates_multi` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
 
 ```rust
-pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code: &str, _ledger_and_nlv: bool, wrapper: &mut impl Wrapper, )
+pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool, wrapper: &mut impl Wrapper, )
 ```
 
 | Parameter | Type | Description |
@@ -723,7 +723,7 @@ pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code:
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `account` | `&str` | Account ID. |
 | `model_code` | `&str` | Model portfolio code (empty for default). |
-| `ledger_and_nlv` | `bool` | If `true`, include ledger and NLV data. |
+| `ledger_and_nlv` | `bool` | If `true`, only the per-currency ledger: each currency's cash, market values and `NetLiquidationByCurrency`. |
 | `wrapper` | `&mut impl Wrapper` | Wrapper callback receiver for synchronous delivery. |
 
 ---
@@ -1075,7 +1075,7 @@ pub fn req_auto_open_orders(&self, _b_auto_bind: bool)
 
 #### `req_executions`
 
-Request execution reports. Replays stored executions (optionally filtered), firing `exec_details` + `commission_and_fees_report` for each, then `exec_details_end`.
+Request execution reports. Replays stored executions (optionally filtered), firing `exec_details` + `commission_and_fees_report` for each, then `exec_details_end`. `last_n_days` and `specific_dates` select days as a gateway selects them, counted on the session's time zone; a date that is not a day of the calendar is refused under 320, as a gateway refuses it. The executions answered from reach back to midnight six days before the logon in UTC, or to the logon's own day for a session set to today's executions, so the earliest days asked for can be missing some; those days are named on `error` under 321 ahead of the answer, which still comes. `acct_code` is ignored on a login holding one account and refused on one holding several where the login does not hold it, as a gateway does both. A refused request is told so on `error` and nothing else, as a gateway tells it.
 
 ```rust
 pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper)
@@ -1084,7 +1084,7 @@ pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mu
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
-| `filter` | `&ExecutionFilter` | Execution filter (client_id, acct_code, time, symbol, sec_type, exchange, side). |
+| `filter` | `&ExecutionFilter` | Execution filter (client_id, acct_code, time, symbol, sec_type, exchange, side, last_n_days, specific_dates). |
 | `wrapper` | `&mut impl Wrapper` | Wrapper callback receiver for synchronous delivery. |
 
 ---
@@ -2431,7 +2431,7 @@ pub fn req_family_codes(&self, wrapper: &mut impl Wrapper)
 
 #### `set_server_log_level`
 
-Set server log level. 1 to 5 set this client's logger to error, warn, info, debug and trace. A gateway applies the level to its own log; this client, which serves the caller in its place, applies it to the logger it installed. Nothing goes to the venue, which has no message for it. Where the program installed a logger of its own, that logger's level is the program's, and the call says so on the error callback rather than reporting a level it did not set. A level outside 1 to 5 is refused the same way.
+Set server log level. 1 to 5 are a gateway's System, Error, Warning, Info and Detail, and set this client's logger to error, error, warn, info and trace. A gateway applies the level to its own log; this client, which serves the caller in its place, applies it to the logger it installed. Nothing goes to the venue, which has no message for it. Where the program installed a logger of its own, that logger's level is the program's, and the call says so on the error callback rather than reporting a level it did not set. A level outside 1 to 5 is refused the same way.
 
 ```rust
 pub fn set_server_log_level(&self, log_level: i32)
@@ -2439,7 +2439,7 @@ pub fn set_server_log_level(&self, log_level: i32)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `log_level` | `i32` | Log level: 1=error, 2=warn, 3=info, 4=debug, 5=trace. |
+| `log_level` | `i32` | A gateway's level: 1=System, 2=Error, 3=Warning, 4=Info, 5=Detail; this client's logger goes to error, error, warn, info and trace. |
 
 ---
 
@@ -3472,7 +3472,7 @@ What a subscription was given: the increment its prices move in, which venues it
 | `ticker_id` | `i64` | Ticker/request ID. |
 | `min_tick` | `f64` | Minimum tick size. |
 | `bbo_exchange` | `&str` | BBO exchange for smart component lookup (e.g. `"SMART"`). |
-| `snapshot_permissions` | `i64` | Snapshot permissions bitmask. |
+| `snapshot_permissions` | `i64` | What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. |
 
 ---
 

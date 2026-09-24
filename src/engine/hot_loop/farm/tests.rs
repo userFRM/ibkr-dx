@@ -4673,7 +4673,60 @@ mod depth_position_tests {
             .expect("the quote's own request");
         let ack = format!("35=Q\x01777,{quote},0.01");
         farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
-        assert_eq!(shared.market.drain_tick_req_params(), vec![(instrument, 0.01)]);
+        assert_eq!(
+            shared.market.drain_tick_req_params(),
+            vec![(instrument, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() })],
+        );
+    }
+
+    /// A subscription is acknowledged in nine fields, the fifth the permission
+    /// the venue gives the request and the sixth the exchange its best bid and
+    /// offer come from. Both go to the caller as a gateway hands them on, the
+    /// exchange with the contract's security type appended, rather than as
+    /// nothing and nought — which read the same for a contract the account is
+    /// not entitled to and one with nothing to say.
+    #[test]
+    fn an_acknowledgement_states_the_permission_and_the_exchange() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(756733);
+        context.market.set_routing(instrument, "STK", "SMART");
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            false, &mut None, &mut hb,
+        );
+        let quote = farm.md_req_to_instrument.iter()
+            .map(|(id, _)| *id)
+            .find(|id| !farm.generic_tick_reqs.iter().any(|(g, _)| g == id))
+            .expect("the quote's own request");
+        let ack = format!("35=Q\x0133082,{quote},0.01,0,3,9c,,1,1");
+        farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        assert_eq!(
+            shared.market.drain_tick_req_params(),
+            vec![(instrument, crate::bridge::TickReqParams {
+                min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+            })],
+        );
+    }
+
+    /// Both are taken as a gateway takes them: a permission that is none of
+    /// its five numbers is nothing stated, an exchange longer than four
+    /// characters is handed on alone, and neither is trimmed.
+    #[test]
+    fn an_acknowledgement_is_read_as_a_gateway_reads_it() {
+        let read = |ack: &str| {
+            let parts: Vec<&str> = ack.split(',').collect();
+            let p = stated_request_params(&parts, 0.01, "STK");
+            (p.snapshot_permissions, p.bbo_exchange)
+        };
+        assert_eq!(read("33082,7,0.01,0,4,SMART,,1,1"), (4, "SMART".to_string()));
+        assert_eq!(read("33082,7,0.01,0,7,9c,,1,1"), (0, "9c0001".to_string()), "seven is no permission");
+        assert_eq!(read("33082,7,0.01,0,-1,9c,,1,1"), (0, "9c0001".to_string()));
+        assert_eq!(read("33082,7,0.01,0, 3, 9c,,1,1"), (0, " 9c0001".to_string()), "as written");
+        assert_eq!(read("33082,7,0.01,0,3,,,1,1"), (3, String::new()), "no exchange, nothing appended");
+        assert_eq!(read("33082,7,0.01,0,3"), (0, String::new()), "five fields state neither");
     }
 
 }

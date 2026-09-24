@@ -34,20 +34,102 @@ def test_the_level_is_the_newest_gate_carried_and_none_before_a_session():
     assert c.serverVersion() is None
 
 
-def test_a_window_in_days_or_dates_is_refused_not_dropped():
-    w = _Recorder()
+def test_the_levels_named_above_it_are_levels_a_gateway_has():
+    """A gateway announces nothing above 225, so a feature said to be absent
+    at a level above that names a level there is not."""
+    doc = ibkr_dx.EClient.server_version.__doc__
+    assert "(226)" not in doc, doc
+    assert "225 is the highest level a gateway announces" in " ".join(doc.split()), doc
+
+
+class _Seen(_Recorder):
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def execDetails(self, reqId, contract, execution):
+        self.seen.append((reqId, execution.execId))
+
+
+def _on_utc(monkeypatch, w):
+    """A session counting days on UTC, whatever the process was told: the
+    zone is a setting this client publishes, and one set around the suite
+    would move the days these tests count."""
+    monkeypatch.delenv("IBKR_DX_TZ", raising=False)
     c = ibkr_dx.EClient(w)
     c._test_connect()
+    return c
+
+
+def test_a_window_in_days_or_dates_is_applied(monkeypatch):
+    """Days are selected as a gateway selects them, counted on the session's
+    clock, which is UTC unless the session names another."""
+    import datetime
+
+    w = _Seen()
+    c = _on_utc(monkeypatch, w)
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    stamp = lambda back: (today - datetime.timedelta(days=back)).strftime("%Y%m%d") + "-00:00:01"
+    for back in (0, 2, 5):
+        c._test_store_execution(f"back{back}", stamp(back))
 
     stated = ibkr_dx.ExecutionFilter()
     stated.lastNDays = 3
     c.reqExecutions(1, stated)
-    assert [e for e in w.errors if e[0] == 1 and e[1] == 321 and "lastNDays" in e[2]], w.errors
 
     dated = ibkr_dx.ExecutionFilter()
-    dated.specificDates = ["20260901"]
+    dated.specificDates = [int((today - datetime.timedelta(days=5)).strftime("%Y%m%d"))]
     c.reqExecutions(2, dated)
-    assert [e for e in w.errors if e[0] == 2 and e[1] == 321], w.errors
+    c._test_dispatch_once()
+
+    assert not w.errors, w.errors
+    assert sorted(w.seen) == [(1, "back0"), (1, "back2"), (2, "back5")], w.seen
+    assert w.ended == [1, 2]
+
+
+def test_a_date_a_gateway_cannot_read_refuses_the_request(monkeypatch):
+    """A gateway reads each date as a whole number and then as a day of the
+    calendar, and refuses the request where either fails (320). Dropped
+    instead, the request asked for no window and was answered with every
+    execution held."""
+    w = _Seen()
+    c = _on_utc(monkeypatch, w)
+    c._test_store_execution("held", "20260101-00:00:01")
+    for req_id, dates in ((1, [20260231]), (2, ["2026-09-19"]), (3, [None])):
+        f = ibkr_dx.ExecutionFilter()
+        f.specificDates = dates
+        c.reqExecutions(req_id, f)
+    c._test_dispatch_once()
+    assert [(r, code) for r, code, _ in w.errors] == [(1, 320), (2, 320), (3, 320)], w.errors
+    assert "for input string: '2026-09-19'" in w.errors[1][2], w.errors
+    assert w.seen == [], "nothing answered for a refused request"
+    assert w.ended == [1, 2, 3], "and each still ends, as every refusal on this surface does"
+
+
+def test_dates_are_taken_as_the_reference_writes_them(monkeypatch):
+    """Whatever the dates are held in is written out one by one, as the
+    reference writes them; and a date named twice is one day, as a gateway
+    keeps them."""
+    import datetime
+
+    w = _Seen()
+    c = _on_utc(monkeypatch, w)
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    ymd = lambda back: int((today - datetime.timedelta(days=back)).strftime("%Y%m%d"))
+    stamp = lambda back: (today - datetime.timedelta(days=back)).strftime("%Y%m%d") + "-00:00:01"
+    for back in (0, 2):
+        c._test_store_execution(f"back{back}", stamp(back))
+
+    in_a_set = ibkr_dx.ExecutionFilter()
+    in_a_set.specificDates = {ymd(2)}
+    c.reqExecutions(1, in_a_set)
+    twice = ibkr_dx.ExecutionFilter()
+    twice.specificDates = [ymd(0), str(ymd(0))]
+    c.reqExecutions(2, twice)
+    c._test_dispatch_once()
+
+    assert not w.errors, w.errors
+    assert sorted(w.seen) == [(1, "back2"), (2, "back0"), (2, "back2")], w.seen
 
 
 def test_the_reference_defaults_pass_through():

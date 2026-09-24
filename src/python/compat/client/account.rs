@@ -31,14 +31,26 @@ impl EClient {
     }
 }
 
+impl EClient {
+    /// The account a P&L request names, checked as the other surface checks
+    /// it.
+    fn check_pnl_account(&self, account: &str) -> Result<(), Refusal> {
+        let accounts = self.accounts.lock().unwrap().clone();
+        let shared = self.shared_state().map_err(|e| Refusal::not_connected(e.to_string()))?;
+        crate::client_core::ClientCore::check_pnl_account(&shared, &accounts, &self.account(), account)
+            .inspect_err(|why| log::warn!("{}", why.message))
+    }
+}
+
 #[pymethods]
 impl EClient {
     /// Request P&L updates for the account.
     ///
-    /// `model_code` is taken and not applied. One session holds one account
-    /// here, and the venue states its figures for that account without being
-    /// asked which, so there is no model portfolio to name. Another account is
-    /// refused rather than answered with this account's profit.
+    /// `account` is required, as a gateway requires it, and one the login
+    /// does not hold is refused in its words. Another account the login holds
+    /// is refused too, rather than answered with this account's profit.
+    /// `model_code` is taken and not applied: there is no model portfolio to
+    /// name here.
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         // The session before the slot: taken first, a refused request held
@@ -56,14 +68,8 @@ impl EClient {
         //
         // Refused before the slot for the reason above it: a request that will
         // not be reported must not hold the one subscription there is.
-        if !account.is_empty() && account != self.account() {
-            let why = format!(
-                "account {account} was named and this session opened under {}, \
-                 whose profit is not what was asked for",
-                self.account(),
-            );
-            log::warn!("{why}");
-            return self.report_refusal(py, req_id, Refusal::validation(why));
+        if let Err(why) = self.check_pnl_account(account) {
+            return self.report_refusal(py, req_id, why);
         }
         // Refused while another request holds the subscription, and nothing
         // is asked of the venue for a request that will not be reported.
@@ -102,21 +108,13 @@ impl EClient {
 
     /// Request P&L for a single position.
     ///
-    /// `model_code` is taken and not applied. One session holds one account
-    /// here, and the venue states its figures for that account without being
-    /// asked which, so there is no model portfolio to name; another account is
-    /// refused here as `req_pnl` refuses it, and for the reason given there.
+    /// `account` is checked as `req_pnl` checks it, and for the reasons given
+    /// there; `model_code` is taken and not applied.
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        if !account.is_empty() && account != self.account() {
-            let why = format!(
-                "account {account} was named and this session opened under {}, \
-                 whose profit is not what was asked for",
-                self.account(),
-            );
-            log::warn!("{why}");
-            return self.report_refusal(py, req_id, Refusal::validation(why));
+        if let Err(why) = self.check_pnl_account(account) {
+            return self.report_refusal(py, req_id, why);
         }
         self.core.subscribe_pnl_single(req_id, con_id);
         let _ = model_code;
@@ -133,18 +131,31 @@ impl EClient {
 
     /// Request account summary.
     ///
-    /// `group_name` is taken and not applied. One session holds one account
-    /// here, and the venue states its figures for that account without being
-    /// asked which, so there is no second account or model portfolio to name.
+    /// `group_name` is checked as a gateway checks it, and refused in its
+    /// words: an empty one, and on a login that is not an advisor's anything
+    /// but `All` or `AllNonProp`; `All` where the venue says the login may not
+    /// ask for it. Empty `tags` are refused the same way. What is answered is
+    /// the account this session opened under: on a login holding several,
+    /// `All` is answered for that one account, and the caller is told so on
+    /// `error` under 321 ahead of the answer.
+    ///
+    /// Two summaries may be open at once, as on a gateway; a third is refused
+    /// under 322.
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, py: Python<'_>, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        // Refused while another request holds the subscription, as for
-        // `req_pnl`, and said to the caller rather than silently taking it.
-        if let Err(why) = self.core.subscribe_account_summary(req_id, tags) {
+        let shared = self.shared_state()?;
+        let checked = crate::client_core::ClientCore::check_account_summary(&shared, group_name, tags)
+            .and_then(|()| self.core.subscribe_account_summary(req_id, tags));
+        if let Err(why) = checked {
             return self.report_refusal(py, req_id, why);
         }
-        let _ = group_name;
+        if let Some(why) = crate::client_core::ClientCore::answered_for_the_session_account(
+            &shared, group_name, &self.account(),
+        ) {
+            log::warn!("{why}");
+            self.report_refusal(py, req_id, Refusal::validation(why))?;
+        }
         Ok(())
     }
 
@@ -272,17 +283,36 @@ impl EClient {
 
     /// Request account updates.
     ///
-    /// `acct_code` is taken and not applied. One session holds one account
-    /// here, and the venue states its figures for that account without being
-    /// asked which, so there is no second account or model portfolio to name.
+    /// `acct_code` is checked as a gateway checks it. On a login holding one
+    /// account it is ignored, as a gateway ignores it. On a login holding
+    /// several, a subscription naming none, or one the login does not hold, is
+    /// refused in a gateway's words. One it holds, or `All` where the login may
+    /// ask for every account, is answered with the figures of the account this
+    /// session opened under, which are the ones the venue states to it, and
+    /// the caller is told so on `error` under 321.
     ///
     /// Subscribing also asks the venue to state the figures now. It restates
     /// them on its own schedule otherwise, which is unhurried: a session that
     /// has just opened waits tens of seconds for its first set, and a caller
     /// that subscribed and then read the account got nothing.
-    #[pyo3(signature = (subscribe, _acct_code=""))]
-    fn req_account_updates(&self, py: Python<'_>, subscribe: bool, _acct_code: &str) -> PyResult<()> {
+    #[pyo3(signature = (subscribe, acct_code=""))]
+    fn req_account_updates(&self, py: Python<'_>, subscribe: bool, acct_code: &str) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        let accounts = self.accounts.lock().unwrap().clone();
+        let shared = self.shared_state()?;
+        if let Err(why) = crate::client_core::ClientCore::check_account_updates(
+            &shared, &accounts, subscribe, acct_code,
+        ) {
+            return self.report_refusal(py, -1, why);
+        }
+        if subscribe
+            && let Some(why) = crate::client_core::ClientCore::answered_for_the_session_account(
+                &shared, acct_code, &self.account(),
+            )
+        {
+            log::warn!("{why}");
+            self.report_refusal(py, -1, Refusal::validation(why))?;
+        }
         self.core.subscribe_account_updates(subscribe);
         if subscribe {
             let account = self.account();
@@ -308,9 +338,12 @@ impl EClient {
 
     /// Request account updates for multiple accounts/models.
     ///
-    /// `ledger_and_nlv` is taken and not applied. The account figures arrive as
-    /// the venue states them, and it states the ledger and the net liquidation
-    /// among them without being asked.
+    /// `ledger_and_nlv` restricts the answer to the per-currency ledger, as a
+    /// gateway does: each currency's cash, market values and
+    /// `NetLiquidationByCurrency`, which is the net liquidation it means. The
+    /// account's other figures — `NetLiquidation`, `BuyingPower` and the rest
+    /// — are not delivered on such a request.
+    ///
     /// The request is held open. A figure that moves after the first batch is
     /// reported again under the same number, until
     /// `cancelAccountUpdatesMulti` withdraws it — which is what the reference
@@ -325,7 +358,6 @@ impl EClient {
         // set the caller had to guard.
         let Some(_connected) = self.tx_or_report(req_id)? else { return Ok(()) };
         let shared = self.shared_state()?;
-        let _ = ledger_and_nlv;
         // The same wait the plain answer makes, on the flag that a dropped
         // connection actually clears: the one below it was stored once at the
         // first account message of the session and cleared nowhere, so the
@@ -359,7 +391,8 @@ impl EClient {
         // Held open from here. The reference client keeps this request alive
         // and reports each figure again as it moves; answered with one batch
         // and nothing after, a caller watching its balance sheet through it
-        // watched a still picture.
+        // watched a still picture. What it asked for is stated first.
+        self.core.ledger_only_for(req_id, ledger_and_nlv);
         self.account_updates_multi_requested.lock().unwrap().insert(req_id);
         // A model is a slice of the account; the figures below are the whole
         // of it. Echoed onto the label, every one of them read as that model's
@@ -400,6 +433,7 @@ impl EClient {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
         self.core.forget_account_figures_for(req_id);
+        self.core.ledger_only_for(req_id, false);
         Ok(())
     }
 
@@ -695,6 +729,9 @@ w = W()",
         Python::initialize();
         Python::attach(|py| {
             let (client, rx, wrapper) = wired_client(py);
+            // A login holding both, so what is refused is the account this
+            // session did not open under rather than one the login lacks.
+            *client.accounts.lock().unwrap() = vec!["DU123".into(), "DU999".into()];
 
             client.req_pnl(py, 7, "DU999", "").unwrap();
             assert!(rx.try_recv().is_err(), "the venue is asked nothing");
@@ -730,6 +767,31 @@ w = W()",
                 matches!(rx.try_recv(), Ok(ControlCommand::SubscribePnl { req_id: 9, .. })),
                 "the session's own account is asked for as before",
             );
+        });
+    }
+
+    /// No account, and one the login does not hold, are refused as a gateway
+    /// refuses them, in its words, and take nothing.
+    #[test]
+    fn a_profit_request_a_gateway_refuses_takes_nothing() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, rx, wrapper) = wired_client(py);
+            client.req_pnl(py, 7, "", "").unwrap();
+            client.req_pnl_single(py, 8, "DU555", "", 265_598).unwrap();
+            assert!(rx.try_recv().is_err(), "the venue is asked nothing");
+            assert_eq!(*client.core.pnl_req_id.lock().unwrap(), None);
+            assert!(client.core.pnl_single_reqs.lock().unwrap().is_empty());
+            let heard = wrapper.bind(py).getattr("calls").unwrap()
+                .extract::<Vec<(String, i64, i64, i64, String, String)>>().unwrap();
+            let refused: Vec<(i64, i64, String)> = heard.into_iter()
+                .filter(|(name, ..)| name == "error")
+                .map(|(_, req_id, _, code, message, _)| (req_id, code, message))
+                .collect();
+            assert_eq!(refused, vec![
+                (7, 321, "Account must not be empty".to_string()),
+                (8, 321, "Invalid account code".to_string()),
+            ]);
         });
     }
 }

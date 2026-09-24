@@ -157,15 +157,15 @@ pub(crate) fn handle_ledger_update(msg: &[u8], shared: &SharedState) {
         // per currency, and it is the first of them. A caller that asked for
         // the ledger and reads the rows by name has no other way to be told
         // which currency a bucket is in when it asked for all of them.
-        shared.portfolio.note_account_value("Currency", currency, currency);
+        shared.portfolio.note_ledger_value("Currency", currency, currency);
         if let Some(balance) = cash {
             // The insured deposit is part of what is held in cash unless the
             // session splits them, and it is stated apart either way.
             let held = balance + insured.filter(|d| d.is_finite()).unwrap_or(0.0);
-            shared.portfolio.note_account_value("CashBalance", &ledger_figure(held), currency);
+            shared.portfolio.note_ledger_value("CashBalance", &ledger_figure(held), currency);
         }
         for (name, value) in stated.drain(..) {
-            shared.portfolio.note_account_value(name, &value, currency);
+            shared.portfolio.note_ledger_value(name, &value, currency);
         }
     };
     for part in text.split('\x01') {

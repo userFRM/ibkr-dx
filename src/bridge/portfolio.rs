@@ -16,6 +16,12 @@ pub struct PortfolioState {
     /// many more than any client names, and a figure nobody named is still a
     /// figure about the account.
     stated_account_values: Mutex<Vec<(String, String, String)>>,
+    /// Which of those the per-currency ledger stated, by name and currency.
+    ///
+    /// A request that asks for the ledger alone is given these and no other.
+    /// A figure the ledger and the account's other messages both state stays a
+    /// ledger figure.
+    ledger_stated: Mutex<std::collections::HashSet<(String, String)>>,
     /// True once the CCP init burst has been fully processed.
     account_download_complete: AtomicBool,
     /// Position info (conId -> PositionInfo) for reqPositions and P&L.
@@ -65,6 +71,7 @@ impl PortfolioState {
         Self {
             account: Mutex::new(AccountState::default()),
             stated_account_values: Mutex::new(Vec::new()),
+            ledger_stated: Mutex::new(std::collections::HashSet::new()),
             account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
             awaiting_restatement: Mutex::new(std::collections::HashSet::new()),
@@ -143,9 +150,22 @@ impl PortfolioState {
         }
     }
 
+    /// Record a figure the per-currency ledger stated, as above, and that the
+    /// ledger stated it.
+    #[doc(hidden)]
+    pub fn note_ledger_value(&self, key: &str, value: &str, currency: &str) {
+        self.note_account_value(key, value, currency);
+        self.ledger_stated.lock().unwrap().insert((key.to_string(), currency.to_string()));
+    }
+
     /// Every figure the venue has stated about the account, as it stated them.
     pub fn stated_account_values(&self) -> Vec<(String, String, String)> {
         self.stated_account_values.lock().unwrap().clone()
+    }
+
+    /// The figures the per-currency ledger stated, by name and currency.
+    pub fn stated_by_the_ledger(&self) -> std::collections::HashSet<(String, String)> {
+        self.ledger_stated.lock().unwrap().clone()
     }
 
     /// Publish the account as this connection has stated it.

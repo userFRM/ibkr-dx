@@ -454,7 +454,8 @@ impl EClient {
 
     /// How much to log about this session, 1 to 5.
     ///
-    /// 1 to 5 set this client's logger to error, warn, info, debug and trace. A
+    /// 1 to 5 are a gateway's System, Error, Warning, Info and Detail, and set
+    /// this client's logger to error, error, warn, info and trace. A
     /// gateway applies the level to its own log; this client, which serves the
     /// caller in its place, applies it to the logger it installed. Nothing goes
     /// to the venue, which has no message for it. Where the program installed
@@ -465,12 +466,8 @@ impl EClient {
     #[pyo3(signature = (log_level=2))]
     fn set_server_log_level(&self, py: Python<'_>, log_level: i32) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        let level = match log_level {
-            1 => "error",
-            2 => "warn",
-            3 => "info",
-            4 => "debug",
-            5 => "trace",
+        let level = match crate::logging::gateway_level(log_level) {
+            Some(level) => level,
             _ => return self.report_refusal(py, -1, crate::error_codes::Refusal::stated(
                 crate::error_codes::LOG_LEVEL_INVALID,
                 format!("set_server_log_level: {log_level} is not a log level; it is 1 to 5"),
@@ -480,7 +477,7 @@ impl EClient {
         // goes to the venue: this protocol carries no message asking one to
         // change how loudly it talks, and a level a caller states is about the
         // thing serving that caller — which, in a library, is this.
-        if crate::logging::set_level(level) {
+        if crate::logging::set_level(level).is_ok() {
             log::info!("set_server_log_level: logging at {level} (level {log_level})");
             return Ok(());
         }

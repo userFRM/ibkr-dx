@@ -140,8 +140,11 @@ impl EClient {
 
     /// Create a fake "connected" EClient backed by a SharedState + channel.
     #[doc(hidden)]
-    #[pyo3(signature = (account_id="TEST123".to_string(), readonly=false, replay_done=true))]
-    fn _test_connect(&self, account_id: String, readonly: bool, replay_done: bool) -> PyResult<()> {
+    #[pyo3(signature = (account_id="TEST123".to_string(), readonly=false, replay_done=true, port=0, accounts=None))]
+    fn _test_connect(
+        &self, account_id: String, readonly: bool, replay_done: bool, port: i32,
+        accounts: Option<Vec<String>>,
+    ) -> PyResult<()> {
         self.core.set_readonly(readonly);
         // Claimed rather than read, as on the real connect: two callers
         // racing here both found it clear and both built a session.
@@ -180,6 +183,14 @@ impl EClient {
         *self._test_control_rx.lock().unwrap() = Some(rx);
         self.next_order_id.store(1000, Ordering::Relaxed);
         self.session_ended.store(false, Ordering::Release);
+        self.port.store(port, Ordering::Release);
+        let accounts = accounts.unwrap_or_default();
+        // What a logon names, which the checks on orders and on the account
+        // requests read, as they read it on a real session.
+        if let Some(shared) = self.shared.lock().unwrap().as_ref() {
+            shared.reference.set_login(accounts.clone(), false);
+        }
+        *self.accounts.lock().unwrap() = accounts;
         Ok(())
     }
 
@@ -347,6 +358,19 @@ impl EClient {
             );
         }
         Ok(())
+    }
+
+    /// Keep one execution as the session holds those the venue reported,
+    /// stamped as the venue stamps it.
+    #[doc(hidden)]
+    fn _test_store_execution(&self, exec_id: &str, time: &str) {
+        self.core.push_execution(
+            Default::default(),
+            crate::types::model::Execution {
+                exec_id: exec_id.to_string(), time: time.to_string(), ..Default::default()
+            },
+            Default::default(),
+        );
     }
 
     /// Push an order update into SharedState.
@@ -746,10 +770,17 @@ impl EClient {
     }
 
     /// State one account figure the way the venue states it, under its own
-    /// key and in its own currency.
+    /// key and in its own currency — on the per-currency ledger, where
+    /// `ledger` says so.
     #[doc(hidden)]
-    fn _test_note_account_value(&self, key: &str, value: &str, currency: &str) -> PyResult<()> {
-        self.shared_state()?.portfolio.note_account_value(key, value, currency);
+    #[pyo3(signature = (key, value, currency, ledger=false))]
+    fn _test_note_account_value(&self, key: &str, value: &str, currency: &str, ledger: bool) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        if ledger {
+            shared.portfolio.note_ledger_value(key, value, currency);
+        } else {
+            shared.portfolio.note_account_value(key, value, currency);
+        }
         Ok(())
     }
 

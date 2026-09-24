@@ -1121,6 +1121,18 @@ impl EClient {
     /// Request execution reports. Matches `reqExecutions` in C++.
     /// Replays stored executions (optionally filtered), firing `exec_details` +
     /// `commission_and_fees_report` for each, then `exec_details_end`.
+    ///
+    /// `last_n_days` and `specific_dates` select days as a gateway selects
+    /// them, counted on the session's time zone; a date that is not a day of
+    /// the calendar is refused under 320, as a gateway refuses it. The
+    /// executions answered from reach back to midnight six days before the
+    /// logon in UTC, or to the logon's own day for a session set to today's
+    /// executions, so the earliest days asked for can be missing some; those
+    /// days are named on `error` under 321 ahead of the answer, which still
+    /// comes. `acct_code` is ignored on a login holding one account and
+    /// refused on one holding several where the login does not hold it, as a
+    /// gateway does both. A refused request is told so on `error` and nothing
+    /// else, as a gateway tells it.
     pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper) {
         if let Some(why) = self.shared.reference.session_over() {
             return wrapper.error(req_id, Refusal::NOT_CONNECTED as i64, why, "");
@@ -1129,7 +1141,18 @@ impl EClient {
         // `executions`, and the dispatch thread pushes fills through the same
         // mutex — holding it across user code deadlocks one and stalls the
         // other.
-        for se in self.core.snapshot_executions(filter) {
+        let answer = self.core.executions_for_request(
+            &self.shared, &self.accounts, filter, jiff::Timestamp::now(),
+        );
+        let (rows, unheld) = match answer {
+            Ok(answer) => answer,
+            Err(why) => return wrapper.error(req_id, why.code as i64, &why.message, ""),
+        };
+        if let Some(why) = crate::client_core::ClientCore::unheld_days_notice(&unheld) {
+            log::warn!("{why}");
+            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
+        }
+        for se in rows {
             wrapper.exec_details(req_id, &se.contract, &se.execution);
             // Only where the venue has said what it cost. An execution is
             // stored with its charge deliberately unstated -- and every

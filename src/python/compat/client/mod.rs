@@ -148,6 +148,8 @@ pub struct EClient {
     /// It is kept because some calls are answered by client id: binding orders
     /// entered elsewhere is refused for any client id but 0.
     pub(crate) client_id: AtomicI32,
+    /// The port `connect` was given, kept as the reference client keeps it.
+    port: AtomicI32,
     /// The server this session connected to: the one it knocked on, which is
     /// the one the caller named. Held only while there is a session.
     pub(crate) auth_host: Mutex<Option<String>>,
@@ -339,6 +341,7 @@ impl EClient {
     fn __new__(_args: &Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>) -> Self {
         Self {
             client_id: AtomicI32::new(0),
+            port: AtomicI32::new(0),
             auth_host: Mutex::new(None),
             logged_in_at: Mutex::new(None),
             wrapper: RwLock::new(None),
@@ -443,8 +446,9 @@ impl EClient {
     /// not serialize across instances. If you pin engines via ``core_id``, give
     /// each a distinct value.
     ///
-    /// `port` is taken and not applied. The session connects to the venue
-    /// directly, so there is no local socket to name a port on.
+    /// `port` is kept and read back on `port`, as the reference client keeps
+    /// it. The session connects to the venue directly, so there is no local
+    /// socket for it to open.
     #[pyo3(signature = (host=crate::config::CCP_HOSTS[0].to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None, readonly=false, settings=None, session_file=None, *, clientId=None))]
     fn connect(
         &self,
@@ -659,7 +663,7 @@ impl EClient {
         self.connected.store(true, Ordering::Release);
         claim.kept = true;
 
-        let _ = port; // kept for the reference client's signature
+        self.port.store(port, Ordering::Release);
 
         self.announce_the_new_session(py, &shared)
     }
@@ -779,22 +783,30 @@ impl EClient {
         if self.is_connected() { self.auth_host.lock().unwrap().clone() } else { None }
     }
 
-    /// `None`: there is no port. The reference client's is the one its gateway
-    /// listens on for it. This session speaks to the venue's servers on the
-    /// ports the venue names, one per connection, and none of them is a number
-    /// the caller gave — `connect` takes one and does not apply it.
+    /// The port `connect` was given, and `None` when there is no session.
+    ///
+    /// Kept as the caller gave it, as the reference client keeps it. This
+    /// session speaks to the venue's servers on the ports the venue names, so
+    /// the number opens nothing; a program that reads it back gets what it
+    /// passed.
     #[getter]
     fn port(&self) -> Option<i32> {
-        None
+        // Held with the session, as `conn` is: the reference client clears
+        // both together, so a program never reads one without the other.
+        let held = self.shared.lock().unwrap().is_some();
+        held.then(|| self.port.load(Ordering::Acquire))
     }
 
-    /// `None`: there is no socket to hold. The reference client keeps the one
-    /// to its gateway here and shares it with its reader thread. This client's
-    /// connections are opened, read and kept alive inside its engine, and a
-    /// caller has no hand on any of them.
+    /// The client itself while a session is held, and `None` without one.
+    ///
+    /// The reference client keeps its connection here, and what a program
+    /// reads off it is `isConnected()`, `host` and `port` — which this client
+    /// answers, following the session. Its socket is not here: this client's
+    /// connections are opened, read and kept alive inside its engine.
     #[getter]
-    fn conn(&self) -> Option<Py<PyAny>> {
-        None
+    fn conn(slf: Bound<'_, Self>) -> Option<Bound<'_, Self>> {
+        let held = slf.get().shared.lock().unwrap().is_some();
+        held.then_some(slf)
     }
 
     /// `False`: there is no asynchronous mode. The reference client sets this
@@ -820,10 +832,12 @@ impl EClient {
     /// 217 is the newest gate whose feature is carried here. Above it,
     /// attached orders (218) are refused by name — a gateway builds them from
     /// the account's order preset, which this client does not hold — and the
-    /// configuration requests (219, 221) and `conditionsIncludeOvernight`
-    /// are absent. `hedgeMaxSize` (223) is taken and sent on a beta
-    /// hedge, as a gateway sends it; the number stays at 217 because a level
-    /// claims every one below it, and 218 is not carried.
+    /// configuration requests (219, 221), the last price and size stated to
+    /// their precision (222, 224) and odd-lot quotes (225) are absent.
+    /// `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway
+    /// sends it; the number stays at 217 because a level claims every one
+    /// below it, and 218 is not carried. 225 is the highest level a gateway
+    /// announces.
     ///
     /// Below it, a program that believes the number is wrong about the
     /// following, and every one fails loudly on use rather than quietly:
@@ -835,8 +849,7 @@ impl EClient {
     ///   four `verify*` calls (70), `cancelContractData` and
     ///   `cancelHistoricalTicks` (215).
     /// * A withdrawal stating a manual time, an operator or who entered it
-    ///   (169, 192), and an execution filter stating `lastNDays` or
-    ///   `specificDates` (200): refused by name on `error`.
+    ///   (169, 192): refused by name on `error`.
     /// Every other gate at or below 217 names a request, field or callback
     /// that is here and does what it does through a gateway.
     fn server_version(&self) -> Option<i32> {
@@ -1921,6 +1934,31 @@ w = W()",
         (Py::new(py, client).unwrap(), rx, shared, w)
     }
 
+    /// What a subscription was acknowledged with reaches `tickReqParams` as
+    /// the venue stated it: the exchange and the permission number, not
+    /// nothing and nought.
+    #[test]
+    fn tick_req_params_carries_the_stated_exchange_and_permission() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, w) = wired_client(py);
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            py.run(c"
+def tick_params(*args):
+    w.calls.append(('tickReqParams',) + args)
+w.tickReqParams = tick_params
+", Some(&g), None).unwrap();
+            shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams {
+                min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+            });
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"
+assert w.calls == [('tickReqParams', 7, 0.01, '9c0001', 3)], w.calls
+", Some(&g), None).unwrap();
+        });
+    }
+
     #[test]
     fn an_ordinary_callback_exception_escapes_and_closes_the_session() {
         Python::initialize();
@@ -1942,8 +1980,8 @@ def tick_params(req_id, *args):
     client.disconnect()
 w.tickReqParams = tick_params
 ", Some(&g), None).unwrap();
-                    shared.market.push_tick_req_params_for(7, 0.01);
-                    shared.market.push_tick_req_params_for(8, 0.02);
+                    shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
+                    shared.market.push_tick_req_params_for(8, crate::bridge::TickReqParams { min_tick: 0.02, ..Default::default() });
 
                     let err = client.call_method0(py, method).expect_err("the callback raises");
                     assert!(err.value(py).is(g.get_item("failure").unwrap().unwrap()));
@@ -1978,8 +2016,8 @@ def tick_params(req_id, *args):
     raise failure
 w.tickReqParams = tick_params
 ", Some(&g), None).unwrap();
-                    shared.market.push_tick_req_params_for(7, 0.01);
-                    shared.market.push_tick_req_params_for(8, 0.02);
+                    shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
+                    shared.market.push_tick_req_params_for(8, crate::bridge::TickReqParams { min_tick: 0.02, ..Default::default() });
 
                     let err = client.call_method0(py, method).unwrap_err();
                     assert!(err.value(py).is(g.get_item("failure").unwrap().unwrap()));
@@ -3217,7 +3255,7 @@ setattr(w, boundary, replace_session)
                 if boundary == "managedAccounts" {
                     client.call_method0(py, "req_managed_accts").unwrap();
                 } else {
-                    client.get().shared_state().unwrap().market.push_tick_req_params_for(1, 0.01);
+                    client.get().shared_state().unwrap().market.push_tick_req_params_for(1, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
                 }
                 client.call_method0(py, "poll").unwrap();
                 assert_eq!(client.get().core.watching(9), Some(0), "the callback installs the new subscription");
@@ -3318,7 +3356,7 @@ def managed(accounts):
 w.managedAccounts = managed
 client.req_managed_accts()
 ", Some(&g), None).unwrap();
-            shared.market.push_tick_req_params_for(7, 0.01);
+            shared.market.push_tick_req_params_for(7, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
             for expected in 1..=4 {
                 client.call_method0(py, "poll").unwrap();
                 assert_eq!(g.get_item("answers").unwrap().unwrap().len().unwrap(), expected,

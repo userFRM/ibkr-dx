@@ -21,6 +21,22 @@ pub const NEWS_BULLETIN_LIMIT: usize = 1000;
 /// reading, which is the lesser of the two.
 pub const STREAM_BACKLOG_LIMIT: usize = 100_000;
 
+/// What a subscription's acknowledgement states for the request, as a
+/// gateway hands it on `tickReqParams`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TickReqParams {
+    /// The increment prices move in.
+    pub min_tick: f64,
+    /// The exchange the best bid and offer are taken from, with the contract's
+    /// security type appended as four hex digits where the name is four
+    /// characters or fewer, as a gateway writes it.
+    pub bbo_exchange: String,
+    /// What the venue says this request may be given: 0 nothing stated, 1 no
+    /// top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not
+    /// available through the API.
+    pub snapshot_permissions: i64,
+}
+
 /// This machine's clock, in unix milliseconds.
 fn local_millis() -> i64 {
     std::time::SystemTime::now()
@@ -141,13 +157,13 @@ pub struct MarketDataState {
     /// fresh subscription is sent anew rather than deduped against a claim the
     /// venue already declined. Keyed by con_id, as the client keys its askers.
     news_rejections: Mutex<Vec<i64>>,
-    /// The increment each subscription was acknowledged with, for whoever
-    /// watches the contract.
-    tick_req_params: Mutex<Vec<(crate::types::InstrumentId, f64)>>,
-    /// The last minimum increment announced for an instrument, so a request
+    /// What each subscription was acknowledged with, for whoever watches the
+    /// contract.
+    tick_req_params: Mutex<Vec<(crate::types::InstrumentId, TickReqParams)>>,
+    /// What the last acknowledgement for an instrument stated, so a request
     /// that follows an existing subscription can be told it too: the venue
     /// sends one tickReqParams per reqMktData, and a follower asked for none.
-    last_min_tick: Mutex<std::collections::HashMap<crate::types::InstrumentId, f64>>,
+    last_tick_req_params: Mutex<std::collections::HashMap<crate::types::InstrumentId, TickReqParams>>,
     /// Why the venue refused a contract's subscription, kept for whoever asks
     /// for it next. The failure itself is drained once and told to whoever
     /// held it then; a request that joins the same contract afterwards was
@@ -166,7 +182,7 @@ pub struct MarketDataState {
     market_data_over: Mutex<Option<&'static str>>,
     /// tickReqParams owed to a single request that followed a live
     /// subscription, delivered to that request alone rather than fanned.
-    tick_req_params_direct: Mutex<Vec<(i64, f64)>>,
+    tick_req_params_direct: Mutex<Vec<(i64, TickReqParams)>>,
     /// Lookups that named a contract another slot already holds: the slot the
     /// caller was given, and the one the contract lives in.
     subscription_moves: Mutex<Vec<(crate::types::InstrumentId, crate::types::InstrumentId, u64)>>,
@@ -252,7 +268,7 @@ impl MarketDataState {
             companion_refusals: Mutex::new(Vec::new()),
             news_rejections: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
-            last_min_tick: Mutex::new(std::collections::HashMap::new()),
+            last_tick_req_params: Mutex::new(std::collections::HashMap::new()),
             last_subscription_failure: Mutex::new(std::collections::HashMap::new()),
             subscription_failures_direct: Mutex::new(Vec::new()),
             market_data_over: Mutex::new(None),
@@ -301,7 +317,7 @@ impl MarketDataState {
         &self, instrument: crate::types::InstrumentId, released_at: u64,
     ) {
         self.released_slots.lock().unwrap().push((instrument, released_at));
-        self.last_min_tick.lock().unwrap().remove(&instrument);
+        self.last_tick_req_params.lock().unwrap().remove(&instrument);
         self.last_subscription_failure.lock().unwrap().remove(&instrument);
         // And what is still queued under it, not only what is cached. Both of
         // these name a slot rather than a contract, so the next contract to
@@ -596,34 +612,35 @@ impl MarketDataState {
         self.news_rejections.lock().unwrap().push(con_id);
     }
 
-    /// The increment a subscription was acknowledged with, kept for whoever
-    /// watches the contract. Engine side.
-    #[doc(hidden)] pub fn push_tick_req_params(&self, instrument: crate::types::InstrumentId, min_tick: f64) {
+    /// What a subscription was acknowledged with, kept for whoever watches
+    /// the contract. Engine side.
+    #[doc(hidden)] pub fn push_tick_req_params(&self, instrument: crate::types::InstrumentId, params: TickReqParams) {
         // A follower joining after dispatch takes the acknowledgement reads
         // this cache, so it is ready before the acknowledgement can be read.
-        self.last_min_tick.lock().unwrap().insert(instrument, min_tick);
-        self.tick_req_params.lock().unwrap().push((instrument, min_tick));
+        self.last_tick_req_params.lock().unwrap().insert(instrument, params.clone());
+        self.tick_req_params.lock().unwrap().push((instrument, params));
     }
 
-    /// The increment a follower should be told, if the subscription it follows
-    /// was already acknowledged. `None` before that — the pending tickReqParams
+    /// What a follower should be told, if the subscription it follows was
+    /// already acknowledged. `None` before that — the pending tickReqParams
     /// fans out to the follower when it arrives.
-    pub fn min_tick_for_follower(&self, instrument: crate::types::InstrumentId) -> Option<f64> {
-        self.last_min_tick.lock().unwrap().get(&instrument).copied()
+    pub fn tick_req_params_for_follower(&self, instrument: crate::types::InstrumentId) -> Option<TickReqParams> {
+        self.last_tick_req_params.lock().unwrap().get(&instrument).cloned()
     }
 
     /// tickReqParams owed to one request that followed a live subscription.
-    #[doc(hidden)] pub fn push_tick_req_params_for(&self, req_id: i64, min_tick: f64) {
-        self.tick_req_params_direct.lock().unwrap().push((req_id, min_tick));
+    #[doc(hidden)] pub fn push_tick_req_params_for(&self, req_id: i64, params: TickReqParams) {
+        self.tick_req_params_direct.lock().unwrap().push((req_id, params));
     }
 
     /// Take those, in the order they came. Client side.
-    pub fn drain_tick_req_params_direct(&self) -> Vec<(i64, f64)> {
+    pub fn drain_tick_req_params_direct(&self) -> Vec<(i64, TickReqParams)> {
         self.tick_req_params_direct.lock().unwrap().drain(..).collect()
     }
 
-    /// Take the acknowledged increments, in the order they came. Client side.
-    pub fn drain_tick_req_params(&self) -> Vec<(crate::types::InstrumentId, f64)> {
+    /// Take what the subscriptions were acknowledged with, in the order it
+    /// came. Client side.
+    pub fn drain_tick_req_params(&self) -> Vec<(crate::types::InstrumentId, TickReqParams)> {
         self.tick_req_params.lock().unwrap().drain(..).collect()
     }
 
@@ -1334,6 +1351,10 @@ impl MarketDataState {
 mod follower_tick_req_params_tests {
     use super::*;
 
+    fn tick(min_tick: f64) -> TickReqParams {
+        TickReqParams { min_tick, ..Default::default() }
+    }
+
     /// A request that follows a live subscription is owed the increment that
     /// subscription was acknowledged with — the venue sends one tickReqParams
     /// per reqMktData, and a follower asked for none. Cleared when the slot is
@@ -1343,17 +1364,17 @@ mod follower_tick_req_params_tests {
         let m = MarketDataState::new();
         let instrument = 5;
 
-        assert_eq!(m.min_tick_for_follower(instrument), None, "none before the acknowledgement");
-        m.push_tick_req_params(instrument, 0.01);
-        assert_eq!(m.min_tick_for_follower(instrument), Some(0.01), "cached from the acknowledgement");
+        assert_eq!(m.tick_req_params_for_follower(instrument), None, "none before the acknowledgement");
+        m.push_tick_req_params(instrument, tick(0.01));
+        assert_eq!(m.tick_req_params_for_follower(instrument), Some(tick(0.01)), "cached from the acknowledgement");
 
         // The follower is owed it, delivered to that request alone.
-        m.push_tick_req_params_for(2, 0.01);
-        assert_eq!(m.drain_tick_req_params_direct(), vec![(2, 0.01)]);
+        m.push_tick_req_params_for(2, tick(0.01));
+        assert_eq!(m.drain_tick_req_params_direct(), vec![(2, tick(0.01))]);
         assert!(m.drain_tick_req_params_direct().is_empty(), "taken once");
 
         m.note_released_slot(instrument, u64::MAX);
-        assert_eq!(m.min_tick_for_follower(instrument), None, "cleared when the slot is given back");
+        assert_eq!(m.tick_req_params_for_follower(instrument), None, "cleared when the slot is given back");
     }
 
     /// Publishing waits for the follower's copy to be ready, so a follower
@@ -1363,10 +1384,10 @@ mod follower_tick_req_params_tests {
         let market = MarketDataState::new();
         let queued = market.tick_req_params.lock().unwrap();
         std::thread::scope(|scope| {
-            let writer = scope.spawn(|| market.push_tick_req_params(5, 0.025));
+            let writer = scope.spawn(|| market.push_tick_req_params(5, tick(0.025)));
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
             let cached = loop {
-                let cached = market.min_tick_for_follower(5);
+                let cached = market.tick_req_params_for_follower(5);
                 if cached.is_some() || std::time::Instant::now() >= deadline {
                     break cached;
                 }
@@ -1375,10 +1396,10 @@ mod follower_tick_req_params_tests {
             assert!(queued.is_empty());
             drop(queued);
             writer.join().unwrap();
-            assert_eq!(cached, Some(0.025), "publication cannot precede the follower's copy");
+            assert_eq!(cached, Some(tick(0.025)), "publication cannot precede the follower's copy");
         });
-        assert_eq!(market.drain_tick_req_params(), vec![(5, 0.025)]);
-        assert_eq!(market.min_tick_for_follower(5), Some(0.025));
+        assert_eq!(market.drain_tick_req_params(), vec![(5, tick(0.025))]);
+        assert_eq!(market.tick_req_params_for_follower(5), Some(tick(0.025)));
     }
 }
 

@@ -169,6 +169,10 @@ pub struct ReferenceState {
     /// The accounts the logon names as the login's own, and whether the login
     /// is an advisor's (logon tag 6108).
     login: Mutex<(Vec<String>, bool)>,
+    /// Whether the logon named accounts `AllNonProp` leaves out.
+    all_non_prop_leaves_out: AtomicBool,
+    /// Where the executions the session opened with start, in unix seconds.
+    executions_held_from: Mutex<Option<i64>>,
     /// Whether the venue granted the older spelling of Nasdaq. Settled when
     /// the grants are, because a contract definition is parsed under it and a
     /// lock and a scan per definition is not what that path is for.
@@ -250,6 +254,8 @@ impl ReferenceState {
             order_permissions: Mutex::new(HashMap::new()),
             enabled_features: Mutex::new(Vec::new()),
             login: Mutex::new((Vec::new(), false)),
+            all_non_prop_leaves_out: AtomicBool::new(false),
+            executions_held_from: Mutex::new(None),
             island_granted: AtomicBool::new(false),
             algorithms: Mutex::new(HashMap::new()),
             order_presets: Mutex::new(Vec::new()),
@@ -1196,6 +1202,34 @@ impl ReferenceState {
     /// left out, and whether the login is an advisor's.
     pub fn login(&self) -> (Vec<String>, bool) {
         self.login.lock().unwrap().clone()
+    }
+
+    /// Whether the logon stated this login is an advisor's.
+    pub fn advisor(&self) -> bool {
+        self.login.lock().unwrap().1
+    }
+
+    #[doc(hidden)] pub fn set_advisor(&self, advisor: bool) {
+        self.login.lock().unwrap().1 = advisor;
+    }
+
+    /// Whether the logon named accounts `AllNonProp` leaves out.
+    pub fn all_non_prop_leaves_out(&self) -> bool {
+        self.all_non_prop_leaves_out.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)] pub fn set_all_non_prop_leaves_out(&self, named: bool) {
+        self.all_non_prop_leaves_out.store(named, Ordering::Relaxed);
+    }
+
+    /// Where the executions the session opened with start, in unix seconds:
+    /// what it holds reaches back that far. `None` before a logon states it.
+    pub fn executions_held_from(&self) -> Option<i64> {
+        *self.executions_held_from.lock().unwrap()
+    }
+
+    #[doc(hidden)] pub fn set_executions_held_from(&self, from: Option<i64>) {
+        *self.executions_held_from.lock().unwrap() = from;
     }
 
     /// Which algorithms the venue offers, keyed `PROVIDER/SECTYPE`.

@@ -46,6 +46,10 @@ use hmds::HmdsState;
 const CCP_HEARTBEAT_SECS: u64 = crate::config::CCP_HEARTBEAT;
 /// Farm heartbeat interval — single source in config.
 const FARM_HEARTBEAT_SECS: u64 = crate::config::FARM_HEARTBEAT;
+/// How long a stop waits for the trading connection's recovery to end: the
+/// five seconds a gateway gives a connection's thread it is stopping before it
+/// goes on without it.
+const WORKER_STOP_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 /// Liveness, aligned with the gateway's transport thresholds:
 /// send a test request when nothing has been received for this long..
 pub const LIVENESS_TEST_SECS: u64 = 15;
@@ -193,6 +197,9 @@ pub struct HotLoop {
     /// between the phases of a handshake, so neither opens a session at the
     /// venue after the client stopped asking for one.
     reconnect_cancel: Arc<AtomicBool>,
+    /// The socket the trading connection's attempt has open, so a stop can
+    /// close it rather than wait out the read it is blocked in.
+    ccp_in_flight: Arc<crate::gateway::InFlight>,
     /// Held so the loop can say its workers have finished before it returns:
     /// a reconnect spawned detached kept dialling and authenticating after
     /// the shutdown that orphaned it.
@@ -476,6 +483,7 @@ impl HotLoop {
             farm_budget: crate::reliability::RecoveryBudget::new(),
             secdef_budget: crate::reliability::RecoveryBudget::new(),
             reconnect_cancel: Arc::new(AtomicBool::new(false)),
+            ccp_in_flight: Arc::default(),
             reconnect_workers: Vec::new(),
         }
     }
@@ -1214,23 +1222,61 @@ impl HotLoop {
     /// resolving, connecting and authenticating after the engine had
     /// announced its death.
     fn take_back_the_recovery_still_in_flight(&mut self) {
-        self.reconnect_cancel.store(true, Ordering::Relaxed);
+        self.cancel_recovery();
         // Only the trading connection's worker is waited for: its landed
         // session must be logged out below. The others close their socket
         // when the receiver they would hand it to is gone, and waiting on one
         // held the healthy trading connection unread and unheartbeated for
         // the length of a dial.
+        //
+        // Waited for within the bound a gateway gives a connection's thread
+        // it is stopping. What the closed socket cannot cut short is a dial
+        // not yet connected — the name being resolved, the socket being
+        // opened — which reads the flag as soon as its socket exists, and a
+        // logon already written, which is let finish so that it can be told
+        // goodbye.
+        let mut left_running = false;
         for (trading, worker) in self.reconnect_workers.drain(..) {
             if trading {
-                let _ = worker.join();
+                let bound = Instant::now() + WORKER_STOP_BOUND;
+                while !worker.is_finished() && Instant::now() < bound {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                if worker.is_finished() {
+                    let _ = worker.join();
+                } else {
+                    log::warn!(
+                        "the trading connection's recovery did not stop within {:?}; a \
+                         session it opens from here is told goodbye as it lands",
+                        WORKER_STOP_BOUND,
+                    );
+                    left_running = true;
+                }
             }
         }
-        if let Some(rx) = self.pending_ccp_reconnect.take()
-            && let Ok(Ok(conn)) = rx.try_recv()
-        {
-            log::warn!("a trading session opened after the stop — saying so before it goes");
-            let mut landed_too_late = Some(conn);
-            self.ccp.send_logout(&mut landed_too_late, &mut self.hb);
+        if let Some(rx) = self.pending_ccp_reconnect.take() {
+            match rx.try_recv() {
+                Ok(Ok(conn)) => {
+                    log::warn!("a trading session opened after the stop — saying so before it goes");
+                    let mut landed_too_late = Some(conn);
+                    self.ccp.send_logout(&mut landed_too_late, &mut self.hb);
+                }
+                // Still on its way. A worker still dialling ends as taken
+                // back; one past the logon lands a session, which is waited for
+                // off this thread and told goodbye there. Dropped here, it
+                // would go in silence, and the venue has to time it out.
+                Err(std::sync::mpsc::TryRecvError::Empty) if left_running => {
+                    let _ = std::thread::Builder::new()
+                        .name("ccp-reconnect-goodbye".into())
+                        .spawn(move || {
+                            if let Ok(Ok(mut conn)) = rx.recv() {
+                                log::warn!("a trading session opened after the stop — saying so before it goes");
+                                let _ = ccp::say_goodbye(&mut conn);
+                            }
+                        });
+                }
+                _ => {}
+            }
         }
         self.pending_farm_reconnect = None;
         self.pending_hmds_reconnect = None;
@@ -2460,7 +2506,7 @@ impl HotLoop {
                     // through all of that and could pass the last of its own
                     // checks meanwhile, which is a session opened at the venue
                     // after the caller asked for the one it had to end.
-                    self.reconnect_cancel.store(true, Ordering::Relaxed);
+                    self.cancel_recovery();
                     // Orders handed over before the stop go out before it.
                     // They are drained at the top of a lap and this arm runs
                     // further down one, so an order batched with the stop was
@@ -2976,6 +3022,21 @@ impl HotLoop {
         }
     }
 
+    /// Tell every recovery in flight it is taken back, and close the socket the
+    /// trading connection's attempt is blocked on, as a gateway closes a
+    /// connection it is stopping.
+    ///
+    /// The flag is read between the phases of a handshake, and a worker inside
+    /// one is blocked on its socket until the read's timeout — up to twenty
+    /// seconds of dialling, authenticating and asking for a second factor
+    /// after the caller stopped asking for any of it. Closed, the read returns
+    /// now. A logon already written is not cut short: the attempt holds its
+    /// socket only until then, and what it lands is told goodbye.
+    fn cancel_recovery(&self) {
+        self.reconnect_cancel.store(true, Ordering::Relaxed);
+        self.ccp_in_flight.close();
+    }
+
     /// Keep a reconnect worker so the loop can wait for it, and let go of the
     /// ones that have already finished.
     ///
@@ -3009,7 +3070,7 @@ impl HotLoop {
     /// one; the Python surface folds only the events one dispatch drains, and
     /// a dispatch between the two announced connectivity lost a second time.
     fn halt_recovery(&mut self, reason: retry::DisconnectReason) {
-        self.reconnect_cancel.store(true, Ordering::Relaxed);
+        self.cancel_recovery();
         if self.reconnect_halted.is_some() {
             return;
         }
@@ -3047,7 +3108,9 @@ impl HotLoop {
     /// For the halts raised from inside the loop. A worker reads the flag
     /// between the phases of a handshake, and one past the last of those
     /// reads is inside a dial, a key exchange or a logon poll, each bounded
-    /// in tens of seconds and none of them interruptible. Waited out here,
+    /// in tens of seconds. The trading attempt's socket is closed here, which
+    /// cuts a key exchange short; a dial not yet connected and a logon already
+    /// written run on until their own bound. Waited out here,
     /// that is the thread that polls every other transport, answers the
     /// venue's own test requests, sends every heartbeat and drains every
     /// command — so transports with nothing wrong with them are pushed toward
@@ -3067,7 +3130,7 @@ impl HotLoop {
     /// The other three return sockets that close when the receiver is gone,
     /// so those are given up here, as they are at the loop's exit.
     fn stop_dialling_without_waiting(&mut self) {
-        self.reconnect_cancel.store(true, Ordering::Relaxed);
+        self.cancel_recovery();
         self.pending_farm_reconnect = None;
         self.pending_hmds_reconnect = None;
         self.pending_secdef_reconnect = None;
@@ -3545,10 +3608,11 @@ impl HotLoop {
 
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let cancel = Arc::clone(&self.reconnect_cancel);
+        let in_flight = Arc::clone(&self.ccp_in_flight);
         let worker = std::thread::Builder::new()
             .name(format!("ccp-reconnect-{attempt}"))
             .spawn(move || {
-                let _ = tx.send(reconnect_ccp(&auth, &cancel));
+                let _ = tx.send(reconnect_ccp(&auth, &cancel, &in_flight));
             })
             .ok();
         self.own_reconnect_worker(true, worker);
@@ -6314,6 +6378,89 @@ mod tests {
         assert!(
             hl.pending_farm_reconnect.is_none(),
             "the next run installs a socket the session before it opened",
+        );
+    }
+
+    /// A stop closes the socket the trading connection's recovery is blocked
+    /// on, as a gateway closes a connection it is stopping, rather than
+    /// waiting out the read in flight.
+    ///
+    /// The worker reads the flag only between the phases of a handshake, so a
+    /// read inside one held the stop for as long as its timeout — up to twenty
+    /// seconds, on the thread that was told to stop.
+    #[test]
+    fn a_stop_closes_the_socket_a_recovery_is_blocked_on() {
+        use std::io::Read;
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let at = listener.local_addr().unwrap();
+        let in_flight = Arc::clone(&hl.ccp_in_flight);
+        let cancel = Arc::clone(&hl.reconnect_cancel);
+        let (dialled, has_dialled) = std::sync::mpsc::sync_channel(1);
+        hl.reconnect_workers.push((true,
+            std::thread::Builder::new()
+                .name("recovery-in-a-read".into())
+                .spawn(move || {
+                    let mut socket = std::net::TcpStream::connect(at).expect("the dial");
+                    socket.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+                    in_flight.hold(&socket, &cancel).expect("not yet taken back");
+                    dialled.send(()).unwrap();
+                    // A venue that accepted the connection and says nothing.
+                    let _ = socket.read(&mut [0u8; 1]);
+                })
+                .expect("a thread for the attempt"),
+        ));
+        let _silent = listener.accept().expect("the worker's connection");
+        has_dialled.recv().unwrap();
+
+        let stopping = Instant::now();
+        hl.take_back_the_recovery_still_in_flight();
+        assert!(
+            stopping.elapsed() < std::time::Duration::from_secs(2),
+            "the stop waited {:?} on a read the recovery was blocked in",
+            stopping.elapsed(),
+        );
+    }
+
+    /// A trading recovery that has not stopped within the bound is left to
+    /// finish on its own — a logon already written is not the stop's to cut —
+    /// and a session it lands after that is told goodbye where it lands.
+    /// Dropped with the receiver instead, it was a session the venue has to
+    /// time out, and this account permits one at a time.
+    #[test]
+    fn a_recovery_past_the_bound_is_told_goodbye_where_it_lands() {
+        use std::io::Read;
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let (landed, landed_rx) = std::sync::mpsc::sync_channel(1);
+        hl.pending_ccp_reconnect = Some(landed_rx);
+        let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+        hl.reconnect_workers.push((true,
+            std::thread::Builder::new()
+                .name("recovery-past-the-logon".into())
+                .spawn(move || {
+                    // Waiting on the venue's answer to a logon it has written,
+                    // which closing nothing cuts short.
+                    let _ = released.recv();
+                    let _ = landed.send(Ok(conn));
+                })
+                .expect("a thread for the attempt"),
+        ));
+
+        let stopping = Instant::now();
+        hl.take_back_the_recovery_still_in_flight();
+        let waited = stopping.elapsed();
+        assert!(
+            waited >= WORKER_STOP_BOUND && waited < WORKER_STOP_BOUND + std::time::Duration::from_secs(2),
+            "the stop waited {waited:?}, not the bound",
+        );
+
+        release.send(()).expect("the attempt still running");
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).expect("the goodbye that session is owed");
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("35=5"),
+            "the venue is left holding a session it has to time out",
         );
     }
 

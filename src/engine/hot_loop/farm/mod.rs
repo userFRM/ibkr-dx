@@ -1233,6 +1233,35 @@ fn stated_increment(field: &str) -> Option<f64> {
     (stated.is_finite() && stated > 0.0).then_some(stated)
 }
 
+/// What a subscription's acknowledgement states for the request, as a
+/// gateway hands it on: the increment, the exchange the best bid and offer
+/// come from, and the permission number the venue gives this request.
+///
+/// A subscription is acknowledged in nine fields at the version this session
+/// logs on with — server tag, request, increment, one unused, the permission,
+/// the exchange, then three optional — so the fifth and sixth are read where
+/// the acknowledgement is long enough to carry them, and a shorter one states
+/// neither. Both are taken as a gateway takes them: the permission is one of
+/// its five numbers or nothing stated (0), and the exchange is as written. A
+/// gateway appends the contract's security type to an exchange of four
+/// characters or fewer, as four hex digits, and so does this.
+fn stated_request_params(
+    parts: &[&str], min_tick: f64, fix_sec_type: &str,
+) -> crate::bridge::TickReqParams {
+    let (snapshot_permissions, mut bbo_exchange) = if parts.len() > 5 {
+        (parts[4].parse().ok().filter(|p| (0..=4).contains(p)).unwrap_or(0), parts[5].to_string())
+    } else {
+        (0, String::new())
+    };
+    if !bbo_exchange.is_empty() && bbo_exchange.len() <= 4
+        && let Some(number) =
+            crate::control::contracts::SecurityType::from_fix(fix_sec_type).gateway_number()
+    {
+        bbo_exchange.push_str(&format!("{number:04X}"));
+    }
+    crate::bridge::TickReqParams { min_tick, bbo_exchange, snapshot_permissions }
+}
+
 /// What the venue counts an instrument's sizes in, as its acknowledgement
 /// states it: the last field, after the increment prices move in.
 ///
@@ -2652,7 +2681,8 @@ impl FarmState {
 
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
-        shared.market.push_tick_req_params(instrument, min_tick);
+        let (sec_type, _) = context.market.order_routing(instrument);
+        shared.market.push_tick_req_params(instrument, stated_request_params(&parts, min_tick, &sec_type));
         // The venue has taken it, so whatever it said the last time it would
         // not is no longer what a request joining this contract is owed.
         //

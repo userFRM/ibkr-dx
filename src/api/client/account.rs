@@ -8,6 +8,7 @@ use super::dispatch::NO_REQUEST;
 use crate::types::*;
 
 use super::{Contract, EClient};
+use crate::client_core::ClientCore;
 
 impl EClient {
     // ── Positions ──
@@ -141,6 +142,12 @@ impl EClient {
     /// told. Without the subscription none of that arrives, and the figures
     /// reduce to the unrealised part with nothing realised on any position.
     ///
+    /// `account` is required, as a gateway requires it, and one the login
+    /// does not hold is refused in its words. Another account the login holds
+    /// is refused too: the figures are worked out from one set of midnight
+    /// seeds against one book of holdings, and both belong to the account this
+    /// session opened under.
+    ///
     /// `model_code` is taken and not applied: there is no model portfolio to
     /// name here.
     pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str) {
@@ -149,29 +156,17 @@ impl EClient {
         // under another number was refused as a duplicate of one that never
         // went, and the profit was reported under the refused number.
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+        // And the account before the slot, for the same reason. A request
+        // naming another account used to be told so and then subscribed
+        // under this one, so its number carried a profit it never asked for.
+        if let Err(why) = ClientCore::check_pnl_account(&self.shared, &self.accounts, &self.account_id, account) {
+            log::warn!("{}", why.message);
+            return self.report_reason(req_id, &why);
+        }
         // Refused while another request holds the subscription, and nothing
         // is asked of the venue for a request that will not be reported.
         if let Err(why) = self.core.subscribe_pnl(req_id) {
             return self.report_reason(req_id, &why);
-        }
-        // Always the account this session opened under, whatever was named.
-        //
-        // The figures are worked out from one set of midnight seeds against
-        // one book of holdings, and both belong to this session's account. A
-        // subscription taken out for another account replaced those seeds with
-        // that account's and the next restatement replaced them back, so the
-        // figure reported under this request alternated between two accounts'
-        // realised legs measured against a third thing -- this account's
-        // positions. Named and not applied, with the caller told, as the
-        // holdings answer for another account already is.
-        if !account.is_empty() && account != self.account_id {
-            let why = format!(
-                "account {account} was named and the profit that follows is {}'s, which \
-                 is the account this session opened under",
-                self.account_id,
-            );
-            log::warn!("{why}");
-            self.report_reason(req_id, &Refusal::validation(why));
         }
         let account = self.account_id.clone();
         if let Err(why) = self.send(ControlCommand::SubscribePnl { req_id, account }) {
@@ -193,19 +188,13 @@ impl EClient {
 
     /// Subscribe to single-position PnL updates. Matches `reqPnLSingle` in C++.
     ///
-    /// `account` and `model_code` are taken and not applied, as on
-    /// [`req_pnl`](EClient::req_pnl): the figures are for the account this
-    /// session opened under, and a caller naming another is told so.
+    /// `account` is checked as on [`req_pnl`](EClient::req_pnl), and for the
+    /// same reasons; `model_code` is taken and not applied.
     pub fn req_pnl_single(&self, req_id: i64, account: &str, _model_code: &str, con_id: i64) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
-        if !account.is_empty() && account != self.account_id {
-            let why = format!(
-                "account {account} was named and the profit that follows is {}'s, which \
-                 is the account this session opened under",
-                self.account_id,
-            );
-            log::warn!("{why}");
-            self.report_reason(req_id, &Refusal::validation(why));
+        if let Err(why) = ClientCore::check_pnl_account(&self.shared, &self.accounts, &self.account_id, account) {
+            log::warn!("{}", why.message);
+            return self.report_reason(req_id, &why);
         }
         self.core.subscribe_pnl_single(req_id, con_id);
     }
@@ -220,15 +209,28 @@ impl EClient {
 
     /// Request account summary. Matches `reqAccountSummary` in C++.
     ///
-    /// `group` is taken and not applied. One session holds one account here,
-    /// and the venue states its figures for that account without being asked
-    /// which, so there is no second account or model portfolio to name.
-    pub fn req_account_summary(&self, req_id: i64, _group: &str, tags: &str) {
+    /// `group` is checked as a gateway checks it, and refused in its words: an
+    /// empty one, and on a login that is not an advisor's anything but `All`
+    /// or `AllNonProp`; `All` where the venue says the login may not ask for
+    /// it. Empty `tags` are refused the same way. What is answered is the
+    /// account this session opened under: on a login holding several, `All`
+    /// is answered for that one account, and the caller is told so on `error`
+    /// under 321 ahead of the answer.
+    ///
+    /// Two summaries may be open at once, as on a gateway; a third is refused
+    /// under 322.
+    pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
-        // Refused while another request holds the subscription, as for
-        // `req_pnl`, and said to the caller rather than silently taking it.
-        if let Err(why) = self.core.subscribe_account_summary(req_id, tags) {
-            self.report_reason(req_id, &why);
+        let checked = ClientCore::check_account_summary(&self.shared, group, tags)
+            .and_then(|()| self.core.subscribe_account_summary(req_id, tags));
+        if let Err(why) = checked {
+            return self.report_reason(req_id, &why);
+        }
+        if let Some(why) =
+            ClientCore::answered_for_the_session_account(&self.shared, group, &self.account_id)
+        {
+            log::warn!("{why}");
+            self.report_reason(req_id, &Refusal::validation(why));
         }
     }
 
@@ -242,15 +244,33 @@ impl EClient {
 
     /// Subscribe to account updates. Matches `reqAccountUpdates` in C++.
     ///
-    /// `acct_code` is taken and not applied. One session holds one account
-    /// here, and the venue states its figures for that account without being
-    /// asked which, so there is no second account or model portfolio to name.
+    /// `acct_code` is checked as a gateway checks it. On a login holding one
+    /// account it is ignored, as a gateway ignores it. On a login holding
+    /// several, a subscription naming none, or one the login does not hold, is
+    /// refused in a gateway's words. One it holds, or `All` where the login may
+    /// ask for every account, is answered with the figures of the account this
+    /// session opened under, which are the ones the venue states to it, and
+    /// the caller is told so on `error` under 321.
     ///
     /// Subscribing also asks the venue to state the figures now. It restates
     /// them on its own schedule otherwise, which is unhurried: a session that
     /// has just opened waits tens of seconds for its first set, and a caller
     /// that subscribed and then read the account got nothing.
-    pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str) {
+    pub fn req_account_updates(&self, subscribe: bool, acct_code: &str) {
+        // The session before the account, as for every other request: an
+        // ended one is told it has ended, not that it named a wrong account.
+        if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+        if let Err(why) = ClientCore::check_account_updates(&self.shared, &self.accounts, subscribe, acct_code) {
+            return self.report_reason(NO_REQUEST, &why);
+        }
+        if subscribe
+            && let Some(why) = ClientCore::answered_for_the_session_account(
+                &self.shared, acct_code, &self.account_id,
+            )
+        {
+            log::warn!("{why}");
+            self.report_reason(NO_REQUEST, &Refusal::validation(why));
+        }
         self.core.subscribe_account_updates(subscribe);
         if subscribe {
             let account = self.account_id.clone();
@@ -290,9 +310,11 @@ impl EClient {
     /// its own callbacks, not on the ones `req_account_updates` uses, and a
     /// caller written against it implements those and hears nothing otherwise.
     ///
-    /// `ledger_and_nlv` is taken and not applied. The account figures arrive as
-    /// the venue states them, and it states the ledger and the net liquidation
-    /// among them without being asked.
+    /// `ledger_and_nlv` restricts the answer to the per-currency ledger, as a
+    /// gateway does: each currency's cash, market values and
+    /// `NetLiquidationByCurrency`, which is the net liquidation it means. The
+    /// account's other figures — `NetLiquidation`, `BuyingPower` and the rest
+    /// — are not delivered on such a request.
     ///
     /// The figures are the ones the venue states for the account this session
     /// opened under, and they are labelled with that account. A login holding
@@ -311,7 +333,7 @@ impl EClient {
     /// the reference client does, and what a caller watching a balance sheet
     /// through this request is written for.
     pub fn req_account_updates_multi(
-        &self, req_id: i64, account: &str, model_code: &str, _ledger_and_nlv: bool,
+        &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
         wrapper: &mut impl Wrapper,
     ) {
         if self.session_over() {
@@ -343,7 +365,9 @@ impl EClient {
         // and reports each figure again as it moves, and a caller watching its
         // balance sheet through it was given one still picture and nothing
         // after. Registered before the batch below so a figure that moves
-        // while it is being assembled is not lost between the two.
+        // while it is being assembled is not lost between the two, and what it
+        // asked for is stated before that.
+        self.core.ledger_only_for(req_id, ledger_and_nlv);
         self.account_updates_multi_requested.lock().unwrap().insert(req_id);
         // A model is a slice of the account; the figures below are the whole
         // of it. Echoed onto the label, every one of them read as that model's
@@ -391,6 +415,7 @@ impl EClient {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
         self.core.forget_account_figures_for(req_id);
+        self.core.ledger_only_for(req_id, false);
     }
 
     /// Request positions for multiple accounts/models. Matches `reqPositionsMulti` in

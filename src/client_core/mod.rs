@@ -572,6 +572,65 @@ fn execution_matches(se: &StoredExecution, filter: &ExecutionFilter) -> bool {
     true
 }
 
+/// The days a request for executions is answered for, settled as a gateway
+/// settles them, or `None` where it is answered from the executions held
+/// without regard to the day.
+///
+/// `last_n_days` counts from 1 to 7 and asks for no window otherwise. A date
+/// of 8 or less is dropped. One that is not a day of the calendar refuses the
+/// request, as a gateway refuses it while reading it. A date is kept where it
+/// falls after the day a week before `today` and not after `today`; the rest
+/// are dropped and said in the log, not refused. A date named twice is one
+/// day. The window is applied only where it asks for more than today's
+/// executions: more than one day back, more than one date, or a date other
+/// than today.
+pub fn execution_days(
+    last_n_days: i32, specific_dates: &[i32], today: jiff::civil::Date,
+) -> Result<Option<Vec<jiff::civil::Date>>, Refusal> {
+    let n = if (1..=7).contains(&last_n_days) { last_n_days } else { 0 };
+    let week_ago = today.saturating_sub(jiff::Span::new().days(7));
+    let mut dates = Vec::new();
+    let mut dropped = Vec::new();
+    for &stated in specific_dates.iter().filter(|d| **d > 8) {
+        let day = calendar_day(stated).ok_or_else(|| Refusal::stated(
+            crate::error_codes::REQUEST_NOT_READ,
+            format!("Error reading request: {stated} in specificDates is not a date"),
+        ))?;
+        if week_ago < day && day <= today { dates.push(day) } else { dropped.push(day.to_string()) }
+    }
+    if !dropped.is_empty() {
+        log::info!(
+            "The dates: [{}] are outside of the acceptable range of 7 days back from {week_ago} and {today} .",
+            dropped.join(", "),
+        );
+    }
+    dates.sort();
+    dates.dedup();
+    let history = n > 1 || dates.len() > 1 || (!dates.is_empty() && !dates.contains(&today));
+    if !history {
+        return Ok(None);
+    }
+    let mut days: Vec<jiff::civil::Date> = (0..n)
+        .map(|back| today.saturating_sub(jiff::Span::new().days(back)))
+        .collect();
+    days.extend(dates);
+    Ok(Some(days))
+}
+
+/// The day a `yyyymmdd` names, read as a gateway reads it, or `None` where its
+/// month or day is not one the calendar has.
+///
+/// ponytail: a year past 9999 is checked on the year its 400-year cycle puts
+/// in the last one this calendar counts, and so falls after any window; a log
+/// line naming it names that year.
+fn calendar_day(stated: i32) -> Option<jiff::civil::Date> {
+    let (year, month, day) = (stated / 10_000, stated / 100 % 100, stated % 100);
+    let year = if year > 9999 { 9600 + year % 400 } else { year };
+    jiff::civil::Date::new(
+        i16::try_from(year).ok()?, i8::try_from(month).ok()?, i8::try_from(day).ok()?,
+    ).ok()
+}
+
 /// A stored execution + commission_and_fees pair for `req_executions` replay.
 /// Shared between Rust and Python adapters via `ClientCore`.
 #[derive(Clone)]
@@ -1161,6 +1220,9 @@ pub struct ClientCore {
     /// first dispatch then found every figure undelivered and said it all
     /// again to a caller that had just been given it.
     pub last_stated_account_multi: Mutex<HashMap<i64, AccountFiguresTold>>,
+    /// The multi-account requests that asked for the ledger and net
+    /// liquidation alone.
+    pub ledger_only_multi: Mutex<std::collections::HashSet<i64>>,
     /// Whether the caller has been told the account is fully stated.
     pub account_end_sent: AtomicBool,
     /// Its positions as last stated.
@@ -1325,6 +1387,23 @@ pub struct OrderSession {
     pub features: Vec<String>,
 }
 
+/// Whether a login holds several accounts, as a gateway decides it: the venue
+/// lets accounts be added to it as it runs, the first account its logon names
+/// is an introducing broker's master, or its logon names more than one account
+/// that is not a group. The accounts a family links to the login are not
+/// counted. One rule for orders and for the account requests alike.
+pub(crate) fn holds_several_accounts(logon_accounts: &[String], features: &[String]) -> bool {
+    // A group's code has a `G` second or third.
+    let group = |a: &str| a.len() > 3 && (a.as_bytes()[1] == b'G' || a.as_bytes()[2] == b'G');
+    let master = |a: &str| {
+        let a = a.as_bytes();
+        a.len() > 2 && (a[0] == b'I' || (a[0] == b'D' && a[1] == b'I'))
+    };
+    features.iter().any(|f| f == "DYNACCTADD")
+        || logon_accounts.first().is_some_and(|a| master(a) && !group(a))
+        || logon_accounts.iter().filter(|a| !group(a)).count() > 1
+}
+
 impl OrderSession {
     /// A login holding one account, with nothing enabled.
     pub fn single(account: &str) -> Self {
@@ -1341,21 +1420,10 @@ impl OrderSession {
         self.features.iter().any(|f| f == feature)
     }
 
-    /// Whether the login holds several accounts, as a gateway decides it: the
-    /// venue lets accounts be added to it as it runs, the first account its
-    /// logon names is an introducing broker's master, or its logon names more
-    /// than one account that is not a group. The accounts a family links to
-    /// the login are not counted.
+    /// Whether the login holds several accounts, as a gateway decides it
+    /// ([`holds_several_accounts`]).
     pub fn holds_several_accounts(&self) -> bool {
-        // A group's code has a `G` second or third.
-        let group = |a: &str| a.len() > 3 && (a.as_bytes()[1] == b'G' || a.as_bytes()[2] == b'G');
-        let master = |a: &str| {
-            let a = a.as_bytes();
-            a.len() > 2 && (a[0] == b'I' || (a[0] == b'D' && a[1] == b'I'))
-        };
-        self.enables("DYNACCTADD")
-            || self.logon_accounts.first().is_some_and(|a| master(a) && !group(a))
-            || self.logon_accounts.iter().filter(|a| !group(a)).count() > 1
+        holds_several_accounts(&self.logon_accounts, &self.features)
     }
 
     /// Whether the login holds this account.
@@ -1405,6 +1473,7 @@ impl ClientCore {
             account_updates_subscribed: AtomicBool::new(false),
             last_stated_account: Mutex::new(HashMap::new()),
             last_stated_account_multi: Mutex::new(HashMap::new()),
+            ledger_only_multi: Mutex::new(std::collections::HashSet::new()),
             account_end_sent: AtomicBool::new(false),
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(ExecutionStore::default()),
@@ -1791,6 +1860,7 @@ impl ClientCore {
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         self.last_stated_account.lock().unwrap().clear();
         self.last_stated_account_multi.lock().unwrap().clear();
+        self.ledger_only_multi.lock().unwrap().clear();
         self.account_end_sent.store(false, Ordering::Release);
         *self.last_portfolio.lock().unwrap() = None;
         *self.executions.lock().unwrap() = ExecutionStore::default();
@@ -2090,11 +2160,11 @@ impl ClientCore {
     /// the other, the second was the ordinary path for those contracts.
     fn pay_a_joiner(&self, shared: &SharedState, instrument: InstrumentId, req_id: i64) {
         // The venue sends a tickReqParams per reqMktData; a follower asked for
-        // none, so it is owed the increment the live subscription was
-        // acknowledged with. Before that acknowledgement there is none yet,
+        // none, so it is owed what the live subscription was acknowledged
+        // with. Before that acknowledgement there is none yet,
         // and the pending one fans out to this follower when it arrives.
-        if let Some(min_tick) = shared.market.min_tick_for_follower(instrument) {
-            shared.market.push_tick_req_params_for(req_id, min_tick);
+        if let Some(params) = shared.market.tick_req_params_for_follower(instrument) {
+            shared.market.push_tick_req_params_for(req_id, params);
         }
         // And where the subscription this one joins was refused, it is refused
         // too. The refusal is drained once and told to whoever held the
@@ -3301,10 +3371,176 @@ impl ClientCore {
 
     // ── Account summary subscription management ──
 
+    /// What a gateway refuses an account summary for, checked in the order it
+    /// checks them, each under its own words.
+    ///
+    /// The group is exactly `All` or `AllNonProp` on a login that is not an
+    /// advisor's; an advisor's own group names are its to state, and are not
+    /// refused here. `All` is refused where the venue says the login may not
+    /// ask for it, unless it also says requests for every position are let
+    /// through.
+    pub fn check_account_summary(shared: &SharedState, group: &str, tags: &str) -> Result<(), Refusal> {
+        if tags.is_empty() {
+            return Err(Refusal::validation("Tags cannot be null"));
+        }
+        if group.is_empty() {
+            return Err(Refusal::validation("Group name cannot be null"));
+        }
+        let advisor = shared.reference.advisor();
+        if !advisor && group != "All" && group != "AllNonProp" {
+            return Err(Refusal::validation("Group name is invalid"));
+        }
+        let features = shared.reference.enabled_features();
+        let has = |token: &str| features.iter().any(|f| f == token);
+        if group.eq_ignore_ascii_case("All") && !has("APIREQALLPOS") {
+            if !advisor && has("NOALL") {
+                return Err(Refusal::validation("ALL account is not supported"));
+            }
+            if has("DYNACCTADD") {
+                return Err(Refusal::stated(
+                    crate::error_codes::ALL_NOT_FOR_DYNAMIC_ACCOUNTS,
+                    "This API request for All is not supported for Dynamic Account Addition",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a gateway counts this login as holding several accounts, by the
+    /// rule an order is checked under.
+    pub fn login_holds_several_accounts(shared: &SharedState) -> bool {
+        let (logon_accounts, _) = shared.reference.login();
+        holds_several_accounts(&logon_accounts, &shared.reference.enabled_features())
+    }
+
+    /// Whether a gateway takes any account named, rather than only one the
+    /// login held at logon: a login the venue adds accounts to, where it does
+    /// not say the API may not take them.
+    fn takes_accounts_added_later(shared: &SharedState) -> bool {
+        let features = shared.reference.enabled_features();
+        let has = |token: &str| features.iter().any(|f| f == token);
+        has("DYNACCTADD") && !has("NOAPIDYNADD")
+    }
+
+    /// The account `reqAccountUpdates` names, checked as a gateway checks it.
+    ///
+    /// A login holding one account is answered for it whatever is named, and
+    /// the name is ignored, as a gateway ignores it. On a login holding
+    /// several, a subscription names one it holds; `All`, where the login may
+    /// ask for every account; or `AllNonProp`, where the venue offers it and
+    /// the logon names accounts it leaves out.
+    pub fn check_account_updates(
+        shared: &SharedState, accounts: &[String], subscribe: bool, code: &str,
+    ) -> Result<(), Refusal> {
+        if !Self::login_holds_several_accounts(shared) {
+            if !code.is_empty() {
+                log::debug!("Account code is ignored for non multiple account customers.");
+            }
+            return Ok(());
+        }
+        if !subscribe {
+            return Ok(());
+        }
+        if code.is_empty() {
+            return Err(Refusal::validation("The account code is required for this operation."));
+        }
+        let features = shared.reference.enabled_features();
+        let has = |token: &str| features.iter().any(|f| f == token);
+        if code == "All" && !shared.reference.advisor() && has("NOALL") {
+            return Err(Refusal::validation("ALL account is not supported"));
+        }
+        let held = accounts.iter().any(|a| a == code)
+            || code == "All"
+            || (code == "AllNonProp" && has("ALLNONPROP") && shared.reference.all_non_prop_leaves_out());
+        if !held && !Self::takes_accounts_added_later(shared) {
+            return Err(Refusal::validation(format!("Invalid account code '{code}'.")));
+        }
+        Ok(())
+    }
+
+    /// What a caller is told where an account request on a login holding
+    /// several accounts names more than, or other than, the account this
+    /// session opened under. The figures this client is given are that
+    /// account's, and they are what the request is answered with.
+    pub fn answered_for_the_session_account(
+        shared: &SharedState, named: &str, session: &str,
+    ) -> Option<String> {
+        (Self::login_holds_several_accounts(shared) && named != session).then(|| format!(
+            "{named} was named and the figures that follow are {session}'s, which is the \
+             account this session opened under",
+        ))
+    }
+
+    /// The account an execution filter names, checked as a gateway checks it.
+    ///
+    /// A login holding one account is answered for it whatever is named, and
+    /// the name is ignored, as a gateway ignores it; on one holding several,
+    /// an account the login does not hold is refused.
+    pub fn check_execution_account(
+        shared: &SharedState, accounts: &[String], filter: &mut ExecutionFilter,
+    ) -> Result<(), Refusal> {
+        if filter.acct_code.is_empty() {
+            return Ok(());
+        }
+        if !Self::login_holds_several_accounts(shared) {
+            log::debug!("The accountCode is ignored for single account customers");
+            filter.acct_code.clear();
+            return Ok(());
+        }
+        if !Self::takes_accounts_added_later(shared) && !accounts.contains(&filter.acct_code) {
+            return Err(Refusal::validation(format!("Invalid account code {}.", filter.acct_code)));
+        }
+        Ok(())
+    }
+
+    /// The account a P&L request names, checked as a gateway checks it, then
+    /// against what this client can answer.
+    ///
+    /// A gateway refuses a blank account, one the login does not hold, and
+    /// `All` where the login may not ask for every account or is one the venue
+    /// adds accounts to. Profit here is worked out from one account's midnight
+    /// seeds and holdings — the account this session opened under — so any
+    /// other is refused too: answered, it would be that account's number on
+    /// this account's profit.
+    pub fn check_pnl_account(
+        shared: &SharedState, accounts: &[String], session: &str, account: &str,
+    ) -> Result<(), Refusal> {
+        if account.trim().is_empty() {
+            return Err(Refusal::validation("Account must not be empty"));
+        }
+        let features = shared.reference.enabled_features();
+        let has = |token: &str| features.iter().any(|f| f == token);
+        let every = account.eq_ignore_ascii_case("All");
+        let no_all = !shared.reference.advisor() && has("NOALL");
+        if !Self::takes_accounts_added_later(shared) {
+            let held = account == session
+                || accounts.iter().any(|a| a == account)
+                || (every && Self::login_holds_several_accounts(shared) && !no_all);
+            if !held {
+                return Err(Refusal::validation("Invalid account code"));
+            }
+        }
+        if every && has("DYNACCTADD") {
+            return Err(Refusal::validation(
+                "This API request for All is not supported for Dynamic Account Addition",
+            ));
+        }
+        if every && no_all {
+            return Err(Refusal::validation("ALL account is not supported"));
+        }
+        if account != session {
+            return Err(Refusal::validation(format!(
+                "account {account} was named and this session opened under {session}, \
+                 whose profit is not what was asked for",
+            )));
+        }
+        Ok(())
+    }
+
     /// Ask for the account summary.
     ///
     /// Both subscriptions stay until cancelled, including after their first
-    /// answers; a third request would exceed the venue's limit.
+    /// answers; a third is refused under 322, as a gateway refuses it.
     pub fn subscribe_account_summary(&self, req_id: i64, tags: &str) -> Result<(), Refusal> {
         let tag_list: Vec<String> = tags.split(',')
             .map(|s| s.trim().to_string())
@@ -3321,8 +3557,12 @@ impl ClientCore {
         } else if other.is_none() {
             &mut *other
         } else {
-            return Err(Refusal::validation(
-                "two account summaries are already subscribed; cancel one before subscribing under another",
+            // The limit a gateway sets, under the number and in the words it
+            // reports it with.
+            return Err(Refusal::stated(
+                crate::error_codes::REQUEST_NOT_PROCESSED,
+                "Maximum number of account summary requests exceeded; desubscribe to previous \
+                 request first",
             ));
         };
         *target = Some((req_id, tag_list));
@@ -3504,6 +3744,77 @@ impl ClientCore {
     pub fn snapshot_executions(&self, filter: &ExecutionFilter) -> Vec<StoredExecution> {
         let store = self.executions.lock().unwrap();
         store.rows.iter().filter(|se| execution_matches(se, filter)).cloned().collect()
+    }
+
+    /// The executions a `reqExecutions` is answered with: those the filter
+    /// matches, on the days it asks for, counted on the session's clock —
+    /// and the days asked for that start before what the session holds.
+    ///
+    /// Each day is a day on `zone`, which is the zone the session announced
+    /// at logon, as a gateway counts days on its own. An execution whose time
+    /// cannot be read is kept, as the time bound keeps one.
+    ///
+    /// The account is checked as [`check_execution_account`](Self::check_execution_account)
+    /// checks it. A day asked for that starts before the executions the
+    /// session opened with is answered with what is held of it, and named in
+    /// the second list, so the caller can be told rather than handed a short
+    /// answer in silence.
+    ///
+    /// ponytail: answered from the executions the session holds, which reach
+    /// back to midnight six days before the logon in UTC, or to the logon's
+    /// own day for a session set to today's executions. A gateway asks the
+    /// venue for each day the window names; how that answer ends has not
+    /// been seen, so it is not asked here.
+    pub fn executions_for_request(
+        &self, shared: &SharedState, accounts: &[String], filter: &ExecutionFilter, now: jiff::Timestamp,
+    ) -> Result<(Vec<StoredExecution>, Vec<jiff::civil::Date>), Refusal> {
+        let zone = shared.settings().timezone.clone();
+        let clock = crate::protocol::datetime::clock_named(&zone).unwrap_or_else(|| {
+            log::warn!("the session's time zone {zone} cannot be read, so days are counted on UTC");
+            jiff::tz::TimeZone::UTC
+        });
+        let today = now.to_zoned(clock.clone()).date();
+        // The days as the request is read, then the account as it is checked:
+        // a gateway reads a request before it checks one.
+        let days = execution_days(filter.last_n_days, &filter.specific_dates, today)?;
+        let mut filter = filter.clone();
+        Self::check_execution_account(shared, accounts, &mut filter)?;
+        let rows = self.snapshot_executions(&filter);
+        let Some(days) = days else {
+            return Ok((rows, Vec::new()));
+        };
+        let held_from = shared.reference.executions_held_from();
+        let mut unheld: Vec<jiff::civil::Date> = days.iter().copied()
+            .filter(|day| held_from.is_some_and(|from| {
+                day.to_zoned(clock.clone()).is_ok_and(|start| start.timestamp().as_second() < from)
+            }))
+            .collect();
+        unheld.sort();
+        let rows = rows.into_iter()
+            .filter(|se| {
+                let Some(at) = crate::protocol::datetime::ib_datetime_to_unix(&se.execution.time)
+                    .and_then(|secs| jiff::Timestamp::from_second(secs).ok())
+                else {
+                    return true;
+                };
+                days.contains(&at.to_zoned(clock.clone()).date())
+            })
+            .collect();
+        Ok((rows, unheld))
+    }
+
+    /// What a caller is told of the days an execution request asked for that
+    /// start before what the session holds.
+    pub fn unheld_days_notice(unheld: &[jiff::civil::Date]) -> Option<String> {
+        if unheld.is_empty() {
+            return None;
+        }
+        let named: Vec<String> = unheld.iter().map(ToString::to_string).collect();
+        Some(format!(
+            "the executions this session holds do not reach back to the start of {}, so \
+             what follows for those days is only what it holds of them",
+            named.join(", "),
+        ))
     }
 
     // ── Open order tracking ──
@@ -4798,13 +5109,23 @@ impl ClientCore {
     ///
     /// Answered against what this request has been told, which is what makes
     /// the first batch the account whole and every batch after it the moves.
+    ///
+    /// A request that asked for the ledger and net liquidation alone is given
+    /// what the per-currency ledger states and nothing else, as a gateway
+    /// gives it: the net liquidation it means is the ledger's own, per
+    /// currency, and the account's other figures are not delivered.
     pub fn account_figures_that_moved(
         &self, shared: &SharedState, req_id: i64,
     ) -> Vec<AccountFieldUpdate> {
+        let ledger_only = self.ledger_only_multi.lock().unwrap().contains(&req_id);
+        let ledger = ledger_only.then(|| shared.portfolio.stated_by_the_ledger());
         let mut held = self.last_stated_account_multi.lock().unwrap();
         let already = held.entry(req_id).or_default();
         let mut moved = Vec::new();
         for (key, value, currency) in shared.portfolio.stated_account_values() {
+            if ledger.as_ref().is_some_and(|l| !l.contains(&(key.clone(), currency.clone()))) {
+                continue;
+            }
             if already.get(&(key.clone(), currency.clone())).map(String::as_str)
                 == Some(value.as_str())
             {
@@ -4820,6 +5141,14 @@ impl ClientCore {
     /// answered with the account whole, and a withdrawn one keeps nothing.
     pub fn forget_account_figures_for(&self, req_id: i64) {
         self.last_stated_account_multi.lock().unwrap().remove(&req_id);
+    }
+
+    /// Whether a multi-account request asked for the ledger and net
+    /// liquidation alone. Stated before the request is watched, so no figure
+    /// outside the ledger reaches it in between.
+    pub fn ledger_only_for(&self, req_id: i64, ledger_and_nlv: bool) {
+        let mut asked = self.ledger_only_multi.lock().unwrap();
+        if ledger_and_nlv { asked.insert(req_id); } else { asked.remove(&req_id); }
     }
 
     /// Prepare portfolio updates (position entries) for account streaming.
@@ -4934,11 +5263,13 @@ impl ClientCore {
         // rows the venue sends, and a summary asked for before they arrive
         // reported an empty account rather than nothing.
         let stated = shared.portfolio.stated_account_values();
-        // "All" is the venue's word for every figure it holds, and a request
-        // naming no tag at all means the same. Matched against a local list of
-        // names instead, "All" matches none of them and returns empty, and any
-        // figure absent from that list is dropped with it: accrued cash, SMA,
-        // look-ahead margin, per-currency ledger rows.
+        // "All" is the venue's word for every figure it holds. Matched against
+        // a local list of names instead, "All" matches none of them and
+        // returns empty, and any figure absent from that list is dropped with
+        // it: accrued cash, SMA, look-ahead margin, per-currency ledger rows.
+        // Empty tags are refused before this, as a gateway refuses them; a
+        // list of nothing but separators is answered as "All" here, and what
+        // the venue answers one with has not been seen.
         let asked: Vec<(i64, Vec<String>)> = req.iter().chain(other.iter()).cloned().collect();
         for (req_id, tags) in &asked {
             let initial = !last.contains_key(req_id);

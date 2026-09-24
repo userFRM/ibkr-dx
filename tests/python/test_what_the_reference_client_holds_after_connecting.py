@@ -4,7 +4,9 @@ Its sample reads `asynchronous` in `connectAck`, prints `serverVersion()` and
 `twsConnectionTime()` once connected, calls `setConnectOptions` before, and
 gives the client id as `clientId`. Each is answered with what this client has.
 Where the reference client's value belongs to the gateway process it speaks
-to, of which there is none here, the answer is `None` rather than a stand-in.
+to, of which there is none here, the answer is `None`. Its connection object
+is answered by this client itself, which answers what a program reads off one.
+What the caller gave `connect` is kept and read back, as the reference keeps it.
 """
 
 import pytest
@@ -39,9 +41,23 @@ def test_what_belongs_to_a_gateway_is_absent():
     c = EClient(EWrapper())
     c._test_connect()
     assert c.serverVersion() == 217, "the level this client implements; None only before a session"
-    assert c.conn is None
-    assert c.port is None
     assert c.asynchronous is False
+
+
+def test_the_port_and_the_connection_follow_the_session():
+    """The port `connect` was given reads back as given, and `conn` answers
+    `isConnected()` as the session stands; both are `None` without one, as the
+    reference client's are."""
+    c = EClient(EWrapper())
+    assert c.port is None and c.conn is None
+    c._test_connect(port=4002)
+    assert c.port == 4002
+    assert c.conn.isConnected() is True and c.conn.port == 4002
+    c._test_end_session()
+    assert c.conn.isConnected() is False
+    assert c.port == 4002 and c.conn.port == 4002, "both held until the session is let go"
+    c.disconnect()
+    assert c.port is None and c.conn is None
 
 
 def test_host_and_logon_time_are_none_without_a_venue():

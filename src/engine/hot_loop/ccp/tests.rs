@@ -1539,6 +1539,18 @@ fn the_per_currency_figures_are_read_off_their_bucket() {
         read("CashBalance", "EUR").is_some() && read("NetLiquidationByCurrency", "EUR").is_none(),
         "and a figure stated in one bucket does not leak into the other",
     );
+    // Each kept as the ledger's, which is all a request for the ledger and
+    // net liquidation is given.
+    let ledger = shared.portfolio.stated_by_the_ledger();
+    for (name, currency) in [
+        ("Currency", "EUR"), ("CashBalance", "EUR"), ("ExchangeRate", "EUR"),
+        ("NetLiquidationByCurrency", "BASE"),
+    ] {
+        assert!(
+            ledger.contains(&(name.to_string(), currency.to_string())),
+            "{name} in {currency} was stated by the ledger: {ledger:?}",
+        );
+    }
 }
 
 /// The venue's exchange directory says which of its sections is which, and a

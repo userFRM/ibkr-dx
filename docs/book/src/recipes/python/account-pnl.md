@@ -22,6 +22,17 @@ session's quotes move.
 
 ## Limits
 
+`account` is checked as a gateway checks it, in its order and words: a blank
+one is refused (*Account must not be empty*, 321); one the login does not hold
+is refused (*Invalid account code*, 321), and so is `All` on a login holding one
+account or where the logon says the login may not ask for every account; `All`
+on a login the venue adds accounts to is refused (*This API request for All is
+not supported for Dynamic Account Addition*, 321). Another account the login
+holds, and `All` where a gateway would take it, are refused too, on both
+clients: the figures are worked out from one account's midnight seeds and
+holdings, the one this session opened under. Nothing is subscribed for a
+refused request.
+
 `model_code` is taken and not applied. There is no model portfolio to name here,
 so leave it at its default.
 

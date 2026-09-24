@@ -377,7 +377,8 @@ impl EClient {
 
     /// Set server log level. Matches `setServerLogLevel` in C++.
     ///
-    /// 1 to 5 set this client's logger to error, warn, info, debug and trace. A
+    /// 1 to 5 are a gateway's System, Error, Warning, Info and Detail, and set
+    /// this client's logger to error, error, warn, info and trace. A
     /// gateway applies the level to its own log; this client, which serves the
     /// caller in its place, applies it to the logger it installed. Nothing goes
     /// to the venue, which has no message for it.
@@ -387,12 +388,8 @@ impl EClient {
     /// reporting a level it did not set. A level outside 1 to 5 is refused the
     /// same way.
     pub fn set_server_log_level(&self, log_level: i32) {
-        let level = match log_level {
-            1 => "error",
-            2 => "warn",
-            3 => "info",
-            4 => "debug",
-            5 => "trace",
+        let level = match crate::logging::gateway_level(log_level) {
+            Some(level) => level,
             // Refused rather than substituted. Reading a level nobody asked
             // for as `warn` told the caller nothing and left them believing
             // they had set the level they named.
@@ -408,7 +405,7 @@ impl EClient {
         // message asking one to change how loudly it talks, and a level a
         // caller states is about the thing serving that caller — which, on a
         // client that runs in the caller's own process, is this library.
-        if crate::logging::set_level(level) {
+        if crate::logging::set_level(level).is_ok() {
             log::info!("set_server_log_level: logging at {level} (level {log_level})");
             return;
         }

@@ -31,7 +31,7 @@ def __init__(wrapper)
 
 #### `connect`
 
-Connect to IB and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the deadline fires (``ib_key_timeout_secs``, default ~18 min). This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass a smaller ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  ``code_provider`` answers that factor with a typed code instead: ``code_provider(factor, display_id, avth_url) -> str``, where ``factor`` is ``"ibkey"`` (return the code shown for ``display_id``) or ``"authenticator"`` (return the account's current code; ``display_id`` and ``avth_url`` are empty). An authenticator account has no push to fall back to and cannot log in without this. It is called once, on a thread of its own, and holds the GIL while it runs — return the code, don't block on input. It is asked once and the login carries whatever it returns; what the venue does with a wrong code has not been exercised from here.  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value.  `port` is taken and not applied. The session connects to the venue directly, so there is no local socket to name a port on.
+Connect to IB and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the deadline fires (``ib_key_timeout_secs``, default ~18 min). This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass a smaller ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  ``code_provider`` answers that factor with a typed code instead: ``code_provider(factor, display_id, avth_url) -> str``, where ``factor`` is ``"ibkey"`` (return the code shown for ``display_id``) or ``"authenticator"`` (return the account's current code; ``display_id`` and ``avth_url`` are empty). An authenticator account has no push to fall back to and cannot log in without this. It is called once, on a thread of its own, and holds the GIL while it runs — return the code, don't block on input. It is asked once and the login carries whatever it returns; what the venue does with a wrong code has not been exercised from here.  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value.  `port` is kept and read back on `port`, as the reference client keeps it. The session connects to the venue directly, so there is no local socket for it to open.
 
 ```python
 def connect(host, port=0, client_id=0, username="", password="", paper=True, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None, readonly=False, settings=None, session_file=None, *, clientId=None)
@@ -105,7 +105,7 @@ client.host  # read-only attribute
 
 #### `port`
 
-`None`: there is no port. The reference client's is the one its gateway listens on for it. This session speaks to the venue's servers on the ports the venue names, one per connection, and none of them is a number the caller gave — `connect` takes one and does not apply it.
+The port `connect` was given, and `None` when there is no session.  Kept as the caller gave it, as the reference client keeps it. This session speaks to the venue's servers on the ports the venue names, so the number opens nothing; a program that reads it back gets what it passed.
 
 ```python
 client.port  # read-only attribute
@@ -115,7 +115,7 @@ client.port  # read-only attribute
 
 #### `conn`
 
-`None`: there is no socket to hold. The reference client keeps the one to its gateway here and shares it with its reader thread. This client's connections are opened, read and kept alive inside its engine, and a caller has no hand on any of them.
+The client itself while a session is held, and `None` without one.  The reference client keeps its connection here, and what a program reads off it is `isConnected()`, `host` and `port` — which this client answers, following the session. Its socket is not here: this client's connections are opened, read and kept alive inside its engine.
 
 ```python
 client.conn  # read-only attribute
@@ -135,7 +135,7 @@ client.asynchronous  # read-only attribute
 
 #### `server_version`
 
-The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session, as the reference client answers before its greeting.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221) and `conditionsIncludeOvernight` are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried.  Below it, a program that believes the number is wrong about the following, and every one fails loudly on use rather than quietly:  * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * Requests and fields that do not exist here, an `AttributeError`: the four `verify*` calls (70), `cancelContractData` and `cancelHistoricalTicks` (215). * A withdrawal stating a manual time, an operator or who entered it (169, 192), and an execution filter stating `lastNDays` or `specificDates` (200): refused by name on `error`. Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
+The protocol level this client implements: 217, the reference client's `MIN_SERVER_VER_ADDITIONAL_ORDER_PARAMS_2`. `None` before a session, as the reference client answers before its greeting.  In the reference architecture this number is the API level of the process a program is talking to. That process was a gateway, which announced it and had every request gated on it; here it is this client, so the number is a statement about this client and not a reading off the venue, whose logon names no such level.  217 is the newest gate whose feature is carried here. Above it, attached orders (218) are refused by name — a gateway builds them from the account's order preset, which this client does not hold — and the configuration requests (219, 221), the last price and size stated to their precision (222, 224) and odd-lot quotes (225) are absent. `hedgeMaxSize` (223) is taken and sent on a beta hedge, as a gateway sends it; the number stays at 217 because a level claims every one below it, and 218 is not carried. 225 is the highest level a gateway announces.  Below it, a program that believes the number is wrong about the following, and every one fails loudly on use rather than quietly:  * An order field this client does not carry, refused by name on `error` under 321 when the order is placed: `smartComboRoutingParams` (57). * Requests and fields that do not exist here, an `AttributeError`: the four `verify*` calls (70), `cancelContractData` and `cancelHistoricalTicks` (215). * A withdrawal stating a manual time, an operator or who entered it (169, 192): refused by name on `error`. Every other gate at or below 217 names a request, field or callback that is here and does what it does through a gateway.
 
 ```python
 def server_version()
@@ -479,7 +479,7 @@ def qualify_contracts(contracts)
 
 #### `req_pnl`
 
-Request P&L updates for the account.  `model_code` is taken and not applied. One session holds one account here, and the venue states its figures for that account without being asked which, so there is no model portfolio to name. Another account is refused rather than answered with this account's profit.
+Request P&L updates for the account.  `account` is required, as a gateway requires it, and one the login does not hold is refused in its words. Another account the login holds is refused too, rather than answered with this account's profit. `model_code` is taken and not applied: there is no model portfolio to name here.
 
 ```python
 def req_pnl(req_id, account, model_code="")
@@ -509,7 +509,7 @@ def cancel_pnl(req_id)
 
 #### `req_pnl_single`
 
-Request P&L for a single position.  `model_code` is taken and not applied. One session holds one account here, and the venue states its figures for that account without being asked which, so there is no model portfolio to name; another account is refused here as `req_pnl` refuses it, and for the reason given there.
+Request P&L for a single position.  `account` is checked as `req_pnl` checks it, and for the reasons given there; `model_code` is taken and not applied.
 
 ```python
 def req_pnl_single(req_id, account, model_code, con_id)
@@ -540,7 +540,7 @@ def cancel_pnl_single(req_id)
 
 #### `req_account_summary`
 
-Request account summary.  `group_name` is taken and not applied. One session holds one account here, and the venue states its figures for that account without being asked which, so there is no second account or model portfolio to name.
+Request account summary.  `group_name` is checked as a gateway checks it, and refused in its words: an empty one, and on a login that is not an advisor's anything but `All` or `AllNonProp`; `All` where the venue says the login may not ask for it. Empty `tags` are refused the same way. What is answered is the account this session opened under: on a login holding several, `All` is answered for that one account, and the caller is told so on `error` under 321 ahead of the answer.  Two summaries may be open at once, as on a gateway; a third is refused under 322.
 
 ```python
 def req_account_summary(req_id, group_name, tags)
@@ -590,10 +590,10 @@ def cancel_positions()
 
 #### `req_account_updates`
 
-Request account updates.  `acct_code` is taken and not applied. One session holds one account here, and the venue states its figures for that account without being asked which, so there is no second account or model portfolio to name.  Subscribing also asks the venue to state the figures now. It restates them on its own schedule otherwise, which is unhurried: a session that has just opened waits tens of seconds for its first set, and a caller that subscribed and then read the account got nothing.
+Request account updates.  `acct_code` is checked as a gateway checks it. On a login holding one account it is ignored, as a gateway ignores it. On a login holding several, a subscription naming none, or one the login does not hold, is refused in a gateway's words. One it holds, or `All` where the login may ask for every account, is answered with the figures of the account this session opened under, which are the ones the venue states to it, and the caller is told so on `error` under 321.  Subscribing also asks the venue to state the figures now. It restates them on its own schedule otherwise, which is unhurried: a session that has just opened waits tens of seconds for its first set, and a caller that subscribed and then read the account got nothing.
 
 ```python
-def req_account_updates(subscribe, _acct_code="")
+def req_account_updates(subscribe, acct_code="")
 ```
 
 | Parameter | Type | Description |
@@ -615,7 +615,7 @@ def req_managed_accts()
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models.  `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The request is held open. A figure that moves after the first batch is reported again under the same number, until `cancelAccountUpdatesMulti` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
+Request account updates for multiple accounts/models.  `ledger_and_nlv` restricts the answer to the per-currency ledger, as a gateway does: each currency's cash, market values and `NetLiquidationByCurrency`, which is the net liquidation it means. The account's other figures — `NetLiquidation`, `BuyingPower` and the rest — are not delivered on such a request.  The request is held open. A figure that moves after the first batch is reported again under the same number, until `cancelAccountUpdatesMulti` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
 
 ```python
 def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=False)
@@ -626,7 +626,7 @@ def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=False)
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `account` | `str` | Account ID. |
 | `model_code` | `str` | Model portfolio code (empty for default). |
-| `ledger_and_nlv` | `bool` | If `true`, include ledger and NLV data. |
+| `ledger_and_nlv` | `bool` | If `true`, only the per-currency ledger: each currency's cash, market values and `NetLiquidationByCurrency`. |
 
 ---
 
@@ -861,7 +861,7 @@ def req_auto_open_orders(b_auto_bind)
 
 #### `req_executions`
 
-Request execution reports.  Before a session exists this is reported on the error callback, as every other request made before connecting is. Answered instead, the answer waits for a dispatch pass no session is there to make, and the caller hears nothing at all.  `lastNDays` and `specificDates` on the filter are refused when stated: the executions answered are this session's, filtered by the other fields, and a window this client cannot apply would go unapplied.
+Request execution reports.  Before a session exists this is reported on the error callback, as every other request made before connecting is. Answered instead, the answer waits for a dispatch pass no session is there to make, and the caller hears nothing at all.  `lastNDays` and `specificDates` select days as a gateway selects them, counted on the session's time zone. A date that does not read as a number, or is not a day of the calendar, is refused under 320, as a gateway refuses it. The executions answered from reach back to midnight six days before the logon in UTC, or to the logon's own day for a session set to today's executions, so the earliest days asked for can be missing some; those days are named on `error` under 321 ahead of the answer, which still comes. `acctCode` is ignored on a login holding one account and refused on one holding several where the login does not hold it, as a gateway does both.
 
 ```python
 def req_executions(req_id, exec_filter=None)
@@ -2059,7 +2059,7 @@ def req_family_codes()
 
 #### `set_server_log_level`
 
-How much to log about this session, 1 to 5.  1 to 5 set this client's logger to error, warn, info, debug and trace. A gateway applies the level to its own log; this client, which serves the caller in its place, applies it to the logger it installed. Nothing goes to the venue, which has no message for it. Where the program installed a logger of its own, the call says so on `error` rather than reporting a level it did not set. A level outside 1 to 5 is refused rather than reported back as `warn`, which would tell a caller they had a level that does not exist.
+How much to log about this session, 1 to 5.  1 to 5 are a gateway's System, Error, Warning, Info and Detail, and set this client's logger to error, error, warn, info and trace. A gateway applies the level to its own log; this client, which serves the caller in its place, applies it to the logger it installed. Nothing goes to the venue, which has no message for it. Where the program installed a logger of its own, the call says so on `error` rather than reporting a level it did not set. A level outside 1 to 5 is refused rather than reported back as `warn`, which would tell a caller they had a level that does not exist.
 
 ```python
 def set_server_log_level(log_level=2)
@@ -2067,7 +2067,7 @@ def set_server_log_level(log_level=2)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `log_level` | `int` | Log level: 1=error, 2=warn, 3=info, 4=debug, 5=trace. |
+| `log_level` | `int` | A gateway's level: 1=System, 2=Error, 3=Warning, 4=Info, 5=Detail; this client's logger goes to error, error, warn, info and trace. |
 
 ---
 
@@ -3089,7 +3089,7 @@ What a subscription was given: the increment its prices move in, which venues it
 | `ticker_id` | `int` | Ticker/request ID. |
 | `min_tick` | `float` | Minimum tick size. |
 | `bbo_exchange` | `str` | BBO exchange for smart component lookup (e.g. `"SMART"`). |
-| `snapshot_permissions` | `int` | Snapshot permissions bitmask. |
+| `snapshot_permissions` | `int` | What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. |
 
 ---
 

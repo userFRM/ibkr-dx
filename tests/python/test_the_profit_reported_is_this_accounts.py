@@ -32,7 +32,7 @@ def test_naming_another_account_is_refused_rather_than_answered():
     """
     w = Errors()
     c = ibkr_dx.EClient(w)
-    c._test_connect("DU123")
+    c._test_connect("DU123", accounts=["DU123", "DU999"])
 
     c.reqPnL(9, "DU999", "")
 

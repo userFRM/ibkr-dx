@@ -311,40 +311,63 @@ the volatility order and the pegged-to-stock order — nor are the four
 volatility pegs. Each carries prices or companions not yet established here,
 and is refused by name.
 
-## An account summary is this session's account, whatever group is named
+## An account summary is this session's account
 
-`reqAccountSummary` takes a group. The venue selects which accounts a summary
-covers from that group and from the model code beside it, and answers with the
-rows it picked. This client does neither: it filters the account stream it is
-already receiving for the tags the caller asked for, and the group and the
-model are taken and not applied.
+`reqAccountSummary` is checked as a gateway checks it and refused in its
+words, before anything is taken: empty tags (*Tags cannot be null*), an empty
+group (*Group name cannot be null*), and on a login that is not an advisor's
+any group but `All` or `AllNonProp` (*Group name is invalid*), all under 321.
+`All` is refused where the logon says the login may not ask for every account
+(*ALL account is not supported*, 321) and, on a login the venue adds accounts
+to, under 10200. A third summary while two are open is refused under 322, as a
+gateway refuses it. The tag `All` is what asks for every figure; a group of
+`All` with empty tags is refused.
 
-For a login holding one account and no model that is the same answer, which is
-the case this was written and measured against. For an advisor login where a
-group names accounts beyond the one this session holds, it is not: the summary
-covers the session's account rather than the group's members.
+What is answered is the account stream this session is already receiving,
+filtered for the tags the caller asked for. For a login holding one account
+that is the same answer a gateway gives, which is the case this was written
+and measured against. On a login holding several accounts, `All` covers the
+account this session opened under, not every account, and the caller is told
+so on `error` under 321 ahead of the answer. An advisor's own group names are
+passed through and answered the same way: a gateway refuses a group the
+advisor does not have, and this client does not check the name against the
+advisor's groups.
 
 The rows themselves are encoded the same way either way. What differs is which
 accounts they are for.
 
-## Executions and fills are the day's, not the account's
+## Executions and fills are the ones the venue restated, not the account's history
 
 `reqExecutions()` answers with the executions this session has seen **and the
 ones the venue restated when the session opened**.
 
-The venue restates the day's executions at every logon. Those are filed for a
+The venue restates the account's recent executions at every logon. Those are filed for a
 caller that asks and announced to nobody — a restarted program is answered with
 the fills it made before it restarted, including fills on orders that had
 already completed, which it never tracked and knows nothing else about.
 
-What is still absent is anything the venue does not restate. A gateway asks
-the venue for the account's executions over the days a filter names, up to
-seven back. This client does not ask: the filter's time is a test applied here
-to what it holds, and in Python a filter stating `lastNDays` or
-`specificDates` is refused (the Rust filter has neither field). So an answer
-holds today's executions on this account, not its history. A program
-reconciling against more than a day needs another source for it, and an empty
-answer means the venue restated none and this session has seen none.
+A filter's `lastNDays` (1 to 7, counting today) and `specificDates` (within
+the last seven days) select days the way a gateway selects them: anything
+else asks for no window, a date of 8 or less is dropped, a date outside the
+week is dropped and said in the log rather than refused, a date named twice
+is one day, and a window that asks for no more than today is answered with
+the executions held. A date that does not read as a whole number, or is not a
+day of the calendar (the thirty-first of February), refuses the request under
+320, as a gateway refuses it while reading it. Days are counted on the
+session's time zone. What is answered from is what the venue restated at
+logon, which reaches back to midnight six days before the logon in UTC (to
+the logon's own day for a session set to today's executions); a gateway asks
+the venue for each day the window names. So on a clock east of UTC, or a
+session set to today's executions, the earliest days a window asks for can be
+missing executions; the days concerned are named on `error` under 321 ahead
+of the answer, which still comes. `acctCode` is ignored on a login holding
+one account, as a gateway ignores it; on a login holding several, one the
+login does not hold is refused.
+
+A refused execution request is told so on `error`. The Rust client sends
+nothing else, as a gateway sends nothing else; the Python client also ends it
+with `execDetailsEnd`, as it ends every request it refuses, so a program
+waiting on the end is not left waiting.
 
 `reqCompletedOrders` is not in that position. It asks the venue, which answers
 with what it has finished rather than with what this session watched finish,
@@ -372,11 +395,22 @@ them.
 ## A recovery attempt outlives the call that stops it, and opens nothing
 
 `disconnect` stops the engine and returns. An attempt to reopen a connection
-that was already dialling when it did is told to stop — a flag every worker
-reads between the phases of a handshake — but it is not interrupted inside one,
-so it finishes whatever call it is in before it reads the flag.
+that was already dialling when it did is told to stop, and the trading
+connection's attempt is stopped as a gateway stops a connection: its socket is
+closed from the stopping thread, so a key exchange, an authentication or a
+wait for a second factor in flight returns at once rather than waiting out its
+timeout. This holds wherever recovery is taken back — a stop, a halt, a spent
+budget — not only as the engine ends. What closing the socket cannot cut short
+is a dial not yet connected (the host being resolved, the socket being
+opened), which reads the flag as soon as its socket exists and opens nothing,
+and a logon already written, which is let finish so the session it opens can
+be told goodbye rather than dropped. An engine that is ending waits for the
+trading attempt at most five seconds, the time a gateway gives a connection's
+thread it is stopping; a session the attempt lands after that is told goodbye
+where it lands.
 
-Nothing it opens is used. The trading connection's attempt is waited for, and a
+Nothing it opens is used. The trading connection's attempt is waited for,
+within that bound, and a
 session that landed after the stop is logged out rather than dropped: on this
 protocol an authenticated session is a session open at the venue, and somebody
 may have approved a second factor for it. The other three are not waited for.

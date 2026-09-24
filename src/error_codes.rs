@@ -169,6 +169,10 @@ pub const NOT_CANCELLABLE: i32 = 161;
 /// The code a log level outside the range the client carries is refused under.
 pub const LOG_LEVEL_INVALID: i32 = 319;
 
+/// The code a request for every account is refused under on a login the venue
+/// adds accounts to as it runs.
+pub const ALL_NOT_FOR_DYNAMIC_ACCOUNTS: i32 = 10200;
+
 /// The code a placement under a number the venue has already worked an order
 /// under is refused under.
 ///

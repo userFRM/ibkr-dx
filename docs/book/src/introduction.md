@@ -31,8 +31,8 @@ the same callbacks.
 + client.connect(username="...", password="...")    # no external process
 ```
 
-`port` is still accepted and is ignored. There is no local process to point it
-at.
+`port` is still accepted, and `client.port` reads it back while the session is
+held, but nothing connects on it. There is no local process to point it at.
 
 ## What goes away
 

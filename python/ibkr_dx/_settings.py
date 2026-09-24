@@ -19,9 +19,11 @@ Setting one afterwards affects the next session, not the running one.
 
 The three logging settings are read earlier still. A process has one logger and
 importing ``ibkr_dx`` installs it, so ``IBKR_DX_LOG_LEVEL``, ``IBKR_DX_LOG_DIR`` and
-``IBKR_DX_LOG_QUEUE`` are read at that moment and belong in the environment before
-it. :func:`configure` refuses them rather than storing a value nothing will
-read.
+``IBKR_DX_LOG_QUEUE`` are read at that moment. The level can be moved afterwards:
+:func:`configure` moves the logger ``ibkr_dx`` installed. Where it writes and how
+much it buffers are fixed once it runs, so those two belong in the environment
+before the import, and :func:`configure` refuses them rather than storing a
+value nothing will read.
 """
 
 from __future__ import annotations
@@ -73,30 +75,30 @@ _SETTINGS: dict[str, tuple[str, str]] = {
 #: have a stand-in — it is simply not one of the settings above — and the reason
 #: names it.
 UNAVAILABLE: dict[str, str] = {
-    "ApiMsgsPerSlice": "nothing paces what a caller sends; the pacing here is the subscription burst a reconnect replays, stated on ReconnectConfig",
-    "ApiTimeSliceMillis": "nothing paces what a caller sends; the pacing here is the subscription burst a reconnect replays, stated on ReconnectConfig",
-    "TimestampZone": "no setting chooses the zone a timestamp is stated in; a bar is stated on the zone the venue names beside it, or as seconds since the epoch where the request asked for that",
+    "rejectMessagesAboveMaxRate": "nothing paces what a caller sends: a gateway paces requests at the rate its logon states (fifty a second where it states none) unless this is set; set, a request above that rate is answered with error 100 and still carried out, and the third ends the connection, unless the venue or the client asks for pacing. This client does neither; the pacing here is the subscription burst a reconnect replays, stated on ReconnectConfig",
+    "sendInstrumentTimezone": "no setting chooses the zone a timestamp is stated in: a bar is stated on the zone the venue names beside it, or as seconds since the epoch where the request asked for that; an execution is stamped as the venue stamps it",
     "LocalServerPort": "no local socket to listen on; this client is the client",
     "LocalApiPort": "no local socket to listen on; this client is the client",
     "TrustedIPs": "nothing connects to this client, so nothing needs trusting",
     "Local_FIX_Server_Settings": "no local socket to listen on; this client is the client, and the only sockets it holds are the ones it opened to the venue",
-    "ApiOnly": "stated per session rather than once for a process: `readonly` on the client config, or connect(readonly=True)",
-    "RemoteHostOrderRouting": "orders are routed on the connection the login opened, so this is `host` on the client config, or connect(host=...); left unset, the venue names the server this account is on",
+    "ApiOnly": "`readonly` on the client config, or connect(readonly=True): stated per session rather than once for a process",
+    "RemoteHostOrderRouting": "`host` on the client config, or connect(host=...): orders are routed on the connection the login opened, and left unset the venue names the server this account is on",
     "RemotePortOrderRouting": "one port, fixed by the protocol: a redirect naming another is accepted at the socket and then reset, and the session only completes on the fixed one",
     "useSsl": "no switch: the login and the order connection are TLS with no plaintext path, and a farm connection is opened the one way the venue answers — a key exchange, an enciphered logon, then messages signed rather than enciphered",
     "UseSSL": "no switch: the login and the order connection are TLS with no plaintext path, and a farm connection is opened the one way the venue answers — a key exchange, an enciphered logon, then messages signed rather than enciphered",
-    "Select_account_type": "nothing here selects one: the login decides, the venue names the accounts it holds at logon, and whether a session is a paper one is stated as `paper` on the client config, or connect(paper=True)",
+    "Select_account_type": "`paper` on the client config, or connect(paper=True): nothing here selects an account type, the login decides it and the venue names the accounts it holds at logon",
     "MainWindow.Width": "no window",
     "MainWindow.Height": "no window",
     "vmoptions": "no runtime to size",
 }
 
 
-#: The three that belong to the process rather than to a session. A process has
-#: one logger, and importing ``ibkr_dx`` installs it, so a value set from here
-#: arrives after the only moment it could have been read. Refused rather than
-#: stored: stored, it reads back as a log level that was set and did nothing.
-_INSTALLED_AT_IMPORT = ("log_level", "log_dir", "log_queue")
+#: The two that are fixed once the logger runs. A process has one logger, and
+#: importing ``ibkr_dx`` installs it, so a value set from here arrives after the
+#: only moment it could have been read. Refused rather than stored: stored, it
+#: reads back as a setting that was set and did nothing. The level is not one of
+#: them — it moves the running logger.
+_INSTALLED_AT_IMPORT = ("log_dir", "log_queue")
 
 
 def configure(**settings) -> None:
@@ -107,9 +109,12 @@ def configure(**settings) -> None:
 
         ibkr_dx.configure(timezone="America/New_York", execution_reports="today")
 
-    The three logging settings are the exception, and are refused here: set
-    them in the environment before ``import ibkr_dx``, which is when the logger is
-    installed.
+    ``log_level`` moves the logger ``ibkr_dx`` installed, and raises where the
+    program installed its own; ``None`` or ``""`` moves it back to the level it
+    was installed at, as either leaves the setting unset. ``log_dir`` and
+    ``log_queue`` are refused here:
+    set them in the environment before ``import ibkr_dx``, which is when the
+    logger is installed.
     """
     unknown = set(settings) - set(_SETTINGS)
     if unknown:
@@ -125,6 +130,15 @@ def configure(**settings) -> None:
             f"{', '.join(_SETTINGS[name][0] for name in too_late)} in the "
             "environment before that"
         )
+    if "log_level" in settings:
+        from .ibkr_dx import _set_log_level
+
+        # Empty is unset, as the session reads it; unset is the level the
+        # logger was installed at, rather than wherever it was last moved.
+        if settings["log_level"] == "":
+            settings["log_level"] = None
+        level = settings["log_level"]
+        _set_log_level(None if level is None else str(level))
     for name, value in settings.items():
         var, _ = _SETTINGS[name]
         if value is None:

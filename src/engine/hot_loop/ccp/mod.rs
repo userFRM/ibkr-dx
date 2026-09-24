@@ -520,6 +520,20 @@ fn unnamed(sec_type: &str, symbol: &str, exchange: &str, listings: usize, so: &s
     }
 }
 
+/// The logout a session is owed as it is shut down rather than lost.
+pub(crate) fn say_goodbye(conn: &mut Connection) -> std::io::Result<()> {
+    let ts = chrono_free_timestamp();
+    conn.send_fix(&[
+        (fix::TAG_MSG_TYPE, fix::MSG_LOGOUT),
+        (fix::TAG_SENDING_TIME, &ts),
+        // The vendor states a reason here; "S" is what it sends when the
+        // session is being shut down rather than lost.
+        (8372, "S"),
+    ])?;
+    log::info!("Logout sent");
+    Ok(())
+}
+
 /// The contract a request names, when it carries one.
 ///
 /// Only the requests that must be sent under an id are listed: everything else
@@ -2477,17 +2491,8 @@ impl CcpState {
         hb: &mut HeartbeatState,
     ) {
         let Some(conn) = ccp_conn.as_mut() else { return };
-        let ts = chrono_free_timestamp();
-        let sent = conn.send_fix(&[
-            (fix::TAG_MSG_TYPE, fix::MSG_LOGOUT),
-            (fix::TAG_SENDING_TIME, &ts),
-            // The vendor states a reason here; "S" is what it sends when the
-            // session is being shut down rather than lost.
-            (8372, "S"),
-        ]);
-        if sent.is_ok() {
+        if say_goodbye(conn).is_ok() {
             hb.last_ccp_sent = Instant::now();
-            log::info!("Logout sent");
         }
     }
 

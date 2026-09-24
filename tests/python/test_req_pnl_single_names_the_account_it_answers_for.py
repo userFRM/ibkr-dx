@@ -15,7 +15,7 @@ class Errors(ibkr_dx.EWrapper):
 def test_req_pnl_single_says_whose_figures_it_answers_with():
     w = Errors()
     c = ibkr_dx.EClient(w)
-    c._test_connect("T")
+    c._test_connect("T", accounts=["T", "DU999"])
     c.reqPnLSingle(7, "DU999", "", 265598)
     assert [(r, code) for r, code, _ in w.seen] == [(7, 321)], w.seen
     assert "DU999" in w.seen[0][2]

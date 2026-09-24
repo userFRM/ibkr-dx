@@ -1921,6 +1921,170 @@ fn an_account_summary_reports_every_figure_the_venue_stated() {
     assert!(batch.entries.is_empty(), "{:?}", batch.entries.len());
 }
 
+/// An account summary is refused where a gateway refuses one, in its order
+/// and its words: no tags, no group, a group a login that is not an advisor's
+/// does not have, and `All` where the venue says the login may not ask for it.
+#[test]
+fn an_account_summary_is_refused_where_a_gateway_refuses_one() {
+    let check = |shared: &SharedState, group: &str, tags: &str| {
+        ClientCore::check_account_summary(shared, group, tags).map_err(|r| (r.code, r.message))
+    };
+    let shared = SharedState::new();
+    assert_eq!(check(&shared, "", ""), Err((321, "Tags cannot be null".into())));
+    assert_eq!(check(&shared, "", "NetLiquidation"), Err((321, "Group name cannot be null".into())));
+    for group in ["Nope", "all"] {
+        assert_eq!(
+            check(&shared, group, "NetLiquidation"),
+            Err((321, "Group name is invalid".into())),
+            "{group}",
+        );
+    }
+    assert_eq!(check(&shared, "All", "NetLiquidation"), Ok(()));
+    assert_eq!(check(&shared, "AllNonProp", "NetLiquidation"), Ok(()));
+
+    shared.reference.set_enabled_features(vec!["NOALL".into()]);
+    assert_eq!(check(&shared, "All", "NetLiquidation"), Err((321, "ALL account is not supported".into())));
+    shared.reference.set_advisor(true);
+    assert_eq!(check(&shared, "All", "NetLiquidation"), Ok(()), "an advisor may ask for every account");
+    assert_eq!(check(&shared, "MyGroup", "NetLiquidation"), Ok(()), "an advisor's groups are its own");
+    shared.reference.set_advisor(false);
+    shared.reference.set_enabled_features(vec!["NOALL".into(), "APIREQALLPOS".into()]);
+    assert_eq!(check(&shared, "All", "NetLiquidation"), Ok(()));
+
+    shared.reference.set_enabled_features(vec!["DYNACCTADD".into()]);
+    assert_eq!(
+        check(&shared, "All", "NetLiquidation"),
+        Err((10200, "This API request for All is not supported for Dynamic Account Addition".into())),
+    );
+}
+
+/// The account `reqAccountUpdates` names is checked as a gateway checks it:
+/// ignored on a login holding one, and on one holding several, one it holds,
+/// `All` where the login may ask for every account, or `AllNonProp` where the
+/// venue offers it and the logon names accounts it leaves out.
+#[test]
+fn an_account_update_is_refused_where_a_gateway_refuses_one() {
+    let check = |shared: &SharedState, accounts: &[&str], code: &str| {
+        let accounts: Vec<String> = accounts.iter().map(|a| a.to_string()).collect();
+        // What the logon names, as a real session holds it.
+        shared.reference.set_login(accounts.clone(), shared.reference.advisor());
+        ClientCore::check_account_updates(shared, &accounts, true, code).map_err(|r| (r.code, r.message))
+    };
+    let shared = SharedState::new();
+    assert_eq!(check(&shared, &["DU1"], "U9"), Ok(()), "one account: the code is ignored");
+    let several = ["DU1", "DU2"];
+    assert_eq!(check(&shared, &several, "DU2"), Ok(()));
+    assert_eq!(check(&shared, &several, "All"), Ok(()), "every account, as a gateway takes it");
+    assert_eq!(check(&shared, &several, "all"), Err((321, "Invalid account code 'all'.".into())));
+    assert_eq!(
+        check(&shared, &several, ""),
+        Err((321, "The account code is required for this operation.".into())),
+    );
+    assert_eq!(
+        check(&shared, &several, "AllNonProp"),
+        Err((321, "Invalid account code 'AllNonProp'.".into())),
+        "not offered",
+    );
+    shared.reference.set_enabled_features(vec!["ALLNONPROP".into()]);
+    assert_eq!(
+        check(&shared, &several, "AllNonProp"),
+        Err((321, "Invalid account code 'AllNonProp'.".into())),
+        "offered, and the logon names no account it leaves out",
+    );
+    shared.reference.set_all_non_prop_leaves_out(true);
+    assert_eq!(check(&shared, &several, "AllNonProp"), Ok(()));
+
+    shared.reference.set_enabled_features(vec!["NOALL".into()]);
+    assert_eq!(check(&shared, &several, "All"), Err((321, "ALL account is not supported".into())));
+    shared.reference.set_advisor(true);
+    assert_eq!(check(&shared, &several, "All"), Ok(()), "an advisor may ask for every account");
+    shared.reference.set_advisor(false);
+
+    // A login the venue adds accounts to holds several whatever the logon
+    // named, and takes any account unless the venue says the API may not.
+    shared.reference.set_enabled_features(vec!["DYNACCTADD".into()]);
+    assert_eq!(
+        check(&shared, &["DU1"], ""),
+        Err((321, "The account code is required for this operation.".into())),
+    );
+    assert_eq!(check(&shared, &["DU1"], "DU7"), Ok(()));
+    shared.reference.set_enabled_features(vec!["DYNACCTADD".into(), "NOAPIDYNADD".into()]);
+    assert_eq!(check(&shared, &["DU1"], "DU7"), Err((321, "Invalid account code 'DU7'.".into())));
+}
+
+/// An execution filter's account is ignored on a login holding one, and on
+/// one holding several — which a login the venue adds accounts to is — one
+/// the login does not hold is refused unless the venue takes accounts added
+/// later.
+#[test]
+fn an_execution_filters_account_is_refused_where_a_gateway_refuses_it() {
+    let check = |shared: &SharedState, code: &str| {
+        let mut filter = ExecutionFilter { acct_code: code.into(), ..Default::default() };
+        ClientCore::check_execution_account(shared, &["DU1".to_string()], &mut filter)
+            .map(|()| filter.acct_code)
+            .map_err(|r| (r.code, r.message))
+    };
+    let shared = SharedState::new();
+    assert_eq!(check(&shared, "DU7"), Ok(String::new()), "one account: ignored, and cleared");
+    shared.reference.set_enabled_features(vec!["DYNACCTADD".into()]);
+    assert_eq!(check(&shared, "DU7"), Ok("DU7".into()), "taken, and kept to filter by");
+    shared.reference.set_enabled_features(vec!["DYNACCTADD".into(), "NOAPIDYNADD".into()]);
+    assert_eq!(check(&shared, "DU7"), Err((321, "Invalid account code DU7.".into())));
+    assert_eq!(check(&shared, "DU1"), Ok("DU1".into()));
+}
+
+/// The account a P&L request names is checked in a gateway's order and words
+/// — blank, not held, `All` where the login may not ask for every account or
+/// is one the venue adds accounts to — before this client's own refusal of an
+/// account other than the session's.
+#[test]
+fn a_profit_request_is_refused_in_a_gateways_order() {
+    let check = |shared: &SharedState, accounts: &[&str], account: &str| {
+        let accounts: Vec<String> = accounts.iter().map(|a| a.to_string()).collect();
+        // What the logon names, as a real session holds it.
+        shared.reference.set_login(accounts.clone(), shared.reference.advisor());
+        ClientCore::check_pnl_account(shared, &accounts, "DU1", account).map_err(|r| (r.code, r.message))
+    };
+    let shared = SharedState::new();
+    assert_eq!(check(&shared, &["DU1"], "DU1"), Ok(()));
+    assert_eq!(check(&shared, &["DU1"], " "), Err((321, "Account must not be empty".into())));
+    assert_eq!(check(&shared, &["DU1"], "All"), Err((321, "Invalid account code".into())), "one account");
+    let several = ["DU1", "DU2"];
+    let ours = |named: &str| -> Result<(), (i32, String)> { Err((321, format!(
+        "account {named} was named and this session opened under DU1, whose profit is not what was asked for",
+    ))) };
+    assert_eq!(check(&shared, &several, "all"), ours("all"), "a gateway takes every account");
+    assert_eq!(check(&shared, &several, "DU2"), ours("DU2"));
+
+    shared.reference.set_enabled_features(vec!["NOALL".into()]);
+    assert_eq!(check(&shared, &several, "All"), Err((321, "Invalid account code".into())));
+    shared.reference.set_advisor(true);
+    assert_eq!(check(&shared, &several, "All"), ours("All"));
+    shared.reference.set_advisor(false);
+
+    shared.reference.set_enabled_features(vec!["DYNACCTADD".into()]);
+    assert_eq!(
+        check(&shared, &["DU1"], "All"),
+        Err((321, "This API request for All is not supported for Dynamic Account Addition".into())),
+    );
+    assert_eq!(check(&shared, &["DU1"], "DU7"), ours("DU7"), "any account passes a gateway's check here");
+}
+
+/// Two summaries at once is a gateway's limit, and a third is refused under
+/// the number and in the words a gateway uses.
+#[test]
+fn a_third_account_summary_is_refused_as_a_gateway_refuses_it() {
+    let core = ClientCore::new();
+    core.subscribe_account_summary(3, "NetLiquidation").unwrap();
+    core.subscribe_account_summary(4, "NetLiquidation").unwrap();
+    let refused = core.subscribe_account_summary(5, "NetLiquidation").unwrap_err();
+    assert_eq!(refused.code, 322);
+    assert_eq!(
+        refused.message,
+        "Maximum number of account summary requests exceeded; desubscribe to previous request first",
+    );
+}
+
 /// One slot serves the P&L subscription. A second asker under another
 /// request is refused rather than handed the slot, which took the updates
 /// away from the first caller without a word to either one. The first
@@ -3414,7 +3578,7 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
     let shared = SharedState::new();
     let slot: InstrumentId = 3;
 
-    shared.market.push_tick_req_params(slot, 0.01);
+    shared.market.push_tick_req_params(slot, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
     shared.market.push_subscription_move(slot, 9, 0);
     shared.market.push_tick_news(crate::types::TickNews {
         instrument: slot,
@@ -3654,7 +3818,7 @@ fn a_request_the_engine_names_the_slot_for_is_paid_like_any_joiner() {
     // the quote as it stands already matching this side's baseline.
     core.instrument_to_req.lock().unwrap().insert(iid, 1);
     core.req_to_instrument.lock().unwrap().insert(1, iid);
-    shared.market.push_tick_req_params(iid, 0.01);
+    shared.market.push_tick_req_params(iid, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
     let _ = shared.market.drain_tick_req_params();
     shared.market.push_subscription_failure(iid, "no entitlement".to_string());
     let _ = shared.market.drain_subscription_failures();
@@ -3713,7 +3877,7 @@ fn a_caller_moved_onto_another_slot_is_paid_like_a_joiner() {
     core.req_to_instrument.lock().unwrap().insert(7, from);
     core.instrument_to_req.lock().unwrap().insert(into, 1);
     core.req_to_instrument.lock().unwrap().insert(1, into);
-    shared.market.push_tick_req_params(into, 0.01);
+    shared.market.push_tick_req_params(into, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
     let _ = shared.market.drain_tick_req_params();
     shared.market.push_subscription_failure(into, "no entitlement".to_string());
     let _ = shared.market.drain_subscription_failures();
@@ -4374,4 +4538,99 @@ mod as_a_gateway_checks_it {
         let read = core.collect_open_orders(&shared).into_iter().find(|(id, _)| *id == 42).unwrap();
         assert_eq!(read.1.order.account, "DU1");
     }
+}
+
+/// A window in days or dates is settled as a gateway settles it: one to seven
+/// days back counting today, dates within the last seven days, and no window
+/// at all where it asks for no more than today's executions.
+#[test]
+fn an_execution_window_is_settled_as_a_gateway_settles_it() {
+    let today = jiff::civil::date(2026, 9, 24);
+    let back = |days: i64| today.saturating_sub(jiff::Span::new().days(days));
+    let ymd = |d: jiff::civil::Date| d.strftime("%Y%m%d").to_string().parse::<i32>().unwrap();
+    for asks_for_no_window in [0, 1, 8, -3, i32::MAX] {
+        assert_eq!(execution_days(asks_for_no_window, &[], today), Ok(None), "{asks_for_no_window}");
+    }
+    assert_eq!(execution_days(2, &[], today), Ok(Some(vec![today, back(1)])));
+    assert_eq!(execution_days(7, &[], today).map(|d| d.map(|d| d.len())), Ok(Some(7)));
+    assert_eq!(execution_days(0, &[ymd(back(5))], today), Ok(Some(vec![back(5)])));
+    assert_eq!(execution_days(0, &[ymd(back(7))], today), Ok(None), "a week back is outside the window");
+    assert_eq!(execution_days(0, &[ymd(today)], today), Ok(None), "today alone");
+    assert_eq!(execution_days(0, &[ymd(today), ymd(today)], today), Ok(None), "today named twice is today");
+    assert_eq!(execution_days(2, &[ymd(back(5))], today), Ok(Some(vec![today, back(1), back(5)])));
+    assert_eq!(execution_days(0, &[3, 8], today), Ok(None), "eight or less is dropped");
+    assert_eq!(execution_days(0, &[99_991_231, 100_000_101], today), Ok(None), "far off, and dropped");
+    // Not a day of the calendar: a gateway refuses the request as it reads it.
+    for not_a_day in [20260231, 20261301, 20260900, 20260932, 9, 20_261_332] {
+        let refused = execution_days(0, &[not_a_day], today).unwrap_err();
+        assert_eq!(refused.code, 320, "{not_a_day}");
+    }
+    assert_eq!(execution_days(0, &[20240229], today), Ok(None), "a leap day is a day");
+}
+
+/// The executions answered are those on the days asked for, each day counted
+/// on the session's clock.
+#[test]
+fn executions_are_answered_for_the_days_asked() {
+    let core = ClientCore::new();
+    for (id, time) in [
+        ("today", "20260924-10:00:00"),
+        ("two back", "20260922-10:00:00"),
+        ("five back", "20260919-10:00:00"),
+        ("late two back", "20260922-20:00:00"),
+    ] {
+        core.push_execution(
+            ApiContract::default(),
+            crate::types::model::Execution { exec_id: id.into(), time: time.into(), ..Default::default() },
+            Default::default(),
+        );
+    }
+    let now: jiff::Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
+    let on = |zone: &str| {
+        let shared = SharedState::new();
+        shared.set_settings(std::sync::Arc::new(crate::settings::GatewaySettings {
+            timezone: Some(zone.into()), ..Default::default()
+        }.resolve()));
+        shared
+    };
+    let answered = |last_n_days: i32, specific_dates: &[i32], zone: &str| {
+        let filter = ExecutionFilter {
+            last_n_days, specific_dates: specific_dates.to_vec(), ..Default::default()
+        };
+        let (rows, _) = core.executions_for_request(&on(zone), &[], &filter, now).unwrap();
+        let mut ids: Vec<String> = rows.into_iter().map(|se| se.execution.exec_id).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(answered(2, &[], "UTC"), ["today"]);
+    assert_eq!(answered(3, &[], "UTC"), ["late two back", "today", "two back"]);
+    assert_eq!(answered(8, &[], "UTC").len(), 4, "no window");
+    assert_eq!(answered(1, &[], "UTC").len(), 4, "today alone is the executions held");
+    assert_eq!(answered(0, &[20260919], "UTC"), ["five back"]);
+    assert_eq!(answered(0, &[20260904], "UTC").len(), 4, "a date outside the week is dropped");
+    assert_eq!(answered(2, &[20260919], "UTC"), ["five back", "today"]);
+    // Nine hours east, the evening of the twenty-second is the morning of the
+    // twenty-third, which is inside two days back.
+    assert_eq!(answered(2, &[], "Asia/Tokyo"), ["late two back", "today"]);
+
+    // A day that starts before what the session holds is answered with what
+    // it holds, and named so the caller can be told. Held from midnight six
+    // days back in UTC, a week counted in Tokyo reaches nine hours further.
+    let tokyo = on("Asia/Tokyo");
+    let held_from: jiff::Timestamp = "2026-09-18T00:00:00Z".parse().unwrap();
+    tokyo.reference.set_executions_held_from(Some(held_from.as_second()));
+    let filter = ExecutionFilter { last_n_days: 7, ..Default::default() };
+    let (_, unheld) = core.executions_for_request(&tokyo, &[], &filter, now).unwrap();
+    assert_eq!(unheld, [jiff::civil::date(2026, 9, 18)]);
+    let utc = on("UTC");
+    utc.reference.set_executions_held_from(tokyo.reference.executions_held_from());
+    let (_, unheld) = core.executions_for_request(&utc, &[], &filter, now).unwrap();
+    assert!(unheld.is_empty(), "{unheld:?}");
+    let (_, unheld) = core.executions_for_request(&tokyo, &[], &ExecutionFilter::default(), now).unwrap();
+    assert!(unheld.is_empty(), "no window, nothing to say");
+
+    // And a date that is not a day refuses the request as a gateway reads it.
+    let filter = ExecutionFilter { specific_dates: vec![20260231], ..Default::default() };
+    let Err(refused) = core.executions_for_request(&utc, &[], &filter, now) else { panic!("answered") };
+    assert_eq!(refused.code, 320);
 }

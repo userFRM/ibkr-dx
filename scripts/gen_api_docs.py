@@ -81,8 +81,8 @@ PARAM_DOCS: dict[str, str] = {
     "period": "Histogram period, e.g. `\"1week\"`, `\"1month\"`.",
     "tags": "Comma-separated account tags: `\"NetLiquidation,BuyingPower,...\"`.",
     "all_msgs": "If `true`, receive all existing bulletins on subscribe.",
-    "log_level": "Log level: 1=error, 2=warn, 3=info, 4=debug, 5=trace.",
-    "filter": "Execution filter (client_id, acct_code, time, symbol, sec_type, exchange, side).",
+    "log_level": "A gateway's level: 1=System, 2=Error, 3=Warning, 4=Info, 5=Detail; this client's logger goes to error, error, warn, info and trace.",
+    "filter": "Execution filter (client_id, acct_code, time, symbol, sec_type, exchange, side, last_n_days, specific_dates).",
     "b_auto_bind": "If `true`, auto-bind future orders to this client.",
     "bbo_exchange": "BBO exchange for smart component lookup (e.g. `\"SMART\"`).",
     "acct_code": "Account code (e.g. `\"DU1234567\"`).",
@@ -105,7 +105,7 @@ PARAM_DOCS: dict[str, str] = {
     "cxml": "FA XML configuration data.",
     "group_id": "Display group ID.",
     "contract_info": "Display group contract info string.",
-    "ledger_and_nlv": "If `true`, include ledger and NLV data.",
+    "ledger_and_nlv": "If `true`, only the per-currency ledger: each currency's cash, market values and `NetLiquidationByCurrency`.",
     "regulatory_snapshot": "If `true`, request a regulatory snapshot (additional fees may apply).",
     "format_date": "Date format: 1=`\"YYYYMMDD HH:MM:SS\"`, 2=Unix seconds.",
     "keep_up_to_date": "If `true`, continue receiving updates after initial history.",
@@ -198,7 +198,7 @@ PARAM_DOCS: dict[str, str] = {
     "time_zone": "Timezone string (e.g. `\"US/Eastern\"`).",
     "data": "Raw data string (XML/JSON).",
     "min_tick": "Minimum tick size.",
-    "snapshot_permissions": "Snapshot permissions bitmask.",
+    "snapshot_permissions": "What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API.",
     "tick_type": "Tick type ID or tick-by-tick type string.",
     "error_code": "Error code.",
     "error_string": "Error message.",
@@ -631,8 +631,8 @@ def parse_pymethods(path: Path) -> list[dict]:
             doc = re.sub(r"\s*Matches `[^`]+` in C\+\+\.?", "", doc)
             doc = plain_intra_doc_links(doc)
             params = parse_rust_params(args_str)
-            # Filter out &self, py: Python
-            params = [p for p in params if p["name"] != "py" and "Python" not in p.get("type", "")]
+            # Filter out &self, py: Python, and the `slf` receiver pyo3 takes in its place
+            params = [p for p in params if p["name"] not in ("py", "slf") and "Python" not in p.get("type", "")]
             py_sig = _build_py_sig(name, args_str, pyo3_sig)
             results.append({
                 "name": name, "signature": py_sig, "doc": doc,

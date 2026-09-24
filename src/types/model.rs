@@ -1612,6 +1612,14 @@ pub struct ExecutionFilter {
     pub exchange: String,
     /// Only buys, or only sells.
     pub side: String,
+    /// Only fills on the last this many days, counting today, where it is 1
+    /// to 7; anything else asks for no window. Days are counted on the
+    /// session's time zone, as a gateway counts them on its own.
+    pub last_n_days: i32,
+    /// Only fills on these days, `yyyymmdd`, where they fall within the last
+    /// seven; a date outside that is dropped, as a gateway drops it, and said
+    /// in the log.
+    pub specific_dates: Vec<i32>,
 }
 
 // ── CommissionAndFeesReport ──

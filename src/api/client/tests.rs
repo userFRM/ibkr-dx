@@ -1650,7 +1650,7 @@ fn a_profit_subscription_on_an_ended_session_takes_no_slot() {
         fn error(&mut self, _req_id: i64, code: i64, _msg: &str, _json: &str) { self.0.push(code); }
     }
     let mut w = Heard::default();
-    client.req_pnl(9, "", "");
+    client.req_pnl(9, "DU123", "");
     client.process_msgs(&mut w);
     assert!(client.core.pnl_req_id.lock().unwrap().is_none(), "the slot is not taken");
     assert!(w.0.contains(&504), "and the caller is told the session is over: {:?}", w.0);
@@ -5358,7 +5358,7 @@ fn the_account_figures_are_the_ones_the_venue_stated() {
     shared.portfolio.note_account_value("SettledCash", "42.5", "CHF");
 
     let mut rows = Rows::default();
-    client.req_account_updates_multi(1, "DU999", "", true, &mut rows);
+    client.req_account_updates_multi(1, "DU999", "", false, &mut rows);
 
     assert!(
         rows.0.iter().any(|(account, key, value, currency)| {
@@ -5376,6 +5376,190 @@ fn the_account_figures_are_the_ones_the_venue_stated() {
         rows.0.iter().all(|(account, ..)| account == "DU123"),
         "an account that was asked about is not the account these are for",
     );
+}
+
+/// A request for the ledger and net liquidation is given the per-currency
+/// ledger and nothing else, as a gateway gives it, first batch and moves alike;
+/// a request without the flag is given both.
+#[test]
+fn a_ledger_request_is_given_the_ledger_alone() {
+    #[derive(Default)]
+    struct Rows(Vec<(i64, String, String)>);
+    impl crate::api::wrapper::Wrapper for Rows {
+        fn account_update_multi(
+            &mut self, req_id: i64, _account: &str, _model: &str,
+            key: &str, _value: &str, currency: &str,
+        ) {
+            self.0.push((req_id, key.to_string(), currency.to_string()));
+        }
+    }
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.account_download_is_settled();
+    shared.portfolio.note_account_value("NetLiquidation", "100", "USD");
+    shared.portfolio.note_ledger_value("Currency", "USD", "USD");
+    shared.portfolio.note_ledger_value("TotalCashBalance", "50.00", "USD");
+    shared.portfolio.note_ledger_value("NetLiquidationByCurrency", "100.00", "USD");
+
+    let mut rows = Rows::default();
+    client.req_account_updates_multi(1, "", "", true, &mut rows);
+    client.req_account_updates_multi(2, "", "", false, &mut rows);
+    let keys = |req: i64, rows: &Rows| -> Vec<String> {
+        let mut k: Vec<String> =
+            rows.0.iter().filter(|(r, ..)| *r == req).map(|(_, key, _)| key.clone()).collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(1, &rows), ["Currency", "NetLiquidationByCurrency", "TotalCashBalance"]);
+    assert_eq!(
+        keys(2, &rows),
+        ["Currency", "NetLiquidation", "NetLiquidationByCurrency", "TotalCashBalance"],
+    );
+
+    // A move outside the ledger reaches only the request that did not ask
+    // for the ledger alone; one inside it reaches both.
+    rows.0.clear();
+    shared.portfolio.note_account_value("NetLiquidation", "101", "USD");
+    shared.portfolio.note_ledger_value("NetLiquidationByCurrency", "101.00", "USD");
+    client.process_msgs(&mut rows);
+    assert_eq!(keys(1, &rows), ["NetLiquidationByCurrency"]);
+    assert_eq!(keys(2, &rows), ["NetLiquidation", "NetLiquidationByCurrency"]);
+}
+
+/// On a login holding one account, the code `req_account_updates` names is
+/// ignored, as a gateway ignores it. On one holding several, a subscription
+/// naming none or one the login does not hold is refused in a gateway's words
+/// and asks the venue for nothing.
+#[test]
+fn an_account_code_is_checked_as_a_gateway_checks_it() {
+    let (client, rx, _shared) = test_client();
+    let mut w = RecordingWrapper::default();
+    client.req_account_updates(true, "X");
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("error:")), "{:?}", w.events);
+    assert!(
+        rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { account } if account == "DU123")),
+        "the one account is refreshed whatever was named",
+    );
+
+    let (mut client, rx, shared) = test_client();
+    client.accounts = vec!["DU123".into(), "DU456".into()];
+    shared.reference.set_login(client.accounts.clone(), false);
+    let mut w = RecordingWrapper::default();
+    client.req_account_updates(true, "");
+    client.req_account_updates(true, "U9");
+    client.req_account_updates(false, "");
+    client.process_msgs(&mut w);
+    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
+    assert_eq!(errors, [
+        "error:-1:321:The account code is required for this operation.",
+        "error:-1:321:Invalid account code 'U9'.",
+    ], "{:?}", w.events);
+    assert!(
+        !rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { .. })),
+        "nothing is asked of the venue for a refused subscription",
+    );
+    // One the login holds, and every account, are answered with this
+    // session's account's figures, and the caller is told whose they are.
+    let mut w = RecordingWrapper::default();
+    client.req_account_updates(true, "DU456");
+    assert!(rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { .. })));
+    client.req_account_updates(true, "All");
+    assert!(rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { .. })), "All is taken");
+    client.req_account_updates(true, "DU123");
+    client.process_msgs(&mut w);
+    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
+    assert_eq!(errors, [
+        "error:-1:321:DU456 was named and the figures that follow are DU123's, which is the account this session opened under",
+        "error:-1:321:All was named and the figures that follow are DU123's, which is the account this session opened under",
+    ], "{:?}", w.events);
+
+    // An ended session is told it has ended, not that it named no account.
+    shared.reference.set_session_over("the session ended");
+    let mut w = RecordingWrapper::default();
+    client.req_account_updates(true, "");
+    client.process_msgs(&mut w);
+    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
+    assert_eq!(errors.len(), 1, "{:?}", w.events);
+    assert!(errors[0].starts_with("error:-1:504:"), "{:?}", w.events);
+}
+
+/// An execution filter's account is ignored on a login holding one, and one
+/// the login does not hold is refused on a login holding several, as a gateway
+/// does both.
+#[test]
+fn an_execution_filters_account_is_checked_as_a_gateway_checks_it() {
+    let (mut client, _rx, shared) = test_client();
+    client.core.push_execution(
+        Default::default(),
+        crate::types::model::Execution { exec_id: "e1".into(), acct_number: "DU123".into(), ..Default::default() },
+        Default::default(),
+    );
+    let filter = crate::types::model::ExecutionFilter { acct_code: "X".into(), ..Default::default() };
+    let mut w = RecordingWrapper::default();
+    client.req_executions(1, &filter, &mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:")), "{:?}", w.events);
+
+    client.accounts = vec!["DU123".into(), "DU456".into()];
+
+    shared.reference.set_login(client.accounts.clone(), false);
+    #[derive(Default)]
+    struct Told(Vec<String>);
+    impl crate::api::wrapper::Wrapper for Told {
+        fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            self.0.push(format!("error:{req_id}:{code}:{message}"));
+        }
+        fn exec_details(&mut self, req_id: i64, _: &Contract, _: &crate::types::model::Execution) {
+            self.0.push(format!("exec_details:{req_id}"));
+        }
+        fn exec_details_end(&mut self, req_id: i64) {
+            self.0.push(format!("exec_details_end:{req_id}"));
+        }
+    }
+    let mut w = Told::default();
+    client.req_executions(2, &filter, &mut w);
+    assert_eq!(w.0, ["error:2:321:Invalid account code X."], "refused, and told nothing else, as a gateway tells it");
+
+    // A date that is not a day is refused as a gateway reads the request,
+    // ahead of the account it names.
+    let filter = crate::types::model::ExecutionFilter {
+        acct_code: "X".into(), specific_dates: vec![20260231], ..Default::default()
+    };
+    let mut w = Told::default();
+    client.req_executions(3, &filter, &mut w);
+    assert_eq!(w.0.len(), 1, "{:?}", w.0);
+    assert!(w.0[0].starts_with("error:3:320:"), "{:?}", w.0);
+}
+
+/// An account summary a gateway refuses is refused here in its words, and
+/// takes no slot.
+#[test]
+fn an_account_summary_a_gateway_refuses_takes_nothing() {
+    let (client, _rx, _shared) = test_client();
+    let mut w = RecordingWrapper::default();
+    client.req_account_summary(1, "", "NetLiquidation");
+    client.req_account_summary(2, "All", "");
+    client.process_msgs(&mut w);
+    assert!(
+        w.events.iter().any(|e| e == "error:1:321:Group name cannot be null"),
+        "{:?}", w.events,
+    );
+    assert!(w.events.iter().any(|e| e == "error:2:321:Tags cannot be null"), "{:?}", w.events);
+    assert!(client.core.account_summary_req.lock().unwrap().is_none(), "no slot was taken");
+
+    // Every account, on a login holding several, is answered with this
+    // session's account's figures, and the caller is told so.
+    let (mut client, _rx, shared) = test_client();
+    client.accounts = vec!["DU123".into(), "DU456".into()];
+    shared.reference.set_login(client.accounts.clone(), false);
+    let mut w = RecordingWrapper::default();
+    client.req_account_summary(3, "All", "NetLiquidation");
+    client.process_msgs(&mut w);
+    assert!(
+        w.events.iter().any(|e| e == "error:3:321:All was named and the figures that follow are \
+            DU123's, which is the account this session opened under"),
+        "{:?}", w.events,
+    );
+    assert!(client.core.account_summary_req.lock().unwrap().is_some(), "and it is answered");
 }
 
 /// A holding is labelled with the account that holds it.
@@ -9043,7 +9227,7 @@ fn a_bracket_is_refused_on_a_security_type_the_venue_does_not_permit() {
 #[test]
 fn asking_for_the_accounts_pnl_asks_the_venue() {
     let (client, rx, _shared) = test_client();
-    client.req_pnl(9, "", "");
+    client.req_pnl(9, "DU123", "");
     let asked = rx.try_iter().find_map(|cmd| match cmd {
         ControlCommand::SubscribePnl { req_id, account } => Some((req_id, account)),
         _ => None,
@@ -9054,23 +9238,23 @@ fn asking_for_the_accounts_pnl_asks_the_venue() {
         "the venue was not asked for the account's P&L",
     );
 
-    // And under this session's account whatever is named, because the figure
-    // is worked out from one set of seeds against one book of holdings and
-    // both belong to it. Taken at its word, a second account's seeds replaced
-    // this account's and the next restatement replaced them back, so the
-    // figure alternated between two accounts' realised legs measured against
-    // this account's positions. The slot is held by the first request, so that
-    // one is withdrawn before another may ask.
+    // And nothing for another account, because the figure is worked out from
+    // one set of seeds against one book of holdings and both belong to this
+    // one. Subscribed under this account instead, the caller's number carried
+    // this account's profit under the other's name; a gateway refuses an
+    // account the login does not hold, and says so in its words.
     client.cancel_pnl(9);
+    let mut w = RecordingWrapper::default();
     client.req_pnl(10, "DU999", "");
-    let asked = rx.try_iter().find_map(|cmd| match cmd {
-        ControlCommand::SubscribePnl { account, .. } => Some(account),
-        _ => None,
-    });
-    assert_eq!(
-        asked, Some("DU123".to_string()),
-        "the profit reported is this account's, so this account is what is asked for",
+    client.req_pnl(11, "", "");
+    client.process_msgs(&mut w);
+    assert!(
+        !rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::SubscribePnl { .. })),
+        "the venue is asked for nothing under a refused request",
     );
+    assert!(w.events.iter().any(|e| e == "error:10:321:Invalid account code"), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "error:11:321:Account must not be empty"), "{:?}", w.events);
+    assert_eq!(*client.core.pnl_req_id.lock().unwrap(), None, "and no slot is taken");
 }
 
 /// `regulatory_snapshot` reaches the venue rather than being refused here, and
@@ -9811,7 +9995,8 @@ fn a_standing_watch_does_not_make_the_plain_answer_replay_the_book() {
 /// account-level one is told: the figures are this session's account's.
 #[test]
 fn req_pnl_single_says_whose_figures_it_answers_with() {
-    let (client, _rx, _shared) = test_client();
+    let (mut client, _rx, _shared) = test_client();
+    client.accounts = vec!["DU123".into(), "DU999".into()];
     let mut w = RecordingWrapper::default();
     client.req_pnl_single(7, "DU999", "", 265598);
     client.process_msgs(&mut w);
@@ -10139,12 +10324,27 @@ fn the_acknowledged_increment_reaches_the_caller_on_tick_req_params() {
     let (client, _rx, shared) = test_client();
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
     client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    shared.market.push_tick_req_params(0, 0.01);
+    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01::0"), "{:?}", w.events);
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_req_params:")).count(), 1, "once");
+}
+
+/// And the exchange and permission number the acknowledgement stated beside
+/// it, as they were stated.
+#[test]
+fn the_acknowledged_permission_and_exchange_reach_the_caller() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
+        min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01:9c0001:3"), "{:?}", w.events);
 }
 
 /// A bar that continues a kept-up-to-date request is dated as the history

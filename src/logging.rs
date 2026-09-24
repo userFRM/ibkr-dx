@@ -161,15 +161,45 @@ static LEVEL: std::sync::OnceLock<
     tracing_subscriber::reload::Handle<EnvFilter, tracing_subscriber::Registry>,
 > = std::sync::OnceLock::new();
 
+/// Why a level was not moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelNotMoved {
+    /// The text is not a filter this logger reads.
+    NotALevel,
+    /// This client did not install the logger, and whoever did holds its level.
+    NotThisClients,
+}
+
 /// Move the level of the logger this client installed.
 ///
-/// `false` where there is none to move — a program that installed its own
+/// Refused where there is none to move — a program that installed its own
 /// logger keeps it, and saying otherwise would tell a caller the level changed
-/// when it did not.
-pub fn set_level(level: &str) -> bool {
-    let Some(handle) = LEVEL.get() else { return false };
-    let Ok(filter) = EnvFilter::try_new(level) else { return false };
-    handle.reload(filter).is_ok()
+/// when it did not — and where `level` is not a filter at all.
+pub fn set_level(level: &str) -> Result<(), LevelNotMoved> {
+    let filter = EnvFilter::try_new(level).map_err(|_| LevelNotMoved::NotALevel)?;
+    let handle = LEVEL.get().ok_or(LevelNotMoved::NotThisClients)?;
+    handle.reload(filter).map_err(|_| LevelNotMoved::NotThisClients)
+}
+
+/// The filter the logger this client installed runs at, as a filter is
+/// written, or `None` where it installed none.
+pub fn current_level() -> Option<String> {
+    LEVEL.get()?.with_current(ToString::to_string).ok()
+}
+
+/// The level of this client's logger that a gateway's log level stands for.
+///
+/// A gateway's levels are 1 System, 2 Error, 3 Warning, 4 Info and 5 Detail.
+/// Error, Warning and Info are this logger's own. System and Detail have none
+/// of their own here, and stand at the two ends of it. `None` outside 1 to 5.
+pub fn gateway_level(level: i32) -> Option<&'static str> {
+    Some(match level {
+        1 | 2 => "error",
+        3 => "warn",
+        4 => "info",
+        5 => "trace",
+        _ => return None,
+    })
 }
 
 /// Install the logger the environment asks for, when there may already be one.
@@ -186,11 +216,14 @@ pub fn init(config: &LogConfig) -> LogGuard {
 }
 
 pub fn try_init(config: &LogConfig) -> Option<LogGuard> {
-    let filter = match &config.level {
-        Some(level) => EnvFilter::try_new(level)
-            .unwrap_or_else(|_| EnvFilter::new("info")),
-        None => EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info")),
+    // A level that is not one is said once the logger is there to say it,
+    // rather than read as `info` without a word.
+    let (filter, unread) = match &config.level {
+        Some(level) => match EnvFilter::try_new(level) {
+            Ok(filter) => (filter, None),
+            Err(_) => (EnvFilter::new("info"), Some(level)),
+        },
+        None => (EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")), None),
     };
 
     // Records the writer may hold before it starts dropping them. Left to the
@@ -224,6 +257,9 @@ pub fn try_init(config: &LogConfig) -> Option<LogGuard> {
         .ok()
         .map(|()| {
             let _ = LEVEL.set(handle);
+            if let Some(level) = unread {
+                log::warn!("log level {level} is not a level this logger reads, so it logs at info");
+            }
             LogGuard { _guard: guard }
         })
 }
@@ -233,10 +269,12 @@ pub fn try_init(config: &LogConfig) -> Option<LogGuard> {
 /// A gateway reads its logging configuration once, as the process starts, and
 /// this is the same moment: the first session that states any of the three
 /// installs the logger from what its caller stated, else from the environment.
-/// A process has one logger and whoever installed it holds what flushes it, so
-/// a session that opens later cannot move it — what that session stated is
-/// named in a warning rather than dropped, which is what stating a log level
-/// and getting neither the level nor a word about it used to do.
+/// A process has one logger and whoever installed it holds what flushes it.
+/// A session that opens later moves its level where this client installed it;
+/// where it writes and how much it buffers are fixed once it runs, so what
+/// that session stated of those is named in a warning rather than dropped,
+/// which is what stating a setting and getting neither it nor a word about it
+/// used to do.
 ///
 /// A session that states none of the three installs nothing, so a program that
 /// installs its own logger keeps it.
@@ -252,14 +290,32 @@ pub fn apply(settings: &crate::settings::GatewaySettings) {
     if stated.is_empty() {
         return;
     }
-    match try_init(&LogConfig::stated(settings)) {
-        Some(guard) => guard.keep_for_the_process(),
-        None => log::warn!(
+    if let Some(guard) = try_init(&LogConfig::stated(settings)) {
+        return guard.keep_for_the_process();
+    }
+    let mut unmoved = stated;
+    // Said on its own where it moved, or where it is not a level at all: the
+    // warning below is for what the installed logger could not take.
+    if let Some(level) = settings.log_level.as_deref() {
+        let said = match set_level(level) {
+            Ok(()) => { log::info!("logging at {level}"); true }
+            Err(LevelNotMoved::NotALevel) => {
+                log::warn!("log_level {level} is not a level this logger reads, so the level stays");
+                true
+            }
+            Err(LevelNotMoved::NotThisClients) => false,
+        };
+        if said {
+            unmoved.retain(|name| *name != "log_level");
+        }
+    }
+    if !unmoved.is_empty() {
+        log::warn!(
             "{} stated after this process installed its logger, and a process has \
              one: logging is settled before the first session opens, and this \
              session runs under the logger that is already installed",
-            stated.join(", "),
-        ),
+            unmoved.join(", "),
+        );
     }
 }
 
@@ -279,6 +335,20 @@ impl LogGuard {
 mod tests {
     use super::*;
 
+    /// A gateway's Error is error here, its Warning warn and its Info info —
+    /// not one step louder each, which is what a count from 1 as error made
+    /// of them, with a gateway's default reading as warn.
+    #[test]
+    fn a_gateway_level_is_the_level_it_names() {
+        assert_eq!(gateway_level(1), Some("error"), "System has no level of its own here");
+        assert_eq!(gateway_level(2), Some("error"));
+        assert_eq!(gateway_level(3), Some("warn"));
+        assert_eq!(gateway_level(4), Some("info"));
+        assert_eq!(gateway_level(5), Some("trace"), "nor has Detail");
+        assert_eq!(gateway_level(0), None);
+        assert_eq!(gateway_level(6), None);
+    }
+
     /// A level moves the logger this client installed, and nothing else.
     ///
     /// This call was taken and not applied for as long as it existed: what a
@@ -297,12 +367,17 @@ mod tests {
         let _ = try_init_from_env("info");
         match LEVEL.get() {
             Some(_) => {
-                assert!(set_level("debug"), "the level this client holds is its own to move");
-                assert!(set_level("info"), "and moves back");
+                assert_eq!(set_level("debug"), Ok(()), "the level this client holds is its own to move");
+                assert_eq!(current_level().as_deref(), Some("debug"));
+                assert_eq!(set_level("info"), Ok(()), "and moves back");
             }
             // Somebody else's logger. The call answers that it did not move it,
             // which is the whole of what this guards.
-            None => assert!(!set_level("debug"), "a logger this client did not install is not moved"),
+            None => assert_eq!(
+                set_level("debug"), Err(LevelNotMoved::NotThisClients),
+                "a logger this client did not install is not moved",
+            ),
         }
+        assert_eq!(set_level("info=loud"), Err(LevelNotMoved::NotALevel), "and a level is a level");
     }
 }
