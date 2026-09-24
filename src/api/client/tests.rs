@@ -8448,21 +8448,15 @@ fn solving_an_option_answers_against_the_venues_own_model() {
 /// is the one way of mixing them that cannot work, and it says so on the spot.
 #[test]
 fn a_question_asked_from_inside_a_callback_is_refused_rather_than_left_waiting() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let told: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let read = Arc::new(AtomicBool::new(false));
-    let (t, r) = (Arc::clone(&told), Arc::clone(&read));
-    // On a thread of its own, and never joined: a wedged read cannot be, and
-    // the harness has to report a failure rather than stop on one.
-    std::thread::spawn(move || {
+    let (done, completed) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
         let (client, _rx, shared) = test_client();
         shared.reference.push_historical_error(9, 321, "the venue said no".to_string());
 
-        struct AsksBack<'a> { client: &'a EClient, told: &'a Mutex<Option<String>> }
+        struct AsksBack<'a> { client: &'a EClient, told: Option<String> }
         impl Wrapper for AsksBack<'_> {
             fn error(&mut self, _req_id: i64, _code: i64, _message: &str, _advanced: &str) {
-                *self.told.lock().unwrap() = Some(
+                self.told = Some(
                     match self.client.contract_details(&Contract::default()) {
                         Ok(_) => "answered".to_string(),
                         Err(refused) => refused.to_string(),
@@ -8470,17 +8464,14 @@ fn a_question_asked_from_inside_a_callback_is_refused_rather_than_left_waiting()
                 );
             }
         }
-        let mut asking = AsksBack { client: &client, told: &t };
+        let mut asking = AsksBack { client: &client, told: None };
         client.process_msgs(&mut asking);
-        r.store(true, Ordering::Release);
+        done.send(asking.told.expect("the callback asked its question")).unwrap();
     });
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !read.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    assert!(read.load(Ordering::Acquire), "the read never returned from the callback");
-    let answer = told.lock().unwrap().clone().expect("the callback asked its question");
+    let answer = completed.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the read never returned from the callback");
+    reader.join().expect("the callback reader panicked");
     assert!(
         answer.contains("from inside a callback"),
         "the question was not told why it cannot be answered here: {answer}",

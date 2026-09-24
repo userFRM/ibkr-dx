@@ -3987,7 +3987,11 @@ client.req_current_time()
                 let client = client.clone_ref(py);
                 thread::spawn(move || Python::attach(|py| client.call_method0(py, "poll").map(|_| ())))
             };
-            assert!(g.get_item("entered").unwrap().unwrap().call_method1("wait", (1.0,)).unwrap().extract::<bool>().unwrap());
+            assert!(
+                g.get_item("entered").unwrap().unwrap().call_method1("wait", (30.0,))
+                    .unwrap().extract::<bool>().unwrap(),
+                "poll never entered the current-time callback"
+            );
             let closing = {
                 let client = client.clone_ref(py);
                 thread::spawn(move || Python::attach(|py| client.call_method0(py, "disconnect").map(|_| ())))

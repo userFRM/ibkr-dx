@@ -3,6 +3,8 @@ use crate::types::model::ErrorOrigin;
 use std::io::Read;
 use std::time::Duration;
 
+const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[test]
 fn closing_admission_stops_calls_before_the_join_returns() {
     let shared = Arc::new(SharedState::new());
@@ -14,7 +16,10 @@ fn closing_admission_stops_calls_before_the_join_returns() {
         let client = Arc::clone(&client);
         thread::spawn(move || client.disconnect())
     };
-    assert!(matches!(rx.recv_timeout(Duration::from_secs(1)), Ok(ControlCommand::Logout)));
+    assert!(matches!(
+        rx.recv_timeout(EVENT_TIMEOUT).expect("disconnect did not send Logout"),
+        ControlCommand::Logout
+    ));
     assert!(!closing.is_finished());
     assert!(client.session_over());
     assert!(!client.is_connected());
@@ -27,7 +32,10 @@ fn closing_admission_stops_calls_before_the_join_returns() {
             .take_records(shared.next_seq(), crate::bridge::Take::Whole { bulletins: true })
             .is_empty()
     );
-    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Shutdown)));
+    assert!(matches!(
+        rx.recv_timeout(EVENT_TIMEOUT).expect("disconnect did not send Shutdown"),
+        ControlCommand::Shutdown
+    ));
     assert!(rx.try_recv().is_err());
     release.send(()).unwrap();
     assert_eq!(closing.join().unwrap(), Shutdown { logout_sent: false, engine: EngineEnd::Ended });

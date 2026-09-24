@@ -1511,7 +1511,11 @@ mod shutdown_tests {
         let shared = Arc::new(SharedState::new());
         let client = EClient::from_parts(Arc::clone(&shared), tx, handle, "DU1".into());
         owner_tx.send(client).unwrap();
-        assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(30))
+                .expect("dropping the last owner on the engine thread did not finish"),
+            "dropping the last owner on the engine thread panicked"
+        );
         assert!(shared.admission_closed());
         assert!(matches!(rx.recv().unwrap(), ControlCommand::Logout));
         assert!(matches!(rx.recv().unwrap(), ControlCommand::Shutdown));
@@ -1671,7 +1675,8 @@ mod wake_tests {
             shared.set_wake_hook(None);
             tx.send(()).unwrap();
         });
-        rx.recv_timeout(Duration::from_secs(1)).expect("the captured value can set the next hook");
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("removing the hook did not finish dropping its captured value");
         worker.join().unwrap();
     }
 

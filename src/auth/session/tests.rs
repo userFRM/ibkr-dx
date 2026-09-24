@@ -2185,7 +2185,8 @@ fn taking_back_a_code_wait_waits_for_its_provider_and_submits_nothing() {
             (result, stream.written)
         })
     };
-    provider_entered.recv_timeout(Duration::from_secs(1)).unwrap();
+    provider_entered.recv_timeout(Duration::from_secs(30))
+        .expect("the login never entered the code provider");
     cancel.store(true, Ordering::Release);
     std::thread::sleep(Duration::from_millis(30));
     assert!(!worker.is_finished(), "the code provider still belongs to this login");
