@@ -118,6 +118,7 @@ def test_a_rule_never_seen_is_refused_in_the_slots_a_refusal_goes_in():
     c = EClient(Records())
     c._test_connect()
     c.req_market_rule(26)
+    c.poll()
     (req_id, error_time, code, message), = heard
     # Reported the way the venue reports it: against no request in particular,
     # under the code it uses for a rule it does not know.

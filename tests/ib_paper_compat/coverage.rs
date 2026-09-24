@@ -10,7 +10,8 @@ use super::common::Conns;
 
 const TESTED_CONTROL_COMMANDS: &[&str] = &[
     "Subscribe",
-    "Unsubscribe",
+    // Sent by `cancel_mkt_data`, which the soak phase makes on every lap.
+    "CancelMktData",
     "SubscribeTbt",
     "UnsubscribeTbt",
     "SubscribeNews",
@@ -51,33 +52,44 @@ const TESTED_CONTROL_COMMANDS: &[&str] = &[
     // Sent by the graceful shutdown phase, which stops the loop and hands the
     // connections back.
     "Shutdown",
+    // Sent by `place_order` and `cancel_order`, which the phases driving a
+    // client make.
+    "Place",
+    "CancelOrder",
+    // Sent by `req_all_open_orders`, which the phase reading a working order
+    // back makes.
+    "Ask",
 ];
 
 const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
     (
-        "AlsoAskForSeries",
-        "Sent where a second caller joins a contract already being watched and \
-         names a series the first did not. A phase here watches each contract \
-         once, so nothing joins: what the command does — asking for the \
-         difference and nothing else, and recording it as an entry of the \
-         subscription — is settled offline against the bytes it writes",
+        "CancelCalculation",
+        "Sent where a caller withdraws an option calculation, and no phase \
+         here asks for one",
     ),
     (
-        "MoveInstalled",
-        "Said once a caller whose contract turned out to live in another slot \
-         has been moved onto it. A phase here watches each contract once and \
-         names it by id, so no lookup ever resolves onto a slot another caller \
-         holds: what the command does — telling the engine who holds that slot \
-         now, and withdrawing it where nobody arrived — is settled offline \
-         against the state it changes",
+        "CancelOrderByPermId",
+        "No phase here withdraws an order by the venue's number for it",
     ),
     (
-        "StopAskingForSeries",
-        "The other half of the pair above, sent where such a joiner withdraws \
-         and the subscription stays up for whoever opened it. Nothing joins in \
-         a phase here, so nothing leaves one either: what the command does — \
-         withdrawing the entries nobody asks for and leaving the rest — is \
-         settled offline against the bytes it writes",
+        "GlobalCancel",
+        "Withdraws every order the account has working, including what the \
+         phases beside it are working",
+    ),
+    (
+        "Exercise",
+        "No phase here holds an option to exercise",
+    ),
+    (
+        "Bracket",
+        "Sent by the client's own bracket call, which no phase here makes: the \
+         bracket phases hand the engine the three orders themselves",
+    ),
+    (
+        "Retire",
+        "Sent where a caller withdraws a question it asked the session, which \
+         no phase here does: the one question asked — the open orders — ends \
+         with its answer",
     ),
     (
         "CancelCorporateActions",

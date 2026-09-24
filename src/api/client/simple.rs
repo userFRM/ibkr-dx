@@ -142,7 +142,7 @@ impl EClient {
         // the order would be reported unanswered although the venue answered.
         let _turn = self.take_the_turn()?;
         let order_id = self.next_order_id();
-        self.place_order(order_id, contract, order)?;
+        self.try_place_order(order_id, contract, order)?;
         self.await_order_holding_the_turn(order_id, SETTLE)
     }
 
@@ -175,7 +175,7 @@ impl EClient {
         // to withdraw and nothing to release it.
         let asked = super::ask::ask_id(&self.shared);
         let req_id = asked.get();
-        self.req_mkt_data(req_id, contract, "", false, false)?;
+        self.try_req_mkt_data(req_id, contract, "", false, false)?;
         Ok(asked.keep())
     }
 

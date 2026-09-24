@@ -8,11 +8,11 @@ use pyo3::prelude::*;
 use crate::types::model::{
     ExecutionFilter, OrderCancel,
 };
-use crate::error_codes::{DUPLICATE_ORDER_ID, NOT_CANCELLABLE, ORDER_DOES_NOT_MATCH, Refusal};
+use crate::error_codes::Refusal;
 use crate::client_core::ClientCore;
 use crate::types::*;
 use super::EClient;
-use super::super::contract::{Contract, Order, OrderState, CommissionAndFeesReport, Execution};
+use super::super::contract::{Contract, Order};
 
 /// What a withdrawal states about itself: who is withdrawing it, whether a
 /// person entered it, and when.
@@ -57,15 +57,6 @@ fn withdrawal_states(py: Python<'_>, order_cancel: Option<&Py<PyAny>>) -> PyResu
     }))
 }
 
-/// Said where a withdrawal states a time.
-fn time_not_sent(time: &str) -> String {
-    format!(
-        "a withdrawal states a time, and this client does not send it: a gateway sends \
-         one only where the venue has turned that record on for the login, and this \
-         client does not read whether it has, so the order is withdrawn without it. State \
-         it where the order was placed to have it recorded. (stated: {time})",
-    )
-}
 
 #[pymethods]
 impl EClient {
@@ -80,29 +71,29 @@ impl EClient {
     /// not.
     pub(crate) fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if let Err(why) = self.core.refuse_if_readonly("an order") {
-            return self.report_refusal(py, order_id, Refusal::validation(why));
+            return self.refuse_placement(py, order_id, Refusal::validation(why));
         }
-        let Some(tx) = self.tx_or_report_for_trading(order_id)? else { return Ok(()) };
+        let Some(tx) = self.tx_or_report_for_trading(self.placement_origin(order_id))? else { return Ok(()) };
 
         let session = self.order_session();
         let mut api_order = order.to_api();
         api_order.order_misc_options = match order.convert_misc_options(py) {
             Ok(options) => options,
-            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+            Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
         };
         if let Err(why) = ClientCore::read_option_list(
             &crate::client_core::ORDER_OPTIONS,
             &ClientCore::written_options(&api_order.order_misc_options), &session.features,
         ) {
-            return self.report_refusal(py, order_id, why);
+            return self.refuse_placement(py, order_id, why);
         }
         if let Err(why) = ClientCore::validate_order_destination(&contract.exchange) {
-            return self.report_refusal(py, order_id, why.into());
+            return self.refuse_placement(py, order_id, why.into());
         }
 
         api_order.conditions = match order.convert_conditions(py) {
             Ok(conditions) => conditions,
-            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+            Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
         };
         // The fields whose Python value is a list of objects: the conversion
         // cannot read one without the interpreter, so they are filled here.
@@ -112,15 +103,15 @@ impl EClient {
         // for stating it.
         api_order.order_combo_legs = match order.convert_order_combo_legs(py) {
             Ok(legs) => legs,
-            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+            Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
         };
         api_order.algo_params = match order.convert_algo_params(py) {
             Ok(params) => params,
-            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+            Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
         };
         api_order.smart_combo_routing_params = match order.convert_smart_combo_routing_params(py) {
             Ok(params) => params,
-            Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+            Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
         };
         // The legs and the hedge the caller states: Python objects, which
         // need the interpreter to read. The contract itself is built whole
@@ -131,7 +122,7 @@ impl EClient {
             // the same way.
             combo_legs: match contract.combo_legs_api(py) {
                 Ok(legs) => legs,
-                Err(why) => return self.report_refusal(py, order_id, Refusal::validation(why)),
+                Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
             },
             // Every field is read from the caller's object. A delta or price
             // defaulted to zero hedges the order against nothing.
@@ -156,7 +147,7 @@ impl EClient {
                     match hedge {
                         Ok(hedge) => Some(hedge),
                         Err(why) => {
-                            return self.report_refusal(py, order_id, Refusal::validation(why))
+                            return self.refuse_placement(py, order_id, Refusal::validation(why))
                         }
                     }
                 }
@@ -167,28 +158,26 @@ impl EClient {
         // the login holds and what the venue enabled.
         let (warnings, refused) = ClientCore::retired_instructions(&api_order, &session);
         if let Err(why) = ClientCore::validate_order(&api_order, &session) {
-            // Where a retired instruction is refused, the ones before it were
-            // warned about first.
             if refused.is_some_and(|r| r.code == why.code) {
                 for warning in warnings {
-                    self.report_refusal(py, order_id, warning)?;
+                    self.refuse_placement(py, order_id, warning)?;
                 }
             }
-            return self.report_refusal(py, order_id, why);
+            return self.refuse_placement(py, order_id, why);
         }
         // From here on, the order as this session sends it.
         let api_order = ClientCore::as_sent(&api_order, &session).into_owned();
         if let Err(why) = ClientCore::validate_supported_instructions(&api_order) {
-            return self.report_refusal(py, order_id, why.into());
+            return self.refuse_placement(py, order_id, why.into());
         }
         if let Err(why) = ClientCore::validate_combo_legs(
             &contract.sec_type, api_contract.combo_legs.len(),
         ) {
-            return self.report_refusal(py, order_id, why);
+            return self.refuse_placement(py, order_id, why);
         }
         for (at, leg) in api_contract.combo_legs.iter().enumerate() {
             if let Err(why) = ClientCore::validate_leg(at, leg) {
-                return self.report_refusal(py, order_id, why);
+                return self.refuse_placement(py, order_id, why);
             }
         }
         if let Err(why) = ClientCore::validate_order_contract(
@@ -199,7 +188,7 @@ impl EClient {
                 &contract.right, &contract.multiplier, &contract.currency,
             ),
         ) {
-            return self.report_refusal(py, order_id, why.into());
+            return self.refuse_placement(py, order_id, why.into());
         }
         // The same guard the Rust surface applies. Without it here, whether a
         // caller is protected from an order the venue will refuse in silence
@@ -209,43 +198,14 @@ impl EClient {
                 &shared.reference.order_permissions(), &contract.sec_type,
             )
         {
-            return self.report_refusal(py, order_id, why);
+            return self.refuse_placement(py, order_id, why);
         }
 
-        // An order names its contract by venue contract id. A caller who
-        // states a description instead, as the reference client's examples do,
-        // has it resolved here once the order itself validates. An order
-        // carrying no id matches nothing and is answered by silence.
-        //
-        // That resolution is a request and an answer the first time, so this
-        // call does not return until the venue has named the contract. The GIL
-        // is released for the wait, so nothing else in the interpreter is held
-        // up — but a caller placing an order from inside a wrapper callback
-        // stalls its own dispatch loop, because that is the thread it is on. A
-        // contract carrying conId resolves nothing and waits for nothing, and
-        // so does one whose description the venue has already named: a program
-        // placing a hundred orders on one contract asks about it once.
-        let named;
-        let contract = if contract.con_id == 0 && !contract.symbol.is_empty() {
-            let key = crate::client_core::ClientCore::description_key(&contract.to_api());
-            match self.qualify_once(py, contract, &key) {
-                Ok(found) => { named = found; &named }
-                // Reported under the code for the cause. An order refused
-                // because the session ended is not code 200, which names a
-                // contract the venue does not hold and invites a retry.
-                Err(why) => return self.report_refusal(py, order_id, why),
-            }
-        } else {
-            contract
-        };
-        // The contract as the venue was told it: the venue's naming, with the
-        // legs and the hedge read off the caller's objects above. One object
-        // for the submit, the record and the cache, built before the order is:
-        // the engine reads the contract's number off the submit to see that
-        // the slot it names still holds that contract, and a submit built from
-        // a description carrying no number passed that check unread, as no
-        // order from the other surface does; and the record read back a
-        // contract id of zero for an order placed by symbol.
+        // The legs and the hedge read off the caller's objects above, beside
+        // the contract as the caller stated it. A contract the caller
+        // described is named by the engine, once per description, and the
+        // naming keeps what the caller said: an order carrying no id matches
+        // nothing and is answered by silence.
         let api_contract = crate::types::model::Contract {
             combo_legs: api_contract.combo_legs,
             delta_neutral_contract: api_contract.delta_neutral_contract,
@@ -259,7 +219,7 @@ impl EClient {
         // not watching and their own cancel named nothing. The reference
         // client sends what it is given and the venue answers for it.
         let Some(oid) = u64::try_from(order_id).ok().filter(|id| *id > 0) else {
-            return self.report_refusal(py, order_id, Refusal::validation(format!(
+            return self.refuse_placement(py, order_id, Refusal::validation(format!(
                 "place_order: order_id {order_id} is not an order number; \
                  ask for one with next_order_id() or reqIds()",
             )));
@@ -275,204 +235,29 @@ impl EClient {
             self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
         }
 
-        // If orderId already names a working order, this is a modification —
-        // emit Modify instead of Submit. Settled before anything is
-        // registered, as on the other surface: asking for a slot first spent
-        // one of the table's on a contract this call then refused, and the
-        // table does not grow.
-        let venue = self.shared_state().ok();
-        // Before the slot a tracked order holds is compared with the one this
-        // contract is cached under: the engine may have given that slot back.
-        if let Some(shared) = venue.as_deref() {
-            self.core.forget_released_slots(shared);
-        }
-        let replacing = self.core.is_working_at_the_venue(oid, venue.as_deref());
-        // A number the venue has already worked an order under names nothing
-        // now, so this placement is not a revision -- and the venue refuses a
-        // repeated number only while it is still working one, so after a fill
-        // it takes it as a new order. A caller retrying what it believed had
-        // failed was given a second live order.
-        if !replacing && self.core.the_number_is_spent(oid) {
-            return self.report_refusal(py, oid as i64, Refusal::stated(
-                DUPLICATE_ORDER_ID,
-                format!(
-                    "order {oid} has already been worked and finished: place a new \
-                     order under a number of its own",
-                ),
-            ));
-        }
-        // A replace carries the order id and its fields, not the contract, so
-        // the order stays on the instrument it was placed on. A contract
-        // naming a different instrument is refused rather than recorded.
-        let placed_on = if replacing { self.core.tracked_instrument(oid) } else { None };
-        let venue_now = venue.as_deref();
-        let wrong_contract = || Refusal::stated(ORDER_DOES_NOT_MATCH, format!(
-            "order {oid} is working on another contract, and a replace names \
-             the order rather than the contract: withdraw it and place a new \
-             order to trade {}",
-            contract.symbol,
-        ));
-        // A registration the engine does not answer — a wait that ran out or
-        // an engine that went away mid-request — is a refusal, and reported
-        // as one: nothing this call sends has anywhere to go.
-        let instrument = match placed_on {
-            Some(placed_on) if contract.con_id != 0 && venue_now.is_some() => {
-                if self.core.cached_instrument(venue_now.unwrap(), contract.con_id)
-                    != Some(placed_on)
-                {
-                    return self.report_refusal(py, order_id, wrong_contract());
-                }
-                placed_on
-            }
-            _ => {
-                // An order the venue replayed holds no slot here, and the
-                // check above has nothing to compare. The venue's own book
-                // names the contract it is on, and a replace names the order
-                // rather than the contract — so one naming another contract is
-                // refused rather than recorded against it, and rather than
-                // spending a slot on a contract nothing needs.
-                if replacing
-                    && let Some(known) =
-                        venue_now.and_then(|v| v.orders.get_order_info(oid))
-                    && !ClientCore::names_the_same_contract(&known.contract, &api_contract)
-                {
-                    return self.report_refusal(py, order_id, wrong_contract());
-                }
-                match self.find_or_register_instrument(py, contract) {
-                    Ok(instrument) => instrument,
-                    Err(why) => return self.report_refusal(py, order_id, why),
-                }
-            }
-        };
-
-        let cmd = if replacing {
-            if placed_on.is_some_and(|placed_on| placed_on != instrument) {
-                return self.report_refusal(py, order_id, wrong_contract());
-            }
-            // A replace is the caller's statement of the order, restated whole;
-            // what a gateway refuses in one is refused here.
-            if let Some(refusal) = self.core.modify_refusal(oid, &api_order, venue_now) {
-                return self.report_refusal(py, order_id, refusal);
-            }
-            // Each read from the field the submit reads it from, as on the
-            // other surface.
-            let price = ClientCore::replace_price(&api_order);
-            let qty = crate::types::qty_from_f64(api_order.total_quantity);
-            let stop_price = ClientCore::replace_trigger(&api_order);
-            // Built with the replace it belongs to, as on the other surface: a
-            // statement that cannot be built refuses the replace before
-            // anything moves, and the two travel as one command so that two
-            // replaces of the same order cannot exchange their terms.
-            let spec = match ClientCore::build_order_request(&api_order, oid, instrument, Some(&api_contract)) {
-                Ok(ControlCommand::Order(OrderRequest::SubmitEx { kind, attrs, .. })) => {
-                    Some(Box::new(crate::types::OrderSpec { kind, attrs }))
-                }
-                Ok(_) => None,
-                Err(why) => return self.report_refusal(py, order_id, why),
-            };
-            ControlCommand::Order(OrderRequest::Modify {
-                order_id: oid,
-                price,
-                qty,
-                outside_rth: api_order.outside_rth,
-                ord_type: api_order.ord_type_byte(),
-                tif: api_order.tif_byte(),
-                stop_price,
-                spec,
-            })
-        } else {
-            match ClientCore::build_order_request(&api_order, oid, instrument, Some(&api_contract)) {
-                Ok(built) => built,
-                Err(why) => return self.report_refusal(py, order_id, why),
-            }
-        };
-        // As on the other surface: an order that does not transmit is built
-        // and kept, and one that does sends whatever of its family was kept
-        // before sending itself.
-        //
-        // The family goes out as one thing or not at all, as far as the
-        // engine will allow: it stays held while it is sent, and each member
-        // leaves the hold only once its send is accounted for. A send that
-        // fails partway otherwise left the parent live at the venue with its
-        // protective children never sent, and the caller saw only that the
-        // call had failed. What reached the engine and what did not is said
-        // on the error callback, under the number a lost session is reported
-        // under, and the call returns.
-        // Track order in shared core, under the contract as the venue was told
-        // it, legs and hedge included: converted afresh, the record held a BAG
-        // with nothing in it, and that is what every callback handed back.
+        // The order as it goes, under its number and the client it goes out
+        // under. Left at nought, the order read back could not be told from
+        // one placed under client zero, and restating one as the other
+        // collides with whatever is held there.
         let mut tracked_order = api_order.clone();
         tracked_order.order_id = oid as i64;
-        // The client this order goes out under. Left at nought, the order
-        // read back could not be told from one placed under client zero, and
-        // restating one as the other collides with whatever is held there.
         tracked_order.client_id = self.client_id.load(Ordering::Acquire);
-        self.core.cache_contract(contract.con_id, api_contract.clone());
-        // The record of a placement goes down before the command, as on the
-        // other surface. Written afterwards, the engine could acknowledge the
-        // order — or refuse and retire it — while there was nothing here to
-        // record it against, and the insertion behind that put a fresh
-        // PendingSubmit over the venue's own word, or brought back an order
-        // the refusal had already taken out. A held placement takes its record
-        // in the same step as the hold: the two apart were read between, and a
-        // withdrawal that found the hold, took it and found no record reported
-        // the order gone while the record was written behind it.
-        //
-        // A replace restates an order the venue is already working, so it
-        // states new terms and not a new order: recorded as one, a partly
-        // filled order came back as pending with nothing filled and its whole
-        // quantity outstanding. Its record goes down first for the same
-        // reason a placement's does — the venue can answer the replace before
-        // this call returns, and a restatement written behind that answer put
-        // the attempted terms over a refusal that had already put back the
-        // real ones.
-        // The caller's statement of the order, as on the other surface: every
-        // replace goes behind one, because a replace states the terms it
-        // changes and nothing else and the shape comes from the record. Left
-        // at what was first placed, that record sent the venue the first of
-        // everything the caller had since changed while this client's own
-        // answer already read back the new ones. The statement rides on the
-        // replace, built with it above.
-        if replacing {
-            // Whether or not the session state is still here. Skipped where it
-            // was not, the record went unchanged for a change that did go out
-            // — and the undo on the send-failure path below still ran, putting
-            // back terms from before a change the venue may have taken.
-            self.core.restate_order(
-                venue_now, oid, api_contract.clone(), tracked_order.clone(), instrument,
-            );
+        // As on the other surface, the engine takes it from here: it names and
+        // registers the contract, checks the order against what this session
+        // placed and what the venue is working, builds it, and sends it or
+        // keeps it for a later transmit — refusing it under its own number
+        // where it will not. Nothing waits here.
+        let placement = crate::types::Placement {
+            order_id: oid,
+            contract: api_contract,
+            order: tracked_order,
+            // What a gateway says about an order it places anyway, on the
+            // order's number, once the order has gone or is kept.
+            warnings,
+        };
+        if let Err(why) = self.send_control(&tx, ControlCommand::Place(Box::new(placement))) {
+            return self.refuse_placement(py, order_id, Refusal::not_connected(why.to_string()));
         }
-        if api_order.transmit {
-            if !replacing {
-                self.core.track_order(
-                    oid, api_contract.clone(), tracked_order.clone(), instrument,
-                );
-            }
-            let sent = self.core.transmit_family(oid, api_order.parent_id, cmd, |c| {
-                Self::send_control(py, &tx, c).is_ok()
-            });
-            if let Err(why) = sent {
-                // Nothing left, so nothing was restated.
-                if replacing { self.core.undo_restatement(oid); }
-                return self.report_refusal(py, order_id, Refusal::not_connected(why));
-            }
-        } else if replacing {
-            self.core.hold_until_transmitted(oid, api_order.parent_id, cmd);
-        } else {
-            self.core.hold_and_track(
-                oid, api_order.parent_id, cmd,
-                api_contract.clone(), tracked_order.clone(), instrument,
-            );
-        }
-        // What a gateway says about an order it places anyway, on the order's
-        // number, as it says it. Said once the order has gone or is held, so
-        // an order that could not be sent draws the failure alone.
-        if let Some(shared) = venue_now {
-            for warning in warnings {
-                shared.orders.push_order_notice(oid, warning.code, warning.message);
-            }
-        }
-
         Ok(())
     }
 
@@ -486,13 +271,18 @@ impl EClient {
     /// own, and an account other than its own holds no position here, which
     /// is answered under 322 as a gateway answers it.
     ///
-    /// `_override` is taken and not sent, because no tag carries it: it names
-    /// a check made before the order is built, not one the venue makes. The
-    /// check it names is real — it is what stops an exercise of an option out
-    /// of the money and a lapse of one in it — and this client does not make
-    /// it, because what it rests on is the venue's word on where the option
-    /// stands, which this client does not ask for. An instruction is sent as
-    /// given; passing `0` says so in the log and changes nothing else.
+    /// The instruction is checked as a gateway checks it, by the engine, which
+    /// holds it while it does: the account's position in the option must be
+    /// above nothing, or it is refused under 322 ("No unlapsed position exists
+    /// in this option in account ..."), and no more than the position goes.
+    /// The option's in-the-money figure (generic tick 493) is asked for
+    /// whatever `_override` says: one already held is used, and otherwise the
+    /// engine watches for one, with no bound, as a gateway does. With
+    /// `_override` 0, an exercise of an option not in the money and a lapse of
+    /// one in it are refused under 322, as a gateway refuses them; with 1 they
+    /// go. `_override` itself travels on no tag: it names this check, which is
+    /// made before the order is built. The position and quantity are checked
+    /// in the account named.
     #[pyo3(signature = (req_id, contract, exercise_action, exercise_quantity, account, _override,
                         manual_order_time="", customer_account="", professional_customer=false))]
     fn exercise_options(
@@ -500,28 +290,21 @@ impl EClient {
         exercise_quantity: i32, account: &str, _override: i32,
         manual_order_time: &str, customer_account: &str, professional_customer: bool,
     ) -> PyResult<()> {
+        let exercising = crate::types::model::ErrorOrigin::Order { id: req_id, op: crate::types::model::OrderOp::Exercise };
         if let Err(why) = self.core.refuse_if_readonly("an exercise") {
-            return self.report_refusal(py, req_id, Refusal::validation(why));
-        }
-        if _override == 0 {
-            log::warn!(
-                "exercise of {} asked to stop short of an option out of the money, and \
-                 this client does not know where the option stands: the instruction is \
-                 sent as given",
-                contract.symbol,
-            );
+            return self.report_refusal_as(py, exercising, Refusal::validation(why));
         }
         // The session is what names the account an exercise would be taken on,
         // so it is established before the one the caller named is compared
         // against it. Without a session there is nothing to compare and nothing
         // to send, and the caller is told that rather than told about its
         // account.
-        let Some(tx) = self.tx_or_report_for_trading(req_id)? else { return Ok(()) };
+        let Some(tx) = self.tx_or_report_for_trading(exercising)? else { return Ok(()) };
         let (action, qty, account) = match ClientCore::validate_exercise(
             exercise_action, exercise_quantity, account, &self.order_session(),
         ) {
             Ok(checked) => checked,
-            Err(why) => return self.report_refusal(py, req_id, why),
+            Err(why) => return self.report_refusal_as(py, exercising, why),
         };
         if let Err(why) = ClientCore::validate_order_contract(
             contract.con_id,
@@ -531,28 +314,36 @@ impl EClient {
                 &contract.right, &contract.multiplier, &contract.currency,
             ),
         ) {
-            return self.report_refusal(py, req_id, why.into());
+            return self.report_refusal_as(py, exercising, why.into());
         }
 
         let oid = if req_id > 0 {
             req_id as u64
         } else {
-            self.take_order_id(py)
+            0
         };
-        let instrument = match self.find_or_register_instrument(py, contract) {
-            Ok(instrument) => instrument,
-            Err(why) => return self.report_refusal(py, req_id, why),
+        // The engine registers the option and sends the instruction, and
+        // refuses a stated number the venue is working an order under.
+        let exercise = crate::types::Exercise {
+            allocator: (req_id <= 0).then(|| self.next_order_id.clone()),
+            req_id,
+            order_id: oid,
+            stated: req_id > 0,
+            contract: contract.to_api(),
+            action,
+            qty: crate::types::qty_from_wire(qty as i64),
+            account,
+            states: crate::client_core::ExerciseStates {
+                manual_order_time: manual_order_time.to_string(),
+                customer_account: customer_account.to_string(),
+                professional_customer,
+            },
+            override_: _override != 0,
         };
-        Self::send_control(py, &tx, ControlCommand::Order(
-            ClientCore::build_exercise_request(
-                oid, instrument, action, crate::types::qty_from_wire(qty as i64), account,
-                crate::client_core::ExerciseStates {
-                    manual_order_time: manual_order_time.to_string(),
-                    customer_account: customer_account.to_string(),
-                    professional_customer,
-                },
-            ),
-        ))
+        if let Err(why) = self.send_control(&tx, ControlCommand::Exercise(Box::new(exercise))) {
+            return self.report_refusal_as(py, exercising, Refusal::not_connected(why.to_string()));
+        }
+        Ok(())
     }
 
     /// Cancel an order.
@@ -574,14 +365,15 @@ impl EClient {
     /// 10301, and nothing is withdrawn.
     #[pyo3(signature = (order_id, order_cancel=None))]
     fn cancel_order(&self, py: Python<'_>, order_id: i64, order_cancel: Option<Py<PyAny>>) -> PyResult<()> {
+        let cancelling = crate::types::model::ErrorOrigin::Order { id: order_id, op: crate::types::model::OrderOp::Cancel };
         if let Err(why) = self.core.refuse_if_readonly("a cancel") {
-            return self.report_refusal(py, order_id, Refusal::validation(why));
+            return self.report_refusal_as(py, cancelling, Refusal::validation(why));
         }
-        let Some(tx) = self.tx_or_report_for_trading(order_id)? else { return Ok(()) };
+        let Some(tx) = self.tx_or_report_for_trading(cancelling)? else { return Ok(()) };
         // As `place_order`. A negative id read as unsigned is a number above
         // nine quintillion, and the cancel names it.
         let Some(oid) = u64::try_from(order_id).ok().filter(|id| *id > 0) else {
-            return self.report_refusal(py, order_id, Refusal::validation(format!(
+            return self.report_refusal_as(py, cancelling, Refusal::validation(format!(
                 "cancel_order: order_id {order_id} is not an order number",
             )));
         };
@@ -591,66 +383,19 @@ impl EClient {
             Ok(stated)
         }) {
             Ok(stated) => stated,
-            Err(why) => return self.report_refusal(py, order_id, why),
+            Err(why) => return self.report_refusal_as(py, cancelling, why),
         };
-        let uncarried = (!stated.manual_order_cancel_time.is_empty())
-            .then(|| time_not_sent(&stated.manual_order_cancel_time));
-        // An order still held never reached the venue, so withdrawing it is
-        // forgetting a command rather than sending one, as it is on the other
-        // surface. Sent, the venue answers that it knows no such order and the
-        // command stays queued to go out behind the next thing that transmits:
-        // a caller that cancelled a parent and then sent its stop-loss had the
-        // parent it had cancelled placed for it. The record goes with the
-        // command, so the id stops reading as a working order's.
-        // Only where what is held would have placed the order. A revision of
-        // an order the venue is already working can also be waiting to be
-        // transmitted, and forgetting that and returning left the live order
-        // working while the caller had been told it was withdrawn: the staged
-        // revision goes, and the cancel still travels.
-        if self.core.withdraw_held_placement(oid) {
-            // Said for a withdrawal that happens, as on the other surface, and
-            // not for one refused below as spent or unknown.
-            if let Some(note) = uncarried {
-                self.say_the_annotation_did_not_travel(py, order_id, note)?;
-            }
-            return Ok(());
+        // The engine withdraws a placement it has not sent by forgetting it,
+        // with the changes behind it and what hangs from it, as on the other
+        // surface; answers a withdrawal of an order this session saw finish
+        // as not cancellable; and, once the venue has named the account's
+        // working set, one naming an order nothing is working as no such
+        // order. Where the withdrawal happens and states a time, it says the
+        // time did not travel.
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelOrder { order_id: oid, stated }) {
+            return self.report_refusal_as(py, cancelling, Refusal::not_connected(why.to_string()));
         }
-        // A withdrawal naming an order this client is not working is answered
-        // rather than sent under a number the venue never gave out.
-        //
-        // Read after the replay of the account's working set, which is what
-        // makes it safe: an order carried over from a previous session is not
-        // known here until that lands, and refusing a withdrawal of a live
-        // order is worse than the silence this replaces. The wait releases the
-        // interpreter, so the first withdrawal of a session does not hold it.
-        let Ok(shared) = self.shared_state() else { return Ok(()) };
-        // An order this client saw finish is not one it has never heard of:
-        // the record is here, and the venue's own answer for it is that it is
-        // no longer cancellable.
-        if self.core.the_number_is_spent(oid) {
-            return self.report_refusal(py, order_id, Refusal::stated(
-                NOT_CANCELLABLE,
-                format!(
-                    "Cancel attempted when order is not in a cancellable state. Order permId = {}",
-                    shared.orders.get_order_info(oid).map_or(0, |info| info.order.perm_id),
-                ),
-            ));
-        }
-        // Bound, and read: where the wait gave up nothing is known either way,
-        // and a withdrawal sent for the venue to answer is the safe side.
-        let named = self.wait_for_the_replay(py);
-        if named && !self.core.a_withdrawal_names_something(oid, &shared) {
-            return self.report_refusal(py, order_id, Refusal::stated(
-                crate::error_codes::NO_SUCH_ORDER,
-                format!("no order is working under {oid}"),
-            ));
-        }
-        // Said before the cancel goes, so a caller reading its callbacks in
-        // order learns what will not travel before it is told the order went.
-        if let Some(note) = uncarried {
-            self.say_the_annotation_did_not_travel(py, order_id, note)?;
-        }
-        Self::send_control(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id: oid, stated }))
+        Ok(())
     }
 
     /// Cancel an order identified by `permId` — stable across sessions, unlike
@@ -665,21 +410,13 @@ impl EClient {
                 "cancel_order_by_perm_id: perm_id must be non-zero",
             ));
         }
-        let Some(_tx) = self.tx_or_report_for_trading(-1)? else { return Ok(()) };
-        let shared = self.shared_state()?;
-        // After the venue has named the working set, as on the other surface.
-        self.wait_for_the_replay(py);
-        let found = self.core.collect_open_orders(&shared)
-            .into_iter()
-            .find(|(_, tracked)| tracked.order.perm_id == perm_id)
-            .map(|(oid, _)| oid);
-        let Some(order_id) = found else {
-            return self.report_refusal(py, -1, Refusal::stated(
-                crate::error_codes::NO_SUCH_ORDER,
-                format!("cancel_order_by_perm_id: permId {perm_id} not found in open orders"),
-            ));
-        };
-        self.cancel_order(py, order_id as i64, None)
+        let Some(tx) = self.tx_or_report_for_trading(crate::types::model::ErrorOrigin::Session)? else { return Ok(()) };
+        // Found once the venue has named the working set, as on the other
+        // surface, and withdrawn under the number its reports carry here.
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelOrderByPermId { perm_id }) {
+            return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
+        }
+        Ok(())
     }
 
     /// Cancel every order the account is working.
@@ -705,7 +442,7 @@ impl EClient {
         if let Err(why) = self.core.refuse_if_readonly("a global cancel") {
             return self.report_refusal(py, -1, Refusal::validation(why));
         }
-        let Some(tx) = self.tx_or_report_for_trading(-1)? else { return Ok(()) };
+        let Some(tx) = self.tx_or_report_for_trading(crate::types::model::ErrorOrigin::Session)? else { return Ok(()) };
         let stated = match withdrawal_states(py, order_cancel.as_ref())?.and_then(|stated| {
             crate::api::client::wire_text("a withdrawal's operator", &stated.ext_operator)?;
             Ok(stated)
@@ -713,50 +450,12 @@ impl EClient {
             Ok(stated) => stated,
             Err(why) => return self.report_refusal(py, -1, why),
         };
-        // Everything held goes with everything working: an order the venue was
-        // never given is withdrawn by forgetting it, and left queued it would
-        // go out behind the next thing that transmits — after the caller had
-        // asked for every order to be taken back.
-        self.core.withdraw_all_held();
-        let named = self.wait_for_the_replay(py);
-        let shared = self.shared_state()?;
-        // One request per instrument the engine holds an order on. The count
-        // is the engine's, mirrored: a contract the venue named an order on
-        // counts whether or not this session ever subscribed to it.
-        let count = shared.market.instrument_count();
-        // Every failed send is counted and reported. A caller answered without
-        // an error takes the account to be flat, and a send that did not reach
-        // the engine withdrew nothing.
-        let mut unsent = 0usize;
-        for instrument in 0..count {
-            let cancel = OrderRequest::CancelAll { instrument, stated: stated.clone() };
-            if Self::send_control(py, &tx, ControlCommand::Order(cancel)).is_err() {
-                unsent += 1;
-            }
-        }
-        if unsent > 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "a global cancel reached the engine for {} of {count} instruments; \
-                 the rest were not sent, so orders on them are still working",
-                count as usize - unsent,
-            )));
-        }
-        // Only where the venue had begun naming and not finished. An account
-        // working nothing is named with nothing, and the record that ends the
-        // naming cannot be told from the one that precedes it, so an empty
-        // account never sees it finish — warning there would cry wolf on every
-        // withdrawal against an idle account.
-        if !named && shared.orders.naming_began() {
-            // Said to the caller rather than the log: what had been named
-            // went, and what had not been named is not covered. A silent
-            // partial cancel is the worst thing this call can do. Reported
-            // on the error callback and the call returns, the way a refusal
-            // is reported.
-            return self.report_refusal(py, -1, Refusal::no_answer(format!(
-                "the venue had not finished naming this account's working orders within \
-                 the wait: {count} cancels were sent for what had been named, and what had \
-                 not been named is not covered and may still be working",
-            )));
+        // Everything the engine holds goes with everything working, and what
+        // is working is withdrawn once the venue has named it; where the
+        // naming does not finish within its bound, what had been named goes
+        // and the caller is told what is not covered.
+        if let Err(why) = self.send_control(&tx, ControlCommand::GlobalCancel { stated }) {
+            return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
         }
         Ok(())
     }
@@ -773,11 +472,14 @@ impl EClient {
     /// connecting.
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
-        let Some(_connected) = self.tx_or_report(-1)? else { return Ok(()) };
-        // As `take_order_id` does: the mark this is read off is raised by a
-        // replay that lands after the connection does.
-        self.wait_for_the_replay(py);
-        self.deliver(py, "next_valid_id", (self.stated_order_id() as i64,))?;
+        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        // The mark this is read off is raised by a replay that lands after the
+        // connection does, so the engine holds the question until the replay
+        // is over; answered where it then stands in the session's order, from
+        // the counter as it stands there.
+        if let Err(why) = self.send_control(&tx, ControlCommand::Ask(crate::types::Ask::NextValidId)) {
+            return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
+        }
         let _ = num_ids;
         Ok(())
     }
@@ -809,55 +511,7 @@ impl EClient {
 
     /// Request all open orders for this client.
     fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        // The venue names the working orders unprompted after a connect.
-        // Answering before that replay lands reports none of them, and a
-        // caller that reads "nothing" places the same order twice.
-        let named = self.wait_for_the_replay(py);
-        let shared = self.shared_state()?;
-        // Only where the venue had begun naming and not finished. An account
-        // working nothing is named with nothing, and the record that ends the
-        // naming cannot be told from the one that precedes it, so an empty
-        // account never sees it finish — reporting there would cry wolf on
-        // every reading of an idle account.
-        if !named && shared.orders.naming_began() {
-            // Said to the caller rather than only to the log, and said ahead of
-            // the orders: what follows is what had arrived, which is otherwise
-            // indistinguishable from an account with nothing working, and a
-            // caller reading it as the whole set places what it already has on.
-            self.report_refusal(py, -1, Refusal::no_answer(
-                "the venue had not finished naming this account's working orders within \
-                 the wait, so what follows is what had arrived rather than what is working",
-            ))?;
-        }
-        let orders = self.core.collect_open_orders(&shared);
-        for (order_id, tracked) in &orders {
-            let c_py = Py::new(py, Contract::from_api(py, &tracked.contract)?)?.into_any();
-            let o = Order::from_api(py, &tracked.order)?;
-            let o_py = Py::new(py, o)?.into_any();
-            let state = super::super::contract::OrderState {
-                status: tracked.status.clone(),
-                ..Default::default()
-            };
-            let state_py = Py::new(py, state)?.into_any();
-            self.deliver(py, "open_order", (*order_id as i64, &c_py, &o_py, &state_py))?;
-            self.deliver(py, "order_status",
-                (*order_id as i64, tracked.status.as_str(), tracked.filled, tracked.remaining,
-                 // What the venue said the fills went at. Answered as nought,
-                 // a caller read "filled three hundred at an average of
-                 // nothing" on an order the venue had stated an average for —
-                 // and the live path on this same surface publishes the stated
-                 // figure, so one order read two ways.
-                 tracked.avg_fill_price, tracked.order.perm_id, tracked.order.parent_id,
-                 tracked.last_fill_price,
-                 // The client the order was placed under, as the accompanying
-                 // order object already states. Read off this client instead,
-                 // the two callbacks for one order disagree and the status
-                 // attributes the order to whoever happened to ask.
-                 tracked.order.client_id as i64, "", 0.0f64))?;
-        }
-        self.deliver(py, "open_order_end", ())?;
-        Ok(())
+        self.ask_open_orders(py, crate::types::model::Question::OpenOrders)
     }
 
     /// Request all open orders across all clients.
@@ -867,7 +521,7 @@ impl EClient {
     /// venue names the orders on the account without stating who entered them.
     /// A subset would be an attribution the venue does not supply.
     fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
-        self.req_open_orders(py)
+        self.ask_open_orders(py, crate::types::model::Question::AllOpenOrders)
     }
 
     /// Binding orders entered elsewhere to this client.
@@ -985,55 +639,12 @@ impl EClient {
             ExecutionFilter::default()
         };
 
-        let shared = self.shared_state()?;
-        let accounts = self.accounts.lock().unwrap().clone();
-        let (snapshot, unheld) = match self.core.executions_for_request(
-            &shared, &accounts, &filter, jiff::Timestamp::now(),
-        ) {
-            Ok(answer) => answer,
-            Err(why) => {
-                self.report_refusal(py, req_id, why)?;
-                // The end still comes, as it does for every request refused on
-                // this surface: a caller waiting on it has nothing else to wait for.
-                return self.deliver(py, "exec_details_end", (req_id,));
-            }
-        };
-        if let Some(why) = crate::client_core::ClientCore::unheld_days_notice(&unheld) {
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::validation(why))?;
-        }
-        // Snapshot before any Python call: the callback runs with the GIL
-        // held, and re-entering a path that locks `executions` would freeze
-        // the interpreter, not just this thread.
-        for se in snapshot {
-            let c_py = Py::new(py, Contract::from_api(py, &se.contract)?)?.into_any();
-
-            let exec_obj = Execution::from_api(&se.execution);
-            let exec_py = Py::new(py, exec_obj)?.into_any();
-
-            self.deliver(py, "exec_details", (req_id, &c_py, &exec_py))?;
-
-            // Only where the venue has said what it cost. An execution is
-            // stored with its charge deliberately unstated -- and every
-            // execution the venue replays at logon is stored that way and
-            // never charged -- so reporting it regardless said the fill cost
-            // nothing, in no currency, naming no execution. The empty name is
-            // the discriminator: a charge with one is refused where it is read
-            // off the wire, so an empty one can only mean nobody has said.
-            if !se.commission_and_fees.exec_id.is_empty() {
-                let report = CommissionAndFeesReport {
-                    exec_id: se.commission_and_fees.exec_id.clone(),
-                    commission_and_fees: se.commission_and_fees.commission_and_fees,
-                    currency: se.commission_and_fees.currency.clone(),
-                    realized_pnl: se.commission_and_fees.realized_pnl,
-                    yield_amount: se.commission_and_fees.yield_amount,
-                    yield_redemption_date: se.commission_and_fees.yield_redemption_date,
-                };
-                let report_py = Py::new(py, report)?.into_any();
-                self.deliver(py, "commission_and_fees_report", (&report_py,))?;
-            }
-        }
-        self.deliver(py, "exec_details_end", (req_id,))?;
+        // The executions kept, then the end, as they stand where the answer
+        // stands in the session's order: every fill delivered before it is in
+        // it.
+        self.shared_state()?.push_call_record(crate::bridge::Record::Answer(
+            crate::bridge::Answer::Executions { req_id, filter },
+        ));
         Ok(())
     }
 
@@ -1045,210 +656,16 @@ impl EClient {
     /// carries the number that API gave it, and one typed in carries none. So
     /// `true` is answered with the orders the venue numbered.
     #[pyo3(signature = (api_only=false))]
-    fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
-        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        // One at a time, as on the other surface: the answer is a run of
-        // ordinary reports and one sentinel, and nothing in the run says which
-        // question it answers, so two callers waiting at once both take the
-        // first answer as their own.
-        // The session this question is asked on, held for the whole of it: read
-        // again later, a disconnect and reconnect in between would have this
-        // caller reading another session's counters, publishing its orders, and
-        // releasing its claim.
-        let session = self.shared.lock().unwrap().clone();
-        let held = session
-            .as_ref()
-            .and_then(|shared| shared.claim_the_completed_orders_question());
-        let Some((session, mut held)) = session.zip(held) else {
-            self.report_refusal(py, -1, crate::error_codes::Refusal::no_answer(
-                "another request for what the account has finished is already waiting; \
-                 this one was not sent",
-            ))?;
-            self.deliver(py, "completed_orders_end", ())?;
-            return Ok(());
-        };
-        // Asked of the venue, not only of this session. What finished while
+    fn req_completed_orders(&self, api_only: bool) -> PyResult<()> {
+        let question = crate::types::model::Question::CompletedOrders;
+        let refused = crate::types::model::ErrorOrigin::Question { q: question, ends: true };
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
+        // Asked of the venue, not only of this session: what finished while
         // this program was watching is a fraction of what the account has
-        // done, and the rest is one request away. The answer is a run of
-        // ordinary reports ending in a sentinel, so the wait below is on that
-        // end rather than on a clock.
-        // Read before the question goes out, and waited for it to move, as on
-        // the other surface: taken as a flag, a caller that gave up a moment
-        // before it was set left it standing for the next one.
-
-        // Detached for the send, as every other command on this surface is:
-        // the channel is bounded, so a hot loop that is behind blocks the
-        // sender — and blocking here holds the interpreter, including the
-        // thread whose job is to drain the answers this very call is asking
-        // for.
-        let asked =
-            Self::send_control(
-                py, &tx,
-                crate::types::ControlCommand::FetchCompletedOrders { turn: held.turn },
-            )
-            .is_ok();
-        if asked {
-            let until = std::time::Instant::now()
-                + std::time::Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS);
-            // Two things in turn and in that order, as on the other surface:
-            // the engine takes this question off the queue, and only then is
-            // the count of answers read again.
-            // The end of this caller's own question is what releases it, as on
-            // the other surface: the turn travels out with the question and
-            // comes back on the end, so an answer is matched to the question
-            // that asked for it.
-            let ended = loop {
-                if session.orders.completed_orders_ended_on() >= held.turn {
-                    break true;
-                }
-                if std::time::Instant::now() >= until {
-                    break false;
-                }
-                py.detach(|| std::thread::sleep(std::time::Duration::from_millis(20)));
-            };
-            if !ended {
-                // Said, not only logged: an empty answer otherwise reads as an
-                // account that has finished nothing.
-                log::warn!(
-                    "the venue did not finish stating what it has finished; answering with \
-                     what arrived",
-                );
-                self.report_refusal(py, -1, crate::error_codes::Refusal::no_answer(
-                    "the venue did not finish stating what the account has finished; \
-                     what follows is what had arrived",
-                ))?;
-            }
-        }
-        // The session this question was asked on, not whichever is current now:
-        // a disconnect and reconnect in between would otherwise have this
-        // caller publishing another session's orders.
-        //
-        // And where that has happened, nothing of this caller's is written
-        // anywhere: the archive, the record of what was placed and the
-        // evictions all belong to whichever session the client now holds, so
-        // an answer about the session that ended would be filed against the
-        // one that replaced it — and published from it.
-        if !self.is_current_session(&session) {
-            self.report_refusal(py, -1, crate::error_codes::Refusal::not_connected(
-                "the session this question was asked on has ended; what the venue said \
-                 about it is not this session's to answer with",
-            ))?;
-            self.deliver(py, "completed_orders_end", ())?;
-            return Ok(());
-        }
-        {
-            let shared = &session;
-            // Read off the queue once and kept. It empties as it is read and
-            // the venue does not send these again, so a second request would
-            // otherwise be answered with none of them, and with default objects
-            // for any whose record has been retired.
-            {
-                let mut archive = self.completed.lock().unwrap();
-                // What the venue has taken back goes first. A trade cancel or
-                // correction returns a finished order to a working quantity,
-                // and the bridge can only drop the completion it still holds —
-                // this is the copy it cannot reach. Applied before the
-                // arrivals below, an order taken back and then finished again
-                // keeps the new record and loses the superseded one.
-                for order_id in shared.orders.drain_order_corrections() {
-                    archive.retain(|(_, order, _)| order.order_id != order_id as i64);
-                    // And the eviction armed for it when it finished. A bust or a
-                    // correction puts the order back to a working quantity, and an
-                    // eviction still standing took its record away on the next pass —
-                    // after which the order reads as one the venue is not working.
-                    self.deferred_evictions.lock().unwrap().remove(&order_id);
-                }
-                for co in shared.orders.drain_completed_orders() {
-                    let status_str = crate::types::order_status::order_status_str(co.status);
-                    let rich_info = shared.orders.get_order_info(co.order_id);
-                    let tracked = self.core.open_orders.lock().unwrap().get(&co.order_id).cloned();
-                    // The state the venue stated where it stated one, under the
-                    // status this client names it by, which is canonical rather
-                    // than whatever the stored state last held.
-                    let state = crate::types::model::OrderState {
-                        status: status_str.into(),
-                        ..rich_info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default()
-                    };
-                    // The venue's own order where it stated one, as on the
-                    // other surface, with the client that placed it where the
-                    // venue names none.
-                    let (contract, mut order) = match (tracked, rich_info) {
-                        // The record's contract carries the legs and the hedge
-                        // the caller stated, which no definition carries.
-                        (Some(o), Some(info)) => (o.contract, info.order),
-                        (None, Some(info)) => (info.contract, info.order),
-                        (Some(o), None) => (o.contract, o.order),
-                        (None, None) => (
-                            crate::types::model::Contract::default(),
-                            crate::types::model::Order {
-                                order_id: co.order_id as i64,
-                                ..Default::default()
-                            },
-                        ),
-                    };
-                    if order.client_id == 0 {
-                        order.client_id = self.core.placing_client(shared, co.order_id);
-                    }
-                    // Filled out from what the venue has said about the
-                    // contract, as the open-order answer already is on both
-                    // surfaces and as the other surface's completed answer is.
-                    // Taken verbatim here, an order lost its exchange, its
-                    // multiplier and its local symbol the moment it finished,
-                    // and only on this binding.
-                    let contract = if contract.con_id != 0 {
-                        self.core.get_contract(contract.con_id, shared).unwrap_or(contract)
-                    } else {
-                        contract
-                    };
-                    // Replaced where this order is already in the archive, as
-                    // on the other surface: the venue restates an order once
-                    // the memory of it has aged out, and pushed again the
-                    // caller was handed the same order twice.
-                    match archive.iter().position(|(_, held, _): &(_, crate::types::model::Order, _)| {
-                        held.order_id == order.order_id
-                            && (held.perm_id == order.perm_id
-                                || held.perm_id == 0
-                                || order.perm_id == 0)
-                    }) {
-                        Some(at) => archive[at] = (contract, order, state),
-                        None => archive.push((contract, order, state)),
-                    }
-                    // Bound `order_cache` growth: terminal entries are no
-                    // longer needed once what they carried has been read out.
-                    // Handed to the side that reads the fills rather than
-                    // freed here. That side is the only one that can tell when
-                    // a record is finished with: a fill taken off the queue but
-                    // not yet reported still needs it, and from here looks like
-                    // no fill at all.
-                    self.deferred_evictions.lock().unwrap().insert(co.order_id);
-                }
-            }
-            // Copied before anything is called back: a callback may ask for
-            // these again, and the lock is not re-entrant.
-            let completed = self.completed.lock().unwrap().clone();
-            // The answer is in this caller's archive now, so the question is
-            // free for the next one — before the callbacks, which may take a
-            // while and may ask for other things while they run. What is left
-            // to the drop is every path that does not reach here.
-            held.give_it_back();
-            for (contract, order, state) in &completed {
-                // Kept whole in the archive and filtered on the way out, so
-                // the same session can ask for all of them and for the
-                // numbered ones and be answered correctly either way.
-                if api_only && !shared.orders.was_entered_through_an_api(
-                    order.order_id.max(0) as u64, order.perm_id.max(0) as u64,
-                ) {
-                    continue;
-                }
-                let c_py = Py::new(py, Contract::from_api(py, contract)?)?.into_any();
-                let o_py = Py::new(py, Order::from_api(py, order)?)?.into_any();
-                let state_py = Py::new(py, OrderState::from_api(state))?.into_any();
-                self.deliver(py, "completed_order", (&c_py, &o_py, &state_py))?;
-            }
-            self.deliver(py, "completed_orders_end", ())?;
-        }
-        // And where nothing was drained at all, the drop gives it back.
-        Ok(())
+        // done. The engine asks one question at a time, in the order they
+        // were asked, and answers each where its end stands in the session's
+        // order: a second asked while the first is out waits its turn.
+        self.send_control(&tx, crate::types::ControlCommand::FetchCompletedOrders { api_only }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, refused, crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 }
 
@@ -1260,18 +677,115 @@ impl EClient {
 /// at the caller's wrapper, so a program could be told a withdrawal's
 /// annotation had not travelled when nothing had been withdrawn at all.
 impl EClient {
-    /// Say that a withdrawal's annotation has nowhere to go, without stopping
-    /// the withdrawal.
-    ///
-    /// The order still comes back. A record of who withdrew it and when is a
-    /// regulatory one, and losing it matters — but not as much as a live order
-    /// left working because the record could not be filed, which is what
-    /// refusing did.
-    pub(super) fn say_the_annotation_did_not_travel(
-        &self, py: Python<'_>, order_id: i64, stated: String,
-    ) -> PyResult<()> {
-        self.report_refusal(py, order_id, Refusal::validation(stated))
+    /// File what the venue has stated finished into the archive the answers
+    /// are read from, where an answer is delivered.
+    pub(crate) fn archive_completed_orders(&self, shared: &crate::bridge::SharedState) {
+        // Read off the queue once and kept. It empties as it is read and
+        // the venue does not send these again, so a second request would
+        // otherwise be answered with none of them, and with default objects
+        // for any whose record has been retired.
+        {
+            let mut archive = self.completed.lock().unwrap();
+            // What the venue has taken back goes first. A trade cancel or
+            // correction returns a finished order to a working quantity,
+            // and the bridge can only drop the completion it still holds —
+            // this is the copy it cannot reach. Applied before the
+            // arrivals below, an order taken back and then finished again
+            // keeps the new record and loses the superseded one.
+            for order_id in shared.orders.drain_order_corrections() {
+                archive.retain(|(_, order, _)| order.order_id != order_id as i64);
+                // And the eviction armed for it when it finished. A bust or a
+                // correction puts the order back to a working quantity, and an
+                // eviction still standing took its record away on the next pass —
+                // after which the order reads as one the venue is not working.
+                self.deferred_evictions.lock().unwrap().remove(&order_id);
+            }
+            for co in shared.orders.drain_completed_orders() {
+                let status_str = crate::types::order_status::order_status_str(co.status);
+                let rich_info = shared.orders.get_order_info(co.order_id);
+                let tracked = self.core.open_orders.lock().unwrap().get(&co.order_id).cloned();
+                // The state the venue stated where it stated one, under the
+                // status this client names it by, which is canonical rather
+                // than whatever the stored state last held.
+                let state = crate::types::model::OrderState {
+                    status: status_str.into(),
+                    ..rich_info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default()
+                };
+                // The venue's own order where it stated one, as on the
+                // other surface, with the client that placed it where the
+                // venue names none.
+                let (contract, mut order) = match (tracked, rich_info) {
+                    // The record's contract carries the legs and the hedge
+                    // the caller stated, which no definition carries.
+                    (Some(o), Some(info)) => (o.contract, info.order),
+                    (None, Some(info)) => (info.contract, info.order),
+                    (Some(o), None) => (o.contract, o.order),
+                    (None, None) => (
+                        crate::types::model::Contract::default(),
+                        crate::types::model::Order {
+                            order_id: co.order_id as i64,
+                            ..Default::default()
+                        },
+                    ),
+                };
+                if order.client_id == 0 {
+                    order.client_id = self.core.placing_client(shared, co.order_id);
+                }
+                // Filled out from what the venue has said about the
+                // contract, as the open-order answer already is on both
+                // surfaces and as the other surface's completed answer is.
+                // Taken verbatim here, an order lost its exchange, its
+                // multiplier and its local symbol the moment it finished,
+                // and only on this binding.
+                let contract = if contract.con_id != 0 {
+                    self.core.get_contract(contract.con_id, shared).unwrap_or(contract)
+                } else {
+                    contract
+                };
+                // Replaced where this order is already in the archive, as
+                // on the other surface: the venue restates an order once
+                // the memory of it has aged out, and pushed again the
+                // caller was handed the same order twice.
+                match archive.iter().position(|(_, held, _): &(_, crate::types::model::Order, _)| {
+                    held.order_id == order.order_id
+                        && (held.perm_id == order.perm_id
+                            || held.perm_id == 0
+                            || order.perm_id == 0)
+                }) {
+                    Some(at) => archive[at] = (contract, order, state),
+                    None => archive.push((contract, order, state)),
+                }
+                // Bound `order_cache` growth: terminal entries are no
+                // longer needed once what they carried has been read out.
+                // Handed to the side that reads the fills rather than
+                // freed here. That side is the only one that can tell when
+                // a record is finished with: a fill taken off the queue but
+                // not yet reported still needs it, and from here looks like
+                // no fill at all.
+                self.deferred_evictions.lock().unwrap().insert(co.order_id);
+            }
+        }
     }
+
+    /// Every working order, then `open_order_end`, answered where the answer
+    /// stands in the session's order.
+    pub(crate) fn ask_open_orders(&self, py: Python<'_>, question: crate::types::model::Question) -> PyResult<()> {
+        let refused = crate::types::model::ErrorOrigin::Question { q: question, ends: true };
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
+        // The venue names the working orders unprompted after a connect.
+        // Answering before that replay lands reports none of them, and a
+        // caller that reads "nothing" places the same order twice. The engine
+        // holds the question until the replay is over, or its bound has
+        // passed — said ahead of the answer where the venue had begun naming
+        // and not finished — and the orders and the end stand where the answer
+        // does in the session's order.
+        if let Err(why) = self.send_control(&tx, ControlCommand::Ask(crate::types::Ask::OpenOrders(question))) {
+            return self.report_refusal_as(py, refused, Refusal::not_connected(why.to_string()));
+        }
+        Ok(())
+    }
+
+
 }
 
 #[cfg(test)]
@@ -1280,11 +794,11 @@ mod tests {
     use crate::bridge::SharedState;
     use std::sync::Arc;
 
-    /// A connected client whose engine is a channel the test reads, and a
+    /// A connected client whose engine takes what the test hands it, and a
     /// wrapper that keeps every callback it is handed.
     fn wired_client(
         py: Python<'_>,
-    ) -> (EClient, std::sync::mpsc::Receiver<ControlCommand>, Arc<SharedState>, Py<PyAny>) {
+    ) -> (EClient, crate::api::client::tests::Engine, Arc<SharedState>, Py<PyAny>) {
         let client = EClient::__new__(&pyo3::types::PyTuple::empty(py), None);
         let ns = pyo3::types::PyDict::new(py);
         py.run(
@@ -1299,11 +813,12 @@ w = W()",
         let wrapper = ns.get_item("w").unwrap().unwrap().unbind();
         client.__init__(wrapper.clone_ref(py)).unwrap();
         let shared = Arc::new(SharedState::new());
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let (tx, rx) = std::sync::mpsc::channel();
         *client.shared.lock().unwrap() = Some(shared.clone());
         *client.control_tx.lock().unwrap() = Some(tx);
         *client.account_id.lock().unwrap() = Some("DU123".into());
         client.connected.store(true, Ordering::Release);
+        let rx = crate::api::client::tests::Engine::new(rx, &shared);
         (client, rx, shared, wrapper)
     }
 
@@ -1325,7 +840,7 @@ w = W()",
             client.req_global_cancel(py, None).unwrap();
             let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert!(
-                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
+                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::GlobalCancel { instruments, .. })] if instruments == &[0]),
                 "the order the venue named is withdrawn: {sent:?}",
             );
         });
@@ -1339,13 +854,17 @@ w = W()",
     fn a_global_cancel_forgets_the_orders_held_for_a_later_transmit() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, _wrapper) = wired_client(py);
+            let (client, rx, shared, _wrapper) = wired_client(py);
             shared.orders.set_replay_done();
-            client.core.hold_until_transmitted(
-                7, 0, ControlCommand::Order(OrderRequest::Cancel { order_id: 7, stated: Default::default() }),
-            );
+            client.place_order(py, 7, &bracket_contract(), &bracket_order(false, 0)).unwrap();
+            assert!(rx.keeps(7), "held for a later transmit");
             client.req_global_cancel(py, None).unwrap();
-            assert!(!client.core.withdraw_held(7), "nothing is still held");
+            assert!(!rx.keeps(7), "nothing is still held");
+            let sent: Vec<ControlCommand> = rx.try_iter().collect();
+            assert!(
+                !sent.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitEx { .. }))),
+                "and nothing of it goes out: {sent:?}",
+            );
         });
     }
 
@@ -1368,13 +887,15 @@ w = W()",
             client.req_global_cancel(py, None).unwrap();
             let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             assert!(
-                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
+                matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::GlobalCancel { instruments, .. })] if instruments == &[0]),
                 "what had been named is still withdrawn: {sent:?}",
             );
+            // Said where it stands in the session's order: a read delivers it.
+            client.dispatch_once(py, &shared).unwrap();
             let calls = wrapper.bind(py).getattr("calls").unwrap();
-            let heard = calls
-                .extract::<Vec<(String, i64, i64, i64, String, String)>>()
-                .unwrap();
+            let heard: Vec<(String, i64, i64, i64, String, String)> = (0..calls.len().unwrap())
+                .filter_map(|i| calls.get_item(i).unwrap().extract().ok())
+                .collect();
             assert!(
                 heard.iter().any(|(name, req_id, _, code, message, _)| {
                     name == "error"
@@ -1396,12 +917,14 @@ w = W()",
     fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, wrapper) = wired_client(py);
+            let (client, rx, shared, wrapper) = wired_client(py);
             // The venue began naming and never said it had finished. An
             // account named nothing at all is the other case, and is told
             // nothing — there is no missing order to warn about.
             shared.orders.note_naming_began();
             client.req_open_orders(py).unwrap();
+            crate::api::client::tests::the_engine_answers(&rx, &shared);
+            client.dispatch_once(py, &shared).unwrap();
             let calls = wrapper.bind(py).getattr("calls").unwrap();
             let told: Vec<(String, i64, i64, i64, String, String)> = (0..calls.len().unwrap())
                 .filter_map(|i| calls.get_item(i).unwrap().extract().ok())
@@ -1429,7 +952,7 @@ w = W()",
     fn an_order_placed_by_client_zero_keeps_that_client_id_when_read_back() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, wrapper) = wired_client(py);
+            let (client, rx, shared, wrapper) = wired_client(py);
             shared.orders.set_replay_done();
             client.client_id.store(7, Ordering::Release);
             client.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
@@ -1448,7 +971,8 @@ w = W()",
                 0,
             );
             client.req_open_orders(py).unwrap();
-            client.hand_over_what_is_waiting(py).unwrap();
+            crate::api::client::tests::the_engine_answers(&rx, &shared);
+            client.dispatch_once(py, &shared).unwrap();
             let calls = wrapper.bind(py).getattr("calls").unwrap();
             let mut read_back = std::collections::BTreeMap::new();
             for i in 0..calls.len().unwrap() {
@@ -1487,20 +1011,23 @@ w = W()",
         Python::initialize();
         Python::attach(|py| {
             let (client, shared, wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(4);
+            let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
             *client.control_tx.lock().unwrap() = Some(tx);
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
 
-            // A withdrawal names an order this client is working, or it is
+            // A withdrawal names an order the venue is working, or it is
             // answered rather than sent under a number the venue never gave.
             for order_id in [11, 12] {
-                client.core.track_order(
-                    order_id,
-                    crate::types::model::Contract {
+                shared.orders.push_order_info(order_id, crate::bridge::RichOrderInfo {
+                    contract: crate::types::model::Contract {
                         con_id: 756733, symbol: "SPY".into(), ..Default::default()
                     },
-                    Default::default(),
-                    0,
-                );
+                    order: crate::types::model::Order { order_id: order_id as i64, ..Default::default() },
+                    order_state: crate::types::model::OrderState {
+                        status: "Submitted".into(), ..Default::default()
+                    },
+                    last_exec: Default::default(),
+                });
             }
 
             shared.reference.set_session_over("the market data farm");
@@ -1512,14 +1039,14 @@ w = W()",
                 ),
                 "the trading connection still carries the withdrawal",
             );
-            assert!(error_calls(py, &wrapper).is_empty(), "and nothing is reported");
+            assert!(error_calls(py, &client, &wrapper).is_empty(), "and nothing is reported");
 
             // Once that connection is the one that has ended, it is refused.
             shared.reference.set_trading_over("the trading connection");
             client.cancel_order(py, 12, None).unwrap();
             assert!(rx.try_recv().is_err(), "nothing reaches the engine");
             assert_eq!(
-                error_calls(py, &wrapper).len(), 1,
+                error_calls(py, &client, &wrapper).len(), 1,
                 "and the caller is told, on the callback a refusal is reported on",
             );
         });
@@ -1591,26 +1118,18 @@ w = W()",
     fn an_order_placed_by_description_carries_the_contract_the_venue_named() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _shared, _wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(0);
+            let (client, shared, _wrapper) = placed_client(py);
+            let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
             *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_secs(2));
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
             let described = Contract { con_id: 0, ..bracket_contract() };
             // Named already, so the lookup is answered from the record rather
             // than the venue: the question is what the naming is used for.
             let key = crate::client_core::ClientCore::description_key(&described.to_api());
-            client.core.remember_named(key, bracket_contract().to_api());
-            let engine = std::thread::spawn(move || {
-                match rx.recv() {
-                    Ok(ControlCommand::RegisterInstrument { reply_tx, .. }) => {
-                        let _ = reply_tx.expect("a registration asks for an answer").send(Ok(7));
-                    }
-                    other => panic!("a registration goes first, got {other:?}"),
-                }
-                rx.recv()
-            });
+            rx.engine().intake.remember_named(key, bracket_contract().to_api());
             client.place_order(py, 9, &described, &bracket_order(true, 0)).unwrap();
-            let sent = engine.join().unwrap();
+            let sent = rx.try_recv();
+            client.dispatch_once(py, &shared).unwrap();
             assert!(
                 matches!(sent, Ok(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 756733, order_id: 9, .. }))),
                 "the submit names the contract the venue named: {sent:?}",
@@ -1623,7 +1142,11 @@ w = W()",
     }
 
     /// The error callbacks the wrapper was handed, as id, code and message.
-    fn error_calls(py: Python<'_>, wrapper: &Py<PyAny>) -> Vec<(i64, i64, String)> {
+    fn error_calls(py: Python<'_>, client: &EClient, wrapper: &Py<PyAny>) -> Vec<(i64, i64, String)> {
+        // A refusal is a record in the session's order: a read delivers it.
+        if let Ok(shared) = client.shared_state() {
+            client.dispatch_once(py, &shared).unwrap();
+        }
         let all: Vec<(String, i64, i64, i64, String, String)> = wrapper
             .getattr(py, "calls")
             .unwrap()
@@ -1641,30 +1164,14 @@ w = W()",
     fn a_bracket_whose_engine_takes_the_family_sends_all_three_in_order() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _shared, wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(0);
+            let (client, shared, wrapper) = placed_client(py);
+            let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
             *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_secs(2));
-            let engine = std::thread::spawn(move || {
-                let mut received = Vec::new();
-                match rx.recv() {
-                    Ok(ControlCommand::RegisterInstrument { reply_tx, .. }) => {
-                        let _ = reply_tx.expect("a registration asks for an answer").send(Ok(7));
-                    }
-                    other => panic!("a registration goes first, got {other:?}"),
-                }
-                while received.len() < 3 {
-                    match rx.recv() {
-                        Ok(cmd) => received.push(cmd),
-                        Err(_) => break,
-                    }
-                }
-                received
-            });
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
             client.place_order(py, 3, &bracket_contract(), &bracket_order(false, 0)).unwrap();
             client.place_order(py, 4, &bracket_contract(), &bracket_order(false, 3)).unwrap();
             client.place_order(py, 5, &bracket_contract(), &bracket_order(true, 3)).unwrap();
-            let received = engine.join().unwrap();
+            let received: Vec<ControlCommand> = rx.try_iter().collect();
             assert!(
                 matches!(
                     received.as_slice(),
@@ -1676,104 +1183,31 @@ w = W()",
                 ),
                 "the family goes in the order it was placed: {received:?}",
             );
-            assert!(error_calls(py, &wrapper).is_empty(), "a family that went is not reported");
-            assert!(!client.core.withdraw_held(3), "nothing is held after the transmit");
-            assert!(!client.core.withdraw_held(4), "nothing is held after the transmit");
+            assert!(error_calls(py, &client, &wrapper).is_empty(), "a family that went is not reported");
+            assert!(!rx.keeps(3), "nothing is held after the transmit");
+            assert!(!rx.keeps(4), "nothing is held after the transmit");
         });
     }
 
-    /// The engine stops once the parent of a bracket is in hand: the parent
-    /// is on its way to the venue and the protective children are not. The
-    /// call is answered on the error callback, stating what reached the
-    /// engine and what did not — raised instead, a caller written against
-    /// the reference client learned only that something failed, and had an
-    /// unhedged position it believed did not exist.
-    #[test]
-    fn a_bracket_whose_engine_stops_partway_states_what_reached_the_engine() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, _shared, wrapper) = placed_client(py);
-            // A rendezvous channel: nothing reaches the engine until the
-            // engine takes it, so the engine controls exactly how much of
-            // the family it has in hand when it stops.
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(0);
-            *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_secs(2));
-            let engine = std::thread::spawn(move || {
-                let mut received = Vec::new();
-                // Answer the registration the first order asks for, take the
-                // parent of the bracket, then stop.
-                match rx.recv() {
-                    Ok(ControlCommand::RegisterInstrument { reply_tx, .. }) => {
-                        let _ = reply_tx.expect("a registration asks for an answer").send(Ok(7));
-                    }
-                    other => panic!("a registration goes first, got {other:?}"),
-                }
-                if let Ok(order) = rx.recv() {
-                    received.push(order);
-                }
-                received
-            });
-            client.place_order(py, 3, &bracket_contract(), &bracket_order(false, 0)).unwrap();
-            client.place_order(py, 4, &bracket_contract(), &bracket_order(false, 3)).unwrap();
-            client.place_order(py, 5, &bracket_contract(), &bracket_order(true, 3)).unwrap();
-            let received = engine.join().unwrap();
-            assert!(
-                matches!(
-                    received.as_slice(),
-                    [ControlCommand::Order(OrderRequest::SubmitEx { con_id: 756733, order_id: 3, .. })],
-                ),
-                "only the parent reached the engine: {received:?}",
-            );
-            let errors = error_calls(py, &wrapper);
-            let (id, code, message) = errors.last().expect("the caller is told on the error callback");
-            assert_eq!(*id, 5);
-            assert_eq!(*code, 504);
-            assert!(message.contains("order 3 reached the engine"), "{message}");
-            assert!(message.contains("orders 4, 5 did not reach it"), "{message}");
-            // What did not go is not left queued to slip out behind the next
-            // thing that transmits.
-            assert!(!client.core.withdraw_held(4), "the child that did not go is withdrawn");
-            assert!(!client.core.withdraw_held(3), "the parent went with its send");
-        });
-    }
 
-    /// The engine stops before it takes anything of a bracket. Nothing is
-    /// sent and nothing is lost: the family is still held for a later
-    /// transmit, and the caller is told that on the error callback rather
-    /// than handed an exception.
+    /// A placement the engine can no longer take is told on the error
+    /// callback under its own number, rather than handed over as an
+    /// exception.
     #[test]
-    fn a_bracket_whose_engine_stops_first_sends_nothing_and_keeps_its_family() {
+    fn a_placement_the_engine_can_no_longer_take_is_reported_under_its_number() {
         Python::initialize();
         Python::attach(|py| {
             let (client, _shared, wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(0);
+            let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
             *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_secs(2));
-            let engine = std::thread::spawn(move || {
-                let received: Vec<ControlCommand> = Vec::new();
-                // Answer the registration, then stop before taking an order.
-                match rx.recv() {
-                    Ok(ControlCommand::RegisterInstrument { reply_tx, .. }) => {
-                        let _ = reply_tx.expect("a registration asks for an answer").send(Ok(7));
-                    }
-                    other => panic!("a registration goes first, got {other:?}"),
-                }
-                received
-            });
+            // The engine has stopped: nothing takes what is placed.
+            drop(rx);
             client.place_order(py, 3, &bracket_contract(), &bracket_order(false, 0)).unwrap();
-            client.place_order(py, 4, &bracket_contract(), &bracket_order(false, 3)).unwrap();
-            client.place_order(py, 5, &bracket_contract(), &bracket_order(true, 3)).unwrap();
-            let received = engine.join().unwrap();
-            assert!(received.is_empty(), "no order reached the engine: {received:?}");
-            let errors = error_calls(py, &wrapper);
-            let (id, code, message) = errors.last().expect("the caller is told on the error callback");
-            assert_eq!(*id, 5);
-            assert_eq!(*code, 504);
-            assert!(message.contains("nothing was sent"), "{message}");
-            assert!(message.contains("orders 3, 4 are still held"), "{message}");
-            assert!(client.core.withdraw_held(3), "the parent is still held");
-            assert!(client.core.withdraw_held(4), "the child is still held");
+            client.place_order(py, 4, &bracket_contract(), &bracket_order(true, 3)).unwrap();
+            let errors = error_calls(py, &client, &wrapper);
+            let told: Vec<(i64, i64)> = errors.iter().map(|(id, code, _)| (*id, *code)).collect();
+            assert_eq!(told, [(3, 504), (4, 504)], "each is told on the error callback: {errors:?}");
+            assert!(errors.iter().all(|(_, _, message)| message.contains("Engine stopped")), "{errors:?}");
         });
     }
 
@@ -1788,10 +1222,10 @@ w = W()",
     fn cancelling_a_held_order_forgets_it_rather_than_placing_it_later() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _shared, _wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(64);
+            let (client, shared, _wrapper) = placed_client(py);
+            let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
             *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
 
             client.place_order(py, 3, &bracket_contract(), &bracket_order(false, 0)).unwrap();
             client.cancel_order(py, 3, None).unwrap();
@@ -1812,90 +1246,14 @@ w = W()",
                     "and the venue is not asked to withdraw one it never had: {sent:?}",
                 );
             }
-            assert!(!client.core.is_held(3), "nothing of it is left queued");
+            assert!(!rx.keeps(3), "nothing of it is left queued");
+            client.dispatch_once(py, &shared).unwrap();
             assert!(!client.core.is_order_tracked(3), "and its id no longer reads as an order");
         });
     }
 
-    /// The engine is asked for a contract and says nothing before the wait
-    /// runs out. Reported under this client's own number for silence, and
-    /// the call returns: the exception this used to raise was somewhere a
-    /// caller written against the reference client has no handling.
-    #[test]
-    fn a_registration_that_times_out_is_reported_and_the_call_returns() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, _shared, wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(8);
-            *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_millis(20));
-            let engine = std::thread::spawn(move || {
-                // Take the registration and sit on the answer past the wait.
-                if let Ok(cmd) = rx.recv() {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    drop(cmd);
-                }
-            });
-            client.place_order(py, 3, &bracket_contract(), &bracket_order(true, 0)).unwrap();
-            engine.join().unwrap();
-            let errors = error_calls(py, &wrapper);
-            let (id, code, message) = errors.last().expect("the caller is told on the error callback");
-            assert_eq!(*id, 3);
-            assert_eq!(*code, Refusal::NO_ANSWER as i64);
-            assert!(message.contains("Registration timed out"), "{message}");
-        });
-    }
 
-    /// The same silence, on an exercise. Its registration refusal was raised
-    /// where every other call reports it, so a caller written against the
-    /// reference client had nowhere to catch it, and the number went with it.
-    #[test]
-    fn an_exercise_whose_registration_times_out_is_reported_and_the_call_returns() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, _shared, wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(8);
-            *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_millis(20));
-            let engine = std::thread::spawn(move || {
-                if let Ok(cmd) = rx.recv() {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    drop(cmd);
-                }
-            });
-            client.exercise_options(py, 7, &bracket_contract(), 1, 1, "", 1, "", "", false).unwrap();
-            engine.join().unwrap();
-            let errors = error_calls(py, &wrapper);
-            let (id, code, message) = errors.last().expect("the caller is told on the error callback");
-            assert_eq!(*id, 7);
-            assert_eq!(*code, Refusal::NO_ANSWER as i64);
-            assert!(message.contains("Registration timed out"), "{message}");
-        });
-    }
 
-    /// The engine takes a registration and stops before answering it.
-    /// Reported under the number for a lost session, and the call returns.
-    #[test]
-    fn a_registration_the_engine_stops_in_is_reported_and_the_call_returns() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, _shared, wrapper) = placed_client(py);
-            let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(8);
-            *client.control_tx.lock().unwrap() = Some(tx);
-            client.core.set_registration_timeout(std::time::Duration::from_secs(2));
-            let engine = std::thread::spawn(move || {
-                // Take the registration and stop without answering.
-                let _ = rx.recv();
-            });
-            client.place_order(py, 3, &bracket_contract(), &bracket_order(true, 0)).unwrap();
-            engine.join().unwrap();
-            let errors = error_calls(py, &wrapper);
-            let (id, code, message) = errors.last().expect("the caller is told on the error callback");
-            assert_eq!(*id, 3);
-            assert_eq!(*code, 504);
-            assert!(message.contains("Engine stopped"), "{message}");
-        });
-    }
 
     /// A combination leg the caller states and this client cannot read is a
     /// refusal, as the other unreadable fields are, and is answered on the
@@ -1906,7 +1264,7 @@ w = W()",
         Python::initialize();
         Python::attach(|py| {
             let (client, _shared, wrapper) = placed_client(py);
-            let (tx, _rx) = std::sync::mpsc::sync_channel::<ControlCommand>(8);
+            let (tx, _rx) = std::sync::mpsc::channel::<ControlCommand>();
             *client.control_tx.lock().unwrap() = Some(tx);
             let contract = bracket_contract();
             // A leg with no contract id: it names no contract, and the list
@@ -1914,7 +1272,7 @@ w = W()",
             let leg = py.eval(c"type('ComboLeg', (), {})()", None, None).unwrap();
             contract.combo_legs.bound(py).append(leg).unwrap();
             client.place_order(py, 3, &contract, &bracket_order(true, 0)).unwrap();
-            let errors = error_calls(py, &wrapper);
+            let errors = error_calls(py, &client, &wrapper);
             let (id, code, message) = errors.last().expect("the caller is told on the error callback");
             assert_eq!(*id, 3);
             assert_eq!(*code, Refusal::VALIDATION as i64);
@@ -1933,7 +1291,7 @@ w = W()",
     fn the_working_orders_carry_what_the_venue_said_their_fills_went_at() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, _wrapper) = wired_client(py);
+            let (client, rx, shared, wrapper) = wired_client(py);
             shared.orders.set_replay_done();
             shared.orders.push_order_info(77, crate::bridge::RichOrderInfo {
                 contract: crate::types::model::Contract {
@@ -1953,55 +1311,24 @@ w = W()",
             });
 
             client.req_open_orders(py).unwrap();
+            crate::api::client::tests::the_engine_answers(&rx, &shared);
+            client.dispatch_once(py, &shared).unwrap();
 
-            let said = client.waiting_answers.lock().unwrap()
-                .iter()
-                .find(|(name, _)| *name == "order_status")
-                .map(|(_, args)| {
-                    let args = args.bind(py);
-                    (
-                        args.get_item(4).unwrap().extract::<f64>().unwrap(),
-                        args.get_item(7).unwrap().extract::<f64>().unwrap(),
-                    )
+            let calls = wrapper.bind(py).getattr("calls").unwrap();
+            let said = (0..calls.len().unwrap())
+                .map(|i| calls.get_item(i).unwrap())
+                .find(|call| {
+                    let name = call.get_item(0).unwrap().extract::<String>().unwrap();
+                    name == "order_status" || name == "orderStatus"
                 })
+                .map(|call| (
+                    call.get_item(5).unwrap().extract::<f64>().unwrap(),
+                    call.get_item(8).unwrap().extract::<f64>().unwrap(),
+                ))
                 .expect("the order is reported");
             assert_eq!(
                 said, (99.5, 99.75),
                 "the average of everything filled, and what the last of it went at",
-            );
-        });
-    }
-
-    /// A question the engine refuses at once is answered at once, as on the
-    /// other surface.
-    ///
-    /// The engine counts the ask and, where there is no connection to carry
-    /// the question, the end in the same pass. A wait that re-read the count
-    /// of answers at the moment it saw the ask adopted a figure that already
-    /// included its own answer, and then sat out its whole deadline.
-    #[test]
-    fn a_question_answered_before_the_wait_looks_does_not_wait_it_out() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, _rx, shared, _wrapper) = wired_client(py);
-            let engine = {
-                let shared = shared.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    shared.orders.note_completed_orders_asked();
-                    // On the turn the question was asked under, which is what
-                    // the engine reads off the command.
-                    let turn = shared.orders.completed_orders_turn();
-                    shared.orders.note_completed_orders_end_on(turn);
-                })
-            };
-            let began = std::time::Instant::now();
-            client.req_completed_orders(py, false).unwrap();
-            engine.join().unwrap();
-            assert!(
-                began.elapsed() < std::time::Duration::from_secs(2),
-                "the wait sat out its deadline for an answer it already had: {:?}",
-                began.elapsed(),
             );
         });
     }
@@ -2017,7 +1344,7 @@ w = W()",
     fn an_order_named_permanently_after_it_was_answered_replaces_its_earlier_copy() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, _wrapper) = wired_client(py);
+            let (client, _rx, shared, wrapper) = wired_client(py);
             let known = |perm_id: i64| crate::bridge::RichOrderInfo {
                 contract: Default::default(),
                 order: crate::types::model::Order {
@@ -2030,35 +1357,38 @@ w = W()",
                 order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
                 filled_qty: 100, timestamp_ns: 0,
             };
-            // The engine's side of the question: it takes it off the queue,
-            // and then the run of answers ends.
-            let answering = |shared: Arc<SharedState>| {
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    shared.orders.note_completed_orders_asked();
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    let turn = shared.orders.completed_orders_turn();
-                    shared.orders.note_completed_orders_end_on(turn);
-                })
+            // The engine's side of the question: the answer, where the end
+            // of the run of reports stands.
+            let answering = |shared: &SharedState| {
+                shared.push_call_record(crate::bridge::Record::Answer(
+                    crate::bridge::Answer::CompletedOrders { api_only: false },
+                ));
             };
+            // Answered where the answer stands: a read delivers it.
             let answers = |client: &EClient| {
-                client.waiting_answers.lock().unwrap()
-                    .iter().filter(|(name, _)| *name == "completed_order").count()
+                client.dispatch_once(py, &shared).unwrap();
+                let calls = wrapper.bind(py).getattr("calls").unwrap();
+                let said = (0..calls.len().unwrap())
+                    .filter(|i| {
+                        let name = calls.get_item(*i).unwrap().get_item(0).unwrap()
+                            .extract::<String>().unwrap();
+                        name == "completed_order" || name == "completedOrder"
+                    })
+                    .count();
+                calls.call_method0("clear").unwrap();
+                said
             };
 
             shared.orders.push_order_info(31, known(0));
             shared.orders.push_completed_order(finished());
-            let engine = answering(shared.clone());
-            client.req_completed_orders(py, false).unwrap();
-            engine.join().unwrap();
+            client.req_completed_orders(false).unwrap();
+            answering(&shared);
             assert_eq!(answers(&client), 1);
-            client.waiting_answers.lock().unwrap().clear();
 
             shared.orders.push_order_info(31, known(777));
             shared.orders.refile_completed_order(finished());
-            let engine = answering(shared.clone());
-            client.req_completed_orders(py, false).unwrap();
-            engine.join().unwrap();
+            client.req_completed_orders(false).unwrap();
+            answering(&shared);
             assert_eq!(
                 answers(&client), 1,
                 "the one order read as two once the venue had named it",

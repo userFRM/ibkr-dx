@@ -9,6 +9,8 @@ back out of the request call, which is somewhere the reference client never
 raises one.
 """
 
+import time
+
 import pytest
 from ibkr_dx import EClient, EWrapper
 
@@ -31,11 +33,18 @@ def test_the_rest_of_the_answer_and_its_end_still_arrive():
     wrapper = RaisesOnTheFirstPosition()
     client = EClient(wrapper)
     client._test_connect("DU111111", True)
+    # The account has stated itself.
+    client._test_finish_account_download()
     client._test_set_position(111, 10.0, 5.0)
     client._test_set_position(222, 20.0, 6.0)
 
     client.req_positions()
-    client._test_dispatch_once()
+    # The engine gives the holdings' contracts a moment to be named before it
+    # answers, and answers after it.
+    deadline = time.monotonic() + 5
+    while "end" not in wrapper.heard and time.monotonic() < deadline:
+        client._test_dispatch_once()
+        time.sleep(0.05)
 
     # The answer is what comes before its end. The feed follows on the same
     # pass with what moved before the ask, which is these holdings again —

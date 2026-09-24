@@ -41,6 +41,7 @@ def _market_order():
 def test_an_order_numbered_zero_is_refused_not_renumbered():
     w, c = _client()
     c.place_order(0, _spy(), _market_order())
+    c.poll()
     assert w.errors, "an order number of zero must be reported, not replaced"
     assert w.errors[-1][0] == 0
     assert "order_id 0" in w.errors[-1][2]
@@ -49,12 +50,14 @@ def test_an_order_numbered_zero_is_refused_not_renumbered():
 def test_an_order_numbered_below_zero_is_refused():
     w, c = _client()
     c.place_order(-5, _spy(), _market_order())
+    c.poll()
     assert w.errors and "order_id -5" in w.errors[-1][2]
 
 
 def test_a_cancel_numbered_below_zero_is_refused():
     w, c = _client()
     c.cancel_order(-5, "")
+    c.poll()
     assert w.errors and "order_id -5" in w.errors[-1][2]
 
 

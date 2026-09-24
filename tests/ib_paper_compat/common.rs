@@ -71,6 +71,7 @@ pub(super) fn get_config() -> Option<GatewayConfig> {
         ib_key_timeout_secs: ibkr_dx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: ibkr_dx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
+        cancel: None,
         resume: None,
     })
 }
@@ -134,9 +135,33 @@ pub(super) fn run_hot_loop(hot_loop: HotLoop) -> std::thread::JoinHandle<HotLoop
     })
 }
 
+/// The slot the engine serves a market-data request on, once its record of
+/// taking the request is in; the refusal it made instead, as its words.
+///
+/// The engine takes a request in its own loop and says so where the record
+/// stands in the session's order, so this reads the session's records under
+/// that request's number until one of the two arrives.
+pub(super) fn taken_slot(
+    shared: &ibkr_dx::bridge::SharedState, req_id: i64, within: std::time::Duration,
+) -> Result<ibkr_dx::types::InstrumentId, String> {
+    let mine = [ibkr_dx::bridge::Owner::Request(req_id)];
+    let deadline = std::time::Instant::now() + within;
+    while std::time::Instant::now() < deadline {
+        for (_, record) in shared.take_records(shared.next_seq(), ibkr_dx::bridge::Take::Own(&mine)) {
+            match record {
+                ibkr_dx::bridge::Record::MarketDataTaken(taken) => return Ok(taken.slot),
+                ibkr_dx::bridge::Record::Refused((_, code, why)) => return Err(format!("{code}: {why}")),
+                _ => {}
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(format!("the engine said nothing of request {req_id}"))
+}
+
 /// Shutdown a hot loop and reclaim connections.
 pub(super) fn shutdown_and_reclaim(
-    control_tx: &std::sync::mpsc::SyncSender<ControlCommand>,
+    control_tx: &std::sync::mpsc::Sender<ControlCommand>,
     join: std::thread::JoinHandle<HotLoop>,
     account_id: String,
 ) -> Conns {
@@ -1208,8 +1233,8 @@ pub(super) fn run_submit_cancel_phase(
     };
 
     control_tx.send(ControlCommand::Order(order_req)).unwrap();
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90005, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 

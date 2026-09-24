@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 currency: (*currency).into(),
                 ..Default::default()
             },
-        )?;
+        );
     }
 
     // A listing SMART does not route for this account is not a listing that
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 currency: currency.into(),
                 ..Default::default()
             },
-        )?;
+        );
     }
 
     let deadline = Instant::now() + Duration::from_secs(30);

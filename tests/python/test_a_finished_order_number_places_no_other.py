@@ -55,6 +55,7 @@ def test_placing_again_under_a_finished_number_is_refused():
 
     c.placeOrder(83, spy(), limit_order())
 
+    c.poll()
     assert w.seen == [(83, 103)], (
         f"the number has already been worked: {w.seen}"
     )
@@ -73,6 +74,7 @@ def test_a_withdrawal_of_a_finished_number_is_not_cancellable():
     c._test_take_commands()
     w.seen.clear()
     c.cancelOrder(84, "")
+    c.poll()
     assert w.seen == [(84, 161)], f"the order finished under this client's eyes: {w.seen}"
     assert not c._test_take_commands(), "and nothing was sent under it"
 

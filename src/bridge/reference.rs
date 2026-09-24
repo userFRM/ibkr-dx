@@ -1,6 +1,7 @@
 //! What the venue has answered about contracts, history and news.
 
 use super::*;
+use super::record::{Queue, Stamps};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::collections::HashMap;
@@ -119,14 +120,14 @@ pub struct ReferenceState {
     /// count from the same number, so a set shared between them would let one
     /// release what the other is waiting on.
     ours_in_flight: Mutex<std::collections::HashSet<(RecordKind, i64)>>,
-    historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
-    head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
-    contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
-    contract_details_end: Mutex<Vec<u32>>,
-    matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
+    pub(super) historical_data: Queue<(u32, HistoricalResponse)>,
+    pub(super) head_timestamps: Queue<(u32, HeadTimestampResponse)>,
+    pub(super) contract_details: Queue<(u32, ContractDefinition)>,
+    pub(super) contract_details_end: Queue<u32>,
+    pub(super) matching_symbols: Queue<(u32, Vec<SymbolMatch>)>,
     /// Orders this session did not place, paired with the number it reaches
     /// them under. Drained to `order_bound` on each surface.
-    orders_bound: Mutex<Vec<(i64, i64, i64)>>,
+    pub(super) orders_bound: Queue<(i64, i64, i64)>,
     /// Which of those pairings have been stated, for as long as the session
     /// lasts. Kept apart from the queue above because the queue is emptied
     /// every time a caller reads it, and a set that forgets on being read
@@ -135,29 +136,30 @@ pub struct ReferenceState {
     /// The calendar's answers, as the venue wrote them. Two shapes on one
     /// envelope — what event types exist, and the events themselves — kept
     /// apart so a caller waiting on one is not handed the other.
-    calendar_meta_data: Mutex<Vec<(u32, String)>>,
-    calendar_events: Mutex<Vec<(u32, String)>>,
+    pub(super) calendar_meta_data: Queue<(u32, String)>,
+    pub(super) calendar_events: Queue<(u32, String)>,
     /// A whole option chain answer: the underlying's conId, and one entry per
     /// scope the venue listed. The list is what the dispatcher reports before
     /// ending the request, so an empty one still ends it.
-    option_params: Mutex<Vec<(u32, i64, Vec<OptionChainScope>)>>,
-    scanner_params: Mutex<Vec<String>>,
+    pub(super) option_params: Queue<(u32, i64, Vec<OptionChainScope>)>,
+    pub(super) scanner_params: Queue<String>,
     /// A partition of the advisor's configuration the venue has stated, as the
     /// number it is asked for under and the document itself.
-    advisor_config: Mutex<Vec<(i32, String)>>,
+    pub(super) advisor_config: Queue<(i32, String)>,
     /// The end of a replacement, as the caller's number for it and what the
     /// venue said about it.
-    advisor_replaced: Mutex<Vec<(i64, String)>>,
-    /// A replacement the venue refused, as the caller's number for it, the
-    /// code it is reported under and what the venue said.
-    advisor_refused: Mutex<Vec<(i64, i32, String)>>,
-    scanner_data: Mutex<Vec<(u32, ScannerResult)>>,
-    historical_news: Mutex<Vec<(u32, Vec<NewsHeadline>, bool)>>,
-    news_articles: Mutex<Vec<(u32, i32, String)>>,
-    fundamental_data: Mutex<Vec<(u32, String)>>,
-    histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
-    historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
-    historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
+    pub(super) advisor_replaced: Queue<(i64, String)>,
+    /// An advisor request the venue refused, as the caller's number for it,
+    /// the code it is reported under, what the venue said and what it is
+    /// about: a replacement under its number, or the question of a partition.
+    pub(super) advisor_refused: Queue<(i64, i32, String, api::ErrorOrigin)>,
+    pub(super) scanner_data: Queue<(u32, ScannerResult)>,
+    pub(super) historical_news: Queue<(u32, Vec<NewsHeadline>, bool)>,
+    pub(super) news_articles: Queue<(u32, i32, String)>,
+    pub(super) fundamental_data: Queue<(u32, String)>,
+    pub(super) histogram_data: Queue<(u32, Vec<HistogramEntry>)>,
+    pub(super) historical_ticks: Queue<(u32, HistoricalTickData, String, bool)>,
+    pub(super) historical_schedules: Queue<(u32, HistoricalScheduleResponse)>,
     /// A contract's corporate actions, against the contract they belong to.
     ///
     /// Keyed by the contract and not by a request, because that is how the
@@ -182,12 +184,16 @@ pub struct ReferenceState {
     /// `EClient::cancel_adjustments` gives up without it; one the venue refuses,
     /// or that is dropped with its connection, is given up by the engine.
     adjustments_by_request: Mutex<std::collections::HashMap<u32, Option<Vec<crate::control::adjustments::Adjustment>>>>,
-    /// Errors surfaced by HMDS for in-flight reference queries (req_id, code, message).
-    /// Drained by the dispatcher and forwarded to `Wrapper::error`.
-    historical_errors: Mutex<Vec<(u32, i32, String)>>,
+    /// Errors surfaced for in-flight reference queries: (the number a reader
+    /// holds it under, code, message, what it is about). Drained by the
+    /// dispatcher and forwarded to `Wrapper::error_from`.
+    pub(super) historical_errors: Queue<(u32, i32, String, api::ErrorOrigin)>,
     market_rules: Mutex<Vec<MarketRule>>,
     depth_exchanges_cache: Mutex<Option<Vec<DepthMktDataDescription>>>,
     depth_exchanges_pending: Mutex<bool>,
+    /// The answers to those asks, each pushed when the table it states is
+    /// read: at the ask where one is held, or as the table arrives.
+    pub(super) depth_exchanges_answers: Queue<Vec<DepthMktDataDescription>>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
     /// The entries above that are the venue's own definitions, not seeds.
@@ -269,36 +275,46 @@ pub struct ReferenceState {
 }
 
 impl ReferenceState {
+
+
+    /// An empty one, stamping from its own counter.
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::stamping(&Stamps::default())
+    }
+
+    /// An empty one, stamping from the session's counter.
+    pub(super) fn stamping(stamps: &Stamps) -> Self {
         Self {
             ours_in_flight: Mutex::new(Default::default()),
-            historical_data: Mutex::new(Vec::with_capacity(16)),
-            head_timestamps: Mutex::new(Vec::with_capacity(8)),
-            contract_details: Mutex::new(Vec::with_capacity(16)),
-            contract_details_end: Mutex::new(Vec::with_capacity(8)),
-            matching_symbols: Mutex::new(Vec::with_capacity(8)),
-            orders_bound: Mutex::new(Vec::new()),
+            historical_data: Queue::with_capacity(stamps, 16),
+            head_timestamps: Queue::with_capacity(stamps, 8),
+            contract_details: Queue::with_capacity(stamps, 16),
+            contract_details_end: Queue::with_capacity(stamps, 8),
+            matching_symbols: Queue::with_capacity(stamps, 8),
+            orders_bound: Queue::new(stamps),
             orders_bound_said: Mutex::new(std::collections::HashSet::new()),
-            calendar_meta_data: Mutex::new(Vec::new()),
-            calendar_events: Mutex::new(Vec::new()),
-            option_params: Mutex::new(Vec::with_capacity(4)),
-            scanner_params: Mutex::new(Vec::new()),
-            advisor_config: Mutex::new(Vec::new()),
-            advisor_replaced: Mutex::new(Vec::new()),
-            advisor_refused: Mutex::new(Vec::new()),
-            scanner_data: Mutex::new(Vec::with_capacity(8)),
-            historical_news: Mutex::new(Vec::with_capacity(8)),
-            news_articles: Mutex::new(Vec::with_capacity(8)),
-            fundamental_data: Mutex::new(Vec::with_capacity(4)),
-            histogram_data: Mutex::new(Vec::with_capacity(4)),
-            historical_ticks: Mutex::new(Vec::with_capacity(4)),
-            historical_schedules: Mutex::new(Vec::with_capacity(4)),
+            calendar_meta_data: Queue::new(stamps),
+            calendar_events: Queue::new(stamps),
+            option_params: Queue::with_capacity(stamps, 4),
+            scanner_params: Queue::new(stamps),
+            advisor_config: Queue::new(stamps),
+            advisor_replaced: Queue::new(stamps),
+            advisor_refused: Queue::new(stamps),
+            scanner_data: Queue::with_capacity(stamps, 8),
+            historical_news: Queue::with_capacity(stamps, 8),
+            news_articles: Queue::with_capacity(stamps, 8),
+            fundamental_data: Queue::with_capacity(stamps, 4),
+            histogram_data: Queue::with_capacity(stamps, 4),
+            historical_ticks: Queue::with_capacity(stamps, 4),
+            historical_schedules: Queue::with_capacity(stamps, 4),
             adjustments: Mutex::new(std::collections::HashMap::new()),
             adjustments_by_request: Mutex::new(std::collections::HashMap::new()),
-            historical_errors: Mutex::new(Vec::with_capacity(4)),
+            historical_errors: Queue::with_capacity(stamps, 4),
             market_rules: Mutex::new(Vec::new()),
             depth_exchanges_cache: Mutex::new(None),
             depth_exchanges_pending: Mutex::new(false),
+            depth_exchanges_answers: Queue::new(stamps),
             contract_cache: Mutex::new(HashMap::new()),
             defined_contracts: Mutex::new(std::collections::HashSet::new()),
             smart_component_maps: Mutex::new(HashMap::new()),
@@ -331,17 +347,17 @@ impl ReferenceState {
 
     /// Take every historical data waiting, leaving none.
     pub fn drain_historical_data(&self) -> Vec<(u32, HistoricalResponse)> {
-        self.historical_data.lock().unwrap().drain(..).collect()
+        self.historical_data.drain()
     }
 
     /// Take every head timestamps waiting, leaving none.
     pub fn drain_head_timestamps(&self) -> Vec<(u32, HeadTimestampResponse)> {
-        self.head_timestamps.lock().unwrap().drain(..).collect()
+        self.head_timestamps.drain()
     }
 
     /// Take every contract details waiting, leaving none.
     pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
-        self.contract_details.lock().unwrap().drain(..).collect()
+        self.contract_details.drain()
     }
 
     /// The definitions a dispatch loop should deliver, leaving an answering
@@ -350,17 +366,7 @@ impl ReferenceState {
         self.drain_dispatchable(&self.contract_details)
     }
 
-    /// Take every historical data a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_historical_data_for_dispatch(&self) -> Vec<(u32, HistoricalResponse)> {
-        self.drain_dispatchable(&self.historical_data)
-    }
 
-    /// Take every head timestamps a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_head_timestamps_for_dispatch(&self) -> Vec<(u32, HeadTimestampResponse)> {
-        self.drain_dispatchable(&self.head_timestamps)
-    }
 
     /// Take every calendar meta data a dispatch loop should deliver, leaving behind
     /// what a waiting answering call will take.
@@ -374,45 +380,7 @@ impl ReferenceState {
         self.drain_dispatchable(&self.calendar_events)
     }
 
-    /// Take every matching symbols a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_matching_symbols_for_dispatch(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
-        self.drain_dispatchable(&self.matching_symbols)
-    }
 
-    /// Take every histogram data a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_histogram_data_for_dispatch(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
-        self.drain_dispatchable(&self.histogram_data)
-    }
-
-    /// Take every fundamental data a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_fundamental_data_for_dispatch(&self) -> Vec<(u32, String)> {
-        self.drain_dispatchable(&self.fundamental_data)
-    }
-
-    /// Take every historical schedules a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_historical_schedules_for_dispatch(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
-        self.drain_dispatchable(&self.historical_schedules)
-    }
-
-    /// Take every contract details end a dispatch loop should deliver, leaving behind
-    /// what a waiting answering call will take.
-    pub fn drain_contract_details_end_for_dispatch(&self) -> Vec<u32> {
-        let mut g = self.contract_details_end.lock().unwrap();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < g.len() {
-            if self.is_ours(RecordKind::Answer, g[i] as i64) {
-                i += 1;
-            } else {
-                out.push(g.remove(i));
-            }
-        }
-        out
-    }
 
     /// What a refusal against no request at all is carried as.
     ///
@@ -433,13 +401,11 @@ impl ReferenceState {
     pub fn drain_historical_errors_for_dispatch(
         &self, mine: impl Fn(u32) -> bool,
     ) -> Vec<(u32, i32, String)> {
-        let mut g = self.historical_errors.lock().unwrap();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < g.len() {
-            if mine(g[i].0) { i += 1; } else { out.push(g.remove(i)); }
-        }
-        out
+        self.historical_errors
+            .take_if(|e| !mine(e.0))
+            .into_iter()
+            .map(|(id, code, msg, _)| (id, code, msg))
+            .collect()
     }
 
     /// The first id this client's own answering calls ask under.
@@ -528,25 +494,13 @@ impl ReferenceState {
     /// what happened, and the tests of the day could not see it: they filled
     /// the queues by hand, with ids of their own choosing, so the band was
     /// never the one a session hands out.
-    pub fn drain_dispatchable<T>(&self, q: &Mutex<Vec<(u32, T)>>) -> Vec<(u32, T)> {
-        let mut g = q.lock().unwrap();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < g.len() {
-            if self.is_ours(RecordKind::Answer, g[i].0 as i64) {
-                i += 1;
-            } else {
-                out.push(g.remove(i));
-            }
-        }
-        out
+    pub fn drain_dispatchable<T>(&self, q: &Queue<(u32, T)>) -> Vec<(u32, T)> {
+        q.take_if(|(id, _)| !self.is_ours(RecordKind::Answer, *id as i64))
     }
 
     /// Take the one answer belonging to a request, leaving the rest.
-    fn take_one<T>(q: &Mutex<Vec<(u32, T)>>, req_id: u32) -> Option<T> {
-        let mut g = q.lock().unwrap();
-        let at = g.iter().position(|(id, _)| *id == req_id)?;
-        Some(g.remove(at).1)
+    fn take_one<T>(q: &Queue<(u32, T)>, req_id: u32) -> Option<T> {
+        q.take_first(|(id, _)| *id == req_id).map(|(_, item)| item)
     }
 
     // Withdrawing a request stops the venue sending more; it does not unsend
@@ -571,50 +525,50 @@ impl ReferenceState {
 
     /// Throw away bars still queued under a request.
     pub fn purge_historical_for(&self, req_id: u32) {
-        self.historical_data.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.historical_data.retain(|(id, _)| *id != req_id);
+    }
+
+    /// Throw away a trading schedule still queued under a request.
+    pub fn purge_historical_schedule_for(&self, req_id: u32) {
+        self.historical_schedules.retain(|(id, _)| *id != req_id);
     }
 
     /// Throw away a head timestamp still queued under a request.
     pub fn purge_head_timestamp_for(&self, req_id: u32) {
-        self.head_timestamps.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.head_timestamps.retain(|(id, _)| *id != req_id);
     }
 
     /// Throw away calendar answers still queued under a request.
     pub fn purge_calendar_for(&self, req_id: u32) -> bool {
-        let mut meta = self.calendar_meta_data.lock().unwrap();
-        let mut events = self.calendar_events.lock().unwrap();
+        let mut meta = self.calendar_meta_data.lock();
+        let mut events = self.calendar_events.lock();
         let before = meta.len() + events.len();
-        meta.retain(|(id, _)| *id != req_id);
-        events.retain(|(id, _)| *id != req_id);
+        meta.retain(|(_, (id, _))| *id != req_id);
+        events.retain(|(_, (id, _))| *id != req_id);
         meta.len() + events.len() != before
     }
 
     /// Throw away a report still queued under a request.
     pub fn purge_fundamental_for(&self, req_id: u32) {
-        self.fundamental_data.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.fundamental_data.retain(|(id, _)| *id != req_id);
     }
 
     /// Throw away headlines still queued under a request.
     pub fn purge_historical_news_for(&self, req_id: u32) {
-        self.historical_news.lock().unwrap().retain(|(id, ..)| *id != req_id);
+        self.historical_news.retain(|(id, ..)| *id != req_id);
     }
 
     /// Throw away a histogram still queued under a request.
     pub fn purge_histogram_for(&self, req_id: u32) {
-        self.histogram_data.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.histogram_data.retain(|(id, _)| *id != req_id);
     }
 
     /// Bars answering one request. The venue may answer in several parts, so
     /// this takes every part waiting and the caller stops on the one that says
     /// it is the last.
     pub fn take_historical_for(&self, req_id: u32) -> Vec<HistoricalResponse> {
-        let mut q = self.historical_data.lock().unwrap();
-        let mut mine = Vec::new();
-        let mut i = 0;
-        while i < q.len() {
-            if q[i].0 == req_id { mine.push(q.remove(i).1); } else { i += 1; }
-        }
-        mine
+        self.historical_data.take_if(|(id, _)| *id == req_id)
+            .into_iter().map(|(_, response)| response).collect()
     }
 
     /// Take the head timestamp answering one request, leaving the rest.
@@ -629,9 +583,7 @@ impl ReferenceState {
 
     /// The option chains answered for one request.
     pub fn take_option_params_for(&self, req_id: u32) -> Option<(i64, Vec<OptionChainScope>)> {
-        let mut held = self.option_params.lock().unwrap();
-        let at = held.iter().position(|(id, ..)| *id == req_id)?;
-        let (_, underlying, scopes) = held.remove(at);
+        let (_, underlying, scopes) = self.option_params.take_first(|(id, ..)| *id == req_id)?;
         Some((underlying, scopes))
     }
 
@@ -742,26 +694,17 @@ impl ReferenceState {
     /// asking one question needs its own answer without swallowing the answers
     /// belonging to a dispatch loop running beside it.
     pub fn take_contract_details_for(&self, req_id: u32) -> Vec<ContractDefinition> {
-        let mut q = self.contract_details.lock().unwrap();
-        let mut mine = Vec::new();
-        q.retain(|(id, def)| {
-            if *id == req_id { mine.push(def.clone()); false } else { true }
-        });
-        mine
+        self.contract_details.take_if(|(id, _)| *id == req_id)
+            .into_iter().map(|(_, def)| def).collect()
     }
 
     /// Whether the venue has said it has no more to say about one request.
     pub fn take_contract_details_end_for(&self, req_id: u32) -> bool {
-        let mut q = self.contract_details_end.lock().unwrap();
-        let before = q.len();
-        q.retain(|id| *id != req_id);
-        q.len() != before
+        !self.contract_details_end.take_if(|id| *id == req_id).is_empty()
     }
 
     pub fn take_error_for(&self, req_id: u32) -> Option<(i32, String)> {
-        let mut q = self.historical_errors.lock().unwrap();
-        let at = q.iter().position(|(id, _, _)| *id == req_id)?;
-        let (_, code, msg) = q.remove(at);
+        let (_, code, msg, _) = self.historical_errors.take_first(|(id, ..)| *id == req_id)?;
         Some((code, msg))
     }
 
@@ -771,28 +714,23 @@ impl ReferenceState {
     /// the level that follows it is handed over, while a refusal still ends
     /// the stream only after the levels that preceded it.
     pub fn take_reset_for(&self, req_id: u32) -> Option<(i32, String)> {
-        let mut q = self.historical_errors.lock().unwrap();
-        let at = q.iter().position(|(id, code, _)| {
+        let (_, code, msg, _) = self.historical_errors.take_first(|(id, code, ..)| {
             *id == req_id && *code == crate::error_codes::DEPTH_BOOK_RESET
         })?;
-        let (_, code, msg) = q.remove(at);
         Some((code, msg))
     }
 
     /// Take every contract details end waiting, leaving none.
     pub fn drain_contract_details_end(&self) -> Vec<u32> {
-        self.contract_details_end.lock().unwrap().drain(..).collect()
+        self.contract_details_end.drain()
     }
 
     /// Take every calendar meta data waiting, leaving none.
     pub fn drain_calendar_meta_data(&self) -> Vec<(u32, String)> {
-        self.calendar_meta_data.lock().unwrap().drain(..).collect()
+        self.calendar_meta_data.drain()
     }
 
-    /// Take every calendar events waiting, leaving none.
-    pub fn drain_calendar_events(&self) -> Vec<(u32, String)> {
-        self.calendar_events.lock().unwrap().drain(..).collect()
-    }
+
 
     /// The calendar's answer to one request, of either shape, leaving the rest.
     pub fn take_calendar_for(&self, req_id: u32) -> Option<String> {
@@ -802,55 +740,39 @@ impl ReferenceState {
 
     /// Take every matching symbols waiting, leaving none.
     pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
-        self.matching_symbols.lock().unwrap().drain(..).collect()
+        self.matching_symbols.drain()
     }
 
     /// Take every option params waiting, leaving none.
     pub fn drain_option_params(&self) -> Vec<(u32, i64, Vec<OptionChainScope>)> {
-        self.option_params.lock().unwrap().drain(..).collect()
+        self.option_params.drain()
     }
 
-    /// The chains meant for a callback, leaving those a caller is waiting on.
-    ///
-    /// Draining everything hands an answering call's own answer to the
-    /// callback pump instead, and the call then waits out its timeout for
-    /// something that has already been delivered somewhere else.
-    pub fn drain_option_params_for_dispatch(&self) -> Vec<(u32, i64, Vec<OptionChainScope>)> {
-        // Partitioned rather than removed one at a time: each `remove` shifts
-        // the tail, so a pass over a queue that has grown costs the square of
-        // it — under the lock the hot loop pushes into, on exactly the path a
-        // stalled reader takes when it resumes. The `take_*_for` siblings were
-        // already changed for this; these were not.
-        let mut held = self.option_params.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *held).into_iter().partition(|e| !(self.is_ours(RecordKind::Answer, e.0 as i64)));
-        *held = kept;
-        out
-    }
+
 
     /// Take every scanner params waiting, leaving none.
     pub fn drain_scanner_params(&self) -> Vec<String> {
-        self.scanner_params.lock().unwrap().drain(..).collect()
+        self.scanner_params.drain()
     }
 
     /// Take every advisor partition waiting, leaving none.
     pub fn drain_advisor_config(&self) -> Vec<(i32, String)> {
-        self.advisor_config.lock().unwrap().drain(..).collect()
+        self.advisor_config.drain()
     }
 
     /// Take every finished replacement waiting, leaving none.
     pub fn drain_advisor_replaced(&self) -> Vec<(i64, String)> {
-        self.advisor_replaced.lock().unwrap().drain(..).collect()
+        self.advisor_replaced.drain()
     }
 
     /// Take every refused replacement waiting, leaving none.
     pub fn drain_advisor_refused(&self) -> Vec<(i64, i32, String)> {
-        self.advisor_refused.lock().unwrap().drain(..).collect()
+        self.advisor_refused.drain().into_iter().map(|(id, code, text, _)| (id, code, text)).collect()
     }
 
     /// Take every scanner data waiting, leaving none.
     pub fn drain_scanner_data(&self) -> Vec<(u32, ScannerResult)> {
-        self.scanner_data.lock().unwrap().drain(..).collect()
+        self.scanner_data.drain()
     }
 
     /// Take the scan results a dispatch loop should deliver, leaving behind
@@ -867,85 +789,57 @@ impl ReferenceState {
         // it — under the lock the hot loop pushes into, on exactly the path a
         // stalled reader takes when it resumes. The `take_*_for` siblings were
         // already changed for this; these were not.
-        let mut held = self.scanner_data.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *held).into_iter().partition(|e| !(mine(e.0)));
-        *held = kept;
-        out
+        self.scanner_data.take_if(|e| !mine(e.0))
     }
 
     /// The scan results arrived under one request, leaving the rest.
     pub fn take_scanner_data_for(&self, req_id: u32) -> Vec<ScannerResult> {
-        let mut held = self.scanner_data.lock().unwrap();
-        let drained: Vec<(u32, ScannerResult)> = held.drain(..).collect();
-        let mut taken = Vec::new();
-        for (id, result) in drained {
-            if id == req_id {
-                taken.push(result);
-            } else {
-                held.push((id, result));
-            }
-        }
-        taken
+        self.scanner_data.take_if(|(id, _)| *id == req_id)
+            .into_iter().map(|(_, result)| result).collect()
     }
 
     /// Take every historical news waiting, leaving none.
     pub fn drain_historical_news(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
-        self.historical_news.lock().unwrap().drain(..).collect()
+        self.historical_news.drain()
     }
 
     /// The headlines answering one request, leaving anything a dispatch loop
     /// is going to deliver where it is.
     pub fn take_historical_news_for(&self, req_id: u32) -> Option<(Vec<NewsHeadline>, bool)> {
-        let mut held = self.historical_news.lock().unwrap();
-        let at = held.iter().position(|(id, ..)| *id == req_id)?;
-        let (_, headlines, has_more) = held.remove(at);
+        let (_, headlines, has_more) = self.historical_news.take_first(|(id, ..)| *id == req_id)?;
         Some((headlines, has_more))
     }
 
-    /// What a dispatch loop should deliver, leaving what an answering call is
-    /// waiting to take.
-    pub fn drain_historical_news_for_dispatch(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
-        // Partitioned rather than removed one at a time: each `remove` shifts
-        // the tail, so a pass over a queue that has grown costs the square of
-        // it — under the lock the hot loop pushes into, on exactly the path a
-        // stalled reader takes when it resumes. The `take_*_for` siblings were
-        // already changed for this; these were not.
-        let mut held = self.historical_news.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *held).into_iter().partition(|e| !(self.is_ours(RecordKind::Answer, e.0 as i64)));
-        *held = kept;
-        out
-    }
+
 
     /// Take every news articles waiting, leaving none.
     pub fn drain_news_articles(&self) -> Vec<(u32, i32, String)> {
-        self.news_articles.lock().unwrap().drain(..).collect()
+        self.news_articles.drain()
     }
 
     /// Take every fundamental data waiting, leaving none.
     pub fn drain_fundamental_data(&self) -> Vec<(u32, String)> {
-        self.fundamental_data.lock().unwrap().drain(..).collect()
+        self.fundamental_data.drain()
     }
 
     /// Take every histogram data waiting, leaving none.
     pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
-        self.histogram_data.lock().unwrap().drain(..).collect()
+        self.histogram_data.drain()
     }
 
     /// Take every historical ticks waiting, leaving none.
     pub fn drain_historical_ticks(&self) -> Vec<(u32, HistoricalTickData, String, bool)> {
-        self.historical_ticks.lock().unwrap().drain(..).collect()
+        self.historical_ticks.drain()
     }
 
     /// Take every historical schedules waiting, leaving none.
     pub fn drain_historical_schedules(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
-        self.historical_schedules.lock().unwrap().drain(..).collect()
+        self.historical_schedules.drain()
     }
 
     /// Take every historical errors waiting, leaving none.
     pub fn drain_historical_errors(&self) -> Vec<(u32, i32, String)> {
-        self.historical_errors.lock().unwrap().drain(..).collect()
+        self.historical_errors.drain().into_iter().map(|(id, code, msg, _)| (id, code, msg)).collect()
     }
 
     /// Get cached market rules.
@@ -966,27 +860,27 @@ impl ReferenceState {
     // ── Hot-loop-side writers ──
 
     #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
-        self.historical_data.lock().unwrap().push((req_id, response));
+        self.historical_data.push((req_id, response));
     }
 
     #[doc(hidden)] pub fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
-        self.head_timestamps.lock().unwrap().push((req_id, response));
+        self.head_timestamps.push((req_id, response));
     }
 
     #[doc(hidden)] pub fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
-        self.contract_details.lock().unwrap().push((req_id, def));
+        self.contract_details.push((req_id, def));
     }
 
     #[doc(hidden)] pub fn push_contract_details_end(&self, req_id: u32) {
-        self.contract_details_end.lock().unwrap().push(req_id);
+        self.contract_details_end.push(req_id);
     }
 
     #[doc(hidden)] pub fn push_calendar_meta_data(&self, req_id: u32, json: String) {
-        self.calendar_meta_data.lock().unwrap().push((req_id, json));
+        self.calendar_meta_data.push((req_id, json));
     }
 
     #[doc(hidden)] pub fn push_calendar_events(&self, req_id: u32, json: String) {
-        self.calendar_events.lock().unwrap().push((req_id, json));
+        self.calendar_events.push((req_id, json));
     }
 
     /// Say that an order this session did not place is reachable here.
@@ -1009,36 +903,36 @@ impl ReferenceState {
         if !self.orders_bound_said.lock().unwrap().insert(perm_id) {
             return;
         }
-        self.orders_bound.lock().unwrap().push((perm_id, client_id, order_id));
+        self.orders_bound.push((perm_id, client_id, order_id));
     }
 
     /// The pairings not yet handed over.
     pub fn drain_orders_bound(&self) -> Vec<(i64, i64, i64)> {
-        self.orders_bound.lock().unwrap().drain(..).collect()
+        self.orders_bound.drain()
     }
 
     #[doc(hidden)] pub fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {
-        self.matching_symbols.lock().unwrap().push((req_id, matches));
+        self.matching_symbols.push((req_id, matches));
     }
 
     #[doc(hidden)] pub fn push_option_params(&self, req_id: u32, underlying_con_id: i64, scopes: Vec<OptionChainScope>) {
-        self.option_params.lock().unwrap().push((req_id, underlying_con_id, scopes));
+        self.option_params.push((req_id, underlying_con_id, scopes));
     }
 
     #[doc(hidden)] pub fn push_advisor_config(&self, fa_data_type: i32, xml: String) {
-        self.advisor_config.lock().unwrap().push((fa_data_type, xml));
+        self.advisor_config.push((fa_data_type, xml));
     }
 
     #[doc(hidden)] pub fn push_advisor_replaced(&self, req_id: i64, text: String) {
-        self.advisor_replaced.lock().unwrap().push((req_id, text));
+        self.advisor_replaced.push((req_id, text));
     }
 
-    #[doc(hidden)] pub fn push_advisor_refused(&self, req_id: i64, code: i32, text: String) {
-        self.advisor_refused.lock().unwrap().push((req_id, code, text));
+    #[doc(hidden)] pub fn push_advisor_refused(&self, origin: api::ErrorOrigin, code: i32, text: String) {
+        self.advisor_refused.push((origin.id(), code, text, origin));
     }
 
     #[doc(hidden)] pub fn push_scanner_params(&self, xml: String) {
-        self.scanner_params.lock().unwrap().push(xml);
+        self.scanner_params.push(xml);
     }
 
     /// Throw away scan rows still queued under a request.
@@ -1047,43 +941,55 @@ impl ReferenceState {
     /// thing per kind of request: a caller may hold the same number for a scan
     /// and for a set of bars, and withdrawing one must not take the other's.
     pub fn purge_scanner_data_for(&self, req_id: u32) {
-        self.scanner_data.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.scanner_data.retain(|(id, _)| *id != req_id);
     }
 
     #[doc(hidden)] pub fn push_scanner_data(&self, req_id: u32, result: ScannerResult) {
         // A retained stream may never be read or dropped. Shed whole refreshes
         // so every surviving batch still carries all the rows the venue sent.
-        super::market_data::push_bounded(
-            &self.scanner_data, (req_id, result), STREAM_BACKLOG_LIMIT, "scanner_data",
-        );
+        self.scanner_data.push_bounded((req_id, result), STREAM_BACKLOG_LIMIT, "scanner_data");
     }
 
     #[doc(hidden)] pub fn push_historical_news(&self, req_id: u32, headlines: Vec<NewsHeadline>, has_more: bool) {
-        self.historical_news.lock().unwrap().push((req_id, headlines, has_more));
+        self.historical_news.push((req_id, headlines, has_more));
     }
 
     #[doc(hidden)] pub fn push_news_article(&self, req_id: u32, article_type: i32, article_text: String) {
-        self.news_articles.lock().unwrap().push((req_id, article_type, article_text));
+        self.news_articles.push((req_id, article_type, article_text));
     }
 
     #[doc(hidden)] pub fn push_fundamental_data(&self, req_id: u32, data: String) {
-        self.fundamental_data.lock().unwrap().push((req_id, data));
+        self.fundamental_data.push((req_id, data));
     }
 
     #[doc(hidden)] pub fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
-        self.histogram_data.lock().unwrap().push((req_id, entries));
+        self.histogram_data.push((req_id, entries));
     }
 
     #[doc(hidden)] pub fn push_historical_ticks(&self, req_id: u32, data: HistoricalTickData, what_to_show: String, done: bool) {
-        self.historical_ticks.lock().unwrap().push((req_id, data, what_to_show, done));
+        self.historical_ticks.push((req_id, data, what_to_show, done));
     }
 
     #[doc(hidden)] pub fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {
-        self.historical_schedules.lock().unwrap().push((req_id, response));
+        self.historical_schedules.push((req_id, response));
     }
 
+    /// A refusal of the request numbered `req_id`, which nothing more follows:
+    /// the session's where it names no request, and a lookup's this client
+    /// made for itself where it is numbered in the band those take.
     #[doc(hidden)] pub fn push_historical_error(&self, req_id: u32, code: i32, message: String) {
-        self.historical_errors.lock().unwrap().push((req_id, code, message));
+        let origin = match req_id {
+            Self::NO_REQUEST => api::ErrorOrigin::Session,
+            id if id >= Self::ASK_ID_BASE => api::ErrorOrigin::Internal(id),
+            id => api::ErrorOrigin::Request { id: i64::from(id), ends: true },
+        };
+        self.push_error_from(req_id, origin, code, message);
+    }
+
+    /// Something said under the number `req_id` a reader holds it under,
+    /// with what it is about.
+    #[doc(hidden)] pub fn push_error_from(&self, req_id: u32, origin: api::ErrorOrigin, code: i32, message: String) {
+        self.historical_errors.push((req_id, code, message, origin));
     }
 
     #[doc(hidden)] pub fn push_market_rules(&self, rules: Vec<MarketRule>) {
@@ -1103,13 +1009,7 @@ impl ReferenceState {
     /// is: spent on nothing, the ask was answered with nothing and the table
     /// answered nobody. A table naming no book is an answer, and an empty one.
     pub fn drain_depth_exchanges(&self) -> Option<Vec<DepthMktDataDescription>> {
-        let mut pending = self.depth_exchanges_pending.lock().unwrap();
-        if !*pending {
-            return None;
-        }
-        let held = self.depth_exchanges_cache.lock().unwrap().clone()?;
-        *pending = false;
-        Some(held)
+        self.depth_exchanges_answers.take_first(|_| true)
     }
 
     /// Every exchange the venue named as serving a book, as it named them.
@@ -1121,12 +1021,25 @@ impl ReferenceState {
 
     /// Replaced whole: a reconnect states the table again, and added to what
     /// was already held it leaves every exchange in it twice.
+    ///
+    /// An ask still waiting for a table is answered with this one, here, in
+    /// its place in the session's order.
     #[doc(hidden)] pub fn push_depth_exchanges(&self, descs: Vec<DepthMktDataDescription>) {
-        *self.depth_exchanges_cache.lock().unwrap() = Some(descs);
+        let mut pending = self.depth_exchanges_pending.lock().unwrap();
+        *self.depth_exchanges_cache.lock().unwrap() = Some(descs.clone());
+        if std::mem::take(&mut *pending) {
+            self.depth_exchanges_answers.push(descs);
+        }
     }
 
+    /// An ask for the exchanges that serve a book: answered with the table
+    /// held, or when one arrives.
     #[doc(hidden)] pub fn notify_depth_exchanges(&self) {
-        *self.depth_exchanges_pending.lock().unwrap() = true;
+        let mut pending = self.depth_exchanges_pending.lock().unwrap();
+        match self.depth_exchanges_cache.lock().unwrap().clone() {
+            Some(held) => self.depth_exchanges_answers.push(held),
+            None => *pending = true,
+        }
     }
 
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {
@@ -1651,7 +1564,7 @@ impl ReferenceState {
     /// bring them back, so a caller that keeps asking is waiting out a timeout
     /// per call for an answer that cannot arrive.
     pub fn session_over(&self) -> Option<&'static str> {
-        *self.session_over.lock().unwrap()
+        *self.session_over.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Why the trading connection is gone for good, where it is.
@@ -1686,14 +1599,14 @@ impl ReferenceState {
     /// to stop" for a session the caller did not stop, and discards the reason
     /// there was something to say about.
     #[doc(hidden)] pub fn set_session_over(&self, why: &'static str) {
-        let mut over = self.session_over.lock().unwrap();
+        let mut over = self.session_over.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if over.is_none() {
             *over = Some(why);
         }
     }
 
     #[doc(hidden)] pub fn clear_session_over(&self) {
-        *self.session_over.lock().unwrap() = None;
+        *self.session_over.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     #[doc(hidden)] pub fn set_competing_session(&self, other: Option<(String, String, bool)>) {
@@ -1752,12 +1665,13 @@ mod ask_id_band {
         // off its size, the test passed only when some other test in the same
         // run had happened to record it — and failed on its own.
         state.note_ours(RecordKind::Answer, ReferenceState::ASK_ID_BASE as i64);
-        let q = std::sync::Mutex::new(vec![(1_786_766_504_u32, "theirs"),
-                                           (ReferenceState::ASK_ID_BASE, "ours")]);
+        let q = crate::bridge::Queue::new(&crate::bridge::Stamps::default());
+        q.push((1_786_766_504_u32, "theirs"));
+        q.push((ReferenceState::ASK_ID_BASE, "ours"));
         let out = state.drain_dispatchable(&q);
         assert_eq!(out.len(), 1, "the caller's answer is delivered");
         assert_eq!(out[0].1, "theirs");
-        assert_eq!(q.lock().unwrap().len(), 1, "and ours is left for the waiting call");
+        assert_eq!(q.len(), 1, "and ours is left for the waiting call");
     }
 
     /// Two sessions in one process do not hold each other's ids.

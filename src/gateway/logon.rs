@@ -6,7 +6,6 @@
 //! caller is holding, so what goes on the wire can be read back in a test.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -879,8 +878,8 @@ pub struct FarmLogon {
 /// Execute farm logon exchange.
 ///
 /// Returns (read_iv, sign_iv, remaining_buf) for message signing/verification.
-pub fn farm_logon_exchange(
-    stream: &mut TcpStream,
+pub fn farm_logon_exchange<C: std::borrow::Borrow<std::sync::atomic::AtomicBool>>(
+    stream: &mut crate::protocol::connection::LogonSocket<C>,
     channel: &mut SecureChannel,
     session_token: &BigUint,
     username: &str,

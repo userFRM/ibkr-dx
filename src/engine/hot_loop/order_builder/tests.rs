@@ -64,7 +64,7 @@ fn a_replaced_two_part_peg_keeps_its_order_type() {
         tif: b'0',
         attrs,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 8192];
     let n = peer.read(&mut buf).unwrap();
     let placed = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -80,7 +80,7 @@ fn a_replaced_two_part_peg_keeps_its_order_type() {
         stop_price: 0,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
@@ -117,7 +117,7 @@ fn a_replace_does_not_name_an_option_by_its_underlying() {
         tif: b'0',
         attrs: Default::default(),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 8192];
     let _ = peer.read(&mut buf).unwrap();
 
@@ -131,7 +131,7 @@ fn a_replace_does_not_name_an_option_by_its_underlying() {
         stop_price: 0,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
@@ -173,8 +173,7 @@ fn a_replace_restates_the_attributes_the_order_was_placed_with() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
     let mut buf = [0u8; 8192];
     let n = peer.read(&mut buf).unwrap();
     let placed = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -198,8 +197,7 @@ fn a_replace_restates_the_attributes_the_order_was_placed_with() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
@@ -246,8 +244,7 @@ fn a_cancel_names_the_side_account_and_originator_but_no_transact_time() {
             false,
             &shared,
             false,
-            &None,
-        );
+            &None, &mut 64,);
         let mut buf = [0u8; 4096];
         let n = peer.read(&mut buf).unwrap();
         let msg = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -313,8 +310,7 @@ fn a_modify_states_the_type_tif_and_trigger_it_carries() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -374,8 +370,7 @@ fn a_moved_trigger_is_sent_at_the_price_the_caller_stated() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -418,7 +413,7 @@ fn a_cancel_waits_for_the_recovery_to_say_what_the_broker_holds() {
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
 
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, true, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, true, &None, &mut 64);
     peer.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
     let mut buf = [0u8; 512];
     assert!(
@@ -439,7 +434,7 @@ fn a_cancel_waits_for_the_recovery_to_say_what_the_broker_holds() {
         0,
     ));
     context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 43, stated: Default::default() });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, true, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, true, &None, &mut 64);
     let n = std::io::Read::read(&mut peer, &mut buf).unwrap_or(0);
     assert!(
         String::from_utf8_lossy(&buf[..n]).contains("35=F"),
@@ -455,8 +450,7 @@ fn a_cancel_waits_for_the_recovery_to_say_what_the_broker_holds() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
     let n = std::io::Read::read(&mut peer, &mut buf).unwrap();
     assert!(String::from_utf8_lossy(&buf[..n]).contains("35=F"), "and then it is sent",);
 }
@@ -494,8 +488,7 @@ fn every_leg_a_bracket_writes_is_recorded_as_this_client_s_own() {
     let _rx = rx;
     drain_and_send_orders(
         &mut conn, &mut context, "DU1", &mut hb, false, &shared, false,
-        &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())),
-    );
+        &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())), &mut 64,);
 
     for id in [10u64, 11, 12] {
         assert!(
@@ -535,8 +528,7 @@ fn a_bracket_whose_write_failed_leaves_no_leg_reported_as_working() {
     let shared = std::sync::Arc::new(SharedState::new());
     let (tx, rx) = std::sync::mpsc::sync_channel(4096);
     drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())),
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())), &mut 64,);
 
     for id in [10u64, 11, 12] {
         assert_eq!(
@@ -607,8 +599,7 @@ fn an_order_whose_write_failed_is_unknown_rather_than_rejected() {
         false,
         &shared,
         false,
-        &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())),
-    );
+        &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())), &mut 64,);
 
     // Both deliveries, because the event channel is documented as a second
     // delivery of everything rather than a lesser one — and an order whose
@@ -692,8 +683,7 @@ fn a_replacement_can_itself_be_replaced() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let first = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
     assert!(first.contains("|41=7.0|"), "the first replace names the original: {first}");
@@ -716,8 +706,7 @@ fn a_replacement_can_itself_be_replaced() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let second = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
     assert!(
@@ -756,8 +745,7 @@ fn a_pegged_order_states_its_offset_and_no_limit_price() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -803,8 +791,7 @@ fn a_replace_that_drops_the_trigger_does_not_carry_it() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -854,8 +841,7 @@ fn a_modify_that_states_nothing_keeps_the_resting_values() {
         false,
         &shared,
         false,
-        &None,
-    );
+        &None, &mut 64,);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -1126,6 +1112,37 @@ fn conditions_are_joined_the_way_the_caller_joined_them() {
     assert_eq!(joins(vec![price(false), price(true)]), ["o", "n"], "OR, then the terminator");
     assert_eq!(joins(vec![price(true), price(false), price(true)]), ["a", "o", "n"]);
     assert_eq!(joins(vec![price(false)]), ["n"], "one condition joins nothing");
+}
+
+/// A condition's trigger method and a margin condition's percent go to the
+/// venue as the caller stated them, as the TWS API's `int`s: a negative
+/// percent, and a method outside the ones the venue names, included.
+#[test]
+fn a_conditions_trigger_method_and_percent_go_out_as_stated() {
+    use crate::types::{OrderAttrs, OrderCondition, OrderKind};
+    let msg = send_kind_for_test(
+        OrderKind::Limit { price: 100 * crate::types::PRICE_SCALE },
+        b'1',
+        OrderAttrs {
+            conditions: vec![
+                OrderCondition::Price {
+                    con_id: 756733,
+                    exchange: "SMART".into(),
+                    price: 100 * crate::types::PRICE_SCALE,
+                    is_more: true,
+                    trigger_method: 300,
+                    is_conjunction_connection: true,
+                },
+                OrderCondition::Margin { percent: -5, is_more: false, is_conjunction_connection: true },
+            ],
+            ..Default::default()
+        },
+    );
+    let stated = |tag: &str| -> Vec<String> {
+        msg.split('\u{1}').filter_map(|f| f.strip_prefix(tag).map(str::to_string)).collect()
+    };
+    assert_eq!(stated("6127="), ["300", ""], "the trigger method as stated: {msg}");
+    assert_eq!(stated("6245="), ["", "-5"], "the percent as stated: {msg}");
 }
 
 #[test]
@@ -1645,8 +1662,7 @@ mod modify_wire_tests {
         let shared = std::sync::Arc::new(SharedState::new());
         let mut hb = HeartbeatState::new();
         drain_and_send_orders(
-            &mut conn, context, "DU111111", &mut hb, false, &shared, false, &None,
-        );
+            &mut conn, context, "DU111111", &mut hb, false, &shared, false, &None, &mut 64,);
 
         let mut buf = [0u8; 4096];
         let n = peer.read(&mut buf).unwrap();
@@ -2104,8 +2120,7 @@ mod modify_wire_tests {
             let shared = std::sync::Arc::new(SharedState::new());
             let mut hb = HeartbeatState::new();
             drain_and_send_orders(
-                &mut conn, &mut context, "DU111111", &mut hb, false, &shared, false, &None,
-            );
+                &mut conn, &mut context, "DU111111", &mut hb, false, &shared, false, &None, &mut 64,);
 
             let mut buf = [0u8; 4096];
             assert!(peer.read(&mut buf).is_err(), "{name} reaches the venue");
@@ -2148,8 +2163,7 @@ mod modify_wire_tests {
         let shared = std::sync::Arc::new(SharedState::new());
         let mut hb = HeartbeatState::new();
         drain_and_send_orders(
-            &mut conn, &mut context, "DU111111", &mut hb, false, &shared, false, &None,
-        );
+            &mut conn, &mut context, "DU111111", &mut hb, false, &shared, false, &None, &mut 64,);
 
         let mut buf = [0u8; 4096];
         assert!(peer.read(&mut buf).is_err(), "nothing reaches the venue");
@@ -2484,8 +2498,7 @@ mod outside_rth_polarity_tests {
         let shared = std::sync::Arc::new(SharedState::new());
         let mut hb = HeartbeatState::new();
         drain_and_send_orders(
-            &mut conn, context, "DU111111", &mut hb, false, &shared, false, &None,
-        );
+            &mut conn, context, "DU111111", &mut hb, false, &shared, false, &None, &mut 64,);
 
         let mut buf = vec![0u8; 8192];
         let n = peer.read(&mut buf).unwrap();
@@ -3409,7 +3422,7 @@ fn a_cancel_all_names_every_order_whose_cancel_did_not_leave() {
 
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     for id in [41u64, 42, 43] {
         assert_eq!(
@@ -3456,7 +3469,7 @@ fn an_off_grid_price_reaches_the_venue_as_the_caller_stated_it() {
     });
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -3488,7 +3501,7 @@ fn a_replace_for_an_untracked_order_is_refused_rather_than_invented() {
     });
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     let mut buf = [0u8; 4096];
     assert!(
@@ -3535,7 +3548,7 @@ fn a_replace_naming_a_new_trail_puts_that_trail_on_the_wire() {
         tif: b'0',
         attrs: crate::types::OrderAttrs::default(),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 8192];
     let _placed = peer.read(&mut buf).expect("the order reaches the peer");
 
@@ -3550,7 +3563,7 @@ fn a_replace_naming_a_new_trail_puts_that_trail_on_the_wire() {
         stop_price: 9 * crate::types::PRICE_SCALE,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
@@ -3580,7 +3593,7 @@ fn replace_frame(kind: crate::types::OrderKind, price: i64, stop_price: i64) -> 
         con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
         kind, tif: b'0', attrs: crate::types::OrderAttrs::default(),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 8192];
     let _placed = peer.read(&mut buf).expect("the order reaches the peer");
     context.pending_orders.push(crate::types::OrderRequest::Modify {
@@ -3588,7 +3601,7 @@ fn replace_frame(kind: crate::types::OrderKind, price: i64, stop_price: i64) -> 
         ord_type: 0, tif: 0, stop_price,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     String::from_utf8_lossy(&buf[..n]).to_string()
 }
@@ -3610,7 +3623,7 @@ fn second_replace_frame(kind: crate::types::OrderKind, first: (i64, i64), second
         con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
         kind, tif: b'0', attrs: crate::types::OrderAttrs::default(),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 8192];
     let _placed = peer.read(&mut buf).expect("the order reaches the peer");
     for (price, stop_price) in [first, second] {
@@ -3619,7 +3632,7 @@ fn second_replace_frame(kind: crate::types::OrderKind, first: (i64, i64), second
             ord_type: 0, tif: 0, stop_price,
             spec: None,
         });
-        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let n = peer.read(&mut buf).unwrap();
         if (price, stop_price) == second {
             return String::from_utf8_lossy(&buf[..n]).to_string();
@@ -3751,7 +3764,7 @@ fn a_replace_of_an_order_this_session_did_not_place_restates_what_the_caller_sta
         let mut hb = crate::engine::hot_loop::HeartbeatState::new();
         let shared = std::sync::Arc::new(SharedState::new());
         context.pending_orders.push(modify(described));
-        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let mut buf = [0u8; 8192];
         let n = peer.read(&mut buf).unwrap_or(0);
         let msg = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -3800,7 +3813,7 @@ fn the_latest_statement_stands_however_the_order_was_first_known() {
     let shared = std::sync::Arc::new(SharedState::new());
     let mut buf = [0u8; 8192];
     let mut frame = |context: &mut Context| {
-        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let n = peer.read(&mut buf).unwrap_or(0);
         String::from_utf8_lossy(&buf[..n]).to_string()
     };
@@ -3865,7 +3878,7 @@ fn a_refusal_puts_the_whole_statement_back() {
     let shared = std::sync::Arc::new(SharedState::new());
     let mut buf = [0u8; 8192];
     let mut frame = |context: &mut Context| {
-        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let n = peer.read(&mut buf).unwrap_or(0);
         String::from_utf8_lossy(&buf[..n]).to_string()
     };
@@ -3903,7 +3916,7 @@ fn a_refused_replace_puts_the_shape_back_with_the_terms() {
     let mut buf = [0u8; 8192];
     let mut send = |context: &mut Context, req: crate::types::OrderRequest| {
         context.pending_orders.push(req);
-        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let n = peer.read(&mut buf).unwrap();
         String::from_utf8_lossy(&buf[..n]).to_string()
     };
@@ -3960,7 +3973,7 @@ fn an_advisor_allocation_rides_the_order_and_its_replacement() {
     let mut buf = [0u8; 8192];
     let mut send = |context: &mut Context, req: crate::types::OrderRequest| {
         context.pending_orders.push(req);
-        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let n = peer.read(&mut buf).unwrap();
         String::from_utf8_lossy(&buf[..n]).to_string()
     };
@@ -4307,7 +4320,7 @@ fn a_replacement_that_cannot_be_named_leaves_the_order_standing() {
 
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     let mut buf = [0u8; 8192];
     assert!(peer.read(&mut buf).is_err(), "nothing went out under a name the venue has answered");
@@ -4366,7 +4379,7 @@ fn a_cancel_that_does_not_go_leaves_the_change_outstanding() {
     context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 42, stated: Default::default() });
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     assert!(
         context.pre_replace.contains_key(&(42, 1)),
@@ -4394,7 +4407,7 @@ fn a_request_that_names_a_slot_offers_it_back_when_it_drains() {
 
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     assert_eq!(
         context.slots_to_reconsider, vec![instrument],
@@ -4429,7 +4442,7 @@ fn a_placement_does_not_ask_for_its_slot_back() {
 
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     assert!(context.order(42).is_some(), "the order is in the book");
     assert!(
@@ -4473,7 +4486,7 @@ fn an_order_whose_slot_changed_hands_is_not_sent() {
 
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared = std::sync::Arc::new(SharedState::new());
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
 
     let mut buf = [0u8; 8192];
     assert!(peer.read(&mut buf).is_err(), "nothing went out on the wrong contract");
@@ -4511,7 +4524,7 @@ fn a_replaced_bracket_leg_keeps_its_group_and_its_parent() {
         take_profit: 155 * crate::types::PRICE_SCALE,
         stop_loss: 145 * crate::types::PRICE_SCALE,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     // The three legs, read and set aside.
     let mut buf = vec![0u8; 65536];
     let n = peer.read(&mut buf).unwrap();
@@ -4525,7 +4538,7 @@ fn a_replaced_bracket_leg_keeps_its_group_and_its_parent() {
         ord_type: 0, tif: 0, stop_price: 144 * crate::types::PRICE_SCALE,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     let replaced = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
 
@@ -4565,7 +4578,7 @@ fn a_statement_for_a_refused_replace_goes_with_the_refusal() {
             attrs: crate::types::OrderAttrs::default(),
         })),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let refused = shared.orders.drain_order_inactive();
     assert!(refused.iter().any(|(id, ..)| *id == 77), "the replace is refused: {refused:?}");
     assert!(
@@ -4613,7 +4626,7 @@ fn a_replace_merges_onto_the_order_the_venue_holds() {
             ..Default::default()
         },
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap_or(0);
     let placed = String::from_utf8_lossy(&buf[..n]).to_string();
     assert_eq!(stated(&placed, "6010=").first().map(String::as_str), Some("KEEP"), "{placed}");
@@ -4628,7 +4641,7 @@ fn a_replace_merges_onto_the_order_the_venue_holds() {
             attrs: crate::types::OrderAttrs { display_size: 25, ..Default::default() },
         })),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap_or(0);
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     assert_eq!(
@@ -4679,7 +4692,7 @@ fn a_replace_names_the_venue_the_order_went_out_on() {
         tif: b'0',
         attrs: Default::default(),
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 8192];
     let n = peer.read(&mut buf).unwrap();
     let placed = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -4698,7 +4711,7 @@ fn a_replace_names_the_venue_the_order_went_out_on() {
         stop_price: 0,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
@@ -4745,7 +4758,7 @@ fn a_bracket_leg_is_replaced_on_the_venue_it_went_out_to() {
         take_profit: 410 * crate::types::PRICE_SCALE,
         stop_loss: 390 * crate::types::PRICE_SCALE,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let mut buf = [0u8; 16384];
     let n = peer.read(&mut buf).unwrap();
     let placed = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -4762,7 +4775,7 @@ fn a_bracket_leg_is_replaced_on_the_venue_it_went_out_to() {
         outside_rth: false, ord_type: 0, tif: 0, stop_price: 0,
         spec: None,
     });
-    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
     let n = peer.read(&mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
     let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
@@ -4943,7 +4956,7 @@ mod as_a_gateway_sends_it {
             con_id: 0, order_id: 42, instrument, side: Side::Buy, qty: crate::types::QTY_SCALE,
             kind: placed.0, tif: b'0', attrs: placed.1,
         });
-        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let mut buf = vec![0u8; 16384];
         let n = peer.read(&mut buf).unwrap();
         let first = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -4952,7 +4965,7 @@ mod as_a_gateway_sends_it {
             ord_type: 0, tif: 0, stop_price: 0,
             spec: Some(Box::new(OrderSpec { kind: stated.0, attrs: stated.1 })),
         });
-        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let n = peer.read(&mut buf).unwrap();
         (first, String::from_utf8_lossy(&buf[..n]).to_string())
     }
@@ -5332,7 +5345,7 @@ mod as_a_gateway_sends_it {
             kind: K::Limit { price: P }, tif: b'0', attrs: OrderAttrs { account: "U2".into(), ..Default::default() },
         });
         context.pending_orders.push(OrderRequest::Cancel { order_id: 42, stated: Default::default() });
-        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let mut buf = vec![0u8; 16384];
         let mut text = String::new();
         while !text.contains("35=F") {
@@ -5383,7 +5396,7 @@ mod as_a_gateway_sends_it {
         let mut buf = vec![0u8; 16384];
         let mut cancels = |context: &mut Context, request: OrderRequest, count: usize| {
             context.pending_orders.push(request);
-            drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None);
+            drain_and_send_orders(&mut conn, context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
             let mut text = String::new();
             while text.matches("35=F").count() < count {
                 let n = peer.read(&mut buf).unwrap();
@@ -5437,7 +5450,7 @@ mod as_a_gateway_sends_it {
             side: Side::Buy, qty: crate::types::QTY_SCALE,
             entry_price: 150 * P, take_profit: 155 * P, stop_loss: 145 * P,
         });
-        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
         let mut buf = vec![0u8; 65536];
         let mut text = String::new();
         while text.matches("35=D").count() < 3 {
@@ -5564,4 +5577,106 @@ mod a_price_of_nought {
         let msg = placed(K::Limit { price: P }, ranged(10.0, 20.0));
         assert_eq!((all(&msg, 6152), all(&msg, 6153)), (vec!["10.000000".to_string()], vec!["20.000000".to_string()]), "{msg}");
     }
+}
+
+/// What each refusal of an order says about itself, as a read takes it: the
+/// order and the operation on it.
+fn what_was_refused(shared: &SharedState) -> Vec<(i64, crate::types::model::OrderOp)> {
+    use crate::types::model::ErrorOrigin;
+    shared
+        .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+        .into_iter()
+        .filter_map(|(_, record)| match record {
+            crate::bridge::Record::OrderInactive((id, _, _, op)) => Some((id as i64, op)),
+            crate::bridge::Record::CancelReject(reject) => Some((reject.order_id as i64, reject.refuses())),
+            crate::bridge::Record::HistoricalError((ErrorOrigin::Session, ..)) => {
+                Some((-1, crate::types::model::OrderOp::Venue))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A new order refused before it went and a change to that order refused
+/// before it went say which they are, under the one number.
+#[test]
+fn a_refused_new_order_and_a_refused_modify_of_one_id_say_which_they_are() {
+    use crate::types::model::OrderOp::{Modify, Place};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_peer, _) = listener.accept().unwrap();
+    let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+    let mut context = Context::new();
+    // The slot now holds another contract, so the placement is refused.
+    let instrument = context.register_instrument(320227571);
+    context.set_symbol(instrument, "QQQ".to_string());
+    context.market.set_routing(instrument, "STK", "SMART");
+    context.pending_orders.push(crate::types::OrderRequest::SubmitEx {
+        order_id: 42,
+        instrument,
+        con_id: 756733,
+        side: Side::Buy,
+        qty: 100 * crate::types::QTY_SCALE,
+        kind: crate::types::OrderKind::Limit { price: 150 * crate::types::PRICE_SCALE },
+        tif: b'0',
+        attrs: Default::default(),
+    });
+    // And the change to it, which names an order this session holds no
+    // record of.
+    context.pending_orders.push(crate::types::OrderRequest::Modify {
+        order_id: 42,
+        price: 151 * crate::types::PRICE_SCALE,
+        qty: 100 * crate::types::QTY_SCALE,
+        outside_rth: false,
+        ord_type: 0,
+        tif: 0,
+        stop_price: 0,
+        spec: None,
+    });
+    let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+    let shared = std::sync::Arc::new(SharedState::new());
+    drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64);
+
+    assert_eq!(what_was_refused(&shared), [(42, Place), (42, Modify), (42, Modify)]);
+}
+
+/// What a stop leaves in the buffer is refused as what it was: a cancel, a
+/// change, a placement, and a withdrawal of everything as the session's.
+#[test]
+fn what_a_stop_leaves_is_refused_as_what_it_was() {
+    use crate::types::model::OrderOp::{Cancel, Modify, Place, Venue};
+    let mut context = Context::new();
+    let instrument = context.register_instrument(756733);
+    context.pending_orders.push(crate::types::OrderRequest::Cancel { order_id: 7, stated: Default::default() });
+    context.pending_orders.push(crate::types::OrderRequest::Modify {
+        order_id: 8,
+        price: 151 * crate::types::PRICE_SCALE,
+        qty: 100 * crate::types::QTY_SCALE,
+        outside_rth: false,
+        ord_type: 0,
+        tif: 0,
+        stop_price: 0,
+        spec: None,
+    });
+    context.pending_orders.push(crate::types::OrderRequest::SubmitEx {
+        order_id: 9,
+        instrument,
+        con_id: 756733,
+        side: Side::Buy,
+        qty: 100 * crate::types::QTY_SCALE,
+        kind: crate::types::OrderKind::Limit { price: 150 * crate::types::PRICE_SCALE },
+        tif: b'0',
+        attrs: Default::default(),
+    });
+    context.pending_orders.push(crate::types::OrderRequest::CancelAll {
+        instrument, stated: Default::default(),
+    });
+    let shared = std::sync::Arc::new(SharedState::new());
+    refuse_what_is_left(&mut context, &shared, "the engine stopped");
+
+    assert_eq!(
+        what_was_refused(&shared),
+        [(7, Cancel), (8, Modify), (9, Place), (-1, Venue)],
+        "the withdrawal of everything is the session's, under no request",
+    );
 }

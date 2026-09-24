@@ -96,13 +96,10 @@ fn main() {
     let expiry = std::env::var("IBKR_DX_EXPIRY").unwrap_or_else(|_| "20260918".to_string());
     for (i, contract) in chain(&expiry).into_iter().enumerate() {
         let req_id = 1000 + i as i64;
-        match client.req_mkt_data(req_id, &contract, "", false, false) {
-            Ok(()) => asked += 1,
-            Err(e) => {
-                println!("  this client refused subscription {asked}: {e}");
-                break;
-            }
-        }
+        // A refusal, this client's or the venue's, is heard on the error
+        // callback in its place, and ends the run below.
+        client.req_mkt_data(req_id, &contract, "", false, false);
+        asked += 1;
         // Read as we go: the venue answers the one that goes too far, and
         // asking the rest afterwards would not say which one it was.
         let until = Instant::now() + Duration::from_millis(40);

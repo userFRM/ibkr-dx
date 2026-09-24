@@ -26,8 +26,8 @@ pub(super) fn phase_account_data(conns: Conns) -> Conns {
         shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90001, contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -142,8 +142,8 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
         shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90002, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -247,8 +247,8 @@ pub(super) fn phase_account_summary(conns: Conns) -> Conns {
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90003, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1059,7 +1059,7 @@ pub(super) fn phase_pnl_subscribe_command(conns: Conns) -> Conns {
     let req_id: i64 = 6142;
     // .unwrap() doubles as a liveness check: a closed channel means the hot loop died.
     control_tx
-        .send(ControlCommand::SubscribePnl { req_id, account: account_id.clone() })
+        .send(ControlCommand::SubscribePnl { req_id, single: false, account: account_id.clone() })
         .unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1077,7 +1077,7 @@ pub(super) fn phase_pnl_subscribe_command(conns: Conns) -> Conns {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    control_tx.send(ControlCommand::CancelPnl { req_id }).unwrap();
+    control_tx.send(ControlCommand::CancelPnl { req_id, single: false }).unwrap();
     std::thread::sleep(Duration::from_millis(500));
 
     // Read before the engine is stopped: stopping it sets the same flag a lost
@@ -1109,8 +1109,8 @@ pub(super) fn phase_news_bulletins(conns: Conns) -> Conns {
         conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90004, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 

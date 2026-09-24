@@ -168,12 +168,10 @@ fn main() {
     let tsla_id: i64 = 2;
 
     println!("Subscribing AAPL (req_id={aapl_id})");
-    client.req_mkt_depth(aapl_id, &aapl(), num_rows, is_smart)
-        .expect("Failed to subscribe AAPL depth");
+    client.req_mkt_depth(aapl_id, &aapl(), num_rows, is_smart);
 
     println!("Subscribing TSLA (req_id={tsla_id})");
-    client.req_mkt_depth(tsla_id, &tsla(), num_rows, is_smart)
-        .expect("Failed to subscribe TSLA depth");
+    client.req_mkt_depth(tsla_id, &tsla(), num_rows, is_smart);
 
     // Poll for updates
     let mut wrapper = DepthWrapper::new(&[(aapl_id, "AAPL"), (tsla_id, "TSLA")]);
@@ -195,8 +193,8 @@ fn main() {
     println!("\nTotal depth updates: {total}");
 
     // Cancel subscriptions
-    let _ = client.cancel_mkt_depth(aapl_id);
-    let _ = client.cancel_mkt_depth(tsla_id);
+    client.cancel_mkt_depth(aapl_id);
+    client.cancel_mkt_depth(tsla_id);
 
     // Validate
     for (req_id, book) in &wrapper.books {

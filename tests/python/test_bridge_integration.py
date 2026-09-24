@@ -7,6 +7,7 @@ callbacks fire with correctly converted types across the PyO3 boundary.
 
 import pytest
 import threading
+import time
 from ibkr_dx import (
     Contract, Order, TagValue, BarData, ContractDetails, OrderState,
     EWrapper, EClient,
@@ -873,6 +874,8 @@ class TestAccountDispatch:
 
     def test_account_update_value(self):
         w, c = make_test_client("DU12345")
+        # The account has stated itself.
+        c._test_finish_account_download()
         # Account values flow to a subscriber, the same as they do from TWS.
         c.req_account_updates(True, "DU12345")
         c._test_set_account(net_liquidation=100000.0)
@@ -953,9 +956,16 @@ class TestAccountDispatch:
 
     def test_positions(self):
         w, c = make_test_client("DU12345")
+        # The account has stated itself.
+        c._test_finish_account_download()
         c._test_set_position(265598, 100, 150.50)
         c.req_positions()
-        c._test_dispatch_once()
+        # The engine gives the holding's contract a moment to be named before
+        # it answers.
+        deadline = time.monotonic() + 5
+        while ("position_end",) not in w.events and time.monotonic() < deadline:
+            c._test_dispatch_once()
+            time.sleep(0.05)
 
         # The answer is what comes before its end. The feed follows on the
         # same pass with what moved before the ask, which is this holding

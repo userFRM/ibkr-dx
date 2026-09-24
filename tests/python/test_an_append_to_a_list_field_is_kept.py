@@ -135,6 +135,7 @@ def test_a_leg_appended_is_read_as_it_was_written():
     refuses is refused by its number and its fault."""
     recorder, client = _session()
     client.place_order(1002, _stock_combo(second_leg_action="HOLD"), _limit("BUY", 1, 10.0))
+    client.poll()
     assert recorder.errors, "a leg trading no way the venue knows must be refused"
     _, _, why = recorder.errors[-1]
     assert "leg 1" in why and "HOLD" in why, why
@@ -200,6 +201,7 @@ def test_a_parameter_that_cannot_be_read_is_refused_by_its_place_before_anything
 
     recorder, client = _session()
     client.place_order(1010, _spy(), order)
+    client.poll()
     assert recorder.errors, "a parameter this client cannot read must be refused"
     _, _, why = recorder.errors[-1]
     assert "algo parameter 1" in why and "tag" in why, why
@@ -241,6 +243,7 @@ def test_a_leg_price_appended_as_the_sample_appends_one_is_read():
 
     recorder, client = _session()
     client.place_order(1005, _named_stock_combo(), order)
+    client.poll()
     assert recorder.errors, "a leg priced at no number must be refused"
     assert "order_combo_legs[1]" in recorder.errors[-1][2], recorder.errors
 
@@ -254,6 +257,7 @@ def test_a_routing_parameter_appended_as_the_sample_appends_one_is_refused_by_na
 
     recorder, client = _session()
     client.place_order(1006, _named_stock_combo(), order)
+    client.poll()
     assert recorder.errors, "a routing parameter this protocol cannot carry must be refused"
     assert "smart_combo_routing_params" in recorder.errors[-1][2], recorder.errors
 
@@ -267,6 +271,7 @@ def test_a_miscellaneous_option_appended_is_checked_as_a_gateway_checks_it():
 
     recorder, client = _session()
     client.place_order(1007, _spy(), order)
+    client.poll()
     assert recorder.errors, "an option a gateway does not know must be refused"
     assert recorder.errors[-1][1:] == (
         10337,

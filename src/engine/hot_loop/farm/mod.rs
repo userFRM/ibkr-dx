@@ -1076,15 +1076,6 @@ pub(crate) struct FarmState {
     /// the life of the subscription, reaching callers that never named it, and
     /// asked for again by every rebuild after a reconnect.
     series_asked_on: std::collections::HashMap<(InstrumentId, u32), u64>,
-    /// Where a slot's callers were sent when the contract turned out to live in
-    /// another slot.
-    ///
-    /// What those callers asked for beyond the quote went with them, so a
-    /// withdrawal naming the slot they left has to be read against the slot
-    /// they were sent to: applied to the slot they left, it found nothing there
-    /// and the series it was giving up went on being served where they had been
-    /// moved to.
-    moved_to: std::collections::HashMap<InstrumentId, InstrumentId>,
     /// What the running-volume series last stated for a contract: the
     /// cumulative value, share count and trade count, in that order.
     ///
@@ -1130,7 +1121,7 @@ pub(crate) struct FarmState {
     /// by the contract it is for. Handed over when the subscription is made,
     /// because the series is asked for the way every other is and the scan is
     /// what tells the venue what to look for.
-    spread_scans: std::collections::HashMap<i64, String>,
+    pub(crate) spread_scans: std::collections::HashMap<i64, String>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
 }
 
@@ -2260,11 +2251,17 @@ impl FarmState {
             || self.replay_queue.iter().any(|r| r.0 == instrument)
     }
 
+    /// Forget the scan a contract's strategies series was asked with, once
+    /// the scan is withdrawn: the next scan states its own.
+    pub(crate) fn forget_spread_scan(&mut self, con_id: i64) {
+        self.spread_scans.remove(&con_id);
+    }
+
     /// Keep the scan to state beside the strategies series for a contract.
     ///
-    /// Handed over when the subscription is made rather than read from the
-    /// shared state here, because the series goes out through the same paths
-    /// every other does and those do not carry it.
+    /// Handed over from the scan's own request when the subscription is made,
+    /// because the series goes out through the same paths every other does
+    /// and those do not carry it.
     pub(crate) fn note_spread_scan(&mut self, con_id: i64, stated: String) {
         self.spread_scans.insert(con_id, stated);
     }
@@ -2292,7 +2289,6 @@ impl FarmState {
             subscription_asked_on: std::collections::HashMap::new(),
             subscription_began_under: std::collections::HashMap::new(),
             series_asked_on: std::collections::HashMap::new(),
-            moved_to: std::collections::HashMap::new(),
             rt_volume_totals: std::collections::HashMap::new(),
             news_subscriptions: Vec::new(),
             generic_tick_tags: Vec::new(),
@@ -2954,12 +2950,11 @@ impl FarmState {
                     if kind == NEWS_REQUEST_TYPE
                         && let Some(pos) = self.news_subscriptions.iter().position(|(_, id, ..)| *id == rid)
                     {
-                        let (.., con_id, _) = self.news_subscriptions.remove(pos);
+                        self.news_subscriptions.remove(pos);
+                        // Released, so a request that asks again is asked
+                        // anew rather than held against a subscription the
+                        // venue already refused.
                         self.forget_news(rid, instrument);
-                        // Told so the client clears whoever asked, else its
-                        // dedup holds a re-ask against a claim the venue
-                        // already refused and no fresh subscription is sent.
-                        shared.market.push_news_rejection(con_id);
                     }
                     // Told, not only logged. The venue names the request it is
                     // refusing and says why — the one refusal channel on this
@@ -3235,11 +3230,6 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        // The slot holds a contract of its own again, so the route the last
-        // occupancy's callers were sent along is over: a withdrawal naming this
-        // slot from here on is about what is being asked for now, and the
-        // contract on it says whose.
-        self.moved_to.remove(&instrument);
         // A stream is the pair BID_ASK + LAST on every feed; a delayed or
         // frozen one names the feed beside them on 9887 and asks for the same
         // two. The chargeable snapshot is one entry whatever the feed, so it
@@ -3523,24 +3513,6 @@ impl FarmState {
             log::debug!(
                 "a withdrawal of slot {instrument} named contract {con_id}, taken under \
                  {took_it}, which is not the subscription now on it; it stands",
-            );
-            return;
-        }
-        // A slot whose callers were sent elsewhere holds nothing, and what they
-        // asked for beyond the quote went with them: the withdrawal of those
-        // series belongs to the slot they were sent to. Applied here, it found
-        // nothing and the venue went on serving them there with nobody asking.
-        if !self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
-            && let Some(into) = self.where_its_callers_went(instrument)
-        {
-            // Under whatever holds the slot they were sent to: the caller
-            // that named this withdrawal never took that slot, and the series
-            // it gave up are entries of the subscription now on it. Named with
-            // nothing, the withdrawal was applied wherever the walk ended
-            // whether or not that subscription was the one its caller joined.
-            let held_under = self.what_took_it(into);
-            self.stop_asking_for_series(
-                into, self.what_contract_holds_it(into), held_under, series, issued, farm_conn, hb,
             );
             return;
         }
@@ -4102,51 +4074,6 @@ impl FarmState {
         self.snapshot_answers_held.retain(|(held, ..)| *held != instrument);
         self.subscription_began_under.remove(&instrument);
         self.series_asked_on.retain(|(watched, _), _| *watched != instrument);
-        // The route this slot's callers were sent along is kept: a withdrawal
-        // decided against the occupancy that left is still on its way, and the
-        // route is the only thing that can carry it to where they went.
-        //
-        // A route *into* this slot is not dropped either — it is pointed past
-        // it, at where the callers went from here. Dropped, a withdrawal
-        // decided against the slot at the head of a route lost its way the
-        // moment a slot in the middle of it went back to the table.
-        match self.where_its_callers_went(instrument) {
-            Some(end) if end != instrument => {
-                for (_, into) in self.moved_to.iter_mut().filter(|(_, into)| **into == instrument) {
-                    *into = end;
-                }
-            }
-            _ => self.moved_to.retain(|_, into| *into != instrument),
-        }
-    }
-
-    /// Where a slot's callers ended up, following as many moves as they were
-    /// sent through.
-    ///
-    /// A contract can be moved more than once — resolution sends the callers of
-    /// one slot to another, and that slot's own contract can turn out to live
-    /// somewhere else again. Followed one hop, a withdrawal decided against the
-    /// first slot reached the second and did nothing there.
-    fn where_its_callers_went(&self, from: InstrumentId) -> Option<InstrumentId> {
-        let mut at = *self.moved_to.get(&from)?;
-        // Every step is a slot, and each is stepped through once: a slot seen
-        // twice means the routes lead in a circle, and there is no end to
-        // deliver the withdrawal to.
-        let mut walked = std::collections::HashSet::from([from, at]);
-        while let Some(&next) = self.moved_to.get(&at) {
-            if !walked.insert(next) {
-                log::warn!("the moves off slot {from} lead in a circle; nothing is withdrawn");
-                return None;
-            }
-            at = next;
-        }
-        Some(at)
-    }
-
-    /// Say that a slot's callers, and what they asked for, were sent to another
-    /// slot.
-    pub(crate) fn note_moved(&mut self, from: InstrumentId, into: InstrumentId) {
-        self.moved_to.insert(from, into);
     }
 
     /// Name this occupancy of a slot by the number the request that took it
@@ -4166,24 +4093,6 @@ impl FarmState {
     /// and what arrived can.
     pub(crate) fn note_it_changed_hands(&mut self, instrument: InstrumentId, took_it: u64) {
         self.subscription_began_under.insert(instrument, took_it);
-    }
-
-    /// Whether a slot is held by an occupancy, or a contract, other than the
-    /// one a caller named. Asked before anything is recorded against it.
-    pub(crate) fn another_occupancy_holds_it_now(
-        &self, instrument: InstrumentId, took_it: u64, con_id: i64,
-    ) -> bool {
-        self.another_occupancy_holds_it(instrument, took_it)
-            || self.another_contract_holds_it(instrument, con_id)
-    }
-
-    /// Which contract a slot's subscription went out under, as far as this
-    /// engine's record of it says. Zero where it holds none.
-    fn what_contract_holds_it(&self, instrument: InstrumentId) -> i64 {
-        self.instrument_md_reqs
-            .iter()
-            .find(|(id, _)| *id == instrument)
-            .map_or(0, |(_, record)| record.con_id)
     }
 
     /// Which occupancy of a slot holds it, as the number the request that took
@@ -4943,8 +4852,10 @@ impl FarmState {
             //
             // The queue purge above clears what is queued here, not what the
             // caller holds.
-            shared.reference.push_historical_error(
+            // A notice: the book goes on, from the top.
+            shared.reference.push_error_from(
                 req_id,
+                crate::types::model::ErrorOrigin::Request { id: i64::from(req_id), ends: false },
                 crate::error_codes::DEPTH_BOOK_RESET,
                 "Market depth data has been RESET. Please empty deep book contents \
                  before applying any new entries.".to_string(),
@@ -5038,6 +4949,11 @@ impl FarmState {
                     if let Some(mut comp) = decode_greeks(payload) {
                         comp.instrument = instrument;
                         shared.market.push_option_computation(comp);
+                        // A calculation kept for this contract's model is
+                        // answered right behind the model it waited for, so
+                        // the answer stands before anything pushed after it —
+                        // the session's last record included.
+                        crate::client_core::answer_kept_calculations(shared, Some(instrument), None);
                         emit(event_tx, Event::OptionComputation(comp));
                     }
                 }

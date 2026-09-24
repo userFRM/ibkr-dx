@@ -44,10 +44,6 @@ _SETTINGS: dict[str, tuple[str, str]] = {
     "log_queue": ("IBKR_DX_LOG_QUEUE", "how many records logging buffers before dropping them"),
     "market_data_host": ("IBKR_DX_FARM_HOST", "the host every farm connection is opened on"),
     "port": ("IBKR_DX_MISC_PORT", "the port a farm connection opens on, where the routing names none"),
-    "registration_timeout_ms": (
-        "IBKR_DX_REGISTRATION_TIMEOUT_MS",
-        "how long to wait to be admitted",
-    ),
     "locale": ("IBKR_DX_LOCALE", "session locale"),
     "build": ("IBKR_DX_BUILD", "the build announced at logon"),
     "version": ("IBKR_DX_VERSION", "the version announced at logon"),

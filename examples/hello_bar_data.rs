@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         currency: "USD".into(),
         ..Default::default()
     };
-    client.req_historical_data(1, &spy, "", "1 D", "5 mins", "TRADES", true, 1, false)?;
+    client.req_historical_data(1, &spy, "", "1 D", "5 mins", "TRADES", true, 1, false);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {

@@ -22,6 +22,8 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         Ok(t) => t,
         Err(_) => return,
     };
+    let Some(portfolio) = shared.portfolio_for_message(msg) else { return };
+    let mut account = portfolio.account();
     let mut key: Option<&str> = None;
     let mut account_type_stated = false;
     // The venue states which currency a figure is in, and it is not always the
@@ -51,44 +53,45 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
                 // Kept whether or not anything below names it. A figure nobody
                 // named is still a figure about the account, and dropping it
                 // left no trace that the venue had stated it.
-                shared.portfolio.note_account_value(k, val, currency);
+                portfolio.note_account_value(k, val, currency);
                 stated_a_figure = true;
                 match k {
-                    "NetLiquidation" => { if let Ok(v) = val.parse::<f64>() { context.account.net_liquidation = crate::types::price_from_f64(v); } }
-                    "BuyingPower" => { if let Ok(v) = val.parse::<f64>() { context.account.buying_power = crate::types::price_from_f64(v); } }
+                    "NetLiquidation" => { if let Ok(v) = val.parse::<f64>() { account.net_liquidation = crate::types::price_from_f64(v); } }
+                    "BuyingPower" => { if let Ok(v) = val.parse::<f64>() { account.buying_power = crate::types::price_from_f64(v); } }
                     "MaintMarginReq" => {
                         if let Ok(v) = val.parse::<f64>() {
-                            context.account.margin_used = crate::types::price_from_f64(v);
-                            context.account.maint_margin_req = crate::types::price_from_f64(v);
+                            account.margin_used = crate::types::price_from_f64(v);
+                            account.maint_margin_req = crate::types::price_from_f64(v);
                         }
                     }
-                    "UnrealizedPnL" => { if let Ok(v) = val.parse::<f64>() { context.account.unrealized_pnl = crate::types::price_from_f64(v); } }
-                    "RealizedPnL" => { if let Ok(v) = val.parse::<f64>() { context.account.realized_pnl = crate::types::price_from_f64(v); } }
-                    "TotalCashValue" => { if let Ok(v) = val.parse::<f64>() { context.account.total_cash_value = crate::types::price_from_f64(v); } }
-                    "SettledCash" => { if let Ok(v) = val.parse::<f64>() { context.account.settled_cash = crate::types::price_from_f64(v); } }
-                    "AccruedCash" => { if let Ok(v) = val.parse::<f64>() { context.account.accrued_cash = crate::types::price_from_f64(v); } }
-                    "EquityWithLoanValue" => { if let Ok(v) = val.parse::<f64>() { context.account.equity_with_loan = crate::types::price_from_f64(v); } }
-                    "GrossPositionValue" => { if let Ok(v) = val.parse::<f64>() { context.account.gross_position_value = crate::types::price_from_f64(v); } }
+                    "UnrealizedPnL" => { if let Ok(v) = val.parse::<f64>() { account.unrealized_pnl = crate::types::price_from_f64(v); } }
+                    "RealizedPnL" => { if let Ok(v) = val.parse::<f64>() { account.realized_pnl = crate::types::price_from_f64(v); } }
+                    "TotalCashValue" => { if let Ok(v) = val.parse::<f64>() { account.total_cash_value = crate::types::price_from_f64(v); } }
+                    "SettledCash" => { if let Ok(v) = val.parse::<f64>() { account.settled_cash = crate::types::price_from_f64(v); } }
+                    "AccruedCash" => { if let Ok(v) = val.parse::<f64>() { account.accrued_cash = crate::types::price_from_f64(v); } }
+                    "EquityWithLoanValue" => { if let Ok(v) = val.parse::<f64>() { account.equity_with_loan = crate::types::price_from_f64(v); } }
+                    "GrossPositionValue" => { if let Ok(v) = val.parse::<f64>() { account.gross_position_value = crate::types::price_from_f64(v); } }
                     // The plain spelling alone. The `Full` spellings are
                     // different figures — they diverge whenever intraday
                     // margin relief applies — and folded into one field the
                     // account read whichever the venue stated last. Each stays
                     // reachable by name among the stated values.
-                    "InitMarginReq" => { if let Ok(v) = val.parse::<f64>() { context.account.init_margin_req = crate::types::price_from_f64(v); } }
-                    "AvailableFunds" => { if let Ok(v) = val.parse::<f64>() { context.account.available_funds = crate::types::price_from_f64(v); } }
-                    "ExcessLiquidity" => { if let Ok(v) = val.parse::<f64>() { context.account.excess_liquidity = crate::types::price_from_f64(v); } }
-                    "Cushion" => { if let Ok(v) = val.parse::<f64>() { context.account.cushion = crate::types::price_from_f64(v); } }
-                    "SMA" => { if let Ok(v) = val.parse::<f64>() { context.account.sma = crate::types::price_from_f64(v); } }
-                    "DayTradesRemaining" => { if let Ok(v) = val.parse::<i64>() { context.account.day_trades_remaining = v; } }
-                    "Leverage-S" | "Leverage" => { if let Ok(v) = val.parse::<f64>() { context.account.leverage = crate::types::price_from_f64(v); } }
-                    "DailyPnL" => { if let Ok(v) = val.parse::<f64>() { context.account.daily_pnl = crate::types::price_from_f64(v); } }
+                    "InitMarginReq" => { if let Ok(v) = val.parse::<f64>() { account.init_margin_req = crate::types::price_from_f64(v); } }
+                    "AvailableFunds" => { if let Ok(v) = val.parse::<f64>() { account.available_funds = crate::types::price_from_f64(v); } }
+                    "ExcessLiquidity" => { if let Ok(v) = val.parse::<f64>() { account.excess_liquidity = crate::types::price_from_f64(v); } }
+                    "Cushion" => { if let Ok(v) = val.parse::<f64>() { account.cushion = crate::types::price_from_f64(v); } }
+                    "SMA" => { if let Ok(v) = val.parse::<f64>() { account.sma = crate::types::price_from_f64(v); } }
+                    "DayTradesRemaining" => { if let Ok(v) = val.parse::<i64>() { account.day_trades_remaining = v; } }
+                    "Leverage-S" | "Leverage" => { if let Ok(v) = val.parse::<f64>() { account.leverage = crate::types::price_from_f64(v); } }
+                    "DailyPnL" => { if let Ok(v) = val.parse::<f64>() { account.daily_pnl = crate::types::price_from_f64(v); } }
                     _ => {}
                 }
                 key = None;
             }
     }
     if stated_a_figure {
-        shared.portfolio.set_account(context.account());
+        portfolio.set_account(&account);
+        if std::sync::Arc::ptr_eq(&portfolio, &shared.portfolio) { context.account = account; }
     }
 }
 
@@ -149,6 +152,7 @@ fn ledger_figure(value: f64) -> String {
 /// balance unless the session is set to split the two, which this one is not —
 /// so it is added in rather than published as a figure of its own.
 pub(crate) fn handle_ledger_update(msg: &[u8], shared: &SharedState) {
+    let Some(portfolio) = shared.portfolio_for_message(msg) else { return };
     let Ok(text) = std::str::from_utf8(msg) else { return };
     let mut currency = String::new();
     let mut opened = false;
@@ -167,15 +171,15 @@ pub(crate) fn handle_ledger_update(msg: &[u8], shared: &SharedState) {
         // per currency, and it is the first of them. A caller that asked for
         // the ledger and reads the rows by name has no other way to be told
         // which currency a bucket is in when it asked for all of them.
-        shared.portfolio.note_ledger_value("Currency", currency, currency);
+        portfolio.note_ledger_value("Currency", currency, currency);
         if let Some(balance) = cash {
             // The insured deposit is part of what is held in cash unless the
             // session splits them, and it is stated apart either way.
             let held = balance + insured.filter(|d| d.is_finite()).unwrap_or(0.0);
-            shared.portfolio.note_ledger_value("CashBalance", &ledger_figure(held), currency);
+            portfolio.note_ledger_value("CashBalance", &ledger_figure(held), currency);
         }
         for (name, value) in stated.drain(..) {
-            shared.portfolio.note_ledger_value(name, &value, currency);
+            portfolio.note_ledger_value(name, &value, currency);
         }
     };
     for part in text.split('\x01') {
@@ -219,6 +223,7 @@ pub(crate) fn handle_ledger_update(msg: &[u8], shared: &SharedState) {
 /// Only the realized figure is stated outright; the rest are what a daily
 /// figure is computed from. Values are taken as sent, unscaled.
 pub(crate) fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
+    let Some(portfolio) = shared.portfolio_for_message(msg) else { return };
     let text = match std::str::from_utf8(msg) {
         Ok(t) => t,
         Err(_) => return,
@@ -284,7 +289,7 @@ pub(crate) fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
     // The venue answers against the reference it was given and falls back to
     // its own request id when it has none.
     let key = if reference_id.is_empty() { request_id } else { reference_id };
-    shared.portfolio.set_midnight_seeds(key, seeds);
+    portfolio.set_midnight_seeds(key, seeds);
 }
 
 /// The basis to publish for a position row.
@@ -293,7 +298,7 @@ pub(crate) fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
 /// standing, since an absent cost is not a cost of zero — but only while the
 /// holding is open: a row closing it takes the basis with it, or the next
 /// position in the same contract would inherit the last one's.
-pub(crate) fn basis_for(shared: &SharedState, con_id: i64, stated: Option<Price>, qty: f64) -> Price {
+fn basis_for_portfolio(portfolio: &crate::bridge::PortfolioState, con_id: i64, stated: Option<Price>, qty: f64) -> Price {
     // A closed holding has no basis, and a row closing one has been seen to
     // carry the cost it was closed at. Keeping that leaves the next position
     // in the contract opening against the last one's price.
@@ -306,7 +311,7 @@ pub(crate) fn basis_for(shared: &SharedState, con_id: i64, stated: Option<Price>
     if let Some(c) = stated {
         return c;
     }
-    shared.portfolio.position_info(con_id).map(|p| p.avg_cost).unwrap_or(0)
+    portfolio.position_info(con_id).map(|p| p.avg_cost).unwrap_or(0)
 }
 
 /// Handle position update messages (cross-cutting, called from CCP message processing).
@@ -374,12 +379,13 @@ pub(crate) fn handle_position_update(
     shared: &SharedState,
     event_tx: &Option<EventSink>,
 ) {
+    let Some(portfolio) = shared.portfolio_for_request(parsed.get(&6529).map(String::as_str).unwrap_or("")) else { return };
     let con_id: i64 = match parsed.get(&6008).and_then(|s| s.parse::<i64>().ok()).filter(|id| *id != 0) {
         Some(v) => v,
         None => return,
     };
     // Named by a download in progress, whatever else this frame carries.
-    shared.portfolio.note_restated(con_id);
+    portfolio.note_restated(con_id);
     // An absent quantity means this frame carries no quantity, not that the
     // account is flat. Defaulting to 0 reconciled the engine's position to zero
     // off a marks-only frame and published a flat book to reqPositions and both
@@ -433,29 +439,30 @@ pub(crate) fn handle_position_update(
         // a row conjured here would carry position 0 and read as flat — the very
         // thing this is fixing. Ordering matters for the same reason, so the
         // quantity-bearing path below still writes the info row first.
-        if shared.portfolio.position_info(con_id).is_some() {
-            shared.portfolio.set_position_marks(con_id, market_price, market_value, unrealized_pnl, realized_pnl);
+        if portfolio.position_info(con_id).is_some() {
+            portfolio.set_position_marks(con_id, market_price, market_value, unrealized_pnl, realized_pnl);
         }
         return;
     };
 
     // Always store position info for reqPositions/pnlSingle, regardless of instrument
     // registry.
-    let avg_cost = basis_for(shared, con_id, avg_cost, position_raw.unwrap_or(0.0));
-    shared.portfolio.set_position_info(PositionInfo {
+    let avg_cost = basis_for_portfolio(&portfolio, con_id, avg_cost, position_raw.unwrap_or(0.0));
+    portfolio.set_position_info(PositionInfo {
         con_id, position, avg_cost,
         symbol, sec_type, currency, multiplier,
         ..Default::default()
     });
-    shared.portfolio.set_position_marks(con_id, market_price, market_value, unrealized_pnl, realized_pnl);
+    portfolio.set_position_marks(con_id, market_price, market_value, unrealized_pnl, realized_pnl);
 
-    if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+    if std::sync::Arc::ptr_eq(&portfolio, &shared.portfolio)
+        && let Some(instrument) = context.market.instrument_by_con_id(con_id) {
         let current = context.position(instrument);
         let delta = position - current;
         if delta != 0.0 {
             context.update_position(instrument, delta);
         }
-        shared.portfolio.set_position(instrument, position);
+        portfolio.set_position(instrument, position);
         emit(event_tx, Event::PositionUpdate { instrument, con_id, position, avg_cost });
     }
 }
@@ -470,10 +477,12 @@ impl CcpState {
         event_tx: &Option<EventSink>,
         hb: &mut HeartbeatState,
     ) {
+    let Some(portfolio) = shared.portfolio_for_message(msg) else { return };
     let text = match std::str::from_utf8(msg) {
         Ok(t) => t,
         Err(_) => return,
     };
+    let named_accounts: Vec<_> = text.split('\x01').filter_map(|part| part.strip_prefix("6095=")).collect();
     // Parse repeating group by scanning for 6008= boundaries
     let mut con_id: i64 = 0;
     // `None` until this entry carries a parseable, finite quantity. A zero
@@ -495,12 +504,13 @@ impl CcpState {
         if let Some(v) = part.strip_prefix("6008=") {
             // Flush previous position if any
             if count > 0 && con_id != 0 {
+                let portfolio = named_accounts.get(count - 1).map(|a| shared.portfolio_for(a)).unwrap_or_else(|| portfolio.clone());
                 if let Some(qty) = qty {
-                    let avg_cost = basis_for(
-                        shared, con_id,
+                    let avg_cost = basis_for_portfolio(
+                        &portfolio, con_id,
                         avg_cost_raw.map(crate::types::price_from_f64), qty,
                     );
-                    shared.portfolio.set_position_info(PositionInfo {
+                    portfolio.set_position_info(PositionInfo {
                         con_id,
                         position: qty,
                         avg_cost,
@@ -508,13 +518,14 @@ impl CcpState {
                         sec_type: std::mem::take(&mut sec_type),
                         ..Default::default()
                     });
-                    if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+                    if std::sync::Arc::ptr_eq(&portfolio, &shared.portfolio)
+                        && let Some(instrument) = context.market.instrument_by_con_id(con_id) {
                         adopt_position(context, instrument, qty);
-                        shared.portfolio.set_position(instrument, qty);
+                        portfolio.set_position(instrument, qty);
                         emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
                     }
                 }
-                shared.portfolio.note_restated(con_id);
+                portfolio.note_restated(con_id);
                 self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
             }
             con_id = v.parse().unwrap_or(0);
@@ -540,16 +551,17 @@ impl CcpState {
     }
     // Flush last position
     if count > 0 && con_id != 0 {
+        let portfolio = named_accounts.get(count - 1).map(|a| shared.portfolio_for(a)).unwrap_or_else(|| portfolio.clone());
         if let Some(qty) = qty {
-            let avg_cost = basis_for(
-                shared, con_id,
+            let avg_cost = basis_for_portfolio(
+                &portfolio, con_id,
                 avg_cost_raw.map(crate::types::price_from_f64), qty,
             );
             // With what the frame said it is, as every holding before it in
             // the same frame is published. Left off, the last one is published
             // unnamed and stays that way until the venue's own description of
             // the contract arrives.
-            shared.portfolio.set_position_info(PositionInfo {
+            portfolio.set_position_info(PositionInfo {
                 con_id,
                 position: qty,
                 avg_cost,
@@ -557,13 +569,14 @@ impl CcpState {
                 sec_type: std::mem::take(&mut sec_type),
                 ..Default::default()
             });
-            if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+            if std::sync::Arc::ptr_eq(&portfolio, &shared.portfolio)
+                        && let Some(instrument) = context.market.instrument_by_con_id(con_id) {
                 adopt_position(context, instrument, qty);
-                shared.portfolio.set_position(instrument, qty);
+                portfolio.set_position(instrument, qty);
                 emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
             }
         }
-        shared.portfolio.note_restated(con_id);
+        portfolio.note_restated(con_id);
         self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
     }
     }

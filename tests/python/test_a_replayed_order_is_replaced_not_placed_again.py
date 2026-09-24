@@ -73,6 +73,7 @@ def test_a_replace_naming_another_contract_asks_for_no_slot():
     elsewhere.symbol, elsewhere.con_id = "QQQ", QQQ_CON_ID
     c.place_order(REPLAYED, elsewhere, limit(REPLAYED, 101.0))
 
+    c.poll()
     assert w.refusals, "the caller is told the replace names another contract"
     assert "another contract" in w.refusals[-1][2], w.refusals
     assert c._test_take_commands() == [], "and nothing was asked of the engine"
@@ -87,6 +88,7 @@ def test_a_replace_naming_another_contract_is_refused_with_no_record_of_the_orde
     elsewhere.symbol, elsewhere.con_id = "QQQ", QQQ_CON_ID
     c.place_order(REPLAYED, elsewhere, limit(REPLAYED, 101.0))
 
+    c.poll()
     assert w.refusals, "the caller is told the replace names another contract"
     assert "another contract" in w.refusals[-1][2], w.refusals
     assert c._test_take_commands() == [], "and nothing was asked of the engine"

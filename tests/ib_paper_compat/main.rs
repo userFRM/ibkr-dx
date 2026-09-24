@@ -777,24 +777,22 @@ fn an_order_on_an_index_live() {
         };
         let id = next_order_id() as i64;
         let mut heard = Heard::default();
-        match client.place_order(id, &resolved, &order) {
-            Err(refusal) => println!("  {symbol}: this client refused it — {refusal}"),
-            Ok(()) => {
-                let deadline = std::time::Instant::now() + Duration::from_secs(15);
-                while std::time::Instant::now() < deadline && heard.said.is_empty() {
-                    client.process_msgs(&mut heard);
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                if heard.said.is_empty() {
-                    println!("  {symbol} (conId {}): nothing came back in 15s", resolved.con_id);
-                } else {
-                    for (code, message) in &heard.said {
-                        println!("  {symbol} (conId {}): {code} {message}", resolved.con_id);
-                    }
-                }
-                let _ = client.cancel_order(id, "");
+        // A refusal this client makes arrives on `error` in its place, as the
+        // venue's does, and the read below hears either.
+        client.place_order(id, &resolved, &order);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline && heard.said.is_empty() {
+            client.process_msgs(&mut heard);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if heard.said.is_empty() {
+            println!("  {symbol} (conId {}): nothing came back in 15s", resolved.con_id);
+        } else {
+            for (code, message) in &heard.said {
+                println!("  {symbol} (conId {}): {code} {message}", resolved.con_id);
             }
         }
+        client.cancel_order(id, "");
     }
     println!("\n=== done ===");
     client.disconnect();
@@ -1791,7 +1789,7 @@ fn what_the_venue_holds_after_a_replace_of_each_priced_shape_live() {
                 con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
                 exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
             },
-            identity: String::new(), reply_tx: None,
+            identity: String::new(),
         }).expect("register failed");
         let named = shared.orders.get_order_info(order_id).expect("named by the venue").order;
         let spec = match ibkr_dx::client_core::ClientCore::build_order_request(&named, order_id, 0, None) {
@@ -2511,9 +2509,9 @@ fn an_off_grid_price_is_refused_and_the_caller_told() {
 
     // Subscribe first: the subscribe ack is what populates the engine's
     // per-instrument tick size. Without it the snap is a no-op.
-    control_tx.send(ControlCommand::Subscribe {
-        contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90015,
+        contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).expect("send subscribe failed");
 
     let join = run_hot_loop(hot_loop);
@@ -2683,25 +2681,23 @@ fn reclaim_and_symbol_search_phase_live() {
     );
     let join = run_hot_loop(hot_loop);
 
-    let subscribe = |req: &str| {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        control_tx.send(ControlCommand::Subscribe {
+    let subscribe = |req: &str, req_id: i64| {
+        control_tx.send(ControlCommand::Subscribe { req_id,
             contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0,
-            regulatory_snapshot: false, reply_tx: Some(tx),
-            generic_ticks: Vec::new(), issued: 0,
+            regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         }).expect("send subscribe failed");
-        rx.recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|_| panic!("{req}: no registration reply"))
+        taken_slot(&shared, req_id, Duration::from_secs(10))
             .unwrap_or_else(|e| panic!("{req}: registration rejected: {e}"))
     };
 
     // ── Part 1: reclaim + reuse ──
-    let id1 = subscribe("first subscribe");
+    let id1 = subscribe("first subscribe", 1);
     println!("  first subscribe: instrument id {id1}");
     std::thread::sleep(Duration::from_secs(2));
-    control_tx.send(ControlCommand::Unsubscribe { instrument: id1, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).expect("send unsubscribe failed");
+    control_tx.send(ControlCommand::CancelMktData { req_id: 1 }).expect("send unsubscribe failed");
     std::thread::sleep(Duration::from_secs(2));
-    let id2 = subscribe("re-subscribe");
+    let id2 = subscribe("re-subscribe", 2);
     println!("  re-subscribe: instrument id {id2}");
     assert_eq!(id2, id1,
         "reclaimed slot must be reused — the cap would stay cumulative");
@@ -2866,7 +2862,7 @@ fn conditions_round_trip_phase_live() {
         }];
 
         let id = next_order_id() as i64;
-        client.place_order(id, &spy, &order).expect("place failed");
+        client.place_order(id, &spy, &order);
         std::thread::sleep(Duration::from_secs(4));
         println!("  placed {id} carrying {} condition(s)", order.conditions.len());
         client.disconnect();
@@ -2876,7 +2872,7 @@ fn conditions_round_trip_phase_live() {
 
     let client = EClient::connect(&settings()).expect("reconnect failed");
     let mut stated = Stated::default();
-    client.req_all_open_orders(&mut stated);
+    client.req_all_open_orders(); client.process_msgs(&mut stated);
 
     let stated_with = stated.orders.iter()
         .find(|(id, _)| *id == placed_id)
@@ -2885,13 +2881,13 @@ fn conditions_round_trip_phase_live() {
     // Withdrawn before any assertion, and the withdrawal confirmed. This order is
     // GTC: an unconfirmed cancel, or an assertion returning first, leaves it
     // resting on the account.
-    client.cancel_order(placed_id, "").expect("the resting order is withdrawn");
+    client.cancel_order(placed_id, "");
     let withdrawn_by = std::time::Instant::now() + Duration::from_secs(15);
     let cancelled = loop {
         // Each snapshot is read independently: a retained result would answer for
         // every snapshot after the first.
         stated.orders.clear();
-        client.req_all_open_orders(&mut stated);
+        client.req_all_open_orders(); client.process_msgs(&mut stated);
         if stated.finished.contains(&placed_id)
             || !stated.orders.iter().any(|(id, _)| *id == placed_id)
         {
@@ -3043,8 +3039,8 @@ fn adjusted_series_and_the_clock_live() {
         fn current_time_in_millis(&mut self, t: i64) { self.millis.push(t) }
     }
     let mut clock = Clock::default();
-    client.req_current_time(&mut clock);
-    client.req_current_time_in_millis(&mut clock);
+    client.req_current_time(); client.process_msgs(&mut clock);
+    client.req_current_time_in_millis(); client.process_msgs(&mut clock);
     let (s, ms) = (clock.secs[0], clock.millis[0]);
     println!("\n  clock: {s}s   {ms}ms   fraction stated: {}", ms % 1000);
     assert_eq!(ms / 1000, s, "both read the same clock, so they agree to the second");
@@ -3396,7 +3392,9 @@ fn a_session_held_for_hours_phase_live() {
         match client.watch(&spy) {
             Ok(req_id) => {
                 std::thread::sleep(Duration::from_secs(20));
-                if let Err(why) = client.cancel_mkt_data(req_id) {
+                client.cancel_mkt_data(req_id);
+                // A refusal is a record in the session's order.
+                for (_, _, why) in client.shared_state().drain_refused() {
                     refusals += 1;
                     println!("  lap {laps}: the withdrawal was refused: {why}");
                 }

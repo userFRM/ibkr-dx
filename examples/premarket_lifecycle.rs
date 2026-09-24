@@ -128,7 +128,7 @@ fn run_send() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
         println!("placing [{label}] oid={oid}");
-        client.place_order(oid, &contract, &order)?;
+        client.place_order(oid, &contract, &order);
 
         // Wait for the broker to ack with a permId for this order.
         let perm = {
@@ -177,7 +177,7 @@ fn run_cancel() -> Result<(), Box<dyn std::error::Error>> {
     // surface what hydrated so the permId lookup below can resolve.
     println!("waiting for open-order hydration...");
     pump_until(&client, &mut w, &state, Duration::from_secs(6), |_| false);
-    client.req_all_open_orders(&mut w);
+    client.req_all_open_orders(); client.process_msgs(&mut w);
     pump_until(&client, &mut w, &state, Duration::from_secs(2), |_| false);
     {
         let s = state.lock().unwrap();
@@ -198,10 +198,8 @@ fn run_cancel() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         println!("cancelling [{label}] permId={perm}");
-        match client.cancel_order_by_perm_id(perm) {
-            Ok(()) => {}
-            Err(e) => { eprintln!("  cancel failed for permId={perm}: {e}"); continue; }
-        }
+        // A refusal arrives on `error`, and the pump below reads it.
+        client.cancel_order_by_perm_id(perm);
         let done = pump_until(&client, &mut w, &state, Duration::from_secs(15), |s| {
             s.statuses.iter().any(|(_, st, p)| *p == perm && st == "Cancelled")
         });
@@ -233,7 +231,7 @@ fn run_verify() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("waiting for open-order hydration...");
     pump_until(&client, &mut w, &state, Duration::from_secs(6), |_| false);
-    client.req_all_open_orders(&mut w);
+    client.req_all_open_orders(); client.process_msgs(&mut w);
     pump_until(&client, &mut w, &state, Duration::from_secs(2), |_| false);
 
     let open = state.lock().unwrap().open.clone();
@@ -262,17 +260,15 @@ fn run_purge() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("waiting for open-order hydration...");
     pump_until(&client, &mut w, &state, Duration::from_secs(6), |_| false);
-    client.req_all_open_orders(&mut w);
+    client.req_all_open_orders(); client.process_msgs(&mut w);
     pump_until(&client, &mut w, &state, Duration::from_secs(2), |_| false);
 
     let open = state.lock().unwrap().open.clone();
     println!("cancelling {} open order(s):", open.len());
     for (oid, perm, _) in &open {
         println!("cancelling oid={oid} permId={perm}");
-        if let Err(e) = client.cancel_order(*oid, "") {
-            eprintln!("  cancel failed for oid={oid}: {e}");
-            continue;
-        }
+        // A refusal arrives on `error`, and the pump below reads it.
+        client.cancel_order(*oid, "");
         let done = pump_until(&client, &mut w, &state, Duration::from_secs(15), |s| {
             s.statuses.iter().any(|(id, st, _)| id == oid && st == "Cancelled")
         });

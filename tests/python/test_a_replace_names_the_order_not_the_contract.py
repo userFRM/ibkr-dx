@@ -49,5 +49,6 @@ def test_a_replace_naming_another_contract_is_refused_as_a_mismatch():
     assert c._test_take_commands(), "the order went out"
 
     c.placeOrder(85, stock(265598, "AAPL"), limit_order())
+    c.poll()
     assert w.seen == [(85, 105)], f"the replace names another contract: {w.seen}"
     assert not c._test_take_commands(), "and nothing was sent under it"

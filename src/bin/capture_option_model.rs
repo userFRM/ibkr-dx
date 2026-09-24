@@ -70,9 +70,9 @@ fn main() {
                 println!("{symbol} {expiry} {strike} {right}: the venue does not know it");
                 continue;
             };
-            if client.req_mkt_data(req_id, &resolved, "", false, false).is_err() {
-                continue;
-            }
+            // A refusal is heard on the error callback; the wait below then
+            // reports that nothing was stated.
+            client.req_mkt_data(req_id, &resolved, "", false, false);
             req_id += 1;
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut stated = None;

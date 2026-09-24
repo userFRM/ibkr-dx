@@ -3,6 +3,13 @@ pub mod ccp;
 pub mod hmds;
 pub mod secdef;
 pub mod order_builder;
+pub(crate) mod asks;
+pub(crate) mod intake;
+pub(crate) mod market_requests;
+// A file named for the tests it holds, as every other test file here is.
+#[cfg(test)]
+#[path = "held/tests.rs"]
+mod held_tests;
 pub use crate::reliability::retry;
 
 /// How fast a reconnect may put its subscriptions back.
@@ -35,7 +42,7 @@ use crate::gateway::{connect_farm, reconnect_ccp, Farm, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ContractRef, ControlCommand, Fill, InstrumentId, Price, Qty, PRICE_SCALE, QTY_SCALE, qty_to_f64};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{channel, Receiver, Sender, SyncSender};
 
 use farm::FarmState;
 use ccp::CcpState;
@@ -46,10 +53,6 @@ use hmds::HmdsState;
 const CCP_HEARTBEAT_SECS: u64 = crate::config::CCP_HEARTBEAT;
 /// Farm heartbeat interval — single source in config.
 const FARM_HEARTBEAT_SECS: u64 = crate::config::FARM_HEARTBEAT;
-/// How long a stop waits for the trading connection's recovery to end: the
-/// five seconds a gateway gives a connection's thread it is stopping before it
-/// goes on without it.
-const WORKER_STOP_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 /// Liveness, aligned with the gateway's transport thresholds:
 /// send a test request when nothing has been received for this long..
 pub const LIVENESS_TEST_SECS: u64 = 15;
@@ -57,6 +60,9 @@ pub const LIVENESS_TEST_SECS: u64 = 15;
 /// this long. The old scheme declared death at ~21s — racing the server's
 /// own ~35s reset and losing to transient stalls the server tolerates.
 pub const LIVENESS_DEAD_SECS: u64 = 35;
+/// The most commands one lap takes: the depth the channel had when it was
+/// bounded, so no lap takes more than it did then.
+const COMMANDS_PER_LAP: usize = 64;
 /// Longest plausible gap between two liveness checks.
 ///
 /// A gap above this means the check did not run. Silence measured across it is
@@ -75,23 +81,29 @@ const _: () = assert!(
     LIVENESS_TEST_SECS == crate::protocol::connection::WHOLE_FRAME_TIMEOUT_SECS
 );
 
+/// The finishing phase a logout starts.
+///
+/// It spans laps: every socket is still polled and every lookup still
+/// answered while the order commands the loop accepted are completed, each
+/// within its own bound — the naming of its contract, the venue's naming of
+/// the working set, a reconnect's settling of what it holds. Then every other
+/// held request is withdrawn, the logout is written, and a stop taken during
+/// the phase runs.
+struct Finishing {
+    /// A stop taken during the phase, run once it is over.
+    stop: bool,
+}
+
 /// The pinned-core hot loop. Pushes events to SharedState + optional event channel.
 pub struct HotLoop {
     shared: Arc<SharedState>,
     event_tx: Option<EventSink>,
-    context: Context,
+    pub(crate) context: Context,
     /// Core ID to pin the hot loop thread to. None = no pinning.
     core_id: Option<usize>,
     /// Whether a recoverable loss was announced to the client. Gates the
     /// restore notice so a reconnect that nobody was told about stays quiet.
     loss_announced: bool,
-    /// How far into what the client has asked for this engine has read.
-    ///
-    /// Said back with a slot the engine gives up, because a slot number alone
-    /// says nothing about which occupancy ended: the slot goes to the next
-    /// contract that needs one, and a release read after that forgot the
-    /// records of a contract that had just been given it.
-    heard_up_to: u64,
     /// Set when a reconnect failed for a reason repeating cannot fix. The
     /// scheduler stops rather than climbing a ladder forever against a server
     /// that has already given its answer.
@@ -122,21 +134,40 @@ pub struct HotLoop {
     control_rx: Option<Receiver<ControlCommand>>,
     /// Whether the hot loop should keep running.
     running: bool,
+    /// The finishing phase a logout starts, while it runs.
+    finishing: Option<Finishing>,
+    /// Whether the logout has been written: an order command taken after it
+    /// is refused rather than carried.
+    logout_written: bool,
     /// Account ID for order submission.
     account_id: String,
     /// Heartbeat state.
     hb: HeartbeatState,
     /// Reusable buffer for control commands (avoids per-iteration allocation).
     cmd_buf: Vec<ControlCommand>,
+    /// How many commands this loop has taken off its channel.
+    commands_taken: u64,
     // ── Subsystems ──
     pub(crate) farm: FarmState,
     pub(crate) ccp: CcpState,
     pub(crate) hmds: HmdsState,
+    /// Questions answered from what the session holds, held until the venue
+    /// has stated it.
+    asks: asks::Asks,
+    /// The orders callers place, from their call to the wire.
+    pub(crate) intake: intake::Intake,
     // ── Auto-reconnect ──
     reconnect_auth: Option<ReconnectAuth>,
-    /// Slots whose watchers were sent to another slot, waiting to be given
-    /// back once the move saying so has been read.
-    slots_awaiting_their_word: Vec<InstrumentId>,
+    /// The market-data requests this loop has taken and not withdrawn, by
+    /// the caller's number.
+    pub(crate) md_requests: std::collections::HashMap<i64, market_requests::MdRequest>,
+    /// The last number this loop gave a decision about a subscription.
+    md_numbers: u64,
+    /// How many watches the engine has opened for itself, which numbers the
+    /// next one.
+    own_watches: i64,
+    /// Spread scans held behind another scan of the same contract.
+    pub(crate) held_scans: Vec<ControlCommand>,
     pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
     farm_reconnect_attempt: u32,
     pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
@@ -315,7 +346,7 @@ impl HeartbeatState {
         }
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let now = Instant::now();
         Self {
             last_ccp_sent: now,
@@ -397,8 +428,8 @@ impl HotLoop {
         secdef_conn: Option<Connection>,
         core_id: Option<usize>,
         caller: crate::gateway::CallerAuth,
-    ) -> (HotLoop, SyncSender<ControlCommand>) {
-        let (tx, rx) = sync_channel(64);
+    ) -> (HotLoop, Sender<ControlCommand>) {
+        let (tx, rx) = channel();
         let reconnect_auth = gateway.reconnect_auth(caller);
         // Emitted like everything else, so a logon that arrives at a channel
         // nobody has read yet is counted rather than waited on: this runs on
@@ -430,6 +461,7 @@ impl HotLoop {
         hot_loop.shared.orders.replay_is_pending();
         hot_loop.hmds_conn = hmds_conn;
         hot_loop.secdef_conn = secdef_conn;
+        hot_loop.count_traffic();
         (hot_loop, tx)
     }
 
@@ -446,19 +478,26 @@ impl HotLoop {
             secdef: secdef::SecDefState::new(),
             control_rx: None,
             running: true,
+            finishing: None,
+            logout_written: false,
             account_id: String::new(),
             hb: HeartbeatState::new(),
-            cmd_buf: Vec::with_capacity(16),
+            cmd_buf: Vec::with_capacity(COMMANDS_PER_LAP),
+            commands_taken: 0,
             farm: FarmState::new(),
             ccp: CcpState::new(),
             hmds: HmdsState::new(),
+            asks: asks::Asks::new(),
+            intake: intake::Intake::default(),
             reconnect_auth: None,
-            slots_awaiting_their_word: Vec::new(),
+            md_requests: std::collections::HashMap::new(),
+            md_numbers: 0,
+            own_watches: 0,
+            held_scans: Vec::new(),
             pending_farm_reconnect: None,
             ccp_next_attempt_at: None,
             farm_next_attempt_at: None,
             loss_announced: false,
-            heard_up_to: 0,
             reconnect_halted: None,
             reconnect_cfg: Default::default(),
             budget: Default::default(),
@@ -495,6 +534,8 @@ impl HotLoop {
 
     /// Set the account ID for order submission.
     pub fn set_account_id(&mut self, account_id: String) {
+        self.shared.set_session_account(&account_id);
+        self.shared.name_account_request("AR.1", &account_id);
         self.account_id = account_id;
     }
 
@@ -529,8 +570,8 @@ impl HotLoop {
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
-    ) -> (Self, SyncSender<ControlCommand>) {
-        let (tx, rx) = sync_channel(64);
+    ) -> (Self, Sender<ControlCommand>) {
+        let (tx, rx) = channel();
         let mut hl = Self::new(shared, event_tx, core_id);
         hl.set_control_rx(rx);
         hl.set_account_id(account_id);
@@ -544,219 +585,11 @@ impl HotLoop {
         hl.ccp_conn = Some(ccp_conn);
         hl.shared.orders.replay_is_pending();
         hl.hmds_conn = hmds_conn;
+        hl.count_traffic();
         (hl, tx)
     }
-    /// Give back the slots whose watchers have gone to another slot.
-    ///
-    /// A request whose contract turned out to be held by another slot leaves
-    /// its own slot holding nothing: the watchers follow the move to where the
-    /// contract lives, and nothing will withdraw the slot they left, which is
-    /// the only thing that gives one back. One goes out of the table on every
-    /// such collision, and a table that runs out refuses the next subscription
-    /// for want of a slot.
-    ///
-    /// Not given back at the moment of the move, because giving a slot back
-    /// purges what names it — the move telling its watchers where to follow,
-    /// or the reason no subscription could be made — and that is the only
-    /// thing its reader will ever be told. Once it has been read, both hold.
-    fn give_back_slots_their_word_has_left(&mut self) {
-        if self.slots_awaiting_their_word.is_empty() {
-            return;
-        }
-        let ready: Vec<InstrumentId> = self
-            .slots_awaiting_their_word
-            .iter()
-            .copied()
-            .filter(|slot| {
-                !self.shared.market.a_move_is_pending_from(*slot)
-                    && !self.shared.market.a_failure_is_pending_from(*slot)
-            })
-            .collect();
-        self.slots_awaiting_their_word.retain(|slot| !ready.contains(slot));
-        for slot in ready {
-            self.try_reclaim_instrument(slot);
-        }
-    }
-
-    /// Subscriptions the venue can now be asked for: named by symbol, and the
-    /// lookup has come back with the contract's own id.
-    fn send_resolved_subscriptions(&mut self) {
-        self.give_back_slots_their_word_has_left();
-        for (con_id, p) in std::mem::take(&mut self.ccp.resolved_md_subscribe) {
-                // The slot keeps the id so a reconnect resubscribes by it
-                // rather than starting the lookup again. Where another slot
-                // already holds the contract — one caller naming it by id
-                // and another by symbol — this one cannot: the venue
-                // answers a second subscription on a contract with the
-                // number it is already streaming under, which lands on the
-                // first slot and freezes it. So the caller follows the slot
-                // the contract lives in, and nothing is asked for twice.
-                // What the caller named beyond the quote, where the slot it
-                // was given turns out not to be the slot the contract lives
-                // in. Recorded against the slot it was given, and that slot is
-                // about to be handed back: the caller was moved onto the
-                // contract's own slot and published as watching it, while the
-                // series it asked for went back with the slot it left.
-                let mut carried: Vec<u32> = Vec::new();
-                let instrument = if self.context.market.adopt_con_id(p.instrument, con_id) {
-                    p.instrument
-                } else {
-                    match self.context.market.instrument_by_con_id(con_id) {
-                        Some(owner) if owner != p.instrument => {
-                            // With the occupancy the slot they are moving
-                            // onto is held under, so the caller that arrives
-                            // holds what the engine holds and can withdraw it.
-                            let held_under = self.farm.what_took_it(owner);
-                            self.shared.market.push_subscription_move(p.instrument, owner, held_under);
-                            carried = self.farm
-                                .asked_generic_ticks
-                                .remove(&p.instrument)
-                                .unwrap_or_default();
-                            // Where they went, so a withdrawal naming the slot
-                            // they left reaches what they asked for.
-                            self.farm.note_moved(p.instrument, owner);
-                            // And the slot this request took is owed back. It
-                            // holds nothing now — its watchers follow the move
-                            // to the slot the contract lives in, and nothing
-                            // will ever withdraw it, which is what gives a slot
-                            // back. Left, one goes out of the table on every
-                            // collision, and every table indexed by slot grows
-                            // for the rest of the session to hold slots nothing
-                            // uses.
-                            //
-                            // Not here, though: the release purges the moves
-                            // that name this slot, and that move is the only
-                            // thing telling its watchers where to follow. It is
-                            // given back once the move has been read.
-                            if !self.slots_awaiting_their_word.contains(&p.instrument) {
-                                self.slots_awaiting_their_word.push(p.instrument);
-                            }
-                            owner
-                        }
-                        _ => p.instrument,
-                    }
-                };
-                // What is already up, and only where this request can be
-                // answered by it. A snapshot is neither followed nor followable
-                // — it is a request of its own, asked for under an action of
-                // its own — so a snapshot skipped for a live stream was never
-                // sent and the
-                // caller heard the end of it off ticks it did not ask for,
-                // while a stream skipped for a snapshot in flight was dropped
-                // when the snapshot completed and withdrew.
-                // The subscription that answers this request, whichever slot
-                // it turns out to live in.
-                self.farm.note_subscription_asked_on(instrument, p.issued);
-                // Where this request is the one the subscription goes out for,
-                // the occupancy is its own. Where the contract lives in another
-                // slot the callers are moved onto it, and that slot's occupancy
-                // belongs to whoever took it.
-                if !self.farm.holds_a_stream(instrument) {
-                    // This request begins the stream, so the occupancy is its
-                    // own whatever the slot held before. Kept at the first
-                    // number ever written, a slot that cannot be handed back —
-                    // one pinned by a holding, a working order, a tick-by-tick
-                    // stream or news — stayed named after the caller that had
-                    // already gone, and every withdrawal after that named a
-                    // number the engine did not hold and was refused. The
-                    // venue went on streaming a contract nothing could take
-                    // down, for the life of the session.
-                    self.farm.note_it_changed_hands(instrument, p.issued);
-                }
-                // What this request named, on whichever slot it lands on: the
-                // list it carried off the slot it was given, or the one
-                // recorded against the slot it keeps.
-                let named: Vec<u32> = if carried.is_empty() {
-                    self.farm.asked_generic_ticks.get(&instrument).cloned().unwrap_or_default()
-                } else {
-                    carried.clone()
-                };
-                self.farm.note_series_asked_on(instrument, &named, p.issued);
-                // Carried onto the slot the contract lives in: asked for now
-                // where a stream is already up there, and added to what that
-                // slot asks for where the subscription below is the one that
-                // will carry them.
-                if !carried.is_empty() {
-                    if self.farm.holds_a_stream(instrument) {
-                        self.farm.also_ask_for_series(
-                            instrument,
-                            con_id,
-                            &carried,
-                            &self.context,
-                            &mut self.farm_conn,
-                            &mut self.hb,
-                        );
-                    } else {
-                        let held = self.farm.asked_generic_ticks.entry(instrument).or_default();
-                        for tick in &carried {
-                            if !held.contains(tick) {
-                                held.push(*tick);
-                            }
-                        }
-                    }
-                }
-                if !p.regulatory_snapshot && self.farm.holds_a_stream(instrument) {
-                    continue;
-                }
-                // A feed given up on since the request was taken. The refusal
-                // raised where a caller asks cannot see this one: the request
-                // was accepted while the feed was alive, waited on the venue to
-                // name its contract, and arrives here afterwards. Sent anyway
-                // it reached a socket that is not there and was recorded for a
-                // replay that is not coming, and the caller — told it had a
-                // subscription when it asked — heard nothing for the rest of
-                // the session.
-                if let Some(why) = self.farm_halted {
-                    self.shared.market.push_subscription_failure(
-                        instrument,
-                        format!(
-                            "market data is unavailable for the rest of this session: {}",
-                            why.as_str(),
-                        ),
-                    );
-                    continue;
-                }
-                // A snapshot has no second chance. Every other request here
-                // survives an outage in a record of its own — a stream is
-                // replayed, the headlines and the book are re-sent — and the
-                // snapshot is deliberately not, because a reconnect that
-                // re-sent one would deliver, and bill for, a second burst
-                // nobody asked for. That is right for one that went out. With
-                // no transport to write it to it never went out, and there is
-                // no later moment when it does: it was accepted, dropped, and
-                // never answered.
-                if p.regulatory_snapshot && self.farm.disconnected {
-                    // Not where a stream is held on the contract. What is
-                    // recorded here is about the contract and reaches everyone
-                    // watching it, and the stream was neither refused nor
-                    // given up — it is kept precisely so the reconnect brings
-                    // it back. Told their quote had been refused, its watchers
-                    // withdraw it.
-                    if !self.farm.holds_a_stream(instrument) {
-                        self.shared.market.push_subscription_failure(
-                            instrument,
-                            "the quote feed was down when this snapshot was asked for, \
-                             so it was never sent: ask for it again once the feed is back"
-                                .to_string(),
-                        );
-                    }
-                    continue;
-                }
-                let (sec_type, exchange) =
-                    self.described_as(con_id, &p.sec_type, &p.exchange);
-                self.farm.send_mktdata_subscribe(
-                    con_id, &p.symbol, &exchange, &sec_type,
-                    &p.filters.last_trade_date_or_contract_month, p.filters.strike,
-                    &p.filters.right, &p.filters.multiplier,
-                    instrument, p.mode_9887, p.regulatory_snapshot,
-                    &mut self.farm_conn,
-                    &mut self.hb,
-                );
-        }    }
-
-
-    /// Register a contract, and answer the caller with its slot.
-    fn register_contract(
+    /// Register a contract, and say which slot it holds.
+    pub(crate) fn register_contract(
         &mut self,
         con_id: i64,
         symbol: String,
@@ -768,10 +601,6 @@ impl HotLoop {
         // decides which listing the venue answers with — so two descriptions
         // narrowed differently do not share a slot before either is answered.
         narrowing: &str,
-        // Answered without blocking: this runs on the thread driving all
-        // three transports, and a caller's channel is the caller's to drain.
-        // A reply that cannot be delivered is a caller that stopped listening.
-        reply_tx: &Option<std::sync::mpsc::SyncSender<Result<InstrumentId, String>>>,
     ) -> InstrumentId {
         // Whether this call is what created the slot. Registration is also how
         // an already-live contract is looked up, and the account row is older
@@ -794,8 +623,22 @@ impl HotLoop {
             &mut self.context, &self.shared, con_id, id, is_new_slot,
         );
         self.shared.market.set_instrument_count(self.context.market.count());
-        if let Some(tx) = reply_tx { let _ = tx.try_send(Ok(id)); }
         id
+    }
+
+    /// Say which occupancy a slot is held under, where it has changed: as a
+    /// record in the session's order, ahead of anything pushed under the slot
+    /// after it, and into the slot's quote, which is written again under it.
+    ///
+    /// The number is the one this loop names the occupancy by for its own
+    /// withdrawals, so what a reader compares a quote with is the engine's own
+    /// account of who holds the slot.
+    fn publish_occupancy(&self, slot: InstrumentId) {
+        let generation = self.farm.what_took_it(slot);
+        if self.shared.market.generation_of(slot) != generation {
+            self.shared.push_slot_record(crate::bridge::Record::SlotTaken { slot, generation });
+            self.shared.market.set_generation(slot, generation);
+        }
     }
 
     /// Offer back the slots an order has just stopped holding.
@@ -803,7 +646,7 @@ impl HotLoop {
     /// Asked here rather than where the order ends, because whether a slot is
     /// free is a question about everything else that could be pointing at it,
     /// and this is where all of that is known.
-    fn reclaim_slots_no_order_holds(&mut self) {
+    pub(crate) fn reclaim_slots_no_order_holds(&mut self) {
         for instrument in std::mem::take(&mut self.context.slots_to_reconsider) {
             self.try_reclaim_instrument(instrument);
         }
@@ -833,20 +676,15 @@ impl HotLoop {
         if self.farm.holds_market_data(instrument) {
             return;
         }
+        // Nor while a request is still served on it: its caller's record of
+        // the slot stands until its cancel.
+        if self.md_requests.values().any(|req| req.slot == instrument) {
+            return;
+        }
         if self.hmds.tbt_subscriptions.iter().any(|sub| sub.instrument == instrument) {
             return;
         }
         if self.farm.news_subscriptions.iter().any(|(id, ..)| *id == instrument) {
-            return;
-        }
-        // A subscription waiting on the lookup that will name its contract is
-        // as much a reference as a live one. The pending record carries the
-        // slot, so a slot reclaimed while its lookup is out is handed to
-        // another contract and then subscribed with the first one's id: the
-        // quotes arrive, under the wrong contract, priced on its tick.
-        if self.ccp.pending_md_subscribe.iter().any(|(_, p, _)| p.instrument == instrument)
-            || self.ccp.resolved_md_subscribe.iter().any(|(_, p)| p.instrument == instrument)
-        {
             return;
         }
         // A holding is a reference to the contract as much as a subscription
@@ -860,20 +698,6 @@ impl HotLoop {
             return;
         }
         self.pinned_by_position.retain(|id| *id != instrument);
-        // Releasing a slot purges what is queued under it: the move that tells
-        // its watchers where the contract went, and the reason no subscription
-        // could be made for it at all. Both name the slot, both are the only
-        // thing their reader will ever be told, and a subscription the venue
-        // refused asks for its slot back in the same breath as it states the
-        // reason. Keep the slot until they have been read.
-        if self.shared.market.a_move_is_pending_from(instrument)
-            || self.shared.market.a_failure_is_pending_from(instrument)
-        {
-            if !self.slots_awaiting_their_word.contains(&instrument) {
-                self.slots_awaiting_their_word.push(instrument);
-            }
-            return;
-        }
         if self.context.market.unregister(instrument).is_some() {
             // Said, so the surfaces stop naming a slot this contract no longer
             // holds. They cache the slot a contract was given, and the slot
@@ -921,42 +745,53 @@ impl HotLoop {
             // belong to the contract that has gone and are read against
             // withdrawals of the one that takes the slot next.
             self.farm.forget_what_was_asked_on(instrument);
+            // The occupancy that ended, in its place in the session's order,
+            // so a reader delivers nothing more of that contract under the
+            // slot; and the slot's quote is held under no occupancy until the
+            // next contract takes it.
+            self.shared.push_slot_record(crate::bridge::Record::SlotReleased {
+                slot: instrument, generation: ending,
+            });
+            self.shared.market.set_generation(instrument, 0);
             log::info!("Reclaimed instrument slot {instrument}");
         }
     }
 
+    /// End a session whose engine has not yet been started.
+    pub(crate) fn close_before_start(&mut self) {
+        self.shared.close_admission();
+        if self.ccp_conn.as_mut().is_some_and(|conn| conn.logout_cancelled_logon().is_ok()) {
+            self.shared.logout_sent.store(true, Ordering::Release);
+        }
+        self.shared.push_closed();
+    }
+
     /// Run the hot loop under `catch_unwind`.
     ///
-    /// On a panic, the payload is logged and `Event::Disconnected` is emitted,
-    /// so a consumer sees a dead engine at once rather than on whichever
-    /// outbound call fails next. This is what the engine-spawn site calls,
-    /// rather than `run` directly.
+    /// On a panic, recovery workers end before the final record and the
+    /// shutdown result records the panic. This is what the engine-spawn site
+    /// calls, rather than `run` directly.
     pub fn run_with_panic_recovery(mut self) {
         let event_tx = self.event_tx.clone();
         let shared = self.shared.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.run();
-        }));
-        if let Err(payload) = result {
-            let msg: &str = payload
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| payload.downcast_ref::<&'static str>().copied())
-                .unwrap_or("<non-string panic payload>");
-            log::error!("Engine hot loop panicked, emitting Disconnected: {msg}");
-            // Before anything is told the engine died, because a worker still
-            // dialling outlives the notice: taken back first, none of them can
-            // open a session on behalf of a loop that is gone.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run()));
+        shared.close_admission();
+        let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.take_back_the_recovery_still_in_flight();
-            // Recorded before anything is told of the loss, so a reader woken
-            // by it finds the reason already there. Written afterwards, a
-            // caller that wakes in between cannot tell this from a loss the
-            // engine is still working on, and waits on a recovery that has
-            // nothing left to run it.
-            shared
-                .reference
-                .set_session_over(retry::DisconnectReason::EngineStopped.as_str());
-            shared.set_connection_lost();
+        }));
+        let panicked = result.is_err() || cleanup.is_err();
+        for payload in [result, cleanup].into_iter().filter_map(Result::err) {
+            shared.engine_panicked.store(true, Ordering::Release);
+            // A panic payload can itself panic when dropped.
+            std::mem::forget(payload);
+        }
+        if panicked {
+            shared.reference.set_session_over(retry::DisconnectReason::EngineStopped.as_str());
+        }
+        // Every recovery has ended before the session's final record, and
+        // every socket is dropped on this thread as the loop goes out of scope.
+        shared.push_closed();
+        if panicked {
             emit(&event_tx, Event::Disconnected);
         }
     }
@@ -1019,15 +854,6 @@ impl HotLoop {
                 );
             }
 
-            // 2. Drain pending orders → build → sign → send to auth
-            //    Skip if CCP is disconnected — orders stay in buffer for retry after
-            // reconnect.
-            order_builder::drain_and_send_orders(
-                &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
-                self.ccp.disconnected, &self.shared,
-                self.ccp.recovery_sweep_at.is_some(), &self.event_tx,
-            );
-
             // A write that abandoned the transport leaves it unable to carry
             // anything out while the peer may still be sending, so nothing
             // read-side would ever notice. Without this the liveness deadline
@@ -1040,7 +866,6 @@ impl HotLoop {
                 &mut self.ccp_conn, &mut self.context, &self.shared,
                 &self.event_tx, &mut self.hb, &self.account_id,
             );
-            self.send_resolved_subscriptions();
 
             // A holding that has since been closed releases the slot the
             // caller already asked to free.
@@ -1066,16 +891,11 @@ impl HotLoop {
             }
             self.ccp.sweep_recovery(&mut self.context, &self.shared, &self.event_tx);
             self.ccp.sweep_pending_matching_symbols(&self.shared);
-            self.ccp.sweep_pending_option_params(&self.shared);
             self.ccp.sweep_pending_advisor(&self.shared);
             self.ccp.sweep_pending_schedule_pairs(&mut self.ccp_conn, &self.shared, &self.event_tx, &mut self.hb);
             self.ccp.sweep_scanner_enrichments(&self.shared);
             self.ccp.sweep_contract_details(&self.shared, &self.event_tx);
-            self.ccp.sweep_pending_subscribes(&mut self.context, &self.shared);
             self.ccp.sweep_pending_named(&self.shared);
-            self.ccp.sweep_completed_orders_request(
-                &mut self.ccp_conn, &mut self.hb, &self.shared,
-            );
 
             // 4. Check control_plane_rx (SPSC) for commands
             self.poll_control_commands();
@@ -1103,7 +923,9 @@ impl HotLoop {
             // connection one the account reads as competing with itself.
             // Replay is the same shape: the stop has just withdrawn every
             // subscription, and this would put back whatever was still queued.
-            if self.running {
+            // Nor while a logout's finishing phase runs, which took recovery
+            // back as it began: the session is ending.
+            if self.running && self.finishing.is_none() {
                 // Before what has come back is taken. The time the caller
                 // allowed recovery bounds the attempt in flight, and taking
                 // its answer first cleared the record the deadline is read
@@ -1147,7 +969,7 @@ impl HotLoop {
             // opened at the venue after the disconnect, never logged out, and
             // on the trading connection one the account reads as a second
             // session competing with itself.
-            if self.running {
+            if self.running && self.finishing.is_none() {
                 // Before the schedulers, which return as soon as they find an
                 // attempt in flight: the time the caller allowed recovery
                 // bounds that attempt too.
@@ -1181,7 +1003,35 @@ impl HotLoop {
             }
         }
 
+        self.finish_admitted_commands();
         self.take_back_the_recovery_still_in_flight();
+    }
+
+    /// Refuse orders still admitted when a session ends between laps.
+    fn finish_admitted_commands(&mut self) {
+        self.shared.close_admission();
+        while let Some(cmd) = self.control_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.commands_taken += 1;
+            match intake::order_command(cmd) {
+                Ok(order) => self.refuse_order_command(&order, "the engine stopped"),
+                Err(ControlCommand::Order(req)) => self.context.pending_orders.push(req),
+                Err(_) => {}
+            }
+        }
+        order_builder::refuse_what_is_left(&mut self.context, &self.shared, "the engine stopped");
+        self.shared.publish_finished(self.commands_taken);
+    }
+
+    /// Have every connection the loop holds count into the session's counts,
+    /// with what it counted before the session took it.
+    fn count_traffic(&mut self) {
+        let session = self.shared.traffic_counts();
+        for conn in [&mut self.farm_conn, &mut self.ccp_conn, &mut self.hmds_conn, &mut self.secdef_conn]
+            .into_iter()
+            .flatten()
+        {
+            conn.count_into(session);
+        }
     }
 
     /// Take back whatever recovery is still in flight, wait it out, and say
@@ -1208,59 +1058,20 @@ impl HotLoop {
     /// announced its death.
     fn take_back_the_recovery_still_in_flight(&mut self) {
         self.cancel_recovery();
-        // Only the trading connection's worker is waited for: its landed
-        // session must be logged out below. The others close their socket
-        // when the receiver they would hand it to is gone, and waiting on one
-        // held the healthy trading connection unread and unheartbeated for
-        // the length of a dial.
-        //
-        // Waited for within the bound a gateway gives a connection's thread
-        // it is stopping. What the closed socket cannot cut short is a dial
-        // not yet connected — the name being resolved, the socket being
-        // opened — which reads the flag as soon as its socket exists, and a
-        // logon already written, which is let finish so that it can be told
-        // goodbye.
-        let mut left_running = false;
-        for (trading, worker) in self.reconnect_workers.drain(..) {
-            if trading {
-                let bound = Instant::now() + WORKER_STOP_BOUND;
-                while !worker.is_finished() && Instant::now() < bound {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                if worker.is_finished() {
-                    let _ = worker.join();
-                } else {
-                    log::warn!(
-                        "the trading connection's recovery did not stop within {:?}; a \
-                         session it opens from here is told goodbye as it lands",
-                        WORKER_STOP_BOUND,
-                    );
-                    left_running = true;
-                }
+        // A session is not closed while a recovery can still open one.
+        // Name resolution and a user's code provider finish before their
+        // worker can observe the stop; those waits have no engine bound.
+        for (_, worker) in self.reconnect_workers.drain(..) {
+            if let Err(payload) = worker.join() {
+                std::mem::forget(payload);
             }
         }
-        if let Some(rx) = self.pending_ccp_reconnect.take() {
-            match rx.try_recv() {
-                Ok(Ok(conn)) => {
-                    log::warn!("a trading session opened after the stop — saying so before it goes");
-                    let mut landed_too_late = Some(conn);
-                    self.ccp.send_logout(&mut landed_too_late, &mut self.hb);
-                }
-                // Still on its way. A worker still dialling ends as taken
-                // back; one past the logon lands a session, which is waited for
-                // off this thread and told goodbye there. Dropped here, it
-                // would go in silence, and the venue has to time it out.
-                Err(std::sync::mpsc::TryRecvError::Empty) if left_running => {
-                    let _ = std::thread::Builder::new()
-                        .name("ccp-reconnect-goodbye".into())
-                        .spawn(move || {
-                            if let Ok(Ok(mut conn)) = rx.recv() {
-                                log::warn!("a trading session opened after the stop — saying so before it goes");
-                                let _ = ccp::say_goodbye(&mut conn);
-                            }
-                        });
-                }
-                _ => {}
+        if let Some(rx) = self.pending_ccp_reconnect.take()
+            && let Ok(Ok(conn)) = rx.try_recv()
+        {
+            let mut landed_too_late = Some(conn);
+            if self.ccp.send_logout(&mut landed_too_late, &mut self.hb) {
+                self.shared.logout_sent.store(true, Ordering::Release);
             }
         }
         self.pending_farm_reconnect = None;
@@ -1304,29 +1115,53 @@ impl HotLoop {
     }
 
     fn poll_control_commands(&mut self) {
+        let mut left = COMMANDS_PER_LAP;
+        order_builder::drain_and_send_orders(
+            &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
+            self.ccp.disconnected, &self.shared,
+            self.ccp.recovery_sweep_at.is_some(), &self.event_tx, &mut left,
+        );
+        self.work_through_orders(&mut left);
+        self.asks.answer_what_is_ready(&self.shared, &mut left);
+        self.ccp.send_next_matching_symbols(&mut self.ccp_conn, &mut self.hb, &self.shared, &mut left);
+        self.ccp.send_next_option_params(&mut self.ccp_conn, &mut self.hb, &self.shared, &mut left);
+        self.ccp.sweep_completed_orders_request(&mut self.ccp_conn, &mut self.hb, &self.shared, &mut left);
+        self.secdef.send_next(&mut self.secdef_conn, &mut self.hb, &self.shared, &mut left);
+        self.hmds.send_next_scanner_params(&mut self.hmds_conn, &mut self.hb, &self.shared, &mut left);
         let rx = match self.control_rx.as_ref() {
             Some(rx) => rx,
             None => return,
         };
 
+        // At most a lap's worth, so a caller that never stops admitting
+        // cannot hold the lap and every lap still reads the sockets. Requests
+        // held for want of a contract id come first, within the same number:
+        // they were asked for before anything still in the channel.
         self.cmd_buf.clear();
-        self.cmd_buf.extend(rx.try_iter());
+        let released = self.ccp.resolved_named.len().min(left);
+        self.cmd_buf.extend(self.ccp.resolved_named.drain(..released));
+        let mut sender_dropped = false;
+        while self.cmd_buf.len() < left {
+            match rx.try_recv() {
+                Ok(cmd) => {
+                    self.cmd_buf.push(cmd);
+                    self.commands_taken += 1;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    sender_dropped = true;
+                    break;
+                }
+            }
+        }
+        // Between the take and the lap's publication, a reader of the backlog
+        // still counts what was just taken.
+        #[cfg(test)]
+        crate::bridge::hooks::run(&crate::bridge::hooks::AFTER_THE_TAKE);
 
-        // try_iter() stops on both Empty and Disconnected — do one extra
-        // try_recv() to distinguish.  If a straggler command arrived between
-        // try_iter() finishing and this call, push it into the batch.
-        let sender_dropped = match rx.try_recv() {
-            Ok(cmd)  => { self.cmd_buf.push(cmd); false }
-            Err(std::sync::mpsc::TryRecvError::Empty)        => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
-        };
-
-        // Drain the buffer first, so the loop body can mutably borrow self.
-        // Requests held for want of a contract id come first: they were asked
-        // for before anything still in the buffer.
-        let mut cmds: Vec<ControlCommand> = std::mem::take(&mut self.ccp.resolved_named);
-        cmds.append(&mut self.cmd_buf);
-        for cmd in cmds {
+        // Taken out of the buffer, so the loop body can mutably borrow self.
+        let mut cmds = std::mem::take(&mut self.cmd_buf);
+        for cmd in cmds.drain(..) {
             // Nothing is carried out after the stop. A caller on another
             // thread can have a subscription or an order in the same batch as
             // the disconnect, and by then the stop has already withdrawn every
@@ -1338,12 +1173,42 @@ impl HotLoop {
             // reply channel goes with the command, and the caller is told the
             // engine stopped before it answered. An order is not — it was
             // told it was accepted and given an id, and nothing is waiting —
-            // so it is put where the stop's own sweep looks and refused below
-            // rather than dropped and never spoken of again.
+            // so it is refused rather than dropped and never spoken of again.
             if !self.running {
-                if let ControlCommand::Order(req) = cmd {
-                    self.context.pending_orders.push(req);
+                match intake::order_command(cmd) {
+                    Ok(order) => self.refuse_order_command(&order, "the engine stopped"),
+                    // Put where the stop's own sweep looks, and refused below.
+                    Err(ControlCommand::Order(req)) => self.context.pending_orders.push(req),
+                    Err(_) => {}
                 }
+                continue;
+            }
+            // An order a caller placed, withdrew or exercised, which the
+            // engine carries from here to the wire — and refuses once the
+            // logout has been written, since nothing it sends then is heard.
+            let cmd = match intake::order_command(cmd) {
+                Ok(order) if self.logout_written => {
+                    self.refuse_order_command(&order, "the session had been logged out");
+                    continue;
+                }
+                Ok(order) => {
+                    self.take_order_command(order);
+                    continue;
+                }
+                Err(cmd) => cmd,
+            };
+            // A number already held is checked before another lookup can
+            // claim it. A calculation may share its existing quote watch.
+            if let ControlCommand::Subscribe { req_id, .. } = &cmd
+                && (self.md_requests.get(req_id).is_some_and(|held| {
+                        !matches!(&cmd, ControlCommand::Subscribe { contract, calculation: Some(_), .. }
+                            if contract.con_id != 0 && held.con_id == contract.con_id)
+                    })
+                    || self.ccp.pending_named.iter().any(|(_, waiting, _)| {
+                        matches!(waiting, ControlCommand::Subscribe { req_id: held, .. } if held == req_id)
+                    }))
+            {
+                self.take_subscription(cmd);
                 continue;
             }
             // A caller who passed the contract it wrote down rather than the
@@ -1364,18 +1229,21 @@ impl HotLoop {
                 );
                 log::warn!("{told}");
                 match &cmd {
-                    ControlCommand::Subscribe { reply_tx, .. } => {
-                        if let Some(tx) = reply_tx {
-                            let _ = tx.try_send(Err(told.into()));
-                        }
+                    ControlCommand::Subscribe { req_id, .. } => {
+                        self.shared.push_refused(
+                            crate::types::model::ErrorOrigin::Request { id: *req_id, ends: true },
+                            i64::from(crate::error_codes::Refusal::VALIDATION),
+                            told,
+                        );
                     }
-                    ControlCommand::SubscribeTbt { reply_tx, .. }
-                    | ControlCommand::SubscribeNews { reply_tx, .. }
-                    | ControlCommand::RegisterInstrument { reply_tx, .. } => {
-                        if let Some(tx) = reply_tx {
-                            let _ = tx.try_send(Err(told));
-                        }
+                    ControlCommand::SubscribeTbt { req_id, .. } => {
+                        push_hmds_refusal(
+                            &self.shared, (*req_id).max(0) as u32,
+                            crate::error_codes::Refusal::VALIDATION, told, false,
+                        );
                     }
+                    // Nobody waits on these, and the log says it.
+                    ControlCommand::SubscribeNews { .. } | ControlCommand::RegisterInstrument { .. } => {}
                     ControlCommand::FetchContractDetails { req_id, .. } => {
                         self.shared.reference.push_historical_error(
                             *req_id, crate::error_codes::Refusal::VALIDATION, told,
@@ -1396,396 +1264,20 @@ impl HotLoop {
                 continue;
             }
             match cmd {
-                ControlCommand::Subscribe { contract, filters, mode_9887, regulatory_snapshot, generic_ticks, reply_tx, issued, } => {
-                    self.heard_up_to = self.heard_up_to.max(issued);
-                    let ContractRef { con_id, symbol, exchange, sec_type, currency, last_trade_date, strike, right, multiplier } = contract;
-                    // The strategies series is asked for the way every other is
-                    // and the scan is what tells the venue what to look for, so
-                    // it is handed to the farm before the subscription goes.
-                    if con_id > 0
-                        && let Some(scan) = self.shared.reference.spread_scan(con_id as u32)
-                    {
-                        self.farm.note_spread_scan(con_id, scan);
-                    }
-                    // What tells two conId-less contracts on one underlying apart.
-                    // Built by the same function an order uses, or the two
-                    // describe one contract differently: the slot a
-                    // subscription took would not be found again by an order,
-                    // which would take a second one — with no quote on it, and
-                    // stating the wrong currency because the slot it did take
-                    // never recorded one.
-                    let option_key = crate::types::model::contract_identity(
-                        &last_trade_date, strike, &right, &multiplier, &currency,
-                    );
-                    // Registered without answering yet: a contract with no conId
-                    // has no client-side identity, so whether this is a duplicate
-                    // can only be settled here, against the slot the engine just
-                    // resolved. Refusing after the subscribe had already gone out
-                    // left the caller told it failed while a live subscription
-                    // bound the second contract's tag and minTick onto the first,
-                    // with no id to cancel it by.
-                    // And what narrows the lookup that will name it. None of
-                    // these says what the contract is, so none of them belongs
-                    // in the identity — and each of them decides which listing
-                    // the venue answers with, so two descriptions the venue
-                    // would answer differently are not one contract. Left out,
-                    // the second description followed the first one's
-                    // subscription and was served the other listing's prices
-                    // under its own number.
-                    let narrowing = format!(
-                        "{}|{}|{}|{}|{}|{}",
-                        filters.primary_exchange, filters.local_symbol, filters.trading_class,
-                        filters.sec_id_type, filters.sec_id, filters.issuer_id,
-                    );
-                    let narrowing = if narrowing.chars().all(|c| c == '|') { String::new() } else { narrowing };
-                    let registered = self.register_contract(con_id, symbol.clone(), &sec_type, &exchange, &option_key, &narrowing, &None);
-                    // Held against the slot before the subscription goes out,
-                    // so the frame that carries them is built from them and the
-                    // rebuild after a reconnect asks for them again.
-                    //
-                    // Written against the slot only where this caller is the
-                    // one the subscription goes out for. A caller landing on a
-                    // slot another caller is already being served on is a
-                    // joiner: its list is added to what the slot asks for as
-                    // the series are asked for, in the arm below, because
-                    // written here it would leave nothing new to ask for —
-                    // and written over theirs it would leave the venue serving
-                    // series the rebuild no longer asks for.
-                    // And never from a chargeable snapshot: the message that
-                    // carries one states no extra series at all, so a series
-                    // named beside it went out on nothing — and stayed on the
-                    // list the rebuild after a reconnect reads, which asked
-                    // the venue for it as part of a stream that never named it.
-                    if !generic_ticks.is_empty()
-                        && !regulatory_snapshot
-                        && !self.farm.holds_a_stream(registered)
-                    {
-                        let held = self.farm.asked_generic_ticks.entry(registered).or_default();
-                        for tick in &generic_ticks {
-                            if !held.contains(tick) {
-                                held.push(*tick);
-                            }
-                        }
-                    }
-                    match registered {
-                        // Already subscribed, so nothing goes to the venue
-                        // again: one contract holds one subscription on the
-                        // wire, and the caller watches the one that is up, so
-                        // two parts of one program may watch one contract.
-                        //
-                        // Except the chargeable snapshot, which is a request of
-                        // its own and not a share of somebody's stream. Handed
-                        // the stream instead it was never sent, never billed
-                        // and never refused for want of the entitlement, and
-                        // the caller heard the snapshot end off ticks it did
-                        // not ask for — a paid answer that reached nobody.
-                        //
-                        // And what is followed is a stream. A snapshot holds
-                        // the slot but is withdrawn as soon as it completes,
-                        // so a subscribe pointed at one was never sent and the
-                        // withdrawal took the record out from under it.
-                        id if self.farm.holds_a_stream(id) && !regulatory_snapshot => {
-                            // The answer first, because nothing is done for a
-                            // caller that has stopped waiting: its wait is
-                            // bounded and this loop is not, and it reports a
-                            // refusal and keeps no record of the slot. Asked
-                            // for anyway, the series it named were served for
-                            // the life of a subscription the caller has no
-                            // part in, with nothing able to withdraw them.
-                            if let Some(tx) = &reply_tx
-                                && matches!(
-                                    tx.try_send(Ok(id)),
-                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)),
-                                )
-                            {
-                                continue;
-                            }
-                            // This caller is asking for the contract too, so
-                            // the subscription it is served off is the one it
-                            // asked for: a withdrawal decided before it asked
-                            // is not about that subscription.
-                            self.farm.note_subscription_asked_on(id, issued);
-                            self.farm.note_series_asked_on(id, &generic_ticks, issued);
-                            // The joiner's own series, where the stream it is
-                            // joining was not asked for them. Nothing else
-                            // sends them: the subscription is already up, so
-                            // this is the one chance to ask.
-                            if !generic_ticks.is_empty() {
-                                self.farm.also_ask_for_series(
-                                    id,
-                                    con_id,
-                                    &generic_ticks,
-                                    &self.context,
-                                    &mut self.farm_conn,
-                                    &mut self.hb,
-                                );
-                            }
-                        }
-                        id => {
-                            self.farm.note_subscription_asked_on(id, issued);
-                            // The same rule as the definition path beside it:
-                            // a request that begins the stream owns the
-                            // occupancy, and one that joins what is already
-                            // there did not begin it and must not rename it.
-                            if self.farm.holds_a_stream(id) {
-                                self.farm.note_subscription_began_under(id, issued);
-                            } else {
-                                self.farm.note_it_changed_hands(id, issued);
-                            }
-                            self.farm.note_series_asked_on(id, &generic_ticks, issued);
-                            // The venue states it on the logon. Count streams
-                            // waiting on a definition or a reconnect too: they
-                            // were admitted already and still need their line.
-                            let allowance = self.ccp_conn.as_ref().map_or(40, |c| c.market_data_allowance);
-                            let subscribed = self.context.market.active_instruments().filter(|(at, _)| {
-                                *at != id && (self.farm.holds_a_stream(*at)
-                                    || self.ccp.pending_md_subscribe.iter().any(|(_, p, _)| {
-                                        p.instrument == *at && !p.regulatory_snapshot
-                                    })
-                                    || self.ccp.resolved_md_subscribe.iter().any(|(_, p)| {
-                                        p.instrument == *at && !p.regulatory_snapshot
-                                    }))
-                            }).count();
-                            if !regulatory_snapshot && subscribed >= allowance {
-                                log::warn!(
-                                    "subscription refused: {subscribed} of {allowance} quote \
-                                     lines are in use, which is what the venue allows this session",
-                                );
-                                if let Some(tx) = &reply_tx {
-                                    let _ = tx.try_send(Err(crate::error_codes::Refusal::stated(
-                                        101, "Max number of tickers has been reached",
-                                    )));
-                                }
-                                self.try_reclaim_instrument(id);
-                                continue;
-                            }
-                            // A caller that has stopped waiting gets no
-                            // subscription. Its wait is bounded and this loop
-                            // is not — a redial or a lookup ahead of this
-                            // command outlasts it — and it reports a refusal
-                            // and keeps no record of the slot. Sent anyway,
-                            // the venue streamed a contract for the rest of
-                            // the session that nothing could name: the
-                            // withdrawal is refused for want of a
-                            // subscription, the slot is never given back, and
-                            // only the caller happening to ask for the same
-                            // contract again recovers either.
-                            if let Some(tx) = &reply_tx
-                                && matches!(
-                                    tx.try_send(Ok(id)),
-                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)),
-                                )
-                            {
-                                self.try_reclaim_instrument(id);
-                                continue;
-                            }
-                            // What the contract is, as the caller stated it
-                            // or as the venue's own definition has it.
-                            let (known_sec_type, _) =
-                                self.described_as(con_id, &sec_type, &exchange);
-                            if con_id == 0 || known_sec_type.is_empty() {
-                                // The venue answers a subscription only when it
-                                // is named by contract id, and says nothing at
-                                // all — no tick and no refusal — to one named
-                                // by symbol. Ask it to name the contract first.
-                                //
-                                // And one named by id alone is asked about for
-                                // the reason beside it: nothing here states what
-                                // the contract is, and the encoder describes
-                                // every such contract as a smart-routed stock,
-                                // which is right for a stock and wrong for a
-                                // future, an option or a currency pair. Refused
-                                // instead, an id was the one thing a caller
-                                // could name a contract by and be turned down
-                                // for, though naming it by id is what the venue
-                                // answers a definition for. The definition says
-                                // what it is and the subscription goes out on
-                                // that; a contract the venue names nothing for
-                                // is given up on where every other unanswered
-                                // lookup is.
-                                self.ccp.resolve_for_subscribe(
-                                    crate::engine::hot_loop::ccp::PendingSubscribe {
-                                        instrument: id,
-                                        issued,
-                                        con_id,
-                                        symbol: symbol.clone(),
-                                        exchange: exchange.clone(),
-                                        sec_type: sec_type.clone(),
-                                        currency: currency.clone(),
-                                        filters: filters.clone(),
-                                        mode_9887,
-                                        regulatory_snapshot,
-                                    },
-                                    &mut self.ccp_conn,
-                                    &mut self.hb,
-                                    &self.shared,
-                                );
-                            } else if regulatory_snapshot && self.farm.disconnected {
-                                // As on the resolved path: a snapshot is not
-                                // recorded for replay, so one with no
-                                // transport to carry it is simply lost — and
-                                // said only where no stream on the contract
-                                // would hear it as its own refusal.
-                                if !self.farm.holds_a_stream(id) {
-                                    self.shared.market.push_subscription_failure(
-                                        id,
-                                        "the quote feed was down when this snapshot was \
-                                         asked for, so it was never sent: ask for it \
-                                         again once the feed is back"
-                                            .to_string(),
-                                    );
-                                }
-                            } else {
-                                let (sec_type, exchange) =
-                                    self.described_as(con_id, &sec_type, &exchange);
-                                self.farm.send_mktdata_subscribe(
-                                    con_id, &symbol, &exchange, &sec_type,
-                                    &last_trade_date, strike, &right, &multiplier,
-                                    id, mode_9887, regulatory_snapshot,
-                                    &mut self.farm_conn,
-                                    &mut self.hb,
-                                );
-                            }
-                        }
-                    }
-                }
-                ControlCommand::AlsoAskForSeries {
-                    instrument, con_id, generic_ticks, took_it, issued,
-                } => {
-                    self.heard_up_to = self.heard_up_to.max(issued);
-                    // Not this subscription's caller. The caller that asked can
-                    // be gone by the time this is read, and the slot given to
-                    // another contract: asked for anyway, the series was served
-                    // to a subscription nobody had named it on, and recorded
-                    // against it so that a later withdrawal of that series was
-                    // refused.
-                    if self.farm.another_occupancy_holds_it_now(instrument, took_it, con_id) {
-                        continue;
-                    }
-                    // A caller asking for more on a contract is asking for
-                    // that contract, so the subscription it is served off is
-                    // one it asked for.
-                    self.farm.note_subscription_asked_on(instrument, issued);
-                    self.farm.note_series_asked_on(instrument, &generic_ticks, issued);
-                    self.farm.also_ask_for_series(
-                        instrument,
-                        con_id,
-                        &generic_ticks,
-                        &self.context,
-                        &mut self.farm_conn,
-                        &mut self.hb,
-                    );
-                }
-                ControlCommand::StopAskingForSeries {
-                    instrument, con_id, took_it, generic_ticks, issued,
-                } => {
-                    self.heard_up_to = self.heard_up_to.max(issued);
-                    self.farm.stop_asking_for_series(
-                        instrument,
-                        con_id,
-                        took_it,
-                        &generic_ticks,
-                        issued,
-                        &mut self.farm_conn,
-                        &mut self.hb,
-                    );
-                }
-                ControlCommand::MoveInstalled { from, into, took_it } => {
-                    // The callers are recorded as watching it now, so the hold
-                    // that kept it up for them is over.
-                    self.shared.market.note_a_move_is_read(from, into);
-                    if took_it != 0 {
-                        // And they hold it under a number of their own: what
-                        // could withdraw it before cannot any more.
-                        self.farm.note_it_changed_hands(into, took_it);
-                    } else {
-                        // Nobody arrived. The subscription held up for them is
-                        // nobody's, and goes under the number it is held by
-                        // here rather than one the client would have to guess.
-                        let held_under = self.farm.what_took_it(into);
-                        self.farm.send_mktdata_unsubscribe(
-                            into,
-                            0,
-                            held_under,
-                            &[],
-                            self.heard_up_to,
-                            false,
-                            &mut self.farm_conn,
-                            &mut self.hb,
-                        );
-                        self.try_reclaim_instrument(into);
-                    }
-                }
-                ControlCommand::Unsubscribe { instrument, con_id, took_it, series, issued, } => {
-                    self.heard_up_to = self.heard_up_to.max(issued);
-                    // A subscription this caller is still waiting on the
-                    // contract's name for. Left queued, the answer to that
-                    // lookup arrives after the caller's record here has gone
-                    // and opens the stream anyway: nothing is left that can
-                    // withdraw it, so the venue serves it and holds its slot
-                    // for the rest of the session.
-                    // The lookup this caller is waiting on and no other. A
-                    // second caller on the same description has a lookup of its
-                    // own on the same slot, and retiring that one left it told
-                    // it owned a subscription the venue would never be asked
-                    // for.
-                    let waiting_on_a_name = |p: &crate::engine::hot_loop::ccp::PendingSubscribe| {
-                        p.instrument == instrument
-                            && if took_it != 0 {
-                                p.issued == took_it
-                            } else {
-                                con_id == 0 || p.con_id == con_id || p.con_id == 0
-                            }
-                    };
-                    self.ccp.pending_md_subscribe.retain(|(_, p, _)| !waiting_on_a_name(p));
-                    self.ccp.resolved_md_subscribe.retain(|(_, p)| !waiting_on_a_name(p));
-                    let moving_in = self.shared.market.a_move_is_on_its_way_into(instrument);
-                    self.farm.send_mktdata_unsubscribe(
-                        instrument,
-                        con_id,
-                        took_it,
-                        &series,
-                        issued,
-                        moving_in,
-                        &mut self.farm_conn,
-                        &mut self.hb,
-                    );
-                    // The tags are dead with the requests that earned them, and
-                    // `try_reclaim_instrument` below only drops them when the
-                    // slot itself goes — so a pinned instrument accumulated one
-                    // per ack until the next farm drop. News is the
-                    // one reader that outlives the L1 request: ticker setup
-                    // registers into the same map and news routes on it, so a
-                    // live news subscription keeps them.
-                    //
-                    // And only where the withdrawal went. Four of them do not:
-                    // the slot has been given to another contract, its callers
-                    // were sent elsewhere, a caller is on its way onto it, or
-                    // the subscription now on it began after this withdrawal
-                    // was decided. On each the subscription stays up and the
-                    // venue goes on sending, and the tags were handed back
-                    // anyway — so every record after it named a number no
-                    // contract here held and was dropped with one line in the
-                    // log, while the caller that joined was told it was
-                    // watching. Nothing recovered it either: a slot with a
-                    // subscription on it is never reclaimed, so nothing asked
-                    // the venue again and nothing bound the number back.
-                    if !self.farm.holds_market_data(instrument)
-                        && !self.farm.news_subscriptions.iter().any(|(id, ..)| *id == instrument)
-                    {
-                        self.context.market.clear_server_tags_for(instrument);
-                    }
-                    self.try_reclaim_instrument(instrument);
-                }
-                ControlCommand::SubscribeTbt { contract, req_id, tbt_type, number_of_ticks, ignore_size, reply_tx } => {
+                // A market-data request, which the loop carries from here to
+                // the wire and keeps until its cancel.
+                subscribe @ ControlCommand::Subscribe { .. } => self.take_subscription(subscribe),
+                ControlCommand::CancelMktData { req_id } => self.withdraw_mkt_data(req_id),
+                ControlCommand::CancelCalculation { req_id } => self.withdraw_calculation(req_id),
+                ControlCommand::SubscribeTbt { contract, req_id, tbt_type, number_of_ticks, ignore_size } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
                     // A stream is asked for by the venue's id for the contract.
                     // Sent with none, the venue answers "Unknown contract"
                     // against a query nothing here has told the caller about,
                     // and the caller waits on a stream that was refused before
-                    // it began. Told here instead — the surfaces resolve a
-                    // description before it reaches this point, and this is
-                    // what catches the one that does not.
+                    // it began. A description is named before it reaches
+                    // this point, and this is what catches a request that
+                    // names nothing at all.
                     if con_id == 0 {
                         let reason = format!(
                             "a {sec_type} trade stream on {symbol} was asked for without the \
@@ -1796,11 +1288,8 @@ impl HotLoop {
                         // names no contract, so nothing was ever asked.
                         push_hmds_refusal(
                             &self.shared, req_id.max(0) as u32, crate::error_codes::Refusal::VALIDATION,
-                            reason.clone(), false,
+                            reason, false,
                         );
-                        if let Some(tx) = reply_tx.as_ref() {
-                            let _ = tx.try_send(Err(reason));
-                        }
                         continue;
                     }
                     // One stream per number, as the bar stream beside this
@@ -1810,20 +1299,17 @@ impl HotLoop {
                     // one record away, finds the other still naming that
                     // number, and returns without telling the venue anything —
                     // so the ticks go on arriving under a stream the caller
-                    // has withdrawn. The surfaces refuse this already; what
-                    // reaches here is a caller driving the channel itself.
+                    // has withdrawn.
                     if self.hmds.tbt_subscriptions.iter().any(|s| s.caller_req_id == req_id) {
                         let reason = format!(
-                            "a trade stream is already running under {req_id}; a second one                              would be answered under the same number as the first",
+                            "request {req_id} is already carrying a tick stream: withdraw it \
+                             before asking for another under the same number",
                         );
                         log::error!("{reason}");
                         push_hmds_refusal(
                             &self.shared, req_id.max(0) as u32,
-                            crate::error_codes::Refusal::VALIDATION, reason.clone(), false,
+                            crate::error_codes::DUPLICATE_TICKER_ID, reason, false,
                         );
-                        if let Some(tx) = reply_tx.as_ref() {
-                            let _ = tx.try_send(Err(reason));
-                        }
                         continue;
                     }
                     // With no data connection the stream is refused now, on
@@ -1832,14 +1318,11 @@ impl HotLoop {
                     // begin only if a reconnect re-sent it, and nothing said so.
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id.max(0) as u32, false);
-                        if let Some(tx) = reply_tx.as_ref() {
-                            let _ = tx.try_send(Err(HMDS_UNAVAILABLE.to_string()));
-                        }
                         continue;
                     }
                     // Registered with what the contract is, so the slot carries
                     // it and the subscription can state it.
-                    let id = self.register_contract(con_id, symbol, &sec_type, &exchange, "", "", &reply_tx);
+                    let id = self.register_contract(con_id, symbol, &sec_type, &exchange, "", "");
                     let mts = self.context.market.min_tick_scaled(id);
                     self.hmds.send_tbt_subscribe(
                         req_id, con_id, id, tbt_type, number_of_ticks, ignore_size,
@@ -1847,20 +1330,38 @@ impl HotLoop {
                         &mut self.hmds_conn, &mut self.hb,
                     );
                 }
-                ControlCommand::UnsubscribeTbt { req_id, instrument } => {
-                    // As above: records already queued under this request are
-                    // this request's, and a stream reopened under the same
-                    // number before the next drain would be served them.
+                ControlCommand::UnsubscribeTbt { req_id } => {
+                    // A stream still being named is forgotten with its lookup.
+                    if u32::try_from(req_id).is_ok_and(|rid| self.ccp.withdraw_named(rid, |cmd| matches!(cmd, ControlCommand::SubscribeTbt { .. }))) {
+                        continue;
+                    }
+                    // The loop took the stream before its cancel, so it knows
+                    // whether there is one: a caller withdrawing a stream this
+                    // session does not hold branches on being told so.
+                    let Some(instrument) = self.hmds.tbt_subscriptions.iter()
+                        .find(|s| s.caller_req_id == req_id)
+                        .map(|s| s.instrument)
+                    else {
+                        self.shared.push_refused(
+                            crate::types::model::ErrorOrigin::Request { id: req_id, ends: true },
+                            i64::from(crate::error_codes::NO_SUCH_SUBSCRIPTION),
+                            format!("no tick stream is held under request {req_id}"),
+                        );
+                        continue;
+                    };
+                    // Records already queued under this request are this
+                    // request's, and a stream reopened under the same number
+                    // before the next drain would be served them.
                     self.shared.market.purge_tbt_for(req_id);
                     self.hmds.send_tbt_unsubscribe(req_id, instrument, &mut self.hmds_conn, &mut self.hb);
                     self.try_reclaim_instrument(instrument);
                 }
-                ControlCommand::SubscribeNews { con_id, symbol, sec_type, providers, reply_tx } => {
+                ControlCommand::SubscribeNews { con_id, symbol, sec_type, providers } => {
                     // The command carries no exchange. Given the security
                     // type in that slot instead, it was recorded as where the
                     // contract trades, and every order on the contract went
                     // out routed to a destination of that name.
-                    let id = self.register_contract(con_id, symbol, &sec_type, "", "", "", &reply_tx);
+                    let id = self.register_contract(con_id, symbol, &sec_type, "", "", "");
                     // Allocate req_id from farm's counter (shared ID space)
                     let req_id = self.farm.next_md_req_id;
                     self.farm.next_md_req_id += 1;
@@ -1910,9 +1411,16 @@ impl HotLoop {
                 ControlCommand::Order(req) => {
                     self.context.pending_orders.push(req);
                 }
-                ControlCommand::RegisterInstrument { contract, identity, reply_tx } => {
+                // Taken by the order intake above.
+                ControlCommand::Place(_)
+                | ControlCommand::CancelOrder { .. }
+                | ControlCommand::CancelOrderByPermId { .. }
+                | ControlCommand::GlobalCancel { .. }
+                | ControlCommand::Exercise(_)
+                | ControlCommand::Bracket(_) => {}
+                ControlCommand::RegisterInstrument { contract, identity } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
-                    self.register_contract(con_id, symbol, &sec_type, &exchange, &identity, "", &reply_tx);
+                    self.register_contract(con_id, symbol, &sec_type, &exchange, &identity, "");
                 }
                 ControlCommand::FetchHistorical { contract, req_id, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
@@ -2013,11 +1521,19 @@ impl HotLoop {
                     // space. Counted as held, a withdrawal naming no historical
                     // query was not refused, and then took the stream with it
                     // in silence.
+                    //
+                    // A trading schedule is asked for under a number of its
+                    // own too, and the reference client withdraws it with this
+                    // call: its entry goes and its late answer matches nothing.
                     let held = self.hmds.pending_historical.iter().any(|(_, rid)| *rid == req_id)
                         || self.hmds.held.iter().any(|a| a.req_id == req_id)
                         || self.hmds.keep_up_to_date_reqs.contains(&req_id)
+                        || self.hmds.pending_schedule.iter().any(|(_, rid, _)| *rid == req_id)
                         || self.ccp.pending_named.iter()
-                            .any(|(_, cmd, _)| ccp::request_id(cmd) == Some(req_id));
+                            .any(|(_, cmd, _)| ccp::request_id(cmd) == Some(req_id)
+                                && matches!(cmd, ControlCommand::FetchHistorical { .. } | ControlCommand::FetchHistoricalSchedule { .. }))
+                        || self.ccp.resolved_named.iter().any(|cmd| ccp::request_id(cmd) == Some(req_id)
+                            && matches!(cmd, ControlCommand::FetchHistorical { .. } | ControlCommand::FetchHistoricalSchedule { .. }));
                     if !held {
                         push_hmds_refusal(
                             &self.shared, req_id,
@@ -2026,7 +1542,7 @@ impl HotLoop {
                             false,
                         );
                     }
-                    self.ccp.withdraw_named(req_id);
+                    self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchHistorical { .. } | ControlCommand::FetchHistoricalSchedule { .. }));
                     // What the venue already sent and nobody has read yet
                     // goes with the request. Left queued, the next request
                     // under this number is answered with this one's.
@@ -2048,15 +1564,13 @@ impl HotLoop {
                     // finds, and it goes on sending.
                     if self.hmds.keep_up_to_date_reqs.remove(&req_id) {
                         self.shared.market.purge_real_time_bars(req_id);
-                        let rtbar_query: Option<String> = self.hmds.rtbar_subs.iter()
+                        let rtbar_query = self.hmds.rtbar_subs.iter()
                             .find(|(_, rid, ..)| *rid == req_id)
-                            .map(|(qid, _, ticker_id, ..)| {
-                                ticker_id.map(|t| t.to_string()).unwrap_or_else(|| qid.clone())
-                            });
+                            .map(|(qid, _, ticker_id, ..)| (qid.clone(), *ticker_id));
                         self.hmds.rtbar_subs.retain(|(_, rid, ..)| *rid != req_id);
                         self.hmds.rtbar_resub.retain(|r| r.req_id != req_id);
-                        if let Some(qid) = rtbar_query {
-                            self.hmds.send_historical_cancel(&qid, &mut self.hmds_conn, &mut self.hb);
+                        if let Some((qid, ticker_id)) = rtbar_query {
+                            self.hmds.withdraw_bar_stream(qid, ticker_id, &mut self.hmds_conn, &mut self.hb);
                         }
                         self.hmds.forming_bars.retain(|f| f.req_id != req_id);
                     }
@@ -2070,14 +1584,27 @@ impl HotLoop {
                         let (query_id, _) = self.hmds.pending_historical.remove(pos);
                         self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
                     }
-                    // The held pages and their actions query go together.
-                    // The caller's number may also name a standalone actions
-                    // request, so only the query this series sent is withdrawn.
-                    if let Some(pos) = self.hmds.held.iter().position(|a| a.req_id == req_id) {
-                        let held = self.hmds.held.remove(pos);
-                        if let Some(query_id) = held.actions_query {
-                            self.hmds.send_adjustments_query_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
-                        }
+                    if let Some(pos) = self.hmds.pending_schedule.iter().position(|(_, rid, _)| *rid == req_id) {
+                        let (query_id, _, _) = self.hmds.pending_schedule.remove(pos);
+                        self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
+                    }
+                    self.shared.reference.purge_historical_schedule_for(req_id);
+                    // The request's held pages go with the withdrawal, and so
+                    // does the actions query an adjusted one has out — or the
+                    // pages are left for the life of the session and the
+                    // actions query keeps being served.
+                    //
+                    // The query its own series sent, named by the id it went
+                    // out under. The caller's number is shared with a
+                    // standalone request for a contract's actions, which the
+                    // caller withdraws with a call of its own: named by the
+                    // number, this took whichever query under it was oldest,
+                    // and a reused number lost its standalone answer while the
+                    // series' own query went on being served.
+                    if let Some(pos) = self.hmds.held.iter().position(|a| a.req_id == req_id)
+                        && let Some(query_id) = self.hmds.held.remove(pos).actions_query
+                    {
+                        self.hmds.send_adjustments_cancel_of(&query_id, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::FetchHeadTimestamp { contract, req_id, what_to_show, use_rth, include_expired, .. } => {
@@ -2097,7 +1624,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelHeadTimestamp { req_id } => {
-                    let parked = self.ccp.withdraw_named(req_id);
+                    let parked = self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchHeadTimestamp { .. }));
                     // As above: the answers already queued go with it.
                     self.shared.reference.purge_head_timestamp_for(req_id);
                     if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid)| *rid == req_id) {
@@ -2114,7 +1641,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
-                    self.ccp.send_matching_symbols_request(req_id, &pattern, &mut self.ccp_conn, &mut self.hb, &self.shared);
+                    self.ccp.ask_matching_symbols(req_id, &pattern, &mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::FetchCalendarMetaData { req_id } => {
                     self.secdef.send_calendar_meta_data_request(
@@ -2147,14 +1674,16 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchOptionParams { req_id, symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id } => {
-                    self.ccp.send_option_params_request(
-                        req_id, &symbol, &fut_fop_exchange, &underlying_sec_type, underlying_con_id,
+                    self.ccp.ask_option_params(
+                        ccp::QueuedChain {
+                            req_id, symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id,
+                        },
                         &mut self.ccp_conn, &mut self.hb, &self.shared,
                     );
                 }
-                ControlCommand::FetchCompletedOrders { turn } => {
-                    self.ccp.send_completed_orders_request(
-                        turn, &mut self.ccp_conn, &mut self.hb, &self.shared,
+                ControlCommand::FetchCompletedOrders { api_only } => {
+                    self.ccp.ask_completed_orders(
+                        api_only, &mut self.ccp_conn, &mut self.hb, &self.shared,
                     );
                 }
                 ControlCommand::FetchMktDepthExchanges => {
@@ -2222,6 +1751,11 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchAdjustments { req_id, con_id, sec_type, exchange, start_date, end_date } => {
+                    // Somewhere for the answer to be put, said in the step
+                    // that sends the request: a withdrawal of an earlier
+                    // request under this number was taken before it, and
+                    // lets go of that one's first.
+                    self.shared.reference.expect_adjustments(req_id);
                     if self.hmds_conn.is_none() {
                         // Nothing will answer it, so nothing is held for it.
                         self.shared.reference.stop_waiting_for_adjustments(req_id);
@@ -2263,6 +1797,8 @@ impl HotLoop {
                     self.hmds.send_news_cancel(req_id, &mut self.hmds_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::CancelCorporateActions { req_id } => {
+                    // What the request held is let go of, answered or not.
+                    self.shared.reference.stop_waiting_for_adjustments(req_id);
                     if !self.hmds.send_adjustments_cancel(req_id, &mut self.hmds_conn, &mut self.hb) {
                         push_hmds_refusal(
                             &self.shared, req_id, crate::error_codes::NO_SUCH_SUBSCRIPTION,
@@ -2279,12 +1815,13 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
+                    let parked = self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchHistogramData { .. }));
                     // As above: the answers already queued go with it.
                     self.shared.reference.purge_histogram_for(req_id);
                     if let Some(pos) = self.hmds.pending_histogram.iter().position(|(_, rid)| *rid == req_id) {
                         let (query_id, _) = self.hmds.pending_histogram.remove(pos);
                         self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
-                    } else {
+                    } else if !parked {
                         push_hmds_refusal(
                             &self.shared, req_id, crate::error_codes::NO_SUCH_SUBSCRIPTION,
                             format!("no histogram is awaited under request {req_id}"),
@@ -2361,7 +1898,7 @@ impl HotLoop {
                         );
                         continue;
                     }
-                    let parked = self.ccp.withdraw_named(req_id);
+                    let parked = self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::SubscribeRealTimeBar { .. }));
                     // What already arrived and nobody has read goes with it,
                     // or the next request under this number is served this
                     // stream's bars.
@@ -2369,8 +1906,7 @@ impl HotLoop {
                     self.hmds.rtbar_resub.retain(|r| r.req_id != req_id);
                     if let Some(pos) = self.hmds.rtbar_subs.iter().position(|(_, rid, ..)| *rid == req_id) {
                         let (query_id, _, ticker_id, ..) = self.hmds.rtbar_subs.remove(pos);
-                        let cancel_id = ticker_id.map(|t| t.to_string()).unwrap_or(query_id);
-                        self.hmds.send_historical_cancel(&cancel_id, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.withdraw_bar_stream(query_id, ticker_id, &mut self.hmds_conn, &mut self.hb);
                     } else if !parked {
                         // A withdrawal that took a parked request acted, and
                         // says nothing beside it.
@@ -2410,7 +1946,7 @@ impl HotLoop {
                     );
                 }
                 ControlCommand::UnsubscribeDepth { req_id } => {
-                    self.ccp.withdraw_named(req_id);
+                    self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::SubscribeDepth { .. }));
                     self.farm.send_depth_unsubscribe(
                         req_id,
                         &mut self.farm_conn,
@@ -2420,47 +1956,66 @@ impl HotLoop {
                     // stale data
                     self.shared.market.purge_depth_updates(req_id);
                 }
-                ControlCommand::SubscribePnl { req_id, account } => {
-                    self.ccp.send_pnl_subscribe(req_id, &account, &mut self.ccp_conn, &mut self.hb);
+                ControlCommand::SubscribePnl { req_id, single, account } => {
+                    if !self.shared.portfolio_for(&account).account_download_complete() {
+                        self.ccp.send_account_refresh(&account, &mut self.ccp_conn, &mut self.hb, &self.shared);
+                    }
+                    self.ccp.send_pnl_subscribe(req_id, single, &account, &mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::RefreshAccount { account } => {
                     self.ccp.send_account_refresh(&account, &mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
+                ControlCommand::Ask(ask) => {
+                    // A subscription to the account's figures asks the venue
+                    // to state them now: it restates them on its own,
+                    // unhurried schedule otherwise.
+                    let account = match &ask {
+                        crate::types::Ask::AccountUpdates { account }
+                        | crate::types::Ask::AccountUpdatesMulti { account, .. }
+                        | crate::types::Ask::PositionsMulti { account, .. } => Some(account),
+                        _ => None,
+                    };
+                    if let Some(account) = account {
+                        let account = self.shared.account_name(account);
+                        self.ccp.send_account_refresh(&account, &mut self.ccp_conn, &mut self.hb, &self.shared);
+                    }
+                    self.asks.take(ask);
+                    self.asks.answer_new(&self.shared);
+                }
+                ControlCommand::Retire(what) => self.asks.retire(what, &self.shared),
                 ControlCommand::AdvisorConfig { req_id, command, partition, fa_data_type, document } => {
                     self.ccp.send_advisor_config(
                         req_id, command, &partition, fa_data_type, document.as_deref(),
                         &mut self.ccp_conn, &mut self.hb, &self.shared,
                     );
                 }
-                ControlCommand::CancelPnl { req_id } => {
+                ControlCommand::CancelPnl { req_id, single } => {
                     // No withdrawal message for this subscription has been
                     // observed on the wire, so none is sent. Updates continue
                     // until the session ends, and a reconnect no longer renews
                     // the subscription. Logged so the caller learns this from
                     // the log rather than from continuing updates.
-                    self.ccp.withdraw_pnl_subscription(req_id);
+                    self.ccp.withdraw_pnl_subscription(req_id, single);
                     log::warn!(
                         "P&L subscription {req_id} was asked to stop; this client sends no \
                          withdrawal for one, so the venue goes on reporting it",
                     );
                 }
                 ControlCommand::Logout => {
-                    // Orders handed over before the goodbye go out before it.
-                    // Stopping sends this and then the stop, both read in one
-                    // pass, so draining only at the stop put an accepted order
-                    // on the wire after the venue had been told the session was
-                    // ending.
-                    order_builder::drain_and_send_orders(
-                        &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
-                        self.ccp.disconnected, &self.shared,
-                        self.ccp.recovery_sweep_at.is_some(), &self.event_tx,
-                    );
-                    // Tell the venue the session is going rather than leaving it
-                    // to notice. This ends the session, so it is not part of
-                    // stopping the loop: a caller that stops the engine and keeps
-                    // its connections — reusing them for the next piece of work —
-                    // must not have the session logged out from under it.
-                    self.ccp.send_logout(&mut self.ccp_conn, &mut self.hb);
+                    // Orders handed over before the goodbye go out before it:
+                    // the finishing phase completes every order command the
+                    // loop accepted, then writes the logout. Stopping sends
+                    // this and then the stop, both read in one pass, so a
+                    // goodbye written here put an order still being named on
+                    // the wire after the venue had been told the session was
+                    // ending, or nowhere at all.
+                    //
+                    // Telling the venue the session is going ends the session,
+                    // so it is not part of stopping the loop: a caller that
+                    // stops the engine and keeps its connections — reusing them
+                    // for the next piece of work — must not have the session
+                    // logged out from under it.
+                    self.begin_finishing(false);
                 }
                 ControlCommand::ForceDisconnect => {
                     // What a maintenance window does, on demand. The recovery
@@ -2488,106 +2043,12 @@ impl HotLoop {
                         &mut self.farm_conn, &mut self.context, &self.event_tx, &self.shared,
                     );
                 }
-                ControlCommand::Shutdown => {
-                    // Read here, so a worker sees it while the rest of this
-                    // arm withdraws what the session holds — a subscription
-                    // apiece, and an account that carries many. Raised only
-                    // where the loop returns, a reconnect went on climbing
-                    // through all of that and could pass the last of its own
-                    // checks meanwhile, which is a session opened at the venue
-                    // after the caller asked for the one it had to end.
-                    self.cancel_recovery();
-                    // Orders handed over before the stop go out before it.
-                    // They are drained at the top of a lap and this arm runs
-                    // further down one, so an order batched with the stop was
-                    // buffered and never reached the venue — while its caller
-                    // had been told it was accepted, and given an id for it.
-                    // The buffer's own rule is that nothing is dropped from it
-                    // because a dropped order is one nobody was told about.
-                    order_builder::drain_and_send_orders(
-                        &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
-                        self.ccp.disconnected, &self.shared,
-                        self.ccp.recovery_sweep_at.is_some(), &self.event_tx,
-                    );
-                    // The account subscription this loop opened is closed with
-                    // it. Left open, each loop holds one for the life of the
-                    // connection, and the venue stops answering new ones.
-                    let account = self.account_id.clone();
-                    if !account.is_empty() {
-                        self.ccp.send_account_unsubscribe(
-                            &account, &mut self.ccp_conn, &mut self.hb,
-                        );
-                    }
-                    // Unsubscribe all active market data before stopping
-                    let instruments: Vec<InstrumentId> = self.farm.instrument_md_reqs
-                        .iter().map(|(id, _)| *id).collect();
-                    for instrument in instruments {
-                        // The session is closing, so every subscription goes
-                        // whatever it was asked for under.
-                        self.farm.send_mktdata_unsubscribe(
-                            instrument,
-                            // The session is closing, so every subscription
-                            // goes whatever contract it went out under and
-                            // whoever took it.
-                            0,
-                            0,
-                            &[],
-                            u64::MAX,
-                            false,
-                            &mut self.farm_conn,
-                            &mut self.hb,
-                        );
-                    }
-                    // Every tick stream withdrawn before stopping, each named
-                    // by the request that opened it: a contract can carry
-                    // several, and withdrawing by contract leaves the rest.
-                    let open: Vec<(i64, InstrumentId)> = self.hmds.tbt_subscriptions
-                        .iter().map(|sub| (sub.caller_req_id, sub.instrument)).collect();
-                    for (req_id, instrument) in open {
-                        self.hmds.send_tbt_unsubscribe(
-                            req_id, instrument, &mut self.hmds_conn, &mut self.hb,
-                        );
-                    }
-                    // Every book withdrawn too. A caller may stop the engine
-                    // and keep its connections for the next piece of work, and
-                    // a book left standing keeps arriving on one — under
-                    // server tags the next engine has no record of, and, once
-                    // it subscribes and the venue reuses a tag for the same
-                    // contract and venue, merged into the new caller's book.
-                    // Named the way a caller named them. `depth_subs` holds
-                    // the ids this client asked the venue under, which is what
-                    // the withdrawal resolves TO — handed those, it looks for
-                    // a caller behind a caller and finds none, and no book is
-                    // withdrawn at all.
-                    let mut books: Vec<u32> =
-                        self.farm.depth_fanout_map.iter().map(|(_, user)| *user).collect();
-                    books.sort_unstable();
-                    books.dedup();
-                    for req_id in books {
-                        self.farm.send_depth_unsubscribe(
-                            req_id, &mut self.farm_conn, &mut self.hb,
-                        );
-                    }
-                    // Unsubscribe all news subscriptions before stopping
-                    let news_instruments: Vec<InstrumentId> = self.farm.news_subscriptions
-                        .iter().map(|(id, ..)| *id).collect();
-                    for instrument in news_instruments {
-                        self.farm.send_news_unsubscribe(instrument, &mut self.farm_conn, &mut self.hb);
-                    }
-                    // And whatever the drain above could not send is said
-                    // rather than left in a buffer nothing will read again.
-                    order_builder::refuse_what_is_left(
-                        &mut self.context, &self.shared, "the engine stopped",
-                    );
-                    self.running = false;
-                    // Records the reason alongside the flag. The flag alone
-                    // does not distinguish a venue-initiated drop from a
-                    // caller-requested stop.
-                    self.shared.reference
-                        .set_session_over(retry::DisconnectReason::ByDesign.as_str());
-                    self.shared.set_connection_lost();
-                    emit(&self.event_tx, Event::Stopped);
-                }
+                ControlCommand::Shutdown => match &mut self.finishing {
+                    // Taken during the finishing phase, it only says the loop
+                    // stops once the phase is over.
+                    Some(phase) => phase.stop = true,
+                    None => self.stop(),
+                },
             }
         }
 
@@ -2596,6 +2057,9 @@ impl HotLoop {
         for (instrument, series) in self.farm.chain_series_withdrawn.drain(..) {
             self.shared.market.forget_chain_model_parameters(instrument, series);
         }
+
+        // Kept for the next lap, capacity and all.
+        self.cmd_buf = cmds;
 
         // Whatever arrived behind the stop, said rather than dropped. Nothing
         // sends the buffer again after this point in the lap, so these are
@@ -2606,24 +2070,208 @@ impl HotLoop {
             );
         }
 
-        // All senders dropped — treat as implicit shutdown.
-        if sender_dropped && self.running {
+        // All senders dropped — treat as implicit shutdown, through the same
+        // finishing phase a caller's stop runs.
+        if sender_dropped && self.running && self.finishing.as_ref().is_none_or(|phase| !phase.stop) {
             log::warn!("Control channel disconnected — shutting down hot loop");
-            // As above: what was accepted goes out before the loop stops.
-            order_builder::drain_and_send_orders(
-                &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
-                self.ccp.disconnected, &self.shared,
-                self.ccp.recovery_sweep_at.is_some(), &self.event_tx,
-            );
-            order_builder::refuse_what_is_left(
-                &mut self.context, &self.shared, "the engine stopped",
-            );
-            self.running = false;
-            self.shared.reference
-                .set_session_over(retry::DisconnectReason::ByDesign.as_str());
-            self.shared.set_connection_lost();
-            emit(&self.event_tx, Event::Stopped);
+            self.begin_finishing(true);
         }
+
+        self.finish_when_the_orders_are_done();
+
+        // The lap has taken its commands and updated its holds.
+        self.shared.publish_finished(self.commands_taken.saturating_sub(self.commands_held()));
+    }
+    /// Stop the loop: what a `Shutdown` does, once any finishing phase is
+    /// over.
+    fn stop(&mut self) {
+        // Read here, so a worker sees it while the rest of this
+        // withdraws what the session holds — a subscription
+        // apiece, and an account that carries many. Raised only
+        // where the loop returns, a reconnect went on climbing
+        // through all of that and could pass the last of its own
+        // checks meanwhile, which is a session opened at the venue
+        // after the caller asked for the one it had to end.
+        self.cancel_recovery();
+        // Orders handed over before the stop go out before it. A direct
+        // engine stop has no finishing phase in which to carry them further.
+        order_builder::drain_and_send_orders(
+            &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
+            self.ccp.disconnected, &self.shared,
+            self.ccp.recovery_sweep_at.is_some(), &self.event_tx, &mut { usize::MAX },
+        );
+        // The account subscription this loop opened is closed with
+        // it. Left open, each loop holds one for the life of the
+        // connection, and the venue stops answering new ones.
+        let account = self.account_id.clone();
+        if !account.is_empty() {
+            self.ccp.send_account_unsubscribe(
+                &account, &mut self.ccp_conn, &mut self.hb,
+            );
+        }
+        // Unsubscribe all active market data before stopping
+        let instruments: Vec<InstrumentId> = self.farm.instrument_md_reqs
+            .iter().map(|(id, _)| *id).collect();
+        for instrument in instruments {
+            // The session is closing, so every subscription goes
+            // whatever it was asked for under.
+            self.farm.send_mktdata_unsubscribe(
+                instrument,
+                // The session is closing, so every subscription
+                // goes whatever contract it went out under and
+                // whoever took it.
+                0,
+                0,
+                &[],
+                u64::MAX,
+                false,
+                &mut self.farm_conn,
+                &mut self.hb,
+            );
+        }
+        // Every tick stream withdrawn before stopping, each named
+        // by the request that opened it: a contract can carry
+        // several, and withdrawing by contract leaves the rest.
+        let open: Vec<(i64, InstrumentId)> = self.hmds.tbt_subscriptions
+            .iter().map(|sub| (sub.caller_req_id, sub.instrument)).collect();
+        for (req_id, instrument) in open {
+            self.hmds.send_tbt_unsubscribe(
+                req_id, instrument, &mut self.hmds_conn, &mut self.hb,
+            );
+        }
+        // Every book withdrawn too. A caller may stop the engine
+        // and keep its connections for the next piece of work, and
+        // a book left standing keeps arriving on one — under
+        // server tags the next engine has no record of, and, once
+        // it subscribes and the venue reuses a tag for the same
+        // contract and venue, merged into the new caller's book.
+        // Named the way a caller named them. `depth_subs` holds
+        // the ids this client asked the venue under, which is what
+        // the withdrawal resolves TO — handed those, it looks for
+        // a caller behind a caller and finds none, and no book is
+        // withdrawn at all.
+        let mut books: Vec<u32> =
+            self.farm.depth_fanout_map.iter().map(|(_, user)| *user).collect();
+        books.sort_unstable();
+        books.dedup();
+        for req_id in books {
+            self.farm.send_depth_unsubscribe(
+                req_id, &mut self.farm_conn, &mut self.hb,
+            );
+        }
+        // Unsubscribe all news subscriptions before stopping
+        let news_instruments: Vec<InstrumentId> = self.farm.news_subscriptions
+            .iter().map(|(id, ..)| *id).collect();
+        for instrument in news_instruments {
+            self.farm.send_news_unsubscribe(instrument, &mut self.farm_conn, &mut self.hb);
+        }
+        // An order command still held — a stop taken with no finishing
+        // phase before it — is refused with the stop's words, and every
+        // other held request goes with the loop, saying nothing.
+        self.refuse_held_order_commands("the engine stopped");
+        self.withdraw_the_rest();
+        // And whatever the drain above could not send is said
+        // rather than left in a buffer nothing will read again.
+        order_builder::refuse_what_is_left(
+            &mut self.context, &self.shared, "the engine stopped",
+        );
+        self.running = false;
+        // Records the reason alongside the flag. The flag alone
+        // does not distinguish a venue-initiated drop from a
+        // caller-requested stop.
+        self.shared.reference
+            .set_session_over(retry::DisconnectReason::ByDesign.as_str());
+        self.shared.set_connection_lost();
+        emit(&self.event_tx, Event::Stopped);
+    }
+
+    /// Begin the finishing phase a logout starts, or where it is already
+    /// running, say whether a stop follows it. Once the logout has been
+    /// written there is nothing left to finish, and a stop runs at once.
+    fn begin_finishing(&mut self, stop: bool) {
+        if self.logout_written {
+            if stop {
+                self.stop();
+            }
+            return;
+        }
+        // Nothing is dialled again: the session is ending, and a session a
+        // reconnect opened now would be one the caller asked to end.
+        self.cancel_recovery();
+        let phase = self.finishing.get_or_insert(Finishing { stop: false });
+        phase.stop |= stop;
+    }
+
+    /// End the finishing phase once every order command the loop accepted
+    /// has been sent or refused.
+    ///
+    /// Each completes within a bound of its own: one waiting on its
+    /// contract's name within the naming's, one waiting on the venue's naming
+    /// of the working set within that one's, and one a reconnect's settling
+    /// holds back within the time the settling is given. An order kept for a
+    /// later transmit stays kept and is never sent from here. Then every other
+    /// held request is withdrawn in silence, the logout is written, and a stop
+    /// taken during the phase runs.
+    fn finish_when_the_orders_are_done(&mut self) {
+        let Some(phase) = &self.finishing else { return };
+        let stop = phase.stop;
+        // An exercise watching for its option's standing in the money has no
+        // bound to wait within, so it is refused with the stop's words.
+        self.refuse_exercises_watching("the engine stopped");
+        // What is built and not sent has no connection to go on — the
+        // recovery that would have given it one was taken back as the phase
+        // began — or is held for a reconnect's settling, which ends on its own.
+        let unsendable = self.ccp.disconnected || self.ccp_conn.is_none();
+        if self.intake.waiting() > 0 || (!self.context.pending_orders.is_empty() && !unsendable) {
+            return;
+        }
+        self.finishing = None;
+        self.withdraw_the_rest();
+        if self.ccp.send_logout(&mut self.ccp_conn, &mut self.hb) {
+            self.shared.logout_sent.store(true, Ordering::Release);
+        }
+        self.logout_written = true;
+        if stop {
+            self.stop();
+        }
+    }
+
+    /// Withdraw every held request that is not an order's, and say nothing
+    /// for any of them: a gateway sends nothing after its client's socket has
+    /// closed, and the session's last record is each one's end.
+    ///
+    /// Only the questions are forgotten here, because only they are answered
+    /// from this side of the loop once the session is over. The requests held
+    /// for a lookup or behind an exchange in flight are answered by the loop's
+    /// own sweeps, which do not run again once it stops.
+    fn withdraw_the_rest(&mut self) {
+        self.asks.withdraw_all();
+    }
+
+    /// How many of the commands this loop has taken it still holds: each
+    /// waiting for its contract to be named, or in the order buffer, or asked
+    /// behind the session's own replay. A command taken and held nowhere is
+    /// finished: sent, refused or withdrawn.
+    fn commands_held(&self) -> u64 {
+        // A stopped loop has withdrawn its holds. Their storage lives until
+        // the loop is dropped, but no command in it is still waiting.
+        if !self.running {
+            return 0;
+        }
+        let held = self.ccp.pending_named.len()
+            + self.ccp.resolved_named.len()
+            + self.context.pending_orders.len()
+            + self.ccp.queued_matching_symbols.len()
+            + self.ccp.queued_option_params.len()
+            + self.secdef.calendar_requests_held()
+            + self.hmds.scanner_params_queued
+            + self.asks.len()
+            + self.intake.waiting()
+            + self.intake.kept_count()
+            + self.shared.market.calculations_waiting_for_model()
+            + self.held_scans.len()
+            + self.ccp.completed_orders_questions_held();
+        held as u64
     }
 
     /// Security type (tag 167) and exchange (tag 207) for a contract the
@@ -2868,7 +2516,8 @@ impl HotLoop {
 
     /// Replace the farm connection (after reconnection) and re-subscribe to all
     /// instruments.
-    pub fn reconnect_farm(&mut self, conn: Connection) {
+    pub fn reconnect_farm(&mut self, mut conn: Connection) {
+        conn.count_into(self.shared.traffic_counts());
         // A feed given up on is given up on by the engine's own recovery. This
         // is a caller handing in a transport instead, and that one is live — so
         // the refusal raised when the recovery stopped is taken back with it,
@@ -2919,7 +2568,8 @@ impl HotLoop {
     }
 
     /// Replace the auth connection (after reconnection) and reconcile order state.
-    pub fn reconnect_ccp(&mut self, conn: Connection) {
+    pub fn reconnect_ccp(&mut self, mut conn: Connection) {
+        conn.count_into(self.shared.traffic_counts());
         // Whoever held the account when this reconnect arrived, and the
         // interval the venue stated on it. Both are answers to this
         // connection's logon and belong to this connection: kept from the one
@@ -3066,6 +2716,7 @@ impl HotLoop {
     /// one; the Python surface folds only the events one dispatch drains, and
     /// a dispatch between the two announced connectivity lost a second time.
     fn halt_recovery(&mut self, reason: retry::DisconnectReason) {
+        self.shared.close_admission();
         self.cancel_recovery();
         if self.reconnect_halted.is_some() {
             return;
@@ -3097,6 +2748,16 @@ impl HotLoop {
         // would not, with nothing said. The cancellation above ends the worker;
         // this ends what it could still be believed for.
         self.stop_dialling_without_waiting();
+        // And the loop ends, as a stop ends it. A session nothing is trying to
+        // rebuild has no connection to send on: the order commands it holds
+        // and what is left in the order buffer are refused as a stop refuses
+        // them, every other held request is withdrawn with the loop in
+        // silence, and the session's last record follows.
+        self.refuse_held_order_commands("the engine stopped");
+        self.withdraw_the_rest();
+        order_builder::refuse_what_is_left(&mut self.context, &self.shared, "the engine stopped");
+        self.finishing = None;
+        self.running = false;
     }
 
     /// Take back whatever recovery is still in flight, without waiting on it.
@@ -3449,18 +3110,22 @@ impl HotLoop {
 
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let cancel = Arc::clone(&self.reconnect_cancel);
+        let traffic = Arc::clone(self.shared.traffic_counts());
         let worker = std::thread::Builder::new()
             .name(format!("farm-reconnect-{attempt}"))
             .spawn(move || {
                 let (farm_host, farm_name) =
                     crate::gateway::reconnect_trading_route(&auth);
-                let result = connect_farm(
+                let mut result = connect_farm(
                     &auth.settings, &farm_host, &farm_name,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, Farm::MarketData, auth.trading_port,
                     Some(&cancel),
                 );
+                if let Ok(conn) = &mut result {
+                    conn.count_into(&traffic);
+                }
                 let _ = tx.send(result);
             })
             .ok();
@@ -3485,7 +3150,8 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(conn)) => {
+            Ok(Ok(mut conn)) => {
+                conn.count_into(self.shared.traffic_counts());
                 log::info!("Farm auto-reconnect succeeded (attempt {})", self.farm_reconnect_attempt);
                 // Put nowhere: the session it belongs to ended while it was
                 // still dialling, and the halt that ended it is never lifted.
@@ -3605,10 +3271,15 @@ impl HotLoop {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let cancel = Arc::clone(&self.reconnect_cancel);
         let in_flight = Arc::clone(&self.ccp_in_flight);
+        let traffic = Arc::clone(self.shared.traffic_counts());
         let worker = std::thread::Builder::new()
             .name(format!("ccp-reconnect-{attempt}"))
             .spawn(move || {
-                let _ = tx.send(reconnect_ccp(&auth, &cancel, &in_flight));
+                let mut result = reconnect_ccp(&auth, &cancel, &in_flight);
+                if let Ok(conn) = &mut result {
+                    conn.count_into(&traffic);
+                }
+                let _ = tx.send(result);
             })
             .ok();
         self.own_reconnect_worker(true, worker);
@@ -3622,7 +3293,8 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(conn)) => {
+            Ok(Ok(mut conn)) => {
+                conn.count_into(self.shared.traffic_counts());
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
                 // Put nowhere: the session it belongs to ended while it was
                 // still dialling, and the halt that ended it is never lifted.
@@ -3805,16 +3477,20 @@ impl HotLoop {
         );
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let cancel = Arc::clone(&self.reconnect_cancel);
+        let traffic = Arc::clone(self.shared.traffic_counts());
         let worker = std::thread::Builder::new()
             .name(format!("hmds-reconnect-{attempt}"))
             .spawn(move || {
-                let result = connect_farm(
+                let mut result = connect_farm(
                     &auth.settings, &auth.hmds_host, &auth.hmds_farm,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, Farm::Historical, auth.hmds_port,
                     Some(&cancel),
                 );
+                if let Ok(conn) = &mut result {
+                    conn.count_into(&traffic);
+                }
                 let _ = tx.send(result);
             })
             .ok();
@@ -3907,16 +3583,20 @@ impl HotLoop {
         );
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let cancel = Arc::clone(&self.reconnect_cancel);
+        let traffic = Arc::clone(self.shared.traffic_counts());
         let worker = std::thread::Builder::new()
             .name(format!("secdef-reconnect-{attempt}"))
             .spawn(move || {
-                let result = connect_farm(
+                let mut result = connect_farm(
                     &auth.settings, &auth.secdef_host, &auth.secdef_farm,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, Farm::SecurityDefinition, auth.secdef_port,
                     Some(&cancel),
                 );
+                if let Ok(conn) = &mut result {
+                    conn.count_into(&traffic);
+                }
                 let _ = tx.send(result);
             })
             .ok();
@@ -3931,7 +3611,8 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(conn)) => {
+            Ok(Ok(mut conn)) => {
+                conn.count_into(self.shared.traffic_counts());
                 log::info!(
                     "Security definition farm reconnected (attempt {})",
                     self.secdef_reconnect_attempt,
@@ -4018,7 +3699,8 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(conn)) => {
+            Ok(Ok(mut conn)) => {
+                conn.count_into(self.shared.traffic_counts());
                 log::info!("HMDS reconnect succeeded (attempt {})", self.hmds_reconnect_attempt);
                 // Put nowhere: the session it belongs to ended while it was
                 // still dialling, and the halt that ended it is never lifted.
@@ -4626,6 +4308,31 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
 
+    /// A market-data request under `req_id` for a contract, asking for the
+    /// quote alone.
+    pub(super) fn subscription(req_id: i64, contract: ContractRef) -> ControlCommand {
+        ControlCommand::Subscribe {
+            req_id, contract, filters: Default::default(), mode_9887: 0,
+            regulatory_snapshot: false, snapshot: false, generic_ticks: Vec::new(),
+            news: None, spread_scan: None, calculation: None,
+        }
+    }
+
+    /// What the engine said of a market-data request: the slot it is served
+    /// on, or its refusal's code and words. Nothing where it has said neither.
+    fn answer_to(
+        shared: &SharedState, req_id: i64,
+    ) -> Option<Result<InstrumentId, (i64, String)>> {
+        let mine = [crate::bridge::Owner::Request(req_id)];
+        shared.take_records(shared.next_seq(), crate::bridge::Take::Own(&mine))
+            .into_iter()
+            .find_map(|(_, record)| match record {
+                crate::bridge::Record::MarketDataTaken(taken) if taken.req_id == req_id => Some(Ok(taken.slot)),
+                crate::bridge::Record::Refused((origin, code, why)) if origin.id() == req_id => Some(Err((code, why))),
+                _ => None,
+            })
+    }
+
     /// The session is held to the interval the venue named, not the one this
     /// client proposed at logon.
     ///
@@ -4889,16 +4596,8 @@ mod tests {
 
         // An id and nothing beside it: no security type stated here, and no
         // definition cached for the engine to read one off.
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef { con_id: 893091670, ..Default::default() },
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            generic_ticks: Vec::new(),
-            reply_tx: None,
-            issued: 0,
-        })
-        .expect("the engine holds the other end");
+        tx.send(subscription(1, ContractRef { con_id: 893091670, ..Default::default() }))
+            .expect("the engine holds the other end");
         hl.poll_once();
 
         assert!(
@@ -4906,7 +4605,7 @@ mod tests {
             "a contract the venue will name was turned down for not naming itself",
         );
         assert_eq!(
-            hl.ccp.pending_md_subscribe.len(),
+            hl.ccp.pending_named.len(),
             1,
             "and the venue was asked what it is, so the subscription can go out \
              on the answer rather than on a description invented here",
@@ -4920,26 +4619,31 @@ mod tests {
             let (mut conn, _peer) = Connection::for_test();
             if allowance != 40 { conn.market_data_allowance = allowance; }
             hl.ccp_conn = Some(conn);
-            let (tx, rx) = sync_channel(4);
+            let (tx, rx) = std::sync::mpsc::sync_channel(4);
             hl.set_control_rx(rx);
             // A slot held for something other than quotes spends no line.
             hl.context.market.register(1000);
-            let subscribe = |hl: &mut HotLoop, con_id| {
-                let (reply_tx, reply_rx) = sync_channel(1);
-                tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-                    contract: ContractRef {
-                        con_id, sec_type: sec_type.into(), exchange: "SMART".into(),
-                        ..Default::default()
-                    },
-                    mode_9887: 0,
-                    regulatory_snapshot: false,
-                    generic_ticks: Vec::new(),
-                    reply_tx: Some(reply_tx),
-                    issued: 0,
-                }).unwrap();
+            let shared = hl.shared.clone();
+            let mut req_id = 0;
+            let mut subscribe = |hl: &mut HotLoop, con_id| {
+                req_id += 1;
+                tx.send(subscription(req_id, ContractRef {
+                    con_id, sec_type: sec_type.into(), exchange: "SMART".into(),
+                    ..Default::default()
+                })).unwrap();
                 hl.poll_once();
-                reply_rx.try_recv().expect("the subscriber is answered")
+                if sec_type.is_empty() {
+                    let query = hl.ccp.pending_named[0].0.to_string();
+                    let id = con_id.to_string();
+                    let frame = crate::protocol::fix::fix_build(&[
+                        (35, "d"), (320, &query), (323, "4"), (55, "STOCK"), (167, "STK"),
+                        (6008, &id), (207, "SMART"), (15, "USD"),
+                    ], 1);
+                    hl.ccp.process_ccp_message(&frame, &mut hl.ccp_conn, &mut hl.context,
+                        &shared, &None, &mut hl.hb, "DU1");
+                    hl.poll_once();
+                }
+                answer_to(&shared, req_id).expect("the subscriber is answered")
             };
             let first = subscribe(&mut hl, 1).expect("inside the allowance");
             for con_id in 2..=allowance as i64 {
@@ -4947,15 +4651,19 @@ mod tests {
             }
             let past = allowance as i64 + 1;
             let refused = subscribe(&mut hl, past).expect_err("past the allowance");
-            assert_eq!(refused.code, 101);
+            assert_eq!(refused.0, 101);
             assert!(hl.context.market.instrument_by_con_id(past).is_none(), "no slot left behind");
             assert_eq!(subscribe(&mut hl, 1).unwrap(), first, "a shared contract spends no second line");
-            assert_eq!(hl.farm.instrument_md_reqs.len(), if sec_type.is_empty() { 0 } else { allowance });
-            assert!(hl.ccp.pending_md_subscribe.iter().all(|(_, p, _)| p.con_id != past));
+            assert_eq!(hl.farm.instrument_md_reqs.len(), allowance);
+            assert!(hl.ccp.pending_named.is_empty());
             assert!(hl.is_running(), "existing subscriptions keep running");
 
             if !sec_type.is_empty() {
-                tx.send(ControlCommand::Unsubscribe { instrument: first, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).unwrap();
+                // Every request on the first contract withdrawn: the line goes back.
+                // The first request, and the one that asked for it again.
+                for held in [1, allowance as i64 + 2] {
+                    tx.send(ControlCommand::CancelMktData { req_id: held }).unwrap();
+                }
                 hl.poll_once();
                 subscribe(&mut hl, past).expect("a withdrawn subscription gives its line back");
             }
@@ -4975,7 +4683,7 @@ mod tests {
         let (mut conn, _peer) = Connection::for_test();
         conn.market_data_allowance = allowance;
         hl.ccp_conn = Some(conn);
-        let (tx, rx) = sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
         // Every slot the tables are made with, held for something other than
         // quotes, which spends no line.
@@ -4983,25 +4691,18 @@ mod tests {
             hl.context.market.register(1_000_000 + con_id);
         }
         let mut subscribe = |con_id| {
-            let (reply_tx, reply_rx) = sync_channel(1);
-            tx.send(ControlCommand::Subscribe {
-                filters: Default::default(),
-                contract: ContractRef { con_id, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
-                mode_9887: 0,
-                regulatory_snapshot: false,
-                generic_ticks: Vec::new(),
-                reply_tx: Some(reply_tx),
-                issued: 0,
-            }).unwrap();
+            tx.send(subscription(con_id, ContractRef {
+                con_id, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default()
+            })).unwrap();
             hl.poll_control_commands();
-            reply_rx.try_recv().expect("the subscriber is answered")
+            answer_to(&shared, con_id).expect("the subscriber is answered")
         };
         for con_id in 1..=allowance as i64 {
             let slot = subscribe(con_id).unwrap_or_else(|why| panic!("{con_id} is inside the allowance: {why:?}"));
             assert!(slot as usize >= crate::types::MAX_INSTRUMENTS, "{con_id} took slot {slot}");
         }
         let refused = subscribe(allowance as i64 + 1).expect_err("past the allowance");
-        assert_eq!((refused.code, refused.message.as_str()), (101, "Max number of tickers has been reached"));
+        assert_eq!((refused.0, refused.1.as_str()), (101, "Max number of tickers has been reached"));
         let last = (crate::types::MAX_INSTRUMENTS + allowance - 1) as InstrumentId;
         shared.market.push_quote(last, &crate::types::Quote { bid: 7, ..Default::default() });
         assert_eq!(shared.market.try_quote(last).map(|q| q.bid), Some(7), "a caller reads the slot past them");
@@ -5348,184 +5049,56 @@ mod tests {
         );
     }
 
-    /// A subscription still waiting to be told which contract it is for.
-    ///
-    /// The pending record carries the slot, not the contract — the contract is
-    /// what the lookup is for. Reclaim it and the slot goes to the next
-    /// registration; the lookup then comes back, adopts the first contract's
-    /// id onto the second contract's slot, and subscribes it there. The quotes
-    /// arrive under the wrong contract, priced on its tick increment.
     #[test]
-    fn a_slot_waiting_on_its_lookup_is_not_reclaimed() {
-        for stage in ["asked", "answered"] {
-            let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-            let instrument = hl.context.market.register(0);
-            let pending = crate::engine::hot_loop::ccp::PendingSubscribe {
-                issued: 0,
-                filters: Default::default(),
-                con_id: 0,
-                instrument,
-                symbol: "SPY".into(),
-                exchange: "SMART".into(),
-                sec_type: "STK".into(),
-                currency: "USD".into(),
-                mode_9887: 0, regulatory_snapshot: false,
-            };
-            match stage {
-                // Out on the wire, no answer yet.
-                "asked" => hl.ccp.pending_md_subscribe.push((1, pending, Instant::now())),
-                // Answered, not yet sent.
-                _ => hl.ccp.resolved_md_subscribe.push((756733, pending)),
-            }
-
-            hl.try_reclaim_instrument(instrument);
-
-            // The slot is reclaimed by being handed to the next contract that
-            // asks, which is exactly what must not happen here.
-            let next = hl.context.market.register(265598);
-            assert_ne!(
-                next, instrument,
-                "the slot was handed on while its lookup was {stage}",
-            );
-        }
+    fn a_subscription_waiting_for_its_name_takes_no_slot() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let request = subscription(1, ContractRef { symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() });
+        hl.ccp.hold_until_named(request, &mut None, &mut hl.hb, &hl.shared);
+        assert_eq!(hl.ccp.pending_named.len(), 1);
+        assert_eq!(hl.context.market.active_instruments().count(), 0);
+        assert!(hl.md_requests.is_empty());
     }
 
-    /// A subscription the venue names after the feed is given up on is
-    /// refused, not sent to a socket that is not there.
-    ///
-    /// This is the one path the refusal on the caller's side cannot see. The
-    /// request was accepted while the feed was alive — it had to be, the
-    /// contract was stated by description and the venue had to name it — and it
-    /// arrives back here once the naming lands, which can be after the feed has
-    /// been given up on. Sent anyway it went to nothing and was recorded for a
-    /// replay that is not coming, and the caller, told it had a subscription
-    /// when it asked, heard nothing for the rest of the session.
     #[test]
     fn a_subscription_named_after_the_feed_was_given_up_is_refused() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
-        let instrument = hl.context.market.register(0);
-        hl.ccp.resolved_md_subscribe.push((756733, crate::engine::hot_loop::ccp::PendingSubscribe {
-            issued: 0,
-            filters: Default::default(),
-            con_id: 0,
-            instrument,
-            symbol: "SPY".into(),
-            exchange: "SMART".into(),
-            sec_type: "STK".into(),
-            currency: "USD".into(),
-            mode_9887: 0, regulatory_snapshot: false,
-        }));
+        let (_tx, rx) = channel();
+        hl.set_control_rx(rx);
+        hl.ccp.resolved_named.push(subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
         hl.farm_halted = Some(retry::DisconnectReason::RecoveryExhausted);
-
-        hl.send_resolved_subscriptions();
-
-        assert!(
-            !hl.farm.holds_market_data(instrument),
-            "nothing was recorded for a replay that is not coming",
-        );
-        let told = shared.market.drain_subscription_failures();
-        assert!(
-            told.iter().any(|(at, _)| *at == instrument),
-            "and the caller is told the feed is done: {told:?}",
-        );
+        hl.poll_control_commands();
+        assert!(hl.farm.instrument_md_reqs.is_empty());
+        assert!(hl.md_requests.is_empty());
+        let told = shared.drain_refused();
+        assert_eq!(told.len(), 1);
+        assert_eq!((told[0].0, told[0].1), (1, 200));
+        assert!(told[0].2.contains("unavailable for the rest of this session"));
     }
 
-    /// A slot whose watchers followed the contract elsewhere is given back.
-    ///
-    /// Two callers name one contract, one of them by a description the venue
-    /// has to resolve. The second finds the contract already living in another
-    /// slot, and its own watchers are sent there — so nothing will ever
-    /// withdraw the slot it took, and withdrawing is the only thing that gives
-    /// one back. One went out of the table on every such collision, until the
-    /// table was full and the next subscription was refused for want of a slot.
-    ///
-    /// It is given back once the move has been read, and not before: giving a
-    /// slot back purges the moves that name it, and that move is the only thing
-    /// telling this slot's watchers where their contract went.
     #[test]
-    fn a_slot_whose_watchers_followed_the_contract_is_given_back_after_the_move() {
+    fn a_named_request_is_registered_on_the_slot_its_contract_already_holds() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
-
-        // The contract already lives in a slot of its own.
+        let (_tx, rx) = channel();
+        hl.set_control_rx(rx);
         let holds_it = hl.context.market.register(756733);
-        // And a second request, taken before the venue named its contract.
-        let followed = hl.context.market.register(0);
-        assert_ne!(holds_it, followed, "two slots to begin with");
-
-        hl.ccp.resolved_md_subscribe.push((756733, crate::engine::hot_loop::ccp::PendingSubscribe {
-            issued: 0,
-            filters: Default::default(),
-            con_id: 0,
-            instrument: followed,
-            symbol: "SPY".into(),
-            exchange: "SMART".into(),
-            sec_type: "STK".into(),
-            currency: "USD".into(),
-            mode_9887: 0, regulatory_snapshot: false,
-        }));
-        hl.send_resolved_subscriptions();
-
-        let moves = shared.market.drain_subscription_moves();
-        assert!(
-            moves.iter().any(|(from, to, _)| *from == followed && *to == holds_it),
-            "the watchers are sent to the slot the contract lives in: {moves:?}",
-        );
-        assert!(
-            !hl.slots_awaiting_their_word.is_empty(),
-            "and the slot they left is owed back rather than dropped",
-        );
-
-        // Installed, so the watchers know where to follow. Reading the move off
-        // the queue is not enough: the surface says when it has been installed,
-        // and only then is the slot they left safe to give back.
-        shared.market.note_a_move_is_read(followed, holds_it);
-        hl.send_resolved_subscriptions();
-        assert!(
-            hl.slots_awaiting_their_word.is_empty(),
-            "the slot was owed back and never given",
-        );
+        hl.ccp.resolved_named.push(subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
+        hl.poll_control_commands();
+        assert_eq!(hl.md_requests[&1].slot, holds_it);
+        assert_eq!(hl.context.market.active_instruments().count(), 1);
+        let records = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+        assert!(records.iter().any(|(_, r)| matches!(r,
+            crate::bridge::Record::MarketDataTaken(taken) if taken.slot == holds_it)));
     }
 
-    /// Every reclamation path leaves an unread move intact. Once the caller has
-    /// installed it, the deferred sweep gives the otherwise unused slot back.
-    #[test]
-    fn a_slot_with_an_unread_move_survives_reclamation() {
-        let shared = Arc::new(SharedState::new());
-        let mut hl = HotLoop::new(shared.clone(), None, None);
-        let destination = hl.context.register_instrument(756733);
-        let source = hl.context.register_instrument(0);
-        shared.market.push_subscription_move(source, destination, 0);
-        hl.context.insert_order(crate::types::Order::new(
-            7, source, crate::types::Side::Buy, crate::types::QTY_SCALE,
-            PRICE_SCALE, b'2', b'0', 0,
-        ));
-        hl.context.remove_order(7);
-        hl.reclaim_slots_no_order_holds();
-        hl.try_reclaim_instrument(source);
 
-        assert_eq!(hl.context.market.con_id(source), Some(0), "the source still holds its slot");
-        assert_eq!(hl.slots_awaiting_their_word, vec![source], "queued once for release after the move");
-        assert_eq!(shared.market.drain_subscription_moves(), vec![(source, destination, 0)]);
-        shared.market.note_a_move_is_read(source, destination);
-        hl.give_back_slots_their_word_has_left();
-        assert!(hl.slots_awaiting_their_word.is_empty());
-        assert!(hl.context.market.con_id(source).is_none());
-        assert_eq!(hl.context.register_instrument(265598), source, "the slot is reusable after the move");
-    }
 
-    /// A slot whose subscription the venue refused keeps it until the reason
-    /// has been read.
-    ///
-    /// Nothing will ever withdraw a subscription that never opened, so the
-    /// slot is asked for back in the same breath as the reason is stated — and
-    /// giving a slot back drops what is queued under it, so that the next
-    /// contract to take the slot is not handed the last one's reasons. The two
-    /// together left every caller who named a contract the venue does not know
-    /// waiting on a stream that could not arrive, told nothing, for ever.
+    /// A release leaves the reason a slot's subscription was refused where it
+    /// is: it names the occupancy it was about and stands ahead of the release,
+    /// and it is the only thing its caller will ever be told.
     #[test]
-    fn a_slot_with_an_unread_refusal_survives_reclamation() {
+    fn a_release_leaves_a_refusal_still_waiting_to_be_read() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
         let refused = hl.context.register_instrument(0);
@@ -5534,96 +5107,35 @@ mod tests {
         );
         hl.try_reclaim_instrument(refused);
 
-        assert_eq!(
-            hl.context.market.con_id(refused), Some(0),
-            "the slot is still held, so the reason under it still stands",
-        );
+        assert!(hl.context.market.con_id(refused).is_none(), "the slot is given back");
         assert_eq!(
             shared.market.drain_subscription_failures().len(), 1,
-            "and the caller is told why",
+            "and the caller is still told why",
         );
-
-        // Read, so the slot is owed back and nothing is lost by giving it.
-        hl.give_back_slots_their_word_has_left();
-        assert!(hl.slots_awaiting_their_word.is_empty());
-        assert!(hl.context.market.con_id(refused).is_none());
     }
 
-    /// A request answered by what is already up, and only where it can be.
-    ///
-    /// The chargeable snapshot is not a subscription anybody shares. It is a
-    /// request of its own, asked for under an action of its own, and it is
-    /// withdrawn as soon as it completes. Read as one, both directions were dropped: a stream skipped
-    /// because a snapshot held the slot went out never, and the snapshot's own
-    /// withdrawal then took the record it had been pointed at; a snapshot
-    /// skipped because a stream held the slot was never sent and never refused
-    /// for want of the entitlement, and the caller heard the end of it off
-    /// ticks it did not ask for.
     #[test]
     fn a_snapshot_and_a_stream_are_each_sent_over_the_other() {
-        fn a_pending(
-            instrument: InstrumentId, regulatory_snapshot: bool,
-        ) -> crate::engine::hot_loop::ccp::PendingSubscribe {
-            crate::engine::hot_loop::ccp::PendingSubscribe {
-                issued: 0,
-                filters: Default::default(),
-                con_id: 756733,
-                instrument,
-                symbol: "SPY".into(),
-                exchange: "SMART".into(),
-                sec_type: "STK".into(),
-                currency: "USD".into(),
-                mode_9887: 0,
-                regulatory_snapshot,
-            }
+        for snapshot in [false, true] {
+            let shared = Arc::new(SharedState::new());
+            let mut hl = HotLoop::new(shared, None, None);
+            let (_tx, rx) = channel();
+            hl.set_control_rx(rx);
+            let instrument = hl.context.market.register(756733);
+            hl.farm.instrument_md_reqs.push((instrument, crate::engine::hot_loop::farm::MdReqRecord {
+                con_id: 756733, sec_type: "CS".into(), mode_9887: 0,
+                entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
+                    req_id: 7, request_type: if snapshot { 442 } else { 624 }, venue: "BEST".into(),
+                }],
+            }));
+            let mut asked = subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() });
+            if let ControlCommand::Subscribe { regulatory_snapshot, .. } = &mut asked { *regulatory_snapshot = snapshot; }
+            hl.ccp.resolved_named.push(asked);
+            hl.poll_control_commands();
+            let entries = hl.farm.instrument_md_reqs.iter().find(|(id, _)| *id == instrument).unwrap();
+            assert!(entries.1.entries.len() > 1, "each request reaches the venue");
+            assert!(hl.farm.holds_a_stream(instrument));
         }
-
-        // The stream, where a snapshot already holds the slot.
-        let shared = Arc::new(SharedState::new());
-        let mut hl = HotLoop::new(shared.clone(), None, None);
-        let instrument = hl.context.market.register(756733);
-        hl.farm.instrument_md_reqs.push((instrument, crate::engine::hot_loop::farm::MdReqRecord {
-            con_id: 756733,
-            sec_type: "CS".into(),
-            mode_9887: 0,
-            entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
-                req_id: 7, request_type: 624, venue: "BEST".into(),
-            }],
-        }));
-        hl.ccp.resolved_md_subscribe.push((756733, a_pending(instrument, false)));
-
-        hl.send_resolved_subscriptions();
-
-        assert!(
-            hl.farm.holds_a_stream(instrument),
-            "the subscribe was skipped for a snapshot that is about to withdraw",
-        );
-
-        // And the snapshot, where a stream already holds it.
-        let shared = Arc::new(SharedState::new());
-        let mut hl = HotLoop::new(shared.clone(), None, None);
-        let instrument = hl.context.market.register(756733);
-        hl.farm.instrument_md_reqs.push((instrument, crate::engine::hot_loop::farm::MdReqRecord {
-            con_id: 756733,
-            sec_type: "CS".into(),
-            mode_9887: 0,
-            entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
-                req_id: 7, request_type: 442, venue: "BEST".into(),
-            }],
-        }));
-        hl.ccp.resolved_md_subscribe.push((756733, a_pending(instrument, true)));
-
-        hl.send_resolved_subscriptions();
-
-        let entries = hl.farm.instrument_md_reqs.iter()
-            .find(|(id, _)| *id == instrument)
-            .map(|(_, r)| r.entries.len())
-            .unwrap_or(0);
-        assert!(
-            entries > 1,
-            "the snapshot was answered with somebody else's stream, so nothing \
-             went to the venue at all",
-        );
     }
 
     /// A snapshot the feed cannot carry is refused, not dropped.
@@ -5647,21 +5159,13 @@ mod tests {
         // one nothing will carry this before it is forgotten.
         hl.farm.handle_disconnect_for_test();
 
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: 756733,
-                sec_type: "STK".into(),
-                exchange: "SMART".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: true,
-            generic_ticks: Vec::new(),
-            reply_tx: None,
-            issued: 0,
-        })
-        .expect("the engine holds the other end");
+        let mut snapshot = subscription(1, ContractRef {
+            con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default()
+        });
+        if let ControlCommand::Subscribe { regulatory_snapshot, .. } = &mut snapshot {
+            *regulatory_snapshot = true;
+        }
+        tx.send(snapshot).expect("the engine holds the other end");
         hl.poll_once();
 
         let told = shared.market.drain_subscription_failures();
@@ -5693,21 +5197,13 @@ mod tests {
         );
         hl.farm.handle_disconnect_for_test();
 
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: 756733,
-                sec_type: "STK".into(),
-                exchange: "SMART".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: true,
-            generic_ticks: Vec::new(),
-            reply_tx: None,
-            issued: 0,
-        })
-        .expect("the engine holds the other end");
+        let mut snapshot = subscription(1, ContractRef {
+            con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default()
+        });
+        if let ControlCommand::Subscribe { regulatory_snapshot, .. } = &mut snapshot {
+            *regulatory_snapshot = true;
+        }
+        tx.send(snapshot).expect("the engine holds the other end");
         hl.poll_once();
 
         let told = shared.market.drain_subscription_failures();
@@ -5731,7 +5227,7 @@ mod tests {
         hl.set_control_rx(rx);
 
         tx.send(ControlCommand::FetchHistorical {
-            contract: ContractRef { con_id: 756733, sec_type: "STK".into(), ..Default::default() },
+            contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
             req_id: 64,
             end_date_time: String::new(),
             duration: "1 D".into(),
@@ -5772,7 +5268,7 @@ mod tests {
         hl.set_control_rx(rx);
 
         tx.send(ControlCommand::FetchHistorical {
-            contract: ContractRef { con_id: 756733, sec_type: "STK".into(), ..Default::default() },
+            contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
             req_id: 63,
             end_date_time: String::new(),
             duration: "1 D".into(),
@@ -5808,7 +5304,7 @@ mod tests {
             (65, "", "1 week", "Multi day bar size not supported with adjusted last"),
         ] {
             tx.send(ControlCommand::FetchHistorical {
-                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), ..Default::default() },
+                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
                 req_id,
                 end_date_time: end.into(),
                 duration: "1 Y".into(),
@@ -5845,7 +5341,7 @@ mod tests {
     fn a_series_this_client_does_not_know_is_refused_on_the_control_channel() {
         for command in [
             ControlCommand::FetchHistoricalTicks {
-                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), ..Default::default() },
+                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
                 req_id: 61,
                 start_date_time: String::new(),
                 end_date_time: String::new(),
@@ -5857,7 +5353,7 @@ mod tests {
                 filters: Default::default(),
             },
             ControlCommand::SubscribeRealTimeBar {
-                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), ..Default::default() },
+                contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
                 req_id: 62,
                 what_to_show: "NOT_A_SERIES".into(),
                 use_rth: true,
@@ -5878,48 +5374,6 @@ mod tests {
                  what came back read as what the caller wanted: {told:?}",
             );
         }
-    }
-
-    /// A caller that stopped waiting is sent no subscription.
-    ///
-    /// The wait on this side's answer is bounded and this loop is not: a redial
-    /// or a lookup ahead of the command outlasts it, the caller reports a
-    /// refusal and keeps no record of the slot. Subscribed anyway, the venue
-    /// streamed a contract nothing could name for the rest of the session —
-    /// the withdrawal is refused for want of a subscription, the slot is never
-    /// given back, and only the caller happening to ask for the same contract
-    /// again recovers either.
-    #[test]
-    fn a_caller_that_stopped_waiting_is_sent_no_subscription() {
-        let shared = Arc::new(SharedState::new());
-        let mut hl = HotLoop::new(shared.clone(), None, None);
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
-        hl.set_control_rx(rx);
-
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        // The caller gave up before the answer reached it.
-        drop(reply_rx);
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: 756733,
-                sec_type: "STK".into(),
-                exchange: "SMART".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            generic_ticks: Vec::new(),
-            reply_tx: Some(reply_tx),
-            issued: 0,
-        })
-        .expect("the engine holds the other end");
-        hl.poll_once();
-
-        assert!(
-            hl.context.market.instrument_by_con_id(756733).is_none(),
-            "a slot is held for a subscription nothing on the caller's side can name",
-        );
     }
 
     /// And where the caller asks by contract id, which is the shorter road to
@@ -5945,26 +5399,14 @@ mod tests {
             }],
         }));
 
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: 756733,
-                sec_type: "STK".into(),
-                exchange: "SMART".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            generic_ticks: Vec::new(),
-            reply_tx: Some(reply_tx),
-            issued: 0,
-        })
+        tx.send(subscription(1, ContractRef {
+            con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default()
+        }))
         .expect("the engine holds the other end");
         hl.poll_once();
 
         assert_eq!(
-            reply_rx.try_recv().ok(), Some(Ok(instrument)),
+            answer_to(&shared, 1), Some(Ok(instrument)),
             "the caller is given the contract's slot",
         );
         assert!(
@@ -6413,6 +5855,34 @@ mod tests {
         );
     }
 
+    /// A loop that panics pushes the session's last record and nothing else:
+    /// no finisher runs, and a reader is told the session ended once.
+    ///
+    /// The loss pushed beside it said 1100 for a session that was over, ahead
+    /// of the close.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_loop_that_panics_pushes_only_the_last_record() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(Arc::clone(&shared), None, None);
+        let (control, control_rx) = std::sync::mpsc::sync_channel(1);
+        drop(control);
+        hl.set_control_rx(control_rx);
+        // A lap the loop cannot finish: the counter it opens with is at its
+        // last value.
+        hl.context.loop_iterations = u64::MAX;
+        hl.run_with_panic_recovery();
+        assert!(shared.engine_panicked.load(Ordering::Acquire));
+
+        let taken = shared.take_records(
+            shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false },
+        );
+        assert!(
+            matches!(taken.as_slice(), [(_, crate::bridge::Record::Closed)]),
+            "{taken:?}",
+        );
+    }
+
     /// A loop that leaves by panicking takes its reconnects back on the way,
     /// as one that returns does.
     ///
@@ -6535,46 +6005,46 @@ mod tests {
         );
     }
 
-    /// A trading recovery that has not stopped within the bound is left to
-    /// finish on its own — a logon already written is not the stop's to cut —
-    /// and a session it lands after that is told goodbye where it lands.
-    /// Dropped with the receiver instead, it was a session the venue has to
-    /// time out, and this account permits one at a time.
+    /// Every recovery ends before the last record, including a farm's and
+    /// one whose opened trading session still needs its logout.
     #[test]
-    fn a_recovery_past_the_bound_is_told_goodbye_where_it_lands() {
+    fn a_close_waits_for_every_recovery_and_logs_out_what_it_opened() {
         use std::io::Read;
-        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(Arc::clone(&shared), None, None);
+        let (conn, mut peer) = Connection::for_test();
         let (landed, landed_rx) = std::sync::mpsc::sync_channel(1);
         hl.pending_ccp_reconnect = Some(landed_rx);
-        let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
-        hl.reconnect_workers.push((true,
-            std::thread::Builder::new()
-                .name("recovery-past-the-logon".into())
-                .spawn(move || {
-                    // Waiting on the venue's answer to a logon it has written,
-                    // which closing nothing cuts short.
-                    let _ = released.recv();
-                    let _ = landed.send(Ok(conn));
-                })
-                .expect("a thread for the attempt"),
-        ));
-
-        let stopping = Instant::now();
-        hl.take_back_the_recovery_still_in_flight();
-        let waited = stopping.elapsed();
-        assert!(
-            waited >= WORKER_STOP_BOUND && waited < WORKER_STOP_BOUND + std::time::Duration::from_secs(2),
-            "the stop waited {waited:?}, not the bound",
-        );
-
-        release.send(()).expect("the attempt still running");
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let cancel = Arc::clone(&hl.reconnect_cancel);
+        hl.reconnect_workers.push((true, std::thread::spawn(move || {
+            released.recv().unwrap();
+            landed.send(Ok(conn)).unwrap();
+        })));
+        let (release_farm, released_farm) = std::sync::mpsc::channel::<()>();
+        hl.reconnect_workers.push((false, std::thread::spawn(move || {
+            released_farm.recv().unwrap();
+        })));
+        let (tx, rx) = std::sync::mpsc::channel();
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::Logout).unwrap();
+        tx.send(ControlCommand::Shutdown).unwrap();
+        let engine = std::thread::spawn(move || hl.run_with_panic_recovery());
+        while !cancel.load(Ordering::Acquire) { std::thread::yield_now(); }
+        assert!(!shared.closed_pushed());
+        release.send(()).unwrap();
         let mut buf = [0u8; 4096];
-        let n = peer.read(&mut buf).expect("the goodbye that session is owed");
-        assert!(
-            String::from_utf8_lossy(&buf[..n]).contains("35=5"),
-            "the venue is left holding a session it has to time out",
-        );
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+        // The nontrading worker is still alive, so the session has not ended.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!shared.closed_pushed());
+        assert!(!engine.is_finished());
+        release_farm.send(()).unwrap();
+        engine.join().unwrap();
+        assert!(shared.closed_pushed());
+        let n = peer.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("35=5"));
+        assert!(shared.logout_sent.load(Ordering::Acquire));
     }
 
     /// A trading session that lands after the session ended is told the
@@ -6715,6 +6185,18 @@ mod tests {
         assert_eq!(said, 1, "and once where the worker answered nothing at all");
     }
 
+    /// A halt ends the loop, as a stop does. A session nothing is trying to
+    /// rebuild answers nothing: running on after it, the loop held requests it
+    /// had no connection to send, and the session's last record never came.
+    #[test]
+    fn a_halt_ends_the_loop() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        hl.running = true;
+        hl.ccp.disconnected = true;
+        hl.halt_recovery(retry::DisconnectReason::AuthorizationFailed);
+        assert!(!hl.running, "the loop runs on after the session was given up");
+    }
+
     /// A caller who asked to do the reconnecting is told, and left with a
     /// session.
     ///
@@ -6768,6 +6250,9 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
         hl.loss_announced = true;
+        // The loss the loop announced, which is what that flag records.
+        shared.set_connection_lost();
+        assert!(shared.take_connection_lost());
         hl.farm.disconnected = true;
         hl.farm_halted = Some(retry::DisconnectReason::RecoveryExhausted);
         hl.ccp.disconnected = false;
@@ -6889,6 +6374,9 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
         hl.loss_announced = true;
+        // The loss the loop announced, which is what that flag records.
+        shared.set_connection_lost();
+        assert!(shared.take_connection_lost());
         hl.ccp.disconnected = false;
         hl.farm.disconnected = true;
         hl.report_recovery_exhausted("farm");
@@ -6912,6 +6400,9 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
         hl.loss_announced = true;
+        // The loss the loop announced, which is what that flag records.
+        shared.set_connection_lost();
+        assert!(shared.take_connection_lost());
         hl.ccp.disconnected = false;
         hl.farm.disconnected = true;
         // Nothing was cached, which is the case under test.
@@ -7362,7 +6853,7 @@ mod tests {
         });
 
         hl.reconnect_halted = Some(retry::DisconnectReason::ByDesign);
-        hl.pending_ccp_reconnect = Some(sync_channel::<io::Result<Connection>>(1).1);
+        hl.pending_ccp_reconnect = Some(std::sync::mpsc::sync_channel::<io::Result<Connection>>(1).1);
         hl.end_the_trading_connection_once_recovery_is_over();
 
         let refused = shared.orders.drain_order_inactive();
@@ -7413,6 +6904,9 @@ mod tests {
 
         // One transport back is not the connection back.
         hl.loss_announced = true;
+        // The loss the loop announced, which is what that flag records.
+        shared.set_connection_lost();
+        assert!(shared.take_connection_lost());
         hl.ccp.disconnected = true;
         hl.announce_reconnected();
         assert!(!shared.take_connection_restored(), "the other transport is still down");
@@ -7798,9 +7292,9 @@ mod tests {
     fn a_registration_naming_no_symbol_keeps_the_one_the_slot_has() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let id = hl
-            .register_contract(756733, "SPY".into(), "STK", "SMART", "", "", &None);
+            .register_contract(756733, "SPY".into(), "STK", "SMART", "", "");
         assert_eq!(
-            hl.register_contract(756733, String::new(), "", "", "", "", &None),
+            hl.register_contract(756733, String::new(), "", "", "", ""),
             id,
             "the same contract is the same slot",
         );
@@ -7811,95 +7305,38 @@ mod tests {
         );
     }
 
-    /// A lookup naming a contract another slot holds follows that slot.
-    ///
-    /// One caller names a contract by its id, another by its symbol, and the
-    /// lookup resolves the second to the first's contract. Subscribed anyway,
-    /// the venue answers with the number it is already streaming under, which
-    /// lands on the first slot and freezes it — and withdrawing the second
-    /// gives that number up, so the first caller's stream is dropped for good.
     #[test]
     fn a_lookup_naming_a_held_contract_follows_its_slot() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
-        let by_id = hl.context.market.register(756733);
-        let by_name = hl
-            .context
-            .market
-            .register_contract(0, "SPY", "STK", "SMART", "");
-        assert_ne!(by_id, by_name, "two callers, two slots, one contract");
-
-        hl.ccp.resolved_md_subscribe.push((
-            756733,
-            crate::engine::hot_loop::ccp::PendingSubscribe {
-                issued: 0,
-                filters: Default::default(),
-                instrument: by_name,
-                con_id: 0,
-                symbol: "SPY".into(),
-                exchange: "SMART".into(),
-                sec_type: "STK".into(),
-                currency: "USD".into(),
-                mode_9887: 0,
-                regulatory_snapshot: false,
-            },
-        ));
-        hl.send_resolved_subscriptions();
-
-        assert_eq!(
-            shared.market.drain_subscription_moves(),
-            vec![(by_name, by_id, 0)],
-            "the caller given the second slot is told to read the first",
-        );
+        let (_tx, rx) = channel();
+        hl.set_control_rx(rx);
+        hl.take_subscription(subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
+        let instrument = hl.md_requests[&1].slot;
+        let before = hl.farm.instrument_md_reqs.len();
+        hl.ccp.resolved_named.push(subscription(2, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
+        hl.poll_control_commands();
+        assert_eq!(hl.md_requests[&2].slot, instrument);
+        assert_eq!(hl.context.market.active_instruments().count(), 1);
+        assert_eq!(hl.farm.instrument_md_reqs.len(), before, "no second subscription");
     }
 
-    /// And the series it named follow it there.
-    ///
-    /// What a caller asks for beyond the quote is recorded against the slot it
-    /// was given, and a lookup naming a contract another slot holds gives that
-    /// slot back. Left behind, the caller was published as watching the
-    /// contract's own slot while the series it asked for went back with the
-    /// slot it left: nothing asked the venue for them, and the rebuild after a
-    /// reconnect did not either.
     #[test]
-    fn the_series_a_moved_caller_named_follow_it_to_the_slot_it_moves_to() {
-        let shared = Arc::new(SharedState::new());
-        let mut hl = HotLoop::new(shared.clone(), None, None);
-        let by_id = hl.context.market.register(756733);
-        let by_name = hl
-            .context
-            .market
-            .register_contract(0, "SPY", "STK", "SMART", "");
-
-        // The caller named by symbol asked for a series, recorded against the
-        // slot it was given.
-        hl.farm.asked_generic_ticks.insert(by_name, vec![236]);
-        hl.ccp.resolved_md_subscribe.push((
-            756733,
-            crate::engine::hot_loop::ccp::PendingSubscribe {
-                issued: 0,
-                filters: Default::default(),
-                instrument: by_name,
-                con_id: 0,
-                symbol: "SPY".into(),
-                exchange: "SMART".into(),
-                sec_type: "STK".into(),
-                currency: "USD".into(),
-                mode_9887: 0,
-                regulatory_snapshot: false,
-            },
-        ));
-        hl.send_resolved_subscriptions();
-
-        assert_eq!(
-            hl.farm.asked_generic_ticks.get(&by_id).map(Vec::as_slice),
-            Some([236u32].as_slice()),
-            "the subscription that goes out on the contract's own slot asks for it",
-        );
-        assert!(
-            !hl.farm.asked_generic_ticks.contains_key(&by_name),
-            "and nothing is left on the slot that was given back",
-        );
+    fn the_series_a_named_request_asked_for_are_kept_on_its_contracts_slot() {
+        for already_streaming in [false, true] {
+            let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+            let (_tx, rx) = channel();
+            hl.set_control_rx(rx);
+            let instrument = hl.context.market.register(756733);
+            if already_streaming { hl.take_subscription(subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() })); }
+            let mut asked = subscription(2, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() });
+            if let ControlCommand::Subscribe { generic_ticks, .. } = &mut asked { *generic_ticks = vec![236]; }
+            hl.ccp.resolved_named.push(asked);
+            hl.poll_control_commands();
+            assert_eq!(hl.md_requests[&2].slot, instrument);
+            assert!(hl.farm.asked_generic_ticks[&instrument].contains(&236));
+            assert_eq!(hl.context.market.active_instruments().count(), 1);
+        }
     }
 
     /// Asking for news on a contract does not decide where its orders go.
@@ -7919,7 +7356,6 @@ mod tests {
             symbol: "AAPL".into(),
             sec_type: "STK".into(),
             providers: String::new(),
-            reply_tx: None,
         })
         .expect("the engine is holding the other end");
         hl.poll_control_commands();
@@ -7952,21 +7388,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
 
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: PAST_THE_WIRE,
-                sec_type: "STK".into(),
-                exchange: "SMART".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            generic_ticks: Vec::new(),
-            reply_tx: Some(reply_tx),
-            issued: 0,
-        })
+        tx.send(subscription(1, ContractRef {
+            con_id: PAST_THE_WIRE, sec_type: "STK".into(), exchange: "SMART".into(),
+            ..Default::default()
+        }))
         .expect("the engine holds the other end");
         tx.send(ControlCommand::FetchHistorical {
             req_id: 91,
@@ -7993,9 +7418,9 @@ mod tests {
                 && hl.context.market.instrument_by_con_id(PAST_THE_WIRE).is_none(),
             "neither the id asked for nor the one it narrows to took a slot",
         );
-        let refused = reply_rx.try_recv().expect("the subscriber is answered");
+        let refused = answer_to(&shared, 1).expect("the subscriber is answered");
         assert!(
-            refused.is_err_and(|why| why.message.contains(&PAST_THE_WIRE.to_string())),
+            refused.is_err_and(|(_, why)| why.contains(&PAST_THE_WIRE.to_string())),
             "and is told which contract could not be asked about",
         );
         let (_, why) = shared.reference.take_error_for(91)
@@ -8025,7 +7450,6 @@ mod tests {
             symbol: "AAPL".into(),
             sec_type: "STK".into(),
             providers: String::new(),
-            reply_tx: None,
         })
         .expect("the engine holds the other end");
         hl.poll_control_commands();
@@ -8049,14 +7473,14 @@ mod tests {
     fn two_conid_less_options_on_one_underlying_do_not_share_a_slot() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let call = hl.register_contract(
-            0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None);
+            0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "");
         let put = hl.register_contract(
-            0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "", &None);
+            0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "");
         assert_ne!(call, put, "the call and the put must not resolve to one slot");
 
         // The same option still resolves to its own slot rather than a third.
         assert_eq!(
-            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None),
+            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", ""),
             call, "the same contract keeps its slot",
         );
     }
@@ -8068,14 +7492,14 @@ mod tests {
     #[test]
     fn a_slot_with_no_identity_is_adopted_by_the_first_that_states_one() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let pre = hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "", "", &None);
+        let pre = hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "", "");
         assert_eq!(
-            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", "", &None),
+            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|230|C|100", ""),
             pre, "the identity-less slot is adopted, not stranded",
         );
         // And once adopted it belongs to that contract alone.
         assert_ne!(
-            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", "", &None),
+            hl.register_contract(0, "AAPL".into(), "OPT", "SMART", "20260619|240|P|100", ""),
             pre, "a different contract does not inherit it",
         );
     }
@@ -8083,8 +7507,8 @@ mod tests {
     #[test]
     fn con_id_less_contracts_do_not_share_one_slot() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let aapl = hl.register_contract(0, "AAPL".into(), "STK", "SMART", "", "", &None);
-        let qqq = hl.register_contract(0, "QQQ".into(), "STK", "SMART", "", "", &None);
+        let aapl = hl.register_contract(0, "AAPL".into(), "STK", "SMART", "", "");
+        let qqq = hl.register_contract(0, "QQQ".into(), "STK", "SMART", "", "");
 
         assert_ne!(aapl, qqq, "two symbols must not resolve to one instrument");
         assert_eq!(hl.context.market.symbol(aapl), "AAPL");
@@ -8092,10 +7516,10 @@ mod tests {
 
         // The same contract again is the same slot, or every re-registration
         // burns another one.
-        assert_eq!(hl.register_contract(0, "AAPL".into(), "STK", "SMART", "", "", &None), aapl);
+        assert_eq!(hl.register_contract(0, "AAPL".into(), "STK", "SMART", "", ""), aapl);
         // Tick-by-tick and news register with neither secType nor exchange,
         // and must land on the slot the L1 subscription already has.
-        assert_eq!(hl.register_contract(0, "QQQ".into(), "", "", "", "", &None), qqq);
+        assert_eq!(hl.register_contract(0, "QQQ".into(), "", "", "", ""), qqq);
     }
 
     // F64::from_str accepts "nan"/"inf", so a not-available sentinel
@@ -8495,7 +7919,7 @@ mod tests {
     #[test]
     fn an_l1_unsubscribe_hands_back_its_tags_on_a_pinned_instrument() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
 
         let id = hl.context.market.register(4001);
@@ -8518,7 +7942,10 @@ mod tests {
             running: Default::default(),
         });
 
-        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).unwrap();
+        hl.md_requests.insert(1, market_requests::MdRequest {
+            slot: id, con_id: 4001, series: Vec::new(), news: None, scan: false, for_calculation: false,
+        });
+        tx.send(ControlCommand::CancelMktData { req_id: 1 }).unwrap();
         hl.poll_once();
 
         assert_eq!(
@@ -8532,28 +7959,27 @@ mod tests {
     }
 
     /// A slot that cannot be handed back is named after whoever holds it now,
-    /// not after the caller that first took it.
+    /// not after the request that first took it.
     ///
-    /// The occupancy number is what tells a withdrawal of a dead subscription
-    /// from one of the live subscription on the same slot, and a slot is
-    /// reusable, so it has to name the occupancy that is there. It was written
-    /// once and never replaced: on a slot the engine can hand back, the number
-    /// goes with the slot and the next caller gets a fresh one — but a slot
-    /// pinned by a holding, a working order, a tick-by-tick stream or news is
-    /// never handed back, so it kept the number of a caller that had already
-    /// gone.
-    ///
-    /// Every withdrawal after the first then named a number the engine did not
-    /// hold, was read as belonging to some other occupancy, and was refused
-    /// with the subscription left standing. `cancel_mkt_data` returned
-    /// success, the venue went on streaming, and nothing could ever take it
-    /// down again.
+    /// The occupancy number is what tells a reader's record of one
+    /// subscription on a reusable slot from the next. It was written once and
+    /// never replaced: a slot pinned by a holding, a working order, a
+    /// tick-by-tick stream or news is never handed back, so it kept the number
+    /// of a request that had already gone.
     #[test]
     fn a_pinned_slot_is_named_after_the_subscription_now_on_it() {
-        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = sync_channel(8);
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
         hl.set_control_rx(rx);
-        let id = hl.context.market.register(4004);
+        let aapl = || crate::types::ContractRef {
+            con_id: 4004, symbol: "AAPL".into(), sec_type: "STK".into(),
+            exchange: "SMART".into(), ..Default::default()
+        };
+        tx.send(subscription(1, aapl())).unwrap();
+        hl.poll_once();
+        let id = hl.context.market.instrument_by_con_id(4004).expect("registered");
+        let first = hl.farm.what_took_it(id);
         // What pins it: a tick-by-tick stream, which outlives the quote.
         hl.hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
             ignore_size: false,
@@ -8567,41 +7993,19 @@ mod tests {
             running: Default::default(),
         });
 
-        // The first caller takes the slot under its own number and gives it up.
-        hl.farm.note_it_changed_hands(id, 1);
-        hl.farm.instrument_md_reqs.push((id, crate::engine::hot_loop::farm::MdReqRecord {
-            con_id: 4004,
-            sec_type: "CS".into(),
-            mode_9887: 0,
-            entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
-                req_id: 7, request_type: 442, venue: "BEST".into(),
-            }],
-        }));
-        tx.send(ControlCommand::Unsubscribe {
-            instrument: id, con_id: 4004, took_it: 1, series: Vec::new(), issued: 2,
-        }).unwrap();
-        hl.poll_once();
-        assert!(!hl.farm.holds_market_data(id), "the first subscription went");
-
-        // The next caller takes the same slot, which was never handed back.
-        tx.send(ControlCommand::Subscribe {
-            contract: crate::types::ContractRef {
-                con_id: 4004, symbol: "AAPL".into(), sec_type: "STK".into(),
-                exchange: "SMART".into(), ..Default::default()
-            },
-            filters: Default::default(),
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            generic_ticks: Vec::new(),
-            issued: 3,
-            reply_tx: None,
-        }).unwrap();
+        // The first request gives it up, and the next takes the same slot,
+        // which was never handed back.
+        tx.send(ControlCommand::CancelMktData { req_id: 1 }).unwrap();
+        tx.send(subscription(2, aapl())).unwrap();
         hl.poll_once();
 
-        assert_eq!(
-            hl.farm.what_took_it(id), 3,
-            "the slot names the occupancy now on it, not the one that has gone",
-        );
+        assert_ne!(hl.farm.what_took_it(id), first, "the slot names the occupancy now on it");
+        let records = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+        let said = records.iter().find_map(|(_, r)| match r {
+            crate::bridge::Record::MarketDataTaken(t) if t.req_id == 2 => Some(t.generation),
+            _ => None,
+        });
+        assert_eq!(said, Some(hl.farm.what_took_it(id)), "and the request is told that one");
     }
 
     /// A trade stream asked for twice under one number is refused.
@@ -8616,7 +8020,7 @@ mod tests {
     #[test]
     fn a_second_trade_stream_under_one_number_is_refused() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
         let (conn, _peer) = crate::protocol::connection::Connection::for_test();
         hl.hmds_conn = Some(conn);
@@ -8641,7 +8045,6 @@ mod tests {
             tbt_type: TbtType::AllLast,
             number_of_ticks: 0,
             ignore_size: false,
-            reply_tx: None,
         }).unwrap();
         hl.poll_once();
 
@@ -8654,22 +8057,15 @@ mod tests {
     /// A withdrawal that leaves the subscription standing leaves its tags
     /// standing too.
     ///
-    /// Four withdrawals do not go: the slot has been given to another contract,
-    /// its callers were sent elsewhere, a caller is on its way onto it, or the
-    /// subscription now on it began after the withdrawal was decided. On each
-    /// of those the subscription stays up and the venue goes on sending — and
-    /// the tags were handed back anyway, so every record that followed named a
-    /// number no contract in this session held and was dropped with one line in
-    /// the log.
-    ///
-    /// The caller that joined that subscription was told it was watching, and
-    /// received nothing at all for the rest of the session: the slot is never
-    /// reclaimed while a subscription stands on it, so nothing ever asks the
-    /// venue again and nothing ever binds the number back.
+    /// A request withdrawn while another is still served off the same
+    /// subscription leaves that subscription up, and the venue goes on
+    /// sending. Handed back anyway, the tags left every record that followed
+    /// naming a number no contract in this session held, dropped with one
+    /// line in the log, while the request still watching was told nothing.
     #[test]
     fn a_withdrawal_that_does_not_go_leaves_the_tags_it_routes_on() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
 
         let id = hl.context.market.register(4003);
@@ -8682,20 +8078,15 @@ mod tests {
                 req_id: 7, request_type: 442, venue: "BEST".into(),
             }],
         }));
-
-        // The subscription now on the slot was asked for after this withdrawal
-        // was decided — a caller asked for the same contract in between and was
-        // answered off the subscription that is up.
-        hl.farm.note_subscription_asked_on(id, 10);
-        tx.send(ControlCommand::Unsubscribe {
-            instrument: id, con_id: 4003, took_it: 0, series: Vec::new(), issued: 5,
-        }).unwrap();
+        for req_id in [1, 2] {
+            hl.md_requests.insert(req_id, market_requests::MdRequest {
+                slot: id, con_id: 4003, series: Vec::new(), news: None, scan: false, for_calculation: false,
+            });
+        }
+        tx.send(ControlCommand::CancelMktData { req_id: 1 }).unwrap();
         hl.poll_once();
 
-        assert!(
-            hl.farm.holds_market_data(id),
-            "the withdrawal did not go, which is what this case is about",
-        );
+        assert!(hl.farm.holds_market_data(id), "the subscription stands for the other request");
         assert_eq!(
             hl.context.market.instrument_by_server_tag(910_003), Some(id),
             "so the number the venue is still sending on still names the contract",
@@ -8704,13 +8095,11 @@ mod tests {
 
     /// The map is not L1-only: `35=L` ticker setup registers into it too and
     /// news resolves against it, so an unsubscribe that clears an instrument's
-    /// tags while its news subscription is live ends the news feed silently.    /// The map is not L1-only: `35=L` ticker setup registers into it too and
-    /// news resolves against it, so an unsubscribe that clears an instrument's
     /// tags while its news subscription is live ends the news feed silently.
     #[test]
     fn an_l1_unsubscribe_keeps_the_tags_a_live_news_subscription_routes_on() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
 
         let id = hl.context.market.register(4002);
@@ -8722,8 +8111,11 @@ mod tests {
             entries: vec![crate::engine::hot_loop::farm::MdReqEntry { req_id: 8, request_type: 442, venue: "BEST".into() }],
         }));
         hl.farm.news_subscriptions.push((id, 55, "BRFG".to_string(), 756733, "STK".to_string()));
+        hl.md_requests.insert(1, market_requests::MdRequest {
+            slot: id, con_id: 4002, series: Vec::new(), news: None, scan: false, for_calculation: false,
+        });
 
-        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).unwrap();
+        tx.send(ControlCommand::CancelMktData { req_id: 1 }).unwrap();
         hl.poll_once();
 
         assert_eq!(
@@ -8772,7 +8164,6 @@ mod tests {
             symbol: "AAPL".into(),
             sec_type: "STK".into(),
             providers: String::new(),
-            reply_tx: None,
         })
         .expect("the engine is holding the other end");
         hl.poll_control_commands();
@@ -9179,12 +8570,16 @@ mod tests {
         for series in [687, 691] {
             shared.market.note_chain_model_parameters(instrument, series, vec![Default::default()]);
         }
+        // One request named 236 and another 687; the second withdraws, and the
+        // series only it asked for goes while the subscription stays.
+        for (req_id, series) in [(1, vec![236]), (2, vec![687])] {
+            hl.md_requests.insert(req_id, market_requests::MdRequest {
+                slot: instrument, con_id: 756733, series, news: None, scan: false, for_calculation: false,
+            });
+        }
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
-        tx.send(ControlCommand::StopAskingForSeries {
-            instrument, con_id: 0, took_it: 0, generic_ticks: vec![687], issued: u64::MAX,
-        })
-        .unwrap();
+        tx.send(ControlCommand::CancelMktData { req_id: 2 }).unwrap();
         hl.poll_control_commands();
         assert!(shared.market.chain_model_parameters(instrument, 687).is_empty(), "withdrawn");
         assert_eq!(shared.market.chain_model_parameters(instrument, 691).len(), 1, "not this one");
@@ -9230,14 +8625,13 @@ mod tests {
         hl.farm_conn = Some(conn);
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         tx.send(ControlCommand::SubscribeNews {
             con_id: 793356217, symbol: "MES".into(), sec_type: "FUT".into(),
-            providers: "BRFG".into(), reply_tx: Some(reply_tx),
+            providers: "BRFG".into(),
         })
         .unwrap();
         hl.poll_control_commands();
-        let id = reply_rx.try_recv().expect("registered").expect("a slot");
+        let id = hl.context.market.instrument_by_con_id(793356217).expect("registered");
         std::thread::sleep(std::time::Duration::from_millis(50));
         let sent = farm::tests::drain_inner(&mut peer);
         let text = sent.iter().map(|f| String::from_utf8_lossy(f).replace('\u{1}', "|")).collect::<Vec<_>>().join("\n");
@@ -9269,15 +8663,13 @@ mod tests {
         let mut hl = HotLoop::new(shared.clone(), None, None);
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         tx.send(ControlCommand::SubscribeTbt {
             req_id: 7, contract: stock(756733, "SPY"), tbt_type: crate::types::TbtType::AllLast,
-            number_of_ticks: 0, ignore_size: false, reply_tx: Some(reply_tx),
+            number_of_ticks: 0, ignore_size: false,
         })
         .unwrap();
         hl.poll_control_commands();
-        assert!(matches!(reply_rx.try_recv(), Ok(Err(_))), "refused on the channel the caller waits on");
-        assert!(hl.hmds.tbt_subscriptions.is_empty(), "and nothing is left to be sent later");
+        assert!(hl.hmds.tbt_subscriptions.is_empty(), "nothing is left to be sent later");
         let told = shared.reference.drain_historical_errors();
         assert!(
             told.iter().any(|(rid, code, _)| *rid == 7 && *code == crate::error_codes::Refusal::NOT_CONNECTED),
@@ -9307,16 +8699,12 @@ mod tests {
             ..Default::default()
         };
         // One caller streams the contract; another asks for the one-shot on it.
-        for chargeable in [false, true] {
-            tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-                contract: contract(),
-                mode_9887: 0,
-                regulatory_snapshot: chargeable,
-                reply_tx: None,
-                generic_ticks: Vec::new(), issued: 0,
-            })
-            .expect("the engine is holding the other end");
+        for (req_id, chargeable) in [(1, false), (2, true)] {
+            let mut asked = subscription(req_id, contract());
+            if let ControlCommand::Subscribe { regulatory_snapshot, .. } = &mut asked {
+                *regulatory_snapshot = chargeable;
+            }
+            tx.send(asked).expect("the engine is holding the other end");
             hl.poll_control_commands();
         }
 
@@ -9356,16 +8744,12 @@ mod tests {
             currency: "USD".into(),
             ..Default::default()
         };
-        for wanted in [vec![233u32], vec![236u32]] {
-            tx.send(ControlCommand::Subscribe {
-                filters: Default::default(),
-                contract: contract(),
-                mode_9887: 0,
-                regulatory_snapshot: false,
-                reply_tx: None,
-                generic_ticks: wanted, issued: 0,
-            })
-            .expect("the engine is holding the other end");
+        for (req_id, wanted) in [(1, vec![233u32]), (2, vec![236u32])] {
+            let mut asked = subscription(req_id, contract());
+            if let ControlCommand::Subscribe { generic_ticks, .. } = &mut asked {
+                *generic_ticks = wanted;
+            }
+            tx.send(asked).expect("the engine is holding the other end");
             hl.poll_control_commands();
         }
 
@@ -9393,171 +8777,16 @@ mod tests {
         }
     }
 
-    /// A lookup whose caller has withdrawn does not open a subscription.
+    /// A caller takes the series it brought with it.
     ///
-    /// A contract stated by description is registered before the venue has
-    /// named it, so a caller can withdraw while the lookup is still out. The
-    /// answer to that lookup opened the stream anyway, after the caller's
-    /// record here had gone: nothing was left that could withdraw it, so the
-    /// venue served it and held its slot for the rest of the session.
+    /// A subscription is shared and the series on it are not: a caller joining
+    /// one brings its own list. Left behind when that caller withdrew, the
+    /// venue served those series for as long as the subscription it joined
+    /// outlived it — against an allowance that is counted — and every rebuild
+    /// after a reconnect asked for them again. What another caller also named
+    /// stays: that caller is still reading it.
     #[test]
-    fn a_lookup_whose_caller_withdrew_does_not_open_a_subscription() {
-        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
-        hl.set_control_rx(rx);
-        let instrument = hl.context.market
-            .register_contract(0, "SPY", "STK", "SMART", "");
-        hl.ccp.resolved_md_subscribe.push((756733, crate::engine::hot_loop::ccp::PendingSubscribe {
-            issued: 0,
-            filters: Default::default(),
-            instrument,
-            con_id: 0,
-            symbol: "SPY".into(),
-            exchange: "SMART".into(),
-            sec_type: "STK".into(),
-            currency: "USD".into(),
-            mode_9887: 0,
-            regulatory_snapshot: false,
-        }));
-
-        // The caller gives up before the venue names the contract.
-        tx.send(ControlCommand::Unsubscribe {
-            instrument,
-            con_id: 0,
-            took_it: 0,
-            series: Vec::new(),
-            issued: 1,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-        hl.send_resolved_subscriptions();
-
-        assert!(
-            !hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
-            "the answer to a lookup nobody is waiting on opens nothing",
-        );
-    }
-
-    /// A move installed by the surface changes who can withdraw the slot.
-    ///
-    /// The subscription on a slot a caller is moving onto is held up until the
-    /// move is installed, and the callers that arrive hold it under a number of
-    /// their own from then on. Said by a flag the surface clears rather than on
-    /// this queue, a withdrawal already decided against the occupancy before
-    /// them became valid again simply by arriving late, and it took the
-    /// subscription down underneath them.
-    #[test]
-    fn a_move_installed_changes_who_can_withdraw_the_slot() {
-        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
-        hl.set_control_rx(rx);
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: 756733,
-                symbol: "SPY".into(),
-                exchange: "SMART".into(),
-                sec_type: "STK".into(),
-                currency: "USD".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            reply_tx: None,
-            generic_ticks: Vec::new(),
-            issued: 5,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-        let instrument = hl.context.market.instrument_by_con_id(756733)
-            .expect("the contract holds a slot");
-
-        // Callers of another slot are moved onto it and hold it under 9.
-        tx.send(ControlCommand::MoveInstalled { from: instrument + 1, into: instrument, took_it: 9 })
-            .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-
-        // The caller that held it before them cannot take it down.
-        tx.send(ControlCommand::Unsubscribe {
-            instrument, con_id: 0, took_it: 5, series: Vec::new(), issued: 20,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-        assert!(
-            hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
-            "the subscription the arriving callers are being served off stands",
-        );
-
-        // And the callers that arrived can.
-        tx.send(ControlCommand::Unsubscribe {
-            instrument, con_id: 0, took_it: 9, series: Vec::new(), issued: 21,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-        assert!(
-            !hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
-            "the callers that hold it can withdraw it",
-        );
-    }
-
-    /// A series is not asked for on a subscription its caller never joined.
-    ///
-    /// The caller that asked can be gone by the time the request is read here,
-    /// and the slot given to another contract: asked for anyway, the series was
-    /// served to a subscription nobody had named it on, and recorded against it
-    /// so that a later withdrawal of that series was refused.
-    #[test]
-    fn a_series_is_not_asked_for_on_a_subscription_its_caller_never_joined() {
-        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
-        hl.set_control_rx(rx);
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: ContractRef {
-                con_id: 756733,
-                symbol: "SPY".into(),
-                exchange: "SMART".into(),
-                sec_type: "STK".into(),
-                currency: "USD".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            reply_tx: None,
-            generic_ticks: Vec::new(),
-            issued: 5,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-        let instrument = hl.context.market.instrument_by_con_id(756733)
-            .expect("the contract holds a slot");
-
-        // A joiner of the occupancy before this one.
-        tx.send(ControlCommand::AlsoAskForSeries {
-            instrument,
-            con_id: 756733,
-            generic_ticks: vec![236],
-            took_it: 2,
-            issued: 30,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
-
-        assert!(
-            !hl.farm.asked_generic_ticks.get(&instrument).is_some_and(|a| a.contains(&236)),
-            "nothing is asked for a caller that never joined this subscription",
-        );
-    }
-
-    /// Nothing is asked for on behalf of a caller that has stopped waiting.
-    ///
-    /// A caller's wait is bounded and this loop is not, so a request can arrive
-    /// here after the caller has been told the venue did not answer — and it
-    /// keeps no record of the slot. The series such a request named were asked
-    /// for anyway: served for the life of a subscription that caller has no
-    /// part in, with nothing able to withdraw them.
-    #[test]
-    fn nothing_is_asked_for_a_caller_that_has_stopped_waiting() {
+    fn a_caller_takes_the_series_it_brought_with_it() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);
@@ -9569,42 +8798,205 @@ mod tests {
             currency: "USD".into(),
             ..Default::default()
         };
-        // One caller streams the contract.
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: contract(),
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            reply_tx: None,
-            generic_ticks: Vec::new(),
-            issued: 1,
-        })
-        .expect("the engine is holding the other end");
-        hl.poll_control_commands();
+        // The caller that opened the subscription names one series, and one
+        // watching it names that one and one of its own.
+        for (req_id, wanted) in [(1, vec![233u32]), (2, vec![233u32, 236])] {
+            let mut asked = subscription(req_id, contract());
+            if let ControlCommand::Subscribe { generic_ticks, .. } = &mut asked {
+                *generic_ticks = wanted;
+            }
+            tx.send(asked).expect("the engine is holding the other end");
+            hl.poll_control_commands();
+        }
         let instrument = hl.context.market.instrument_by_con_id(756733)
             .expect("the contract holds a slot");
+        let held = |hl: &HotLoop| {
+            let mut held = hl.farm.asked_generic_ticks.get(&instrument).cloned().unwrap_or_default();
+            held.sort_unstable();
+            held
+        };
 
-        // And a second asks for a series of its own, then stops waiting: its
-        // end of the answer is gone before the request is read here.
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        drop(reply_rx);
-        tx.send(ControlCommand::Subscribe {
-            filters: Default::default(),
-            contract: contract(),
-            mode_9887: 0,
-            regulatory_snapshot: false,
-            reply_tx: Some(reply_tx),
-            generic_ticks: vec![236],
-            issued: 2,
-        })
-        .expect("the engine is holding the other end");
+        tx.send(ControlCommand::CancelMktData { req_id: 2 }).expect("the engine is holding the other end");
         hl.poll_control_commands();
+        assert!(hl.farm.holds_market_data(instrument), "the subscription stays up for the caller that opened it");
+        assert_eq!(
+            held(&hl), [233],
+            "and only the series nobody else named goes with the caller that named it",
+        );
 
+        tx.send(ControlCommand::CancelMktData { req_id: 1 }).expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        assert!(!hl.farm.holds_market_data(instrument), "the last caller takes the subscription");
+    }
+
+    /// A spread scan goes with the scan it states, one scan of a contract at
+    /// a time, and its answer goes with it.
+    ///
+    /// The strategies series is asked once per slot and its answer is kept
+    /// per slot, so a second scan of a contract sent while the first stood
+    /// went out with the first one's text and read its answer. Held until the
+    /// first is withdrawn, it goes with its own; and what the first was
+    /// answered with is not the second's to read.
+    #[test]
+    fn a_second_scan_of_a_contract_waits_for_the_first_and_goes_with_its_own_text() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        hl.set_control_rx(rx);
+        let aapl = || ContractRef {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+            exchange: "SMART".into(),
+            sec_type: "STK".into(),
+            currency: "USD".into(),
+            ..Default::default()
+        };
+        let scan = |req_id, text: &str| {
+            let mut asked = subscription(req_id, aapl());
+            if let ControlCommand::Subscribe { generic_ticks, spread_scan, .. } = &mut asked {
+                *generic_ticks = vec![481];
+                *spread_scan = Some(text.into());
+            }
+            asked
+        };
+        // Somebody watches the quotes, so the slot outlives the scans.
+        tx.send(subscription(3, aapl())).unwrap();
+        tx.send(scan(1, "first")).unwrap();
+        tx.send(scan(2, "second")).unwrap();
+        tx.send(scan(4, "third")).unwrap();
+        hl.poll_control_commands();
+        let slot = match answer_to(&shared, 1) {
+            Some(Ok(slot)) => slot,
+            other => panic!("the first scan is taken: {other:?}"),
+        };
+        assert_eq!(hl.farm.spread_scans.get(&265598).map(String::as_str), Some("first"));
+        assert!(answer_to(&shared, 2).is_none(), "the second waits for the first");
+        shared.market.note_scanned_strategies(slot, vec![Default::default()]);
+
+        tx.send(ControlCommand::CancelMktData { req_id: 1 }).unwrap();
+        hl.poll_control_commands();
+        assert!(shared.market.scanned_strategies(slot).is_empty(), "the first scan's answer goes with it");
+        hl.poll_control_commands();
+        assert!(matches!(answer_to(&shared, 2), Some(Ok(at)) if at == slot), "the second is taken now");
+        assert_eq!(
+            hl.farm.spread_scans.get(&265598).map(String::as_str), Some("second"),
+            "and goes with its own text",
+        );
+        assert_eq!(hl.held_scans.len(), 1, "the third still waits behind the second");
+        tx.send(ControlCommand::CancelMktData { req_id: 2 }).unwrap();
+        hl.poll_control_commands();
+        hl.poll_control_commands();
+        assert!(matches!(answer_to(&shared, 4), Some(Ok(at)) if at == slot));
+        assert_eq!(hl.farm.spread_scans.get(&265598).map(String::as_str), Some("third"));
+    }
+
+    /// One number cannot be taken by two requests at once.
+    ///
+    /// Two contracts watched under one number had their quotes delivered
+    /// under it with nothing to tell them apart, and the withdrawal reached
+    /// only one of them: the other stayed live on the wire with nothing able
+    /// to withdraw it.
+    #[test]
+    fn one_number_cannot_be_taken_by_two_requests_at_once() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        let contract = |con_id, symbol: &str| ContractRef {
+            con_id,
+            symbol: symbol.into(),
+            exchange: "SMART".into(),
+            sec_type: "STK".into(),
+            currency: "USD".into(),
+            ..Default::default()
+        };
+        tx.send(subscription(7, contract(756733, "SPY"))).expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        assert!(matches!(answer_to(&shared, 7), Some(Ok(_))), "the first is taken");
+
+        tx.send(subscription(7, contract(272093, "MSFT"))).expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        let refusal = answer_to(&shared, 7);
         assert!(
-            !hl.farm.asked_generic_ticks.get(&instrument).is_some_and(|a| a.contains(&236)),
-            "nothing was asked for the caller that is no longer listening",
+            matches!(refusal, Some(Err((code, _))) if code == i64::from(crate::error_codes::DUPLICATE_TICKER_ID)),
+            "the second is refused as a duplicate number, not admitted: {refusal:?}",
+        );
+        assert!(
+            hl.context.market.instrument_by_con_id(272093).is_none(),
+            "and takes no slot",
         );
     }
+
+    /// A scan still waiting owns its number, and can be withdrawn after the
+    /// scan before it releases it but before the next lap sends it.
+    #[test]
+    fn a_waiting_scan_keeps_its_number_and_its_withdrawal_releases_the_next() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = channel();
+        hl.set_control_rx(rx);
+        let scan = |req_id, text: &str| {
+            let contract = ContractRef {
+                con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(),
+                sec_type: "STK".into(), currency: "USD".into(), ..Default::default()
+            };
+            let mut asked = subscription(req_id, contract);
+            if let ControlCommand::Subscribe { generic_ticks, spread_scan, .. } = &mut asked {
+                *generic_ticks = vec![481];
+                *spread_scan = Some(text.into());
+            }
+            asked
+        };
+        for (id, text) in [(1, "first"), (2, "second"), (3, "third"), (2, "duplicate")] {
+            shared.admit(&tx, scan(id, text)).unwrap();
+        }
+        hl.poll_control_commands();
+        let refusals = shared.drain_refused();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!((refusals[0].0, refusals[0].1), (2, 102));
+        assert_eq!(shared.backlog(), 2, "both later scans are held");
+
+        shared.admit(&tx, ControlCommand::CancelMktData { req_id: 1 }).unwrap();
+        shared.admit(&tx, ControlCommand::CancelMktData { req_id: 2 }).unwrap();
+        hl.poll_control_commands();
+        assert!(shared.drain_refused().is_empty(), "the second was still withdrawable");
+        assert_eq!(shared.backlog(), 1, "the third remains held");
+        hl.poll_control_commands();
+        assert!(!hl.md_requests.contains_key(&2), "the withdrawn second scan never starts");
+        assert!(hl.md_requests.contains_key(&3), "the third is released by its withdrawal");
+        assert_eq!(hl.farm.spread_scans.get(&265598).map(String::as_str), Some("third"));
+        assert_eq!(shared.backlog(), 0);
+    }
+
+    #[test]
+    fn a_lookup_whose_caller_withdrew_does_not_open_a_subscription() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (_tx, rx) = channel();
+        hl.set_control_rx(rx);
+        hl.ccp.resolved_named.push(subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
+        hl.withdraw_mkt_data(1);
+        hl.poll_control_commands();
+        assert!(hl.farm.instrument_md_reqs.is_empty());
+        assert!(hl.md_requests.is_empty());
+        assert!(hl.ccp.resolved_named.is_empty());
+    }
+
+    #[test]
+    fn a_named_request_sharing_a_slot_is_withdrawn_from_that_slot() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (_tx, rx) = channel();
+        hl.set_control_rx(rx);
+        hl.take_subscription(subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
+        let instrument = hl.md_requests[&1].slot;
+        hl.ccp.resolved_named.push(subscription(2, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }));
+        hl.poll_control_commands();
+        assert_eq!(hl.md_requests[&2].slot, instrument);
+        hl.withdraw_mkt_data(1);
+        assert!(hl.farm.holds_a_stream(instrument));
+        hl.withdraw_mkt_data(2);
+        assert!(!hl.farm.holds_market_data(instrument));
+    }
+
 }
 
 #[cfg(test)]
@@ -9841,45 +9233,17 @@ mod slot_aliasing_tests {
         );
     }
 
-    /// A lookup the venue never answers gives its slot back.
-    ///
-    /// A caller told the venue knows no such contract has no reason to
-    /// withdraw a subscription that never opened, and nothing else asked. A
-    /// chain naming a few dead strikes spent one slot on each until the table
-    /// ran out — the failure reclaiming exists to prevent.
-    ///
-    /// Not before the reason has been read, though: it is queued under the
-    /// slot, and giving the slot back is what drops it.
     #[test]
-    fn a_lookup_the_venue_never_answers_gives_its_slot_back() {
+    fn a_lookup_the_venue_never_answers_leaves_no_slot_held() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
-        let instrument = hl.context.market.register(0);
-        hl.ccp.pending_md_subscribe.push((
-            1,
-            crate::engine::hot_loop::ccp::PendingSubscribe {
-                issued: 0,
-                filters: Default::default(),
-                con_id: 0, instrument,
-                symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(),
-                currency: "USD".into(),
-                mode_9887: 0, regulatory_snapshot: false,
-            },
-            Instant::now() - std::time::Duration::from_secs(3600),
-        ));
-
-        hl.ccp.sweep_pending_subscribes(&mut hl.context, &hl.shared);
-        hl.reclaim_slots_no_order_holds();
-
-        assert_eq!(
-            hl.shared.market.drain_subscription_failures().len(), 1,
-            "the caller is told why before the slot goes anywhere",
-        );
-        hl.give_back_slots_their_word_has_left();
-
-        assert_eq!(
-            hl.context.market.register(265598), instrument,
-            "the slot the abandoned lookup held is offered to the next contract",
-        );
+        hl.ccp.pending_named.push((1, super::tests::subscription(1,
+            ContractRef { symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }),
+            Instant::now() - std::time::Duration::from_secs(3600)));
+        hl.ccp.sweep_pending_named(&hl.shared);
+        assert_eq!(hl.shared.reference.drain_historical_errors().len(), 1);
+        assert!(hl.md_requests.is_empty());
+        assert_eq!(hl.context.market.active_instruments().count(), 0);
+        assert!(hl.ccp.pending_named.is_empty());
     }
 }
 
@@ -9990,8 +9354,7 @@ mod withdrawal_tests {
         hl.poll_control_commands();
         order_builder::drain_and_send_orders(
             &mut hl.ccp_conn, &mut hl.context, &hl.account_id, &mut hl.hb,
-            hl.ccp.disconnected, &hl.shared, false, &hl.event_tx,
-        );
+            hl.ccp.disconnected, &hl.shared, false, &hl.event_tx, &mut 64,);
 
         use std::io::Read;
         let mut buf = [0u8; 8192];
@@ -10190,4 +9553,397 @@ mod withdrawal_tests {
         );
     }
 
+}
+
+/// Admission never waits, and what is admitted and not finished is counted.
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::api::client::EClient;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// A loop that is not running, and a client admitting to it.
+    fn stopped() -> (HotLoop, Arc<SharedState>, EClient) {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = channel();
+        hl.set_control_rx(rx);
+        let client = EClient::from_parts(shared.clone(), tx, std::thread::spawn(|| {}), "DU1".into());
+        (hl, shared, client)
+    }
+
+    /// A contract named by its description, which the loop holds while the
+    /// venue names it.
+    fn described() -> crate::types::model::Contract {
+        crate::types::model::Contract {
+            symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            currency: "USD".into(), ..Default::default()
+        }
+    }
+
+    /// With the loop stopped, every admission returns and is counted; one lap
+    /// then takes 64 of them, the first 64, in the order they were admitted.
+    #[test]
+    fn ten_thousand_admissions_return_and_one_lap_takes_the_first_sixty_four() {
+        let (mut hl, shared, client) = stopped();
+        let (done, admitted) = std::sync::mpsc::channel();
+        let admitting = std::thread::spawn(move || {
+            for req_id in 1..=10_000 {
+                client.cancel_historical_data(req_id);
+            }
+            let _ = done.send(());
+            client
+        });
+        assert!(
+            admitted.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "an admission waited on a loop that was not running",
+        );
+        let client = admitting.join().unwrap();
+        assert_eq!(client.backlog(), 10_000);
+
+        hl.poll_control_commands();
+        assert_eq!(client.backlog(), 10_000 - 64, "one lap takes 64");
+        let taken: Vec<u32> =
+            shared.reference.drain_historical_errors().iter().map(|(id, ..)| *id).collect();
+        assert_eq!(taken, (1..=64).collect::<Vec<u32>>(), "the first 64, in order");
+
+        hl.poll_control_commands();
+        let taken: Vec<u32> =
+            shared.reference.drain_historical_errors().iter().map(|(id, ..)| *id).collect();
+        assert_eq!(taken, (65..=128).collect::<Vec<u32>>(), "and the next lap the next 64");
+    }
+
+    #[test]
+    fn questions_released_by_the_replay_share_the_laps_sixty_four() {
+        let (mut hl, shared, client) = stopped();
+        shared.orders.replay_is_pending();
+        for _ in 0..130 {
+            client.req_ids();
+        }
+        for _ in 0..3 {
+            hl.poll_control_commands();
+        }
+        assert_eq!(client.backlog(), 130);
+        client.cancel_historical_data(500);
+        shared.orders.set_replay_done();
+        for expected in [64, 64, 2] {
+            hl.poll_control_commands();
+            let answers = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+            assert_eq!(answers.iter().filter(|(_, r)| matches!(r, crate::bridge::Record::Answer(crate::bridge::Answer::NextValidId))).count(), expected);
+            let cancelled = answers.iter().any(|(_, r)| matches!(r, crate::bridge::Record::HistoricalError((crate::types::model::ErrorOrigin::Request { id: 500, .. }, ..))));
+            assert_eq!(cancelled, expected == 2, "released questions precede the newly admitted command");
+        }
+        assert_eq!(client.backlog(), 0);
+    }
+
+    #[test]
+    fn order_commands_released_by_the_replay_share_the_laps_sixty_four() {
+        let (mut hl, shared, client) = stopped();
+        shared.orders.replay_is_pending();
+        for perm_id in 1..=130 {
+            shared.admit(&client.control_tx, ControlCommand::CancelOrderByPermId { perm_id }).unwrap();
+        }
+        for _ in 0..3 {
+            hl.poll_control_commands();
+        }
+        assert_eq!(client.backlog(), 130);
+        client.req_ids();
+        shared.orders.set_replay_done();
+        for expected in [64, 64, 2] {
+            hl.poll_control_commands();
+            assert_eq!(shared.drain_refused().len(), expected);
+            let answers = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+            assert_eq!(answers.iter().any(|(_, r)| matches!(r, crate::bridge::Record::Answer(crate::bridge::Answer::NextValidId))), expected == 2);
+        }
+        assert_eq!(client.backlog(), 0);
+    }
+
+    #[test]
+    fn buffered_orders_share_the_laps_sixty_four_with_other_released_work() {
+        let (mut hl, shared, client) = stopped();
+        shared.orders.replay_is_pending();
+        for order_id in 1..=130 {
+            shared.admit(&client.control_tx, ControlCommand::Order(crate::types::OrderRequest::Cancel {
+                order_id, stated: Default::default(),
+            })).unwrap();
+        }
+        for _ in 0..3 {
+            hl.poll_control_commands();
+        }
+        assert_eq!(hl.context.pending_orders.len(), 130);
+        client.req_ids();
+        hl.poll_control_commands();
+        assert_eq!(client.backlog(), 131);
+        client.cancel_historical_data(500);
+        shared.admit(&client.control_tx, ControlCommand::Logout).unwrap();
+        shared.admit(&client.control_tx, ControlCommand::Shutdown).unwrap();
+        shared.orders.set_replay_done();
+        let (ccp, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.ccp_conn = Some(ccp);
+        for remaining in [66, 2, 0] {
+            hl.poll_control_commands();
+            assert_eq!(hl.context.pending_orders.len(), remaining);
+            assert_eq!(hl.is_running(), remaining != 0, "the stop waits across laps for the buffer");
+            let answers = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+            assert_eq!(answers.iter().any(|(_, r)| matches!(r, crate::bridge::Record::Answer(crate::bridge::Answer::NextValidId))), remaining == 0);
+            assert_eq!(answers.iter().any(|(_, r)| matches!(r, crate::bridge::Record::HistoricalError((crate::types::model::ErrorOrigin::Request { id: 500, .. }, ..)))), remaining == 0);
+        }
+        assert_eq!(client.backlog(), 0);
+    }
+
+    #[test]
+    fn connections_replaced_directly_count_into_the_session() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let message = crate::protocol::fix::fix_build(&[(35, "0")], 1);
+        let (mut farm, _farm_peer) = crate::protocol::connection::Connection::for_test();
+        let (mut ccp, _ccp_peer) = crate::protocol::connection::Connection::for_test();
+        for conn in [&mut farm, &mut ccp] {
+            conn.send_raw(&message).unwrap();
+            conn.seed_buffer(&message);
+            assert_eq!(conn.extract_frames().len(), 1);
+        }
+        hl.reconnect_farm(farm);
+        assert_eq!(shared.traffic().messages_received, 1);
+        hl.reconnect_ccp(ccp);
+        assert_eq!(shared.traffic().messages_received, 2);
+        assert_eq!(shared.traffic().bytes_received, (message.len() * 2) as u64);
+        assert!(shared.traffic().messages_sent >= 2);
+        hl.farm_conn.as_mut().unwrap().send_raw(&message).unwrap();
+        hl.ccp_conn.as_mut().unwrap().send_raw(&message).unwrap();
+        assert!(shared.traffic().messages_sent >= 4);
+    }
+
+    #[test]
+    fn a_connection_that_lands_after_the_stop_is_still_counted() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (mut conn, _peer) = crate::protocol::connection::Connection::for_test();
+        let message = crate::protocol::fix::fix_build(&[(35, "0")], 1);
+        conn.send_raw(&message).unwrap();
+        conn.seed_buffer(&message);
+        assert_eq!(conn.extract_frames().len(), 1);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(Ok(conn)).unwrap();
+        hl.pending_secdef_reconnect = Some(rx);
+        hl.reconnect_halted = Some(retry::DisconnectReason::ByDesign);
+        hl.poll_secdef_reconnect();
+        assert!(hl.secdef_conn.is_none());
+        assert_eq!(shared.traffic(), crate::types::Traffic {
+            bytes_sent: message.len() as u64,
+            bytes_received: message.len() as u64,
+            messages_sent: 1,
+            messages_received: 1,
+        });
+    }
+
+    /// A command the loop holds for naming is counted until it is refused,
+    /// and a command it finishes as it takes it is counted no longer.
+    #[test]
+    fn a_command_held_for_naming_counts_until_it_is_refused() {
+        let (mut hl, shared, client) = stopped();
+        let (ccp, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.ccp_conn = Some(ccp);
+        client.req_head_time_stamp(7, &described(), "TRADES", true, 1);
+        hl.poll_control_commands();
+        assert_eq!(hl.ccp.pending_named.len(), 1, "held while the venue names it");
+        assert_eq!(client.backlog(), 1, "and counted while it is held");
+
+        // The venue never names it.
+        let long_ago = Instant::now().checked_sub(Duration::from_secs(600)).unwrap();
+        hl.ccp.pending_named[0].2 = long_ago;
+        hl.ccp.sweep_pending_named(&shared);
+        hl.poll_control_commands();
+        assert!(
+            shared.reference.drain_historical_errors().iter().any(|(id, ..)| *id == 7),
+            "refused",
+        );
+        assert_eq!(client.backlog(), 0, "and finished once refused");
+    }
+
+    /// An order in the buffer is counted until it leaves it: here, refused
+    /// with the stop's words, as a stop refuses what is left.
+    #[test]
+    fn a_placement_counts_while_it_waits_in_the_order_buffer() {
+        let (mut hl, shared, client) = stopped();
+        shared
+            .admit(&client.control_tx, ControlCommand::Order(crate::types::OrderRequest::Cancel {
+                order_id: 5, stated: Default::default(),
+            }))
+            .unwrap();
+        hl.poll_control_commands();
+        assert_eq!(hl.context.pending_orders.len(), 1, "waiting for the trading connection");
+        assert_eq!(client.backlog(), 1, "and counted while it waits");
+        order_builder::refuse_what_is_left(&mut hl.context, &shared, "the engine stopped");
+        hl.poll_control_commands();
+        assert_eq!(client.backlog(), 0, "and finished once it has left the buffer");
+    }
+
+    /// A subscription to a contract named by its description is counted
+    /// while the loop waits for the venue to name it, and finished once it is
+    /// given up on.
+    #[test]
+    fn a_subscription_held_for_naming_counts_until_it_is_given_up_on() {
+        let (mut hl, shared, client) = stopped();
+        let (ccp, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.ccp_conn = Some(ccp);
+        shared
+            .admit(&client.control_tx, ControlCommand::Subscribe {
+                contract: ContractRef {
+                    symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                    currency: "USD".into(), ..Default::default()
+                },
+                req_id: 1, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false,
+                snapshot: false, generic_ticks: Vec::new(), news: None, spread_scan: None,
+                calculation: None,
+            })
+            .unwrap();
+        hl.poll_control_commands();
+        assert_eq!(hl.ccp.pending_named.len(), 1, "held while the venue names it");
+        assert_eq!(client.backlog(), 1, "and counted while it is held");
+        hl.ccp.pending_named[0].2 = Instant::now().checked_sub(Duration::from_secs(600)).unwrap();
+        hl.ccp.sweep_pending_named(&shared);
+        hl.poll_control_commands();
+        assert_eq!(client.backlog(), 0, "and finished once it is given up on");
+    }
+
+    /// A question about what the venue has finished, held behind the
+    /// session's own replay, is counted until it is asked.
+    #[test]
+    fn a_completed_orders_question_counts_while_it_waits_behind_the_replay() {
+        let (mut hl, shared, client) = stopped();
+        let (ccp, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.ccp_conn = Some(ccp);
+        shared.orders.replay_is_pending();
+        shared
+            .admit(&client.control_tx, ControlCommand::FetchCompletedOrders { api_only: false })
+            .unwrap();
+        hl.poll_control_commands();
+        assert_eq!(client.backlog(), 1, "held while the replay may still be running");
+        hl.ccp.give_up_waiting_for_the_replay();
+        hl.ccp.sweep_completed_orders_request(&mut hl.ccp_conn, &mut hl.hb, &shared, &mut { COMMANDS_PER_LAP });
+        hl.poll_control_commands();
+        assert_eq!(client.backlog(), 0, "and finished once it is asked");
+    }
+
+    /// Requests the venue has since named are taken first, within the same
+    /// 64 a lap takes, and what is left of them waits ahead of the channel.
+    #[test]
+    fn requests_named_since_are_taken_first_within_the_same_sixty_four() {
+        let (mut hl, shared, client) = stopped();
+        for req_id in 1..=70 {
+            hl.ccp.resolved_named.push(ControlCommand::CancelHistorical { req_id });
+        }
+        client.cancel_historical_data(100);
+        let taken = |shared: &SharedState| -> Vec<u32> {
+            shared.reference.drain_historical_errors().iter().map(|(id, ..)| *id).collect()
+        };
+        hl.poll_control_commands();
+        assert_eq!(taken(&shared), (1..=64).collect::<Vec<u32>>(), "64, the named ones first");
+        hl.poll_control_commands();
+        assert_eq!(taken(&shared), (65..=70).chain([100]).collect::<Vec<u32>>());
+    }
+
+    /// Commands the loop finishes as it takes them leave nothing counted once
+    /// it has lapped over them all.
+    #[test]
+    fn ten_thousand_pings_leave_nothing_counted_once_the_loop_has_lapped() {
+        let (mut hl, _shared, client) = stopped();
+        for _ in 0..10_000 {
+            client.req_ping();
+        }
+        assert_eq!(client.backlog(), 10_000);
+        let mut laps = 0;
+        while client.backlog() > 0 && laps < 1_000 {
+            hl.poll_control_commands();
+            laps += 1;
+        }
+        assert_eq!(client.backlog(), 0);
+        assert_eq!(laps, 10_000_usize.div_ceil(COMMANDS_PER_LAP), "64 a lap");
+    }
+
+    /// Between a command's removal from the channel and the lap publishing
+    /// that it holds it for naming, the count does not drop.
+    #[test]
+    fn the_count_does_not_drop_between_the_take_and_the_hold() {
+        let (mut hl, shared, client) = stopped();
+        let (ccp, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.ccp_conn = Some(ccp);
+        client.req_head_time_stamp(7, &described(), "TRADES", true, 1);
+        let before = client.backlog();
+        assert_eq!(before, 1);
+        let read = Arc::new(Mutex::new(None));
+        let reading = read.clone();
+        let counting = shared.clone();
+        crate::bridge::hooks::set(&crate::bridge::hooks::AFTER_THE_TAKE, move || {
+            *reading.lock().unwrap() = Some(counting.backlog());
+        });
+        hl.poll_control_commands();
+        crate::bridge::hooks::clear(&crate::bridge::hooks::AFTER_THE_TAKE);
+        let at_the_hook = read.lock().unwrap().expect("the hook ran");
+        assert!(at_the_hook >= before, "read {at_the_hook} after the take, {before} before it");
+        assert_eq!(client.backlog(), 1, "and it is held");
+    }
+
+    /// A caller admitting a command every microsecond does not keep the loop
+    /// from its sockets: the market-data connection closing is read while the
+    /// caller goes on admitting.
+    #[test]
+    fn a_caller_admitting_every_microsecond_does_not_stop_the_socket_reads() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        hl.set_reconnect_config(crate::reliability::ReconnectConfig::manual());
+        let (farm, peer) = crate::protocol::connection::Connection::for_test();
+        hl.farm_conn = Some(farm);
+        let (tx, rx) = channel();
+        hl.set_control_rx(rx);
+        shared.orders.replay_is_pending();
+        for _ in 0..512 {
+            shared.admit(&tx, ControlCommand::Ask(crate::types::Ask::NextValidId)).unwrap();
+        }
+        for _ in 0..8 {
+            hl.poll_control_commands();
+        }
+        assert_eq!(shared.backlog(), 512);
+        let engine = std::thread::spawn(move || hl.run());
+        let client = Arc::new(EClient::from_parts(shared.clone(), tx, engine, "DU1".into()));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let admitting = {
+            let (client, stop) = (client.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut admitted = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    client.req_ping();
+                    admitted += 1;
+                    let next = Instant::now() + Duration::from_micros(1);
+                    while Instant::now() < next {
+                        std::hint::spin_loop();
+                    }
+                }
+                admitted
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        shared.orders.set_replay_done();
+        drop(peer);
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut heard = false;
+        while !heard && Instant::now() < until {
+            let records = shared.take_records(
+                shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false },
+            );
+            heard = records.iter().any(|(_, r)| matches!(
+                r,
+                crate::bridge::Record::VenueData((crate::bridge::VenueDataConnection::MarketData, false)),
+            ));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let admitted = admitting.join().unwrap();
+        assert!(heard, "the closed connection was not read while {admitted} commands were admitted");
+        assert!(admitted > 1_000, "the caller did admit throughout: {admitted}");
+        drop(client);
+    }
 }

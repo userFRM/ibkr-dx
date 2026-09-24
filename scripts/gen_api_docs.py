@@ -204,6 +204,7 @@ PARAM_DOCS: dict[str, str] = {
     "tick_type": "Tick type ID or tick-by-tick type string.",
     "error_code": "Error code.",
     "error_string": "Error message.",
+    "origin": "What the error is about: a request, an order and the operation on it, a request with no number of its own, the session, or a lookup this client made for itself.",
     "advanced_order_reject_json": "JSON with advanced rejection details.",
     "accounts_list": "Comma-separated account IDs.",
     "position": "Book position (row index) or position size.",
@@ -257,6 +258,7 @@ RUST_TO_PY_TYPE = {
     "&ExecutionFilter": "ExecutionFilter",
     "&mut impl Wrapper": "Wrapper",
     "InstrumentId": "int",
+    "Bound<'_, ErrorOrigin>": "ErrorOrigin",
 }
 
 # ── Fallback method descriptions ──
@@ -615,7 +617,7 @@ def parse_pymethods(path: Path) -> list[dict]:
             # A visibility before `fn` is part of the declaration: without it
             # the match began at `fn`, and a method another file also calls
             # was published with no description and none of its defaults.
-            r'((?:\s*(?:///|//)[^\n]*\n|\s*#\[[^\n]*\n)*)\s*(?:pub(?:\([^)]*\))?\s+)?fn (\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)',
+            r'((?:\s*//[^\n]*\n|\s*#\[[^\n]*\n)*)\s*(?:pub(?:\([^)]*\))?\s+)?fn (\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)',
             impl_body,
         ):
             preamble, name, args_str = fm.group(1), fm.group(2), fm.group(3)

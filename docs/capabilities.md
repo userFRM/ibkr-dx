@@ -252,6 +252,7 @@ ib_async's transport, has a method by that name.
 | `algorithms` | venue | · | · | · | ● | ● |
 | `algorithmsFor` | venue | · | · | · | ● | ● |
 | `await_order` | venue | · | · | · | ● | — |
+| `backlog` | this client | · | · | · | ● | ● |
 | `calendarEvents` | venue | · | · | · | ● | ● |
 | `calendarSchema` | venue | · | · | · | ● | ● |
 | `cancelAdjustments` | venue | · | · | · | ● | ● |
@@ -269,6 +270,7 @@ ib_async's transport, has a method by that name.
 | `contractFiguresByInstrument` | venue | · | · | · | ● | ● |
 | `corporateActions` | venue | · | · | · | ● | ● |
 | `enabledFeatures` | venue | · | · | · | ● | ● |
+| `error_from` | this client | · | · | · | ● | ● |
 | `eventsLost` | this client | · | · | · | ● | ● |
 | `instrumentOf` | this client | · | · | · | ● | ● |
 | `last_rtt` / `last_rtt_ms` | this client | · | · | · | ● | ● |
@@ -277,11 +279,14 @@ ib_async's transport, has a method by that name.
 | `newsHeadlines` | venue | · | · | · | ● | ● |
 | `nextOrderId` | this client | · | · | · | ● | ● |
 | `nextSharedId` | this client | · | · | · | ● | ● |
+| `next_shared_id_within` | venue | · | · | · | ● | · |
 | `numberedFigures` | venue | · | · | · | ● | ● |
 | `numberedFiguresSeries` | venue | · | · | · | ● | ● |
+| `on_data` | venue | · | · | · | ● | · |
 | `option_chain` / `option_chains` | venue | · | · | · | ● | ● |
 | `optionModel` | venue | · | · | · | ● | ● |
 | `optionModelByInstrument` | venue | · | · | · | ● | ● |
+| `order_id_floor` | venue | · | · | · | ● | · |
 | `orderPermissions` | venue | · | · | · | ● | ● |
 | `orderPresets` | venue | · | · | · | ● | ● |
 | `pairedFigures` | venue | · | · | · | ● | ● |
@@ -293,8 +298,10 @@ ib_async's transport, has a method by that name.
 | `positionsElsewhere` | venue | · | · | · | ● | ● |
 | `qualifyContract` | venue | · | · | · | ● | ● |
 | `qualifyContracts` | venue | · | · | ● | ● | ● |
+| `question_retired` | this client | · | · | · | ● | — |
 | `quote` | venue | · | · | · | ● | ● |
 | `quoteByInstrument` | venue | · | · | · | ● | ● |
+| `refuse` | this client | · | · | · | ● | — |
 | `reqAdjustments` | venue | · | · | · | ● | ● |
 | `req_config` / `req_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `reqMktDataEx` | venue | · | · | · | ● | ● |
@@ -315,6 +322,7 @@ ib_async's transport, has a method by that name.
 | `statedFiguresSeries` | venue | · | · | · | ● | ● |
 | `statedRows` | venue | · | · | · | ● | ● |
 | `statedRowsSeries` | venue | · | · | · | ● | ● |
+| `traffic` | venue | · | · | · | ● | ● |
 | `twsConnectionTime` | venue | ● | ● | · | ● | ● |
 | `unreadWire` | this client | · | · | · | ● | ● |
 | `update_config` / `update_config_proto_buf` | this client | · | · | · | ◐ | ◐ |

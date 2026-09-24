@@ -857,10 +857,10 @@ fn code_provider_returning(code: &'static str) -> CodeProvider {
     })
 }
 
-/// A provider that never answers, so the gate is observed with `sent=false`.
-fn code_provider_that_never_answers() -> CodeProvider {
+/// A provider whose answer follows the scripted gate outcome.
+fn code_provider_waiting_past_the_gate() -> CodeProvider {
     std::sync::Arc::new(|_| {
-        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::thread::sleep(std::time::Duration::from_millis(250));
         Ok(String::new())
     })
 }
@@ -1022,7 +1022,7 @@ fn security_code_gate_reports_a_774_rejection_before_a_code_is_sent() {
         let err = do_security_code_2fa(
             &mut stream,
             deadline,
-            Some(&code_provider_that_never_answers()), None)
+            Some(&code_provider_waiting_past_the_gate()), None)
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "got {err}");
         assert!(err.to_string().contains("security code rejected (FAILED)"), "got {err}");
@@ -1066,7 +1066,7 @@ fn security_code_gate_accepts_passed_before_a_code_is_sent() {
     let outcome = do_security_code_2fa(
         &mut stream,
         far_future_deadline(),
-        Some(&code_provider_that_never_answers()), None)
+        Some(&code_provider_waiting_past_the_gate()), None)
     .expect("the venue's PASSED must be accepted before a code is sent");
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
     assert!(stream.written.is_empty(), "nothing should have been sent");
@@ -1144,7 +1144,7 @@ fn security_code_gate_surfaces_an_unexpected_774_code_before_a_code_is_sent() {
     let err = do_security_code_2fa(
         &mut stream,
         far_future_deadline(),
-        Some(&code_provider_that_never_answers()), None)
+        Some(&code_provider_waiting_past_the_gate()), None)
     .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     assert!(err.to_string().contains("code 4"), "got {err}");
@@ -1325,7 +1325,7 @@ fn security_code_gate_accepts_a_774_verdict_before_a_code_is_sent() {
     let outcome = do_security_code_2fa(
         &mut stream,
         far_future_deadline(),
-        Some(&code_provider_that_never_answers()), None)
+        Some(&code_provider_waiting_past_the_gate()), None)
     .expect("the venue's PASSED must be accepted before a code is sent");
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
     assert!(stream.written.is_empty(), "nothing should have been sent");
@@ -1437,7 +1437,7 @@ fn security_code_gate_honours_the_deadline() {
     let err = do_security_code_2fa(
         &mut stream,
         std::time::Instant::now(),
-        Some(&code_provider_that_never_answers()), None)
+        Some(&code_provider_waiting_past_the_gate()), None)
     .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     // An expired deadline has to be caught before the loop does anything,
@@ -2163,4 +2163,49 @@ fn a_site_that_is_down_is_not_the_credentials_being_refused() {
         error_the_venue_stated("Auth error", NS_SECURE_ERROR, &["4", "words"]).kind(),
         std::io::ErrorKind::PermissionDenied,
     );
+}
+
+#[test]
+fn taking_back_a_code_wait_waits_for_its_provider_and_submits_nothing() {
+    use std::time::{Duration, Instant};
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (entered, provider_entered) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let released = std::sync::Mutex::new(released);
+    let provider: CodeProvider = Arc::new(move |_| {
+        entered.send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+        Ok("123456".into())
+    });
+    let worker = {
+        let cancel = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            let mut stream = RepliesAfterWrite::with_preface(Vec::new(), vec![0xff], Vec::new());
+            let result = do_security_code_2fa(&mut stream, Instant::now() + Duration::from_secs(5), Some(&provider), Some(&cancel));
+            (result, stream.written)
+        })
+    };
+    provider_entered.recv_timeout(Duration::from_secs(1)).unwrap();
+    cancel.store(true, Ordering::Release);
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(!worker.is_finished(), "the code provider still belongs to this login");
+    release.send(()).unwrap();
+    let (result, written) = worker.join().unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    assert!(written.is_empty(), "a code for a taken-back login is never submitted");
+}
+
+#[test]
+fn a_taken_back_code_wait_never_calls_its_provider() {
+    let cancel = AtomicBool::new(true);
+    let called = Arc::new(AtomicBool::new(false));
+    let provider: CodeProvider = {
+        let called = Arc::clone(&called);
+        Arc::new(move |_| { called.store(true, Ordering::Release); Ok("123456".into()) })
+    };
+    let mut stream = ScriptedStream::new(Vec::new());
+    let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), Some(&cancel)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    assert!(!called.load(Ordering::Acquire));
+    assert!(stream.written.is_empty());
 }

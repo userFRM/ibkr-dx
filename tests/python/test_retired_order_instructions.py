@@ -39,6 +39,8 @@ def test_retired_order_instructions_are_refused(camel, snake, value, code, name)
     setattr(order, camel, value)
     assert getattr(order, snake) == value
     client.placeOrder(91, contract, order)
+    assert not heard.errors
+    client.poll()
     assert heard.errors == [(91, code, f"The '{name}' order attribute is not supported.")]
     assert not client._test_take_commands()
 
@@ -71,10 +73,14 @@ def test_the_option_list_is_checked_before_retired_order_instructions():
     order.optOutSmartRouting = True
     order.orderMiscOptions = [ibkr_dx.TagValue("unknown", "1")]
     client.placeOrder(93, contract, order)
+    assert not heard.errors
+    client.poll()
     assert [code for _, code, _ in heard.errors] == [10337]
     heard.errors.clear()
     client._test_set_enabled_features(["DEPRETFQNC", "NOAPIMISCVLD"])
     client.placeOrder(93, contract, order)
+    assert not heard.errors
+    client.poll()
     assert [code for _, code, _ in heard.errors] == [10268]
     assert not client._test_take_commands()
 
@@ -85,6 +91,8 @@ def test_retired_order_warnings_precede_a_later_instruction_refusal():
     order.nbboPriceCap = 0.0
     order.optOutSmartRouting = True
     client.placeOrder(94, contract, order)
+    assert not heard.errors
+    client.poll()
     assert [(req_id, code) for req_id, code, _ in heard.errors] == [
         (94, 2168), (94, 2169), (94, 2170), (94, 10348),
     ]
@@ -97,10 +105,14 @@ def test_an_orders_option_list_is_checked_before_its_destination_and_conditions(
     order.conditions = [object()]
     contract.exchange = ""
     client.placeOrder(95, contract, order)
+    assert not heard.errors
+    client.poll()
     assert [code for _, code, _ in heard.errors] == [10337]
     heard.errors.clear()
     contract.exchange = "SMART"
     client.placeOrder(95, contract, order)
+    assert not heard.errors
+    client.poll()
     assert [code for _, code, _ in heard.errors] == [10337]
     assert not client._test_take_commands()
 
@@ -112,17 +124,23 @@ def test_an_orders_manual_value_is_checked_after_its_preview_and_trail():
     order.whatIf = True
     order.transmit = False
     client.placeOrder(96, contract, order)
+    assert not heard.errors
+    client.poll()
     assert heard.errors == [(96, 321, "What-If order should have transmit flag set to TRUE ")]
     heard.errors.clear()
     order.transmit = True
     order.orderType = "TRAIL"
     order.trailingPercent = 150.0
     client.placeOrder(96, contract, order)
+    assert not heard.errors
+    client.poll()
     assert heard.errors == [(96, 321,
         "Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.")]
     heard.errors.clear()
     order.trailingPercent = 1.0
     client.placeOrder(96, contract, order)
+    assert not heard.errors
+    client.poll()
     assert heard.errors == [(96, 321,
         "Order: 'manual' has wrong value=2, expected [1 or 0]")]
     assert not client._test_take_commands()
@@ -133,5 +151,7 @@ def test_retired_order_instructions_are_checked_for_previews_and_algorithms(prev
     client, heard, contract, order = session(["DEPRETFQNC"])
     order.whatIf, order.algoStrategy, order.eTradeOnly = preview, strategy, True
     client.placeOrder(97, contract, order)
+    assert not heard.errors
+    client.poll()
     assert heard.errors == [(97, 10268, "The 'EtradeOnly' order attribute is not supported.")]
     assert not client._test_take_commands()

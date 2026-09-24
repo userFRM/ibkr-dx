@@ -14,13 +14,25 @@ use ibkr_dx::engine::hot_loop::HotLoop;
 use ibkr_dx::types::ContractRef;
 use ibkr_dx::types::*;
 
-/// Helper: build an EClient backed by SharedState + channel.
-fn test_client() -> (EClient, std::sync::mpsc::Receiver<ControlCommand>, Arc<SharedState>) {
+#[path = "support/engine.rs"]
+mod engine;
+use engine::Engine;
+
+/// Helper: build an EClient backed by SharedState + channel, and the engine's
+/// side of what its calls hand over.
+fn test_client() -> (EClient, Engine, Arc<SharedState>) {
     let shared = Arc::new(SharedState::new());
-    let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(|| {});
     let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let rx = Engine::new(rx, &shared);
     (client, rx, shared)
+}
+
+/// A call's refusal is a record in the session's order: none was pushed.
+fn nothing_refused(shared: &SharedState) {
+    let refused = shared.drain_refused();
+    assert!(refused.is_empty(), "the call was refused: {refused:?}");
 }
 
 fn spy() -> Contract {
@@ -92,6 +104,8 @@ fn order_lifecycle_partial_then_full_fill() {
 fn order_lifecycle_place_then_cancel() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
+    // The venue has named what the account was already working.
+    shared.orders.set_replay_done();
     client.seed_instrument(756733, 0);
 
     // Place order
@@ -99,12 +113,12 @@ fn order_lifecycle_place_then_cancel() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(50, &spy(), &order).unwrap();
+    client.place_order(50, &spy(), &order); nothing_refused(&shared);
     // Drain control commands
     while rx.try_recv().is_ok() {}
 
     // Cancel order
-    client.cancel_order(50, "").unwrap();
+    client.cancel_order(50, ""); nothing_refused(&shared);
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 50, .. })));
 
@@ -175,7 +189,7 @@ fn order_lifecycle_modify_then_fill() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(80, &spy(), &order).unwrap();
+    client.place_order(80, &spy(), &order); nothing_refused(&shared);
     while rx.try_recv().is_ok() {}
 
     // Modify: new limit at 151
@@ -183,7 +197,7 @@ fn order_lifecycle_modify_then_fill() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 151.0, ..Default::default()
     };
-    client.place_order(80, &spy(), &modified_order).unwrap();
+    client.place_order(80, &spy(), &modified_order); nothing_refused(&shared);
     while rx.try_recv().is_ok() {}
 
     // Fill at new price
@@ -212,7 +226,7 @@ fn order_lifecycle_what_if_preview() {
         order_type: "LMT".into(), lmt_price: 150.0,
         what_if: true, ..Default::default()
     };
-    client.place_order(90, &spy(), &order).unwrap();
+    client.place_order(90, &spy(), &order); nothing_refused(&shared);
 
     // Verify the what-if submission was sent
     let mut found_what_if = false;
@@ -266,7 +280,7 @@ fn order_lifecycle_algo_vwap_partial_fills() {
         algo_params: vec![TagValue { tag: "maxPctVol".into(), value: "0.1".into() }],
         ..Default::default()
     };
-    client.place_order(110, &spy(), &order).unwrap();
+    client.place_order(110, &spy(), &order); nothing_refused(&shared);
     // Drain
     while rx.try_recv().is_ok() {}
 
@@ -339,8 +353,16 @@ fn market_data_subscribe_ticks_unsubscribe() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
 
-    // Mapped by hand, since the real engine is bypassed
-    client.map_req_instrument(1, 0);
+    let spy = Contract {
+        con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
+        exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+    };
+    client.req_mkt_data(1, &spy, "", false, false); nothing_refused(&shared);
+    rx.pump();
+    // The engine's record of taking it says which slot it is served on.
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let slot = client.instrument_of(756733).expect("the engine took it");
 
     // Simulate quote arriving
     let mut q = Quote {
@@ -348,27 +370,28 @@ fn market_data_subscribe_ticks_unsubscribe() {
         ask: 451 * PRICE_SCALE,
         ..Quote::default()
     };
-    shared.market.push_quote(0, &q);
+    shared.market.push_quote(slot, &q);
 
-    let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
 
     // Unsubscribe
-    client.cancel_mkt_data(1).unwrap();
+    client.cancel_mkt_data(1); nothing_refused(&shared);
 
-    // The venue is told, and not only the dispatch loop. Asserted on the ticks
-    // alone, this passes for a client that stops delivering while the
+    // The engine is told, and not only the dispatch loop. Asserted on the
+    // ticks alone, this passes for a client that stops delivering while the
     // subscription stays up at the far end, which is the leak rather than the
     // withdrawal.
     assert!(
-        rx.try_iter().any(|c| matches!(c, ibkr_dx::types::ControlCommand::Unsubscribe { .. })),
+        rx.try_iter().any(|c| matches!(c, ibkr_dx::types::ControlCommand::CancelMktData { req_id: 1 })),
         "the withdrawal never reached the engine",
     );
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().all(|e| !e.starts_with("error:1:")), "{:?}", w.events);
 
     // Push new quote — should NOT be dispatched
     q.bid = 449 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_quote(slot, &q);
     w.events.clear();
     client.process_msgs(&mut w);
     let bid_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();
@@ -424,7 +447,7 @@ fn market_data_tbt_trades_and_quotes() {
 
     // TBT trade
     shared.market.push_tbt_trade(TbtTrade {
-        req_id: 1,
+        req_id: 1, kind: ibkr_dx::types::TbtType::Last,
         instrument: 0, price: 150 * PRICE_SCALE, size: 100,
         timestamp: 1700000001, exchange: "ARCA".into(), conditions: "".into(),
         past_limit: false,
@@ -440,7 +463,7 @@ fn market_data_tbt_trades_and_quotes() {
     });
     // Second trade
     shared.market.push_tbt_trade(TbtTrade {
-        req_id: 1,
+        req_id: 1, kind: ibkr_dx::types::TbtType::Last,
         instrument: 0, price: 151 * PRICE_SCALE, size: 200,
         timestamp: 1700000003, exchange: "NYSE".into(), conditions: "".into(),
         past_limit: false,
@@ -553,18 +576,23 @@ fn account_state_via_eclient() {
 /// Position tracking through reqPositions after fills.
 #[test]
 fn account_req_positions_reflects_fills() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
+    // The account has stated itself.
+    shared.portfolio.account_download_is_settled();
 
     // Set position info (as engine would after fills)
+    // Named, as the engine names a holding's contract once it is stated.
     shared.portfolio.set_position_info(PositionInfo {
-        con_id: 756733, position: 100.0, avg_cost: 450 * PRICE_SCALE, ..Default::default()
+        con_id: 756733, position: 100.0, avg_cost: 450 * PRICE_SCALE, symbol: "SPY".into(),
+        ..Default::default()
     });
     shared.portfolio.set_position_info(PositionInfo {
-        con_id: 265598, position: -50.0, avg_cost: 150 * PRICE_SCALE, ..Default::default()
+        con_id: 265598, position: -50.0, avg_cost: 150 * PRICE_SCALE, symbol: "AAPL".into(),
+        ..Default::default()
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
+    client.req_positions(); let _ = rx.try_recv(); client.process_msgs(&mut w);
 
     let positions: Vec<_> = w.events.iter().filter(|e| e.starts_with("position:")).collect();
     assert_eq!(positions.len(), 2);
@@ -613,14 +641,14 @@ fn historical_data_multi_bar_complete() {
 /// Request → cancel before completion → second process_msgs has no stale data.
 #[test]
 fn historical_data_cancel_no_stale_callbacks() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
 
     // Request
-    client.req_historical_data(6, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    client.req_historical_data(6, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false); nothing_refused(&shared);
     while rx.try_recv().is_ok() {}
 
     // Cancel
-    client.cancel_historical_data(6).unwrap();
+    client.cancel_historical_data(6); nothing_refused(&shared);
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelHistorical { req_id: 6 }));
 
@@ -668,7 +696,7 @@ fn contract_lookup_then_subscribe() {
     let (client, rx, shared) = test_client();
 
     // Step 1: request contract details
-    client.req_contract_details(20, &aapl()).unwrap();
+    client.req_contract_details(20, &aapl()); nothing_refused(&shared);
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::FetchContractDetails { contract: ContractRef { con_id: 265598, .. }, req_id: 20, .. }));
 
@@ -691,7 +719,7 @@ fn contract_lookup_then_subscribe() {
     assert!(w.events.iter().any(|e| e == "contract_details_end:20"));
 
     // Step 3: now subscribe to market data for this contract
-    let _ = client.req_mkt_data(21, &aapl(), "", false, false);
+    client.req_mkt_data(21, &aapl(), "", false, false);
 
     // Simulate ticks
     let q = Quote {
@@ -777,7 +805,7 @@ fn engine_to_eclient_end_to_end() {
     engine.inject_tick(spy_id);
 
     // Build EClient on same SharedState
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(|| {});
     let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
     client.map_req_instrument(1, spy_id);
@@ -925,7 +953,7 @@ fn mixed_all_data_types_single_process() {
 
     // TBT trade
     shared.market.push_tbt_trade(TbtTrade {
-        req_id: 1,
+        req_id: 1, kind: ibkr_dx::types::TbtType::Last,
         instrument: 0, price: 150 * PRICE_SCALE, size: 50,
         timestamp: 0, exchange: "".into(), conditions: "".into(),
         past_limit: false,
@@ -973,7 +1001,10 @@ fn mixed_all_data_types_single_process() {
 /// first call.
 #[test]
 fn req_completed_orders_keeps_what_it_read() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
+    // The venue has named what the account was already working, and there
+    // is no venue to ask: each question is answered with what was read.
+    shared.orders.set_replay_done();
 
     shared.orders.push_completed_order(CompletedOrder {
         order_id: 100, instrument: 0, status: OrderStatus::Filled,
@@ -985,37 +1016,33 @@ fn req_completed_orders_keeps_what_it_read() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
+    client.req_completed_orders(false); let _ = rx.try_recv(); client.process_msgs(&mut w);
 
     assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 2);
     assert!(w.events.iter().any(|e| e == "completed_orders_end"));
 
     // And again, with the same two.
     w.events.clear();
-    client.req_completed_orders(false, &mut w);
+    client.req_completed_orders(false); let _ = rx.try_recv(); client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 2);
     assert!(w.events.iter().any(|e| e == "completed_orders_end"));
 }
 
 #[test]
 fn req_completed_orders_empty_still_fires_end() {
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
     let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
+    client.req_completed_orders(false); let _ = rx.try_recv(); client.process_msgs(&mut w);
     // The end always fires, so a caller reading until it is not left waiting.
     assert!(
         w.events.iter().any(|e| e == "completed_orders_end"),
         "the answer ends: {:?}", w.events,
     );
-    // And with nothing behind it, because nothing answered — said, rather
-    // than handed over as an account that has finished nothing.
+    // And with nothing behind it: nothing was stated finished.
     assert!(
         !w.events.iter().any(|e| e == "completed_order"),
         "nothing is reported as finished: {:?}", w.events,
-    );
-    assert!(
-        w.events.iter().any(|e| e.starts_with("error")),
-        "and the caller is told the venue did not finish stating it: {:?}", w.events,
     );
 }
 

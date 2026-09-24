@@ -81,6 +81,12 @@ pub(crate) struct HmdsState {
     pub(crate) pending_historical: Vec<(String, u32)>,
     pub(crate) pending_head_ts: Vec<(String, u32)>,
     pub(crate) pending_scanner_params: bool,
+    /// Questions for the scanner's parameters asked while one is on the wire.
+    ///
+    /// The answer names no question, so one on the wire at a time: each is
+    /// sent when the one before it is answered, or refused with the connection
+    /// it would have gone out on.
+    pub(crate) scanner_params_queued: usize,
     pub(crate) pending_scanner: Vec<(String, u32)>,
     pub(crate) next_scanner_id: u32,
     pub(crate) pending_news: Vec<(String, u32)>,
@@ -122,6 +128,11 @@ pub(crate) struct HmdsState {
     pub(crate) keep_up_to_date_reqs: std::collections::HashSet<u32>,
     /// The bars still forming, one per request keeping its bars up to date.
     pub(crate) forming_bars: Vec<FormingBar>,
+    /// Bar streams withdrawn before the venue had numbered them, by the name
+    /// this client asked under. A withdrawal by that name reaches nothing the
+    /// venue holds, so each is withdrawn again by the number its
+    /// acknowledgement states, as a tick stream's is.
+    pub(crate) rtbar_withdrawn_unnumbered: std::collections::HashSet<String>,
     /// The live five-second bar streams, in the shape their request needs to
     /// go out again. `rtbar_subs` holds the routing for the session that is
     /// running and cannot rebuild a request, so a reconnect had nothing to
@@ -371,6 +382,7 @@ impl HmdsState {
             pending_historical: Vec::new(),
             pending_head_ts: Vec::new(),
             pending_scanner_params: false,
+            scanner_params_queued: 0,
             pending_scanner: Vec::new(),
             next_scanner_id: 1,
             pending_adjustments: Vec::new(),
@@ -383,6 +395,7 @@ impl HmdsState {
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
+            rtbar_withdrawn_unnumbered: std::collections::HashSet::new(),
             keep_up_to_date_reqs: std::collections::HashSet::new(),
             forming_bars: Vec::new(),
             rtbar_resub: Vec::new(),
@@ -418,6 +431,21 @@ impl HmdsState {
 
     /// Report every unanswered one-shot request as failed, and forget it.
     fn fail_pending(&mut self, why: &str, shared: &SharedState) {
+        // The question for the scanner's parameters on the wire, and those
+        // waiting behind it, end with the connection that carried it.
+        let questions = usize::from(std::mem::take(&mut self.pending_scanner_params))
+            + std::mem::take(&mut self.scanner_params_queued);
+        for _ in 0..questions {
+            shared.reference.push_error_from(
+                crate::bridge::ReferenceState::NO_REQUEST,
+                crate::types::model::ErrorOrigin::Question {
+                    q: crate::types::model::Question::ScannerParameters,
+                    ends: true,
+                },
+                crate::error_codes::Refusal::NOT_CONNECTED,
+                why.to_string(),
+            );
+        }
         let mut stranded: Vec<(u32, bool)> = Vec::new();
         // Every bar request holds its pages here, and it shares the caller's
         // number with its query on `pending_historical` and, if it is to be
@@ -535,6 +563,9 @@ impl HmdsState {
         let bars: Vec<_> = self.rtbar_resub.clone();
         self.rtbar_subs.clear();
         self.rtbar_resub.clear();
+        // And a withdrawal waiting for a number the dead session would have
+        // stated: nothing on the new one carries that name.
+        self.rtbar_withdrawn_unnumbered.clear();
         for r in &bars {
             self.send_realtime_bar_subscribe(
                 r.req_id, r.con_id, "", &r.sec_type, &r.exchange,
@@ -917,6 +948,17 @@ impl HmdsState {
                         }
                     }
                     else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
+                        // A stream withdrawn before this acknowledgement: the
+                        // withdrawal by name reached nothing, so it goes again
+                        // by the number stated now, and nothing is routed.
+                        if let Some(asked) = self.rtbar_withdrawn_unnumbered.iter()
+                            .find(|qid| answers(xml_tag, qid)).cloned()
+                        {
+                            self.rtbar_withdrawn_unnumbered.remove(&asked);
+                            log::info!("bar stream {asked} was withdrawn before it was numbered; withdrawn again as {ticker_id_str}");
+                            self.send_historical_cancel(&ticker_id_str, hmds_conn, hb);
+                            return;
+                        }
                         // No unit, no bars: a price counted in a unit nobody
                         // stated is wrong and looks right.
                         let Some(min_tick) =
@@ -1245,11 +1287,15 @@ impl HmdsState {
                                         log::warn!("scan response payload did not parse ({} bytes)", xml.len());
                                         shared.market.note_unread_wire("scanner", format!("a batch of scan {req_id} named a contract id that cannot be read"));
                                         // 162, the historical service's error number, as the
-                                        // refusals beside this carry it.
-                                        super::push_hmds_refusal(
-                                            shared, req_id, 162,
+                                        // refusals beside this carry it. A notice: the scan
+                                        // goes on.
+                                        shared.reference.push_error_from(
+                                            req_id,
+                                            crate::types::model::ErrorOrigin::Request {
+                                                id: i64::from(req_id), ends: false,
+                                            },
+                                            162,
                                             "a batch of this scan named a contract id that cannot be read, so the batch was not delivered".to_string(),
-                                            false,
                                         );
                                         return;
                                     };
@@ -1582,7 +1628,8 @@ impl HmdsState {
             let caller_req_id = self.tbt_subscriptions[at].caller_req_id;
             // The layout of a record is the layout of the stream it arrived on,
             // which is a property of the subscription and not of the contract.
-            let kind = frame_kind(self.tbt_subscriptions[at].kind);
+            let asked_for = self.tbt_subscriptions[at].kind;
+            let kind = frame_kind(asked_for);
 
             // A move is stated in whole increments of the contract's own smallest
             // one, so without that increment a move cannot be turned into a price.
@@ -1611,6 +1658,7 @@ impl HmdsState {
                         let trade = crate::types::TbtTrade {
                             instrument,
                             req_id: caller_req_id,
+                            kind: asked_for,
                             price: (t.price as i64).saturating_mul(mts),
                             // A size is a count of what the venue said sizes move
                             // in for this contract — whole ones for a share,
@@ -2304,8 +2352,27 @@ fn build_tbt_query(
         // not.
         self.rtbar_subs.retain(|(_, rid, ..)| *rid != req_id);
         self.rtbar_resub.retain(|r| r.req_id != req_id);
-        let cancel_id = ticker_id.map(|t| t.to_string()).unwrap_or(query_id);
-        self.send_historical_cancel(&cancel_id, hmds_conn, hb);
+        self.withdraw_bar_stream(query_id, ticker_id, hmds_conn, hb);
+    }
+
+    /// Tell the venue to stop a bar stream: by the number it gave the stream
+    /// where it has given one, and otherwise by the name this client asked
+    /// under — which the venue does not find, so the stream is withdrawn again
+    /// by number when its acknowledgement states one.
+    pub(crate) fn withdraw_bar_stream(
+        &mut self,
+        query_id: String,
+        ticker_id: Option<u32>,
+        hmds_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        match ticker_id {
+            Some(number) => self.send_historical_cancel(&number.to_string(), hmds_conn, hb),
+            None => {
+                self.send_historical_cancel(&query_id, hmds_conn, hb);
+                self.rtbar_withdrawn_unnumbered.insert(query_id);
+            }
+        }
     }
 
     pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, what_to_show: &str, use_rth: bool, include_expired: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
@@ -2385,28 +2452,44 @@ fn build_tbt_query(
         }
     }
 
+    pub(crate) fn send_next_scanner_params(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, left: &mut usize) {
+        while *left > 0 && !self.pending_scanner_params && self.scanner_params_queued > 0 {
+            *left -= 1;
+            self.scanner_params_queued -= 1;
+            self.send_scanner_params_request(hmds_conn, hb, shared);
+        }
+    }
+
     pub(crate) fn send_scanner_params_request(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // The request carries no number of its own, so a failure is reported
-        // under none: left unreported, the call returned as though the
-        // question had been asked and the answer simply had not come.
+        // under none, as a refusal of the question: left unreported, the call
+        // returned as though the question had been asked and the answer
+        // simply had not come.
+        let refuse = |why: String| shared.reference.push_error_from(
+            crate::bridge::ReferenceState::NO_REQUEST,
+            crate::types::model::ErrorOrigin::Question {
+                q: crate::types::model::Question::ScannerParameters,
+                ends: true,
+            },
+            crate::error_codes::Refusal::NOT_CONNECTED,
+            why,
+        );
         let Some(conn) = hmds_conn.as_mut() else {
-            super::push_hmds_unavailable(
-                shared, crate::bridge::ReferenceState::NO_REQUEST, false,
-            );
+            refuse(super::HMDS_UNAVAILABLE.to_string());
             return;
         };
+        // One on the wire at a time: the answer names no question.
+        if self.pending_scanner_params {
+            self.scanner_params_queued += 1;
+            return;
+        }
         let ts = chrono_free_timestamp();
         if let Err(e) = conn.send_fix(&[
             (fix::TAG_MSG_TYPE, "U"),
             (fix::TAG_SENDING_TIME, &ts),
             (crate::control::scanner::TAG_SUB_PROTOCOL, "10001"),
         ]) {
-            super::push_hmds_refusal(
-                shared, crate::bridge::ReferenceState::NO_REQUEST,
-                crate::error_codes::Refusal::NOT_CONNECTED,
-                format!("scanner parameters request could not be sent: {e}"),
-                false,
-            );
+            refuse(format!("scanner parameters request could not be sent: {e}"));
             return;
         }
         self.pending_scanner_params = true;
@@ -2532,7 +2615,7 @@ fn build_tbt_query(
         }
     }
 
-    pub(crate) fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: i32, shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Err(why) = crate::control::news::validate_news_window(start_time, end_time) {
             super::push_hmds_refusal(shared, req_id, crate::error_codes::Refusal::VALIDATION, why, false);
             return;
@@ -2851,38 +2934,47 @@ fn build_tbt_query(
     /// envelope, the subtype that names this withdrawal, and the id the query
     /// went out under.
     ///
-    /// Answers whether there was one to withdraw, and says nothing itself.
+    /// Answers whether there was one to withdraw, and says nothing itself: the
+    /// caller's own arm decides what a withdrawal naming nothing is told.
+    ///
+    /// A caller's own query, never the one a held series sent: that one
+    /// shares the caller's number and is withdrawn with its series, by the id
+    /// it went out under.
     pub(crate) fn send_adjustments_cancel(
         &mut self,
         req_id: u32,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) -> bool {
+        let folds: Vec<&str> = self.held.iter().filter_map(|a| a.actions_query.as_deref()).collect();
         let named = self.pending_adjustments.iter()
-            .find(|(qid, rid, _)| *rid == req_id && !self.held.iter()
-                .any(|a| a.actions_query.as_deref() == Some(qid.as_str())))
+            .find(|(qid, rid, _)| *rid == req_id && !folds.contains(&qid.as_str()))
             .map(|(qid, ..)| qid.clone());
+        // Whether anything was held is answered before the connection is
+        // looked at, as the two withdrawals beside this one do: this client
+        // holds nothing under that number whether or not there is a socket.
         let Some(query_id) = named else {
             log::debug!("corporate-actions withdrawal for req_id={req_id}, which is not waiting");
             return false;
         };
-        self.send_adjustments_query_cancel(&query_id, hmds_conn, hb)
+        self.send_adjustments_cancel_of(&query_id, hmds_conn, hb)
     }
 
-    /// A historical series owns its actions query by the name sent to the
-    /// venue. A standalone request may use the same caller number.
-    pub(crate) fn send_adjustments_query_cancel(
+    /// Withdraw the corporate-actions query that went out under this id.
+    ///
+    /// Answers whether one was waiting under it.
+    pub(crate) fn send_adjustments_cancel_of(
         &mut self,
         query_id: &str,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) -> bool {
-        let Some(pos) = self.pending_adjustments.iter()
-            .position(|(qid, ..)| qid == query_id)
-        else { return false };
-        let (_, req_id, _) = self.pending_adjustments.remove(pos);
+        let Some(pos) = self.pending_adjustments.iter().position(|(qid, ..)| qid == query_id) else {
+            return false;
+        };
+        let (query_id, req_id, _) = self.pending_adjustments.remove(pos);
         let Some(conn) = hmds_conn.as_mut() else { return true };
-        let xml = crate::control::xml::cancel_query(query_id);
+        let xml = crate::control::xml::cancel_query(&query_id);
         let ts = chrono_free_timestamp();
         let _ = conn.send_fix(&[
             (fix::TAG_MSG_TYPE, "U"),

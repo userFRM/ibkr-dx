@@ -68,6 +68,7 @@ def test_a_discretionary_amount_below_nought_is_refused_under_168():
     order = _limit(10.0)
     order.discretionaryAmt = -0.01
     client.place_order(1, _spy(), order)
+    client.poll()
     assert recorder.errors == [(1, 168, "Discretionary amount does not conform to the minimum "
                                         "price variation for this contract")]
 
@@ -75,6 +76,7 @@ def test_a_discretionary_amount_below_nought_is_refused_under_168():
 def test_a_combination_priced_on_every_leg_and_on_itself_is_refused_under_10054():
     recorder, client = _session()
     client.place_order(2, _combo(), _priced_on_every_leg(21.0))
+    client.poll()
     assert recorder.errors == [(2, 10054, "Can't specify combo price when using per-leg prices.")]
 
 
@@ -84,6 +86,7 @@ def test_a_combination_priced_on_every_leg_alone_is_refused_under_10058():
     # nothing that makes one non-guaranteed.
     recorder, client = _session()
     client.place_order(3, _combo(), _priced_on_every_leg(0.0))
+    client.poll()
     assert recorder.errors == [(3, 10058, "Combo per-leg prices are only supported for "
                                           "non-guaranteed smart combo with two legs and feature "
                                           "\"IECOMBOPERLEGPRICE\" enabled.")]

@@ -2112,6 +2112,110 @@ pub fn contract_identity(
     format!("{last_trade_date}|{strike}|{right}|{multiplier}|||{currency}")
 }
 
+// ── What an error is about ──
+
+/// What an error is about.
+///
+/// The number `Wrapper::error` carries can be a request's, an order's, a
+/// lookup's this client made for itself, or none, and does not say which.
+/// Every error carries its origin from the site that pushes it, and is
+/// delivered through `Wrapper::error_from`, whose default goes on to `error`
+/// under [`ErrorOrigin::id`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorOrigin {
+    /// A numbered request.
+    Request {
+        /// The caller's number for it.
+        id: i64,
+        /// Whether nothing more follows for it. A refusal ends its request; a
+        /// notice its answer follows — the executions a session does not
+        /// hold, the account a request is answered for — does not.
+        ends: bool,
+    },
+    /// An order, and the operation on it the error answers.
+    Order {
+        /// The order's number.
+        id: i64,
+        /// Which operation on it.
+        op: OrderOp,
+    },
+    /// A request that carries no number and has an end of its own.
+    Question {
+        /// Which one.
+        q: Question,
+        /// Whether nothing more follows for it. A notice its answer follows —
+        /// the working orders not all named within the wait — does not end it.
+        ends: bool,
+    },
+    /// The session, or nothing a caller asked for: the connection, a notice
+    /// the venue attributes to no request, and the calls that have no end of
+    /// their own, `req_global_cancel` among them.
+    Session,
+    /// A lookup the engine made for itself, by its own number.
+    Internal(u32),
+}
+
+impl ErrorOrigin {
+    /// The number `Wrapper::error` states the error under: the request's or
+    /// the order's own, the engine lookup's, and -1 for the rest, as the
+    /// reference client states anything it cannot attribute to a request.
+    pub fn id(self) -> i64 {
+        match self {
+            Self::Request { id, .. } | Self::Order { id, .. } => id,
+            Self::Internal(id) => i64::from(id),
+            Self::Question { .. } | Self::Session => -1,
+        }
+    }
+}
+
+/// The operation on an order an error answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderOp {
+    /// A new order.
+    Place,
+    /// A change to one the venue is working.
+    Modify,
+    /// Its withdrawal.
+    Cancel,
+    /// An exercise or a lapse.
+    Exercise,
+    /// The venue's own word on a working order.
+    Venue,
+}
+
+/// A request the TWS API sends with no number and answers with an end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Question {
+    /// `reqOpenOrders`.
+    OpenOrders,
+    /// `reqAllOpenOrders`.
+    AllOpenOrders,
+    /// `reqCompletedOrders`.
+    CompletedOrders,
+    /// `reqPositions`.
+    Positions,
+    /// `reqAccountUpdates`.
+    AccountUpdates,
+    /// `reqManagedAccts`.
+    ManagedAccounts,
+    /// `reqCurrentTime`.
+    CurrentTime,
+    /// `reqCurrentTimeInMillis`.
+    CurrentTimeInMillis,
+    /// `reqNewsProviders`.
+    NewsProviders,
+    /// `reqMarketRule`, for the rule named.
+    MarketRule(i32),
+    /// `reqFamilyCodes`.
+    FamilyCodes,
+    /// `reqMktDepthExchanges`.
+    MktDepthExchanges,
+    /// `reqScannerParameters`.
+    ScannerParameters,
+    /// `requestFA`.
+    Fa,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

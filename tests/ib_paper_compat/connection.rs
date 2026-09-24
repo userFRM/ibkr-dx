@@ -346,8 +346,8 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
         shared.clone(), Some(ibkr_dx::engine::hot_loop::EventSink::new(event_tx, Default::default())), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90006, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -376,8 +376,8 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
         conns1.farm, conns1.ccp, conns1.hmds, None,
     );
 
-    control_tx2.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx2.send(ControlCommand::Subscribe { req_id: 90007, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join2 = run_hot_loop(hot_loop2);
 
@@ -414,6 +414,7 @@ pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
         ib_key_timeout_secs: ibkr_dx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: ibkr_dx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
+        cancel: None,
         resume: None,
     };
 
@@ -445,9 +446,9 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
     let join = run_hot_loop(hot_loop);
 
     // Register 3 instruments via ControlCommand channel (not context_mut)
-    control_tx.send(ControlCommand::RegisterInstrument { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: String::new(), ..Default::default() }, identity: String::new(), reply_tx: None }).unwrap();
-    control_tx.send(ControlCommand::RegisterInstrument { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: "AAPL".to_string(), sec_type: String::new(), exchange: String::new(), ..Default::default() }, identity: String::new(), reply_tx: None }).unwrap();
-    control_tx.send(ControlCommand::RegisterInstrument { contract: ibkr_dx::types::ContractRef { con_id: 272093, symbol: "MSFT".to_string(), sec_type: String::new(), exchange: String::new(), ..Default::default() }, identity: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::RegisterInstrument { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: String::new(), ..Default::default() }, identity: String::new() }).unwrap();
+    control_tx.send(ControlCommand::RegisterInstrument { contract: ibkr_dx::types::ContractRef { con_id: 265598, symbol: "AAPL".to_string(), sec_type: String::new(), exchange: String::new(), ..Default::default() }, identity: String::new() }).unwrap();
+    control_tx.send(ControlCommand::RegisterInstrument { contract: ibkr_dx::types::ContractRef { con_id: 272093, symbol: "MSFT".to_string(), sec_type: String::new(), exchange: String::new(), ..Default::default() }, identity: String::new() }).unwrap();
 
     // Give hot loop time to process
     std::thread::sleep(Duration::from_millis(500));
@@ -457,8 +458,8 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
     println!("  Instrument count after 3 registrations: {count}");
 
     // Now subscribe to one of the registered instruments
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90008, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
 
     // Wait briefly for any events (subscription confirmation or ticks)
@@ -509,8 +510,8 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
     // Submit + cancel an order to verify hot loop is still functional after UpdateParam
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: inst_id, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { outside_rth: true, ..Default::default() } })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90009, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -593,9 +594,9 @@ pub(super) fn phase_farm_recovers_with_credentials(
     }
     let join = run_hot_loop(hot_loop);
 
-    control_tx.send(ControlCommand::Subscribe {
-        contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-        generic_ticks: Vec::new(), issued: 0,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90010,
+        contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
 
     // A tick is the proof. The farm was down before the loop started, so the

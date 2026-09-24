@@ -1,10 +1,7 @@
 //! Account-related methods: positions, PnL, account summary/updates.
 
-use std::sync::atomic::Ordering;
-use crate::types::model::PRICE_SCALE_F;
-use crate::api::wrapper::Wrapper;
 use crate::error_codes::Refusal;
-use super::dispatch::NO_REQUEST;
+use crate::types::model::{ErrorOrigin, Question};
 use crate::types::*;
 
 use super::{Contract, EClient};
@@ -33,126 +30,49 @@ impl EClient {
 
     /// Request positions. Matches `reqPositions` in C++.
     ///
-    /// Waits for the account data the venue pushes as a session opens, then
-    /// delivers what it holds and calls `position_end`. The wait is bounded, and
-    /// an account that says nothing within it delivers nothing — which reads the
-    /// same as an account holding nothing. Said in the log rather than left to
-    /// be inferred, because the two are not the same answer.
-    pub fn req_positions(&self, wrapper: &mut impl Wrapper) {
+    /// Answered where the account has stated what it holds, which the venue
+    /// does as a session opens: every holding and `position_end`, stated as
+    /// the account stands where the answer is delivered, and each move after
+    /// it on `position`. The engine holds the question until then, and nothing
+    /// waits here. An account that says nothing within ten seconds is answered
+    /// with what this session holds — which reads the same as an account
+    /// holding nothing, so it is said on `error` ahead of the answer.
+    pub fn req_positions(&self) {
         // Answered from a session that has ended, this hands back the last
         // book with nothing to say it is stale: the shutdown does not clear
-        // the download flag, so the gate below passes at once. The other
-        // surface refuses, and this now does too.
+        // the download flag. The other surface refuses, and this does too.
         if self.session_over() {
-            return self.report_reason(-1, &Refusal::not_connected("Not connected"));
+            return self.refuse_question(Question::Positions, &Refusal::not_connected("Not connected"));
         }
-        // Waits for the batch-end signal, not for the first holding: an account
-        // with several would otherwise answer with whichever arrived first. An
-        // account holding nothing is complete when the batch ends, so this does
-        // not wait on rows that are not coming.
-        if !self.wait_for_the_download(NO_REQUEST) { return; }
-        if !self.shared.portfolio.account_download_complete() {
-            // Reported to the caller as well as the log. A caller reading
-            // holdings has no other way to tell a truncated answer from a
-            // complete one.
-            let why = "the account had not finished stating its holdings within the wait, \
-                       so what follows is what this session already held rather than what \
-                       the account holds";
-            log::warn!("{why}");
-            wrapper.error(NO_REQUEST, Refusal::NO_ANSWER as i64, why, "");
+        if let Err(why) = self.send(ControlCommand::Ask(Ask::Positions)) {
+            self.refuse_question(Question::Positions, &why);
         }
-        // What moved before this asked is answered by the read below, which
-        // states what the holdings are now; fired as change events as well it
-        // would arrive twice. Taken whether or not a watch stands, as the other
-        // surface takes it: left in the queue for a standing watcher, the next
-        // pass fired every holding again on `position` as well.
-        let already_stated = self.shared.portfolio.drain_position_changes();
-        // Watching before reading: see `req_positions_multi`. Read first and
-        // registered after, a holding that moved while the answer was being
-        // assembled was taken by a watcher that already existed — the queue is
-        // drained once for everyone — and reached this caller nowhere.
-        self.positions_requested.store(true, Ordering::Release);
-        let positions = self.core.named_positions(&self.shared, std::thread::sleep);
-        for pi in &positions {
-            let c = self.position_contract(pi);
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            wrapper.position(&self.account_id, &c, pi.position, avg_cost);
-        }
-        wrapper.position_end();
-        // What was taken above belongs to the per-request watchers too, and
-        // they were not answered here. Handed over now rather than dropped, or
-        // a holding that moved before this ask would reach them never.
-        let watching: Vec<i64> = {
-            let asked = self.positions_multi_requested.lock().unwrap();
-            let mut ids: Vec<i64> = asked.iter().copied().collect();
-            ids.sort_unstable();
-            ids
-        };
-        for pi in &already_stated {
-            let c = self.position_contract(pi);
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            for req_id in &watching {
-                wrapper.position_multi(*req_id, &self.account_id, "", &c, pi.position, avg_cost);
-            }
-        }
-    }
-
-    /// Wait for the account to finish stating itself, up to ten seconds, and
-    /// say whether the session is still there to answer. The session may end
-    /// inside the wait, and what this would answer from afterwards is the
-    /// pre-drop book: checked at entry alone, ten seconds of that book went
-    /// out under a refusal for silence.
-    fn wait_for_the_download(&self, req_id: i64) -> bool {
-        for _ in 0..1000 {
-            if self.shared.portfolio.account_download_complete() { break; }
-            if self.session_over() {
-                self.report_reason(req_id, &Refusal::not_connected("Not connected"));
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        true
     }
 
     // ── PnL ──
 
-    /// Subscribe to account PnL updates. Matches `reqPnL` in C++.
-    ///
-    /// The venue is asked, under `account` or under the one this session opened
-    /// with where none is named. What comes back is what each holding was worth
-    /// at midnight and what it has realised since, and the figures reported on
-    /// `pnl` are worked out from those against the prices the session is being
-    /// told. Without the subscription none of that arrives, and the figures
-    /// reduce to the unrealised part with nothing realised on any position.
-    ///
-    /// `account` is required, as a gateway requires it, and one the login
-    /// does not hold is refused in its words. Another account the login holds
-    /// is refused too: the figures are worked out from one set of midnight
-    /// seeds against one book of holdings, and both belong to the account this
-    /// session opened under.
-    ///
-    /// `model_code` is taken and not applied: there is no model portfolio to
-    /// name here.
-    pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str) {
-        // Before the slot is taken, as the siblings check it: taken first, a
-        // refused request held the one slot there is, so the next request
-        // under another number was refused as a duplicate of one that never
-        // went, and the profit was reported under the refused number.
+    /// Subscribe to the named account's profit. The account is checked as a
+    /// gateway checks it. Each request has its own subscription; a repeated
+    /// active request number is refused under 102. A model is taken and not
+    /// applied, with a log notice once per session.
+    pub fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
-        // And the account before the slot, for the same reason. A request
-        // naming another account used to be told so and then subscribed
-        // under this one, so its number carried a profit it never asked for.
+        // The account is checked before the request number is subscribed.
         if let Err(why) = ClientCore::check_pnl_account(&self.shared, &self.accounts, &self.account_id, account) {
             log::warn!("{}", why.message);
             return self.report_reason(req_id, &why);
         }
-        // Refused while another request holds the subscription, and nothing
-        // is asked of the venue for a request that will not be reported.
-        if let Err(why) = self.core.subscribe_pnl(req_id) {
+        let account = if account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            ClientCore::note_account_selection(&self.shared, account);
+            self.account_id.as_str()
+        } else { account };
+        if let Err(why) = self.core.subscribe_pnl(req_id, account) {
             return self.report_reason(req_id, &why);
         }
-        let account = self.account_id.clone();
-        if let Err(why) = self.send(ControlCommand::SubscribePnl { req_id, account }) {
+        ClientCore::note_account_selection(&self.shared, model_code);
+        let account = account.to_string();
+        if let Err(why) = self.send(ControlCommand::SubscribePnl { req_id, single: false, account }) {
+            self.core.unsubscribe_pnl(req_id);
             self.report_reason(req_id, &why);
         }
     }
@@ -164,56 +84,62 @@ impl EClient {
     /// does.
     pub fn cancel_pnl(&self, req_id: i64) {
         self.core.unsubscribe_pnl(req_id);
-        if let Err(why) = self.send(ControlCommand::CancelPnl { req_id }) {
+        if let Err(why) = self.send(ControlCommand::CancelPnl { req_id, single: false }) {
             self.report_reason(req_id, &why);
         }
     }
 
-    /// Subscribe to single-position PnL updates. Matches `reqPnLSingle` in C++.
-    ///
-    /// `account` is checked as on [`req_pnl`](EClient::req_pnl), and for the
-    /// same reasons; `model_code` is taken and not applied.
-    pub fn req_pnl_single(&self, req_id: i64, account: &str, _model_code: &str, con_id: i64) {
+    /// Subscribe to a position's profit in the named account.
+    /// The account is checked as for the account-level profit. A model is
+    /// taken and not applied, with a log notice once per session.
+    pub fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         if let Err(why) = ClientCore::check_pnl_account(&self.shared, &self.accounts, &self.account_id, account) {
             log::warn!("{}", why.message);
             return self.report_reason(req_id, &why);
         }
-        self.core.subscribe_pnl_single(req_id, con_id);
+        ClientCore::note_account_selection(&self.shared, model_code);
+        let account = if account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            ClientCore::note_account_selection(&self.shared, account);
+            self.account_id.as_str()
+        } else { account };
+        if let Err(why) = self.core.subscribe_pnl_single(req_id, con_id, account) {
+            return self.report_reason(req_id, &why);
+        }
+        if let Err(why) = self.send(ControlCommand::SubscribePnl { req_id, single: true, account: account.to_string() }) {
+            self.core.unsubscribe_pnl_single(req_id);
+            self.report_reason(req_id, &why);
+        }
     }
 
     /// Cancel single-position PnL subscription. Matches `cancelPnLSingle` in C++.
     pub fn cancel_pnl_single(&self, req_id: i64) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.unsubscribe_pnl_single(req_id);
+        if let Err(why) = self.send(ControlCommand::CancelPnl { req_id, single: true }) { self.report_reason(req_id, &why); }
     }
 
     // ── Account Summary ──
 
-    /// Request account summary. Matches `reqAccountSummary` in C++.
-    ///
-    /// `group` is checked as a gateway checks it, and refused in its words: an
-    /// empty one, and on a login that is not an advisor's anything but `All`
-    /// or `AllNonProp`; `All` where the venue says the login may not ask for
-    /// it. Empty `tags` are refused the same way. What is answered is the
-    /// account this session opened under: on a login holding several, `All`
-    /// is answered for that one account, and the caller is told so on `error`
-    /// under 321 ahead of the answer.
-    ///
-    /// Two summaries may be open at once, as on a gateway; a third is refused
-    /// under 322.
+    /// Request an account summary. `All` answers for every account the login
+    /// holds. Account groups and `AllNonProp` are taken and not applied, with
+    /// a log notice once per session. Validation and the limit of two standing
+    /// summary requests follow a gateway.
     pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+        let accounts = if group == "All" { self.accounts.clone() } else {
+            ClientCore::note_account_selection(&self.shared, group);
+            vec![self.account_id.clone()]
+        };
         let checked = ClientCore::check_account_summary(&self.shared, group, tags)
-            .and_then(|()| self.core.subscribe_account_summary(req_id, tags));
+            .and_then(|()| self.core.subscribe_account_summary(req_id, tags, accounts.clone()));
         if let Err(why) = checked {
             return self.report_reason(req_id, &why);
         }
-        if let Some(why) =
-            ClientCore::answered_for_the_session_account(&self.shared, group, &self.account_id)
-        {
-            log::warn!("{why}");
-            self.report_reason(req_id, &Refusal::validation(why));
+        for account in accounts {
+            if let Err(why) = self.send(ControlCommand::RefreshAccount { account }) {
+                self.report_reason(req_id, &why);
+            }
         }
     }
 
@@ -225,41 +151,46 @@ impl EClient {
 
     // ── Account Updates ──
 
-    /// Subscribe to account updates. Matches `reqAccountUpdates` in C++.
-    ///
-    /// `acct_code` is checked as a gateway checks it. On a login holding one
-    /// account it is ignored, as a gateway ignores it. On a login holding
-    /// several, a subscription naming none, or one the login does not hold, is
-    /// refused in a gateway's words. One it holds, or `All` where the login may
-    /// ask for every account, is answered with the figures of the account this
-    /// session opened under, which are the ones the venue states to it, and
-    /// the caller is told so on `error` under 321.
-    ///
-    /// Subscribing also asks the venue to state the figures now. It restates
-    /// them on its own schedule otherwise, which is unhurried: a session that
-    /// has just opened waits tens of seconds for its first set, and a caller
-    /// that subscribed and then read the account got nothing.
+    /// Subscribe to the named account's figures and holdings, or withdraw
+    /// the subscription. A single-account login ignores the name as a gateway
+    /// does. Subscribing asks the venue to restate that account now; the engine
+    /// holds the answer until its download ends or the existing wait expires.
     pub fn req_account_updates(&self, subscribe: bool, acct_code: &str) {
         // The session before the account, as for every other request: an
         // ended one is told it has ended, not that it named a wrong account.
-        if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+        // A subscription is the question of the account's figures; its
+        // withdrawal, like `cancel_positions`, is the session's.
+        let refused = if subscribe {
+            ErrorOrigin::Question { q: Question::AccountUpdates, ends: true }
+        } else {
+            ErrorOrigin::Session
+        };
+        let refuse = |why: Refusal| self.refuse(refused, i64::from(why.code), &why.message);
+        if self.session_over() { return refuse(Refusal::not_connected("Not connected")); }
         if let Err(why) = ClientCore::check_account_updates(&self.shared, &self.accounts, subscribe, acct_code) {
-            return self.report_reason(NO_REQUEST, &why);
+            return refuse(why);
         }
-        if subscribe
-            && let Some(why) = ClientCore::answered_for_the_session_account(
-                &self.shared, acct_code, &self.account_id,
-            )
-        {
-            log::warn!("{why}");
-            self.report_reason(NO_REQUEST, &Refusal::validation(why));
-        }
-        self.core.subscribe_account_updates(subscribe);
-        if subscribe {
-            let account = self.account_id.clone();
-            if let Err(why) = self.send(ControlCommand::RefreshAccount { account }) {
-                self.report_reason(-1, &why);
-            }
+        let account = if ClientCore::login_holds_several_accounts(&self.shared)
+            && !acct_code.eq_ignore_ascii_case("All") && acct_code != "AllNonProp" {
+            acct_code.to_string()
+        } else {
+            if acct_code == "AllNonProp" { ClientCore::note_account_selection(&self.shared, acct_code); }
+            self.account_id.clone()
+        };
+        // A withdrawal is the question's cancel: the engine withdraws a
+        // subscription it still holds and confirms the withdrawal in its
+        // place, after everything the subscription was answered with, so
+        // nothing of the account follows it.
+        let command = if subscribe {
+            ControlCommand::Ask(Ask::AccountUpdates { account })
+        } else {
+            ControlCommand::Retire(Retirement::Question(Question::AccountUpdates))
+        };
+        // Subscribed where the answer stands in the session's order, once the
+        // account has stated itself, which is where the first batch and its
+        // end are stated from.
+        if let Err(why) = self.send(command) {
+            refuse(why);
         }
     }
 
@@ -268,10 +199,15 @@ impl EClient {
     /// Nothing is withdrawn from the venue: it pushes what the account holds
     /// as the session opens and keeps it current whether or not anyone is
     /// listening. What stops is the reporting — a holding that moves after
-    /// this is no longer delivered on `position`.
+    /// this is no longer delivered on `position`. A `req_positions` the engine
+    /// still holds is withdrawn, never answered. The cancel is confirmed on
+    /// [`question_retired`](crate::api::wrapper::Wrapper::question_retired)
+    /// where it stands, after everything the question was answered with.
     pub fn cancel_positions(&self) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
-        self.positions_requested.store(false, Ordering::Release);
+        if let Err(why) = self.send(ControlCommand::Retire(Retirement::Question(Question::Positions))) {
+            self.refuse_session(&why);
+        }
     }
 
     /// Request managed accounts. Matches `reqManagedAccts` in C++.
@@ -279,112 +215,38 @@ impl EClient {
     /// Answered with every account this login holds, comma separated, which is
     /// the shape the reference client answers in. A login with one account is
     /// answered with that one account and no comma.
-    pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper) {
+    pub fn req_managed_accts(&self) {
         if self.session_over() {
-            return self.report_reason(-1, &Refusal::not_connected("Not connected"));
+            return self.refuse_question(Question::ManagedAccounts, &Refusal::not_connected("Not connected"));
         }
-        wrapper.managed_accounts(&self.accounts.join(","));
+        self.reply(crate::bridge::Reply::ManagedAccounts(self.accounts.join(",")));
     }
 
-    /// Request account updates for multiple accounts/models. Matches
-    /// `reqAccountUpdatesMulti` in C++.
-    /// Account values for one account or model, answered on
-    /// `account_update_multi`. The reference client answers this request on
-    /// its own callbacks, not on the ones `req_account_updates` uses, and a
-    /// caller written against it implements those and hears nothing otherwise.
-    ///
-    /// `ledger_and_nlv` restricts the answer to the per-currency ledger, as a
-    /// gateway does: each currency's cash, market values and
-    /// `NetLiquidationByCurrency`, which is the net liquidation it means. The
-    /// account's other figures — `NetLiquidation`, `BuyingPower` and the rest
-    /// — are not delivered on such a request.
-    ///
-    /// The figures are the ones the venue states for the account this session
-    /// opened under, and they are labelled with that account. A login holding
-    /// several is answered for that one; naming another here does not fetch
-    /// the other's figures, and is said in the log rather than answered with
-    /// this account's under the other's name.
-    ///
-    /// A model names a slice of the account, and the venue states the account
-    /// whole. Naming one is said the same way and the figures are labelled
-    /// with no model, rather than the account's whole balance sheet reaching a
-    /// caller as one model's.
-    ///
-    /// The request is held open. A figure that moves after the batch below is
-    /// reported again under the same number, until
-    /// [`EClient::cancel_account_updates_multi`] withdraws it — which is what
-    /// the reference client does, and what a caller watching a balance sheet
-    /// through this request is written for.
+    /// Subscribe to the named account's figures under this request number.
+    /// `ledger_and_nlv` selects the per-currency ledger and net liquidation.
+    /// A model is taken and not applied, with a log notice once per session.
+    /// The initial batch ends with `account_update_multi_end`; changes keep
+    /// arriving until the request is cancelled.
     pub fn req_account_updates_multi(
         &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
-        wrapper: &mut impl Wrapper,
     ) {
         if self.session_over() {
             return self.report_reason(req_id, &Refusal::not_connected("Not connected"));
         }
-        if !account.is_empty() && account != self.account_id {
-            let why = format!(
-                "account {account} was named and the figures that follow are {}'s, which \
-                 is the account this session opened under",
-                self.account_id,
-            );
-            log::warn!("{why}");
-            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
+        ClientCore::note_account_selection(&self.shared, model_code);
+        let account = if account.is_empty() || account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            ClientCore::note_account_selection(&self.shared, account);
+            self.account_id.clone()
+        } else { account.to_string() };
+
+        // Held open from where the answer stands, and answered there with the
+        // account whole: every batch after it is what has moved since. The
+        // engine holds it for the account to state itself, as it holds the
+        // holdings answer beside this: an account that has said nothing since
+        // the connection dropped reads exactly like one holding nothing.
+        if let Err(why) = self.send(ControlCommand::Ask(Ask::AccountUpdatesMulti { req_id, account, model_code: model_code.to_string(), ledger_and_nlv })) {
+            self.refuse_request(req_id, &why);
         }
-        // The same wait the holdings answer beside this makes, and for the
-        // same reason: an account that has said nothing since the connection
-        // dropped reads exactly like one holding nothing, and this path
-        // answered at once from the pre-drop figures without so much as a
-        // warning.
-        if !self.wait_for_the_download(req_id) { return; }
-        if !self.shared.portfolio.account_download_complete() {
-            let why = "the account had not finished stating its figures within the wait, \
-                       so what follows is what this session already held rather than what \
-                       the account holds";
-            log::warn!("{why}");
-            wrapper.error(req_id, Refusal::NO_ANSWER as i64, why, "");
-        }
-        // Held open from here. The reference client keeps this request alive
-        // and reports each figure again as it moves, and a caller watching its
-        // balance sheet through it was given one still picture and nothing
-        // after. Registered before the batch below so a figure that moves
-        // while it is being assembled is not lost between the two, and what it
-        // asked for is stated before that.
-        self.core.ledger_only_for(req_id, ledger_and_nlv);
-        self.account_updates_multi_requested.lock().unwrap().insert(req_id);
-        // A model is a slice of the account; the figures below are the whole
-        // of it. Echoed onto the label, every one of them read as that model's
-        // — and a caller keeping a book per model files the account's net
-        // liquidation and buying power as one model's. Said, and labelled with
-        // no model, as the account is labelled with the one this session
-        // opened under rather than the one that was asked about.
-        let model_code = if model_code.is_empty() { model_code } else {
-            let why = format!(
-                "model {model_code} was named and the figures that follow are the whole \
-                 account's, which is what this session is told",
-            );
-            log::warn!("{why}");
-            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
-            ""
-        };
-        // As the venue stated them, in the currency it stated them in. Eight
-        // of them were worked out here instead, rounded to two decimals and
-        // labelled US dollars whatever the account is held in: an account in
-        // another currency read as a dollar account, and every figure the
-        // venue states beyond those eight was not reported at all.
-        // Against this request's own record, which a fresh ask starts empty —
-        // so the batch is the account whole, and every batch after it is what
-        // has moved since this request last heard. Answered against a record
-        // shared by every watcher, a second ask marked these delivered for all
-        // of them and the watcher already standing lost the move it overtook.
-        self.core.forget_account_figures_for(req_id);
-        for field in self.core.account_figures_that_moved(&self.shared, req_id) {
-            wrapper.account_update_multi(
-                req_id, &self.account_id, model_code,
-                &field.key, &field.value, &field.currency,
-            );
-        }
-        wrapper.account_update_multi_end(req_id);
     }
 
     /// Cancel multi-account updates. Matches `cancelAccountUpdatesMulti` in C++.
@@ -394,96 +256,36 @@ impl EClient {
     /// `cancel_account_updates`; what stops is the reporting — a figure that
     /// moves after this is no longer delivered on `account_update_multi` for
     /// this request.
+    ///
+    /// A request the engine still holds is withdrawn, never answered; one it
+    /// answered stops where the withdrawal stands, after its answer.
     pub fn cancel_account_updates_multi(&self, req_id: i64) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
-        self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
-        self.core.forget_account_figures_for(req_id);
-        self.core.ledger_only_for(req_id, false);
+        if let Err(why) = self.send(ControlCommand::Retire(Retirement::AccountUpdatesMulti(req_id))) {
+            self.report_reason(req_id, &why);
+        }
     }
 
-    /// Request positions for multiple accounts/models. Matches `reqPositionsMulti` in
-    /// C++.
-    /// Holdings for one account or model, answered on `position_multi`.
-    ///
-    /// Answered from the holdings this session already has, rather than by
-    /// pumping for them: pumping here would drain every queued event into a
-    /// collector that reports holdings and discards the rest, so a caller
-    /// running its own loop would lose whatever had arrived since it last
-    /// pumped.
-    pub fn req_positions_multi(
-        &self, req_id: i64, account: &str, model_code: &str,
-        wrapper: &mut impl Wrapper,
-    ) {
+    /// Subscribe to holdings of the named account under this request number.
+    /// A model is taken and not applied, with a log notice once per session.
+    pub fn req_positions_multi(&self, req_id: i64, account: &str, model_code: &str) {
         if self.session_over() {
             return self.report_reason(req_id, &Refusal::not_connected("Not connected"));
         }
-        // What moved before this asked is in the answer that follows, and
-        // fired as change events as well it would arrive twice. Only where
-        // nobody was watching: a queue somebody else owns is not this call's
-        // to empty. The other surface does the same, in the same shape.
-        if !self.positions_requested.load(Ordering::Acquire)
-            && self.positions_multi_requested.lock().unwrap().is_empty()
-        {
-            self.shared.portfolio.drain_position_changes();
+        ClientCore::note_account_selection(&self.shared, model_code);
+        let account = if account.is_empty() || account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            ClientCore::note_account_selection(&self.shared, account);
+            self.account_id.clone()
+        } else { account.to_string() };
+
+        // Watched from where the answer stands, and answered there with what
+        // the account holds. The engine holds it for the account to state
+        // itself, as it holds the plain answer: an account that has said
+        // nothing since the connection dropped reads exactly like one holding
+        // nothing.
+        if let Err(why) = self.send(ControlCommand::Ask(Ask::PositionsMulti { req_id, account, model_code: model_code.to_string() })) {
+            self.refuse_request(req_id, &why);
         }
-        // Watching before reading, so nothing moves into the gap between the
-        // two. Read first and registered after, a holding that moved while the
-        // answer was being assembled was taken by a watcher that already
-        // existed — the queue is drained once for everyone — and this caller
-        // heard of it neither in its answer nor afterwards. Registered first,
-        // the worst that happens is the same holding stated twice, and a
-        // holding states what it is rather than what changed.
-        // The same wait the plain answer makes, for the same reason: an
-        // account that has said nothing since the connection dropped reads
-        // exactly like one holding nothing, and this path answered from the
-        // pre-drop book without so much as a warning.
-        if !self.wait_for_the_download(req_id) { return; }
-        if !self.shared.portfolio.account_download_complete() {
-            let why = "the account had not finished stating its holdings within the wait, \
-                       so what follows is what this session already held rather than what \
-                       the account holds";
-            log::warn!("{why}");
-            wrapper.error(req_id, Refusal::NO_ANSWER as i64, why, "");
-        }
-        self.positions_multi_requested.lock().unwrap().insert(req_id);
-        let held: Vec<_> = self.shared.portfolio.position_infos()
-            .into_iter()
-            .filter(|pi| pi.position != 0.0)
-            .map(|pi| {
-                let contract = self.position_contract(&pi);
-                (contract, pi.position, pi.avg_cost as f64 / PRICE_SCALE_F)
-            })
-            .collect();
-        if !account.is_empty() && account != self.account_id {
-            let why = format!(
-                "account {account} was named and the holdings that follow are {}'s, which \
-                 is the account this session opened under",
-                self.account_id,
-            );
-            log::warn!("{why}");
-            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
-        }
-        // A model is a slice of the account, and these are the whole of what
-        // it holds. Echoed onto the label, every holding read as that model's.
-        let model_code = if model_code.is_empty() { model_code } else {
-            let why = format!(
-                "model {model_code} was named and the holdings that follow are the whole \
-                 account's, which is what this session is told",
-            );
-            log::warn!("{why}");
-            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
-            ""
-        };
-        // Labelled with the account they are on, not with the one that was
-        // asked about: these are the holdings of the account this session
-        // opened under, and echoing the caller's own put another account's
-        // name on them.
-        for (contract, position, avg_cost) in held {
-            wrapper.position_multi(
-                req_id, &self.account_id, model_code, &contract, position, avg_cost,
-            );
-        }
-        wrapper.position_multi_end(req_id);
     }
 
     /// Cancel multi-account positions. Matches `cancelPositionsMulti` in C++.
@@ -493,9 +295,14 @@ impl EClient {
     // anyone is listening, as for `cancel_positions`. What stops is the
     // reporting — a holding that moves after this is no longer delivered on
     // `position_multi` for this request.
+    //
+    // A request the engine still holds is withdrawn, never answered; one it
+    // answered stops where the withdrawal stands, after its answer.
     pub fn cancel_positions_multi(&self, req_id: i64) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
-        self.positions_multi_requested.lock().unwrap().remove(&req_id);
+        if let Err(why) = self.send(ControlCommand::Retire(Retirement::PositionsMulti(req_id))) {
+            self.report_reason(req_id, &why);
+        }
     }
 
     /// Holdings the venue reports that this broker does not hold itself:

@@ -1204,6 +1204,39 @@ mod withdrawing_one_stream_tests {
         }
     }
 
+    /// A trade says which of the two trade streams it arrived on.
+    ///
+    /// The callback names the stream it carries — every trade, or the
+    /// exchange's own — and the subscription is what decided it. Written down
+    /// at the call instead, a second request under a number already carrying
+    /// a stream, which is refused, relabelled every print of the stream that
+    /// was running.
+    #[test]
+    fn a_trade_says_which_stream_it_arrived_on() {
+        let hex: String = crate::protocol::tbt_stream::A_CAPTURED_TRADE_FRAME.split_whitespace().collect();
+        let frame: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let start = frame.windows(5).position(|w| w == b"35=E\x01").unwrap() + 5;
+        let end = frame.windows(6).position(|w| w == b"\x018349=").unwrap();
+        let number = crate::protocol::tbt_stream::frame_ticker_id(&frame[start..end])
+            .expect("the frame names its stream");
+        for kind in [TbtType::AllLast, TbtType::Last] {
+            let mut hmds = HmdsState::new();
+            let shared = crate::bridge::SharedState::new();
+            let mut sub = stream(1, 7, kind);
+            sub.venue_id = number;
+            hmds.tbt_subscriptions.push(sub);
+            hmds.process_hmds_message(&frame, &mut None, &shared, &None, &mut HeartbeatState::new());
+            let heard = shared.market.drain_tbt_trades();
+            assert!(!heard.is_empty(), "the frame carries trades");
+            assert!(
+                heard.iter().all(|t| t.kind == kind),
+                "each print names the stream it arrived on, {kind:?}: {heard:?}",
+            );
+        }
+    }
+
     /// A contract can carry two streams — every trade, and every quote change.
     /// Withdrawing one by naming the contract took whichever was opened first
     /// and left the caller's own running.
@@ -2839,4 +2872,27 @@ fn a_stream_is_read_in_the_shape_it_was_asked_for() {
     assert_eq!(super::frame_kind(TbtType::BidAsk), TbtKind::BidAsk);
     assert_eq!(super::frame_kind(TbtType::Last), TbtKind::AllLast);
     assert_eq!(super::frame_kind(TbtType::AllLast), TbtKind::AllLast);
+}
+
+/// A scan batch that could not be read is a notice: the scan stays subscribed
+/// and goes on, so what is said does not end the request.
+#[test]
+fn an_unreadable_scan_batch_does_not_end_the_scan() {
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+    let mut conn: Option<Connection> = None;
+    hmds.pending_scanner.push(("APISCAN1:9".to_string(), 9));
+    let xml = "<ScanResponse><id>APISCAN1:9</id><scanTime>2026-09-06 13:00:00</scanTime><Contract><contractID>not-a-contract</contractID></Contract></ScanResponse>";
+    let msg = fix::fix_build(&[(fix::TAG_MSG_TYPE, "U"), (6040, "10005"), (6118, xml)], 1);
+    hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+    let said: Vec<_> = shared
+        .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+        .into_iter()
+        .filter_map(|(_, r)| match r {
+            crate::bridge::Record::HistoricalError((origin, code, _)) => Some((origin, code)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, [(crate::types::model::ErrorOrigin::Request { id: 9, ends: false }, 162)]);
 }

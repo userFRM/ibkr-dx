@@ -32,8 +32,9 @@ pub struct HistoricalNewsRequest {
     pub start_time: String,
     /// Its end.
     pub end_time: String,
-    /// The most rows wanted.
-    pub max_results: u32,
+    /// The most rows wanted: the caller's number, no more than
+    /// [`MOST_HEADLINES_ASKED_FOR`], and a lower one passed on as stated.
+    pub max_results: i32,
 }
 
 /// Parameters for a news article request.
@@ -320,9 +321,10 @@ pub(crate) fn parse_news_payload_rows(value: &str) -> Option<NewsHeadline> {
 
 /// The most headlines the venue is asked for at once.
 ///
-/// The reference client takes the smaller of what the caller wanted and this,
-/// so a larger number is one the venue never sees.
-pub const MOST_HEADLINES_ASKED_FOR: u32 = 300;
+/// A gateway takes the smaller of what the caller wanted and this, so a larger
+/// number is one the venue never sees; a smaller one, below nought included,
+/// is passed on as stated.
+pub const MOST_HEADLINES_ASKED_FOR: i32 = 300;
 
 /// Whether a field is shaped like the time the venue stamps a headline with.
 ///
@@ -659,6 +661,12 @@ mod tests {
             end_time: String::new(),
             max_results: 10,
         };
+        // A count below nought goes out as stated, as a gateway passes it on.
+        let negative = build_historical_news_xml(&HistoricalNewsRequest { max_results: -5, ..req.clone() });
+        assert!(
+            negative.contains(&url_encode("conid_count=\"-5\";total_count=\"-5\";")),
+            "{negative}",
+        );
         let xml = build_historical_news_xml(&req);
         assert!(xml.contains("<ListOfQueries>"));
         assert!(xml.contains("<NewsHMDSQuery>"));

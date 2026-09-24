@@ -72,7 +72,7 @@ fn main() {
         ..Contract::default()
     };
 
-    client.req_mkt_data(1, &contract, "", false, false).unwrap();
+    client.req_mkt_data(1, &contract, "", false, false);
     println!("Requested market data for SPY (req_id=1)");
 
     // Zero-copy SeqLock escape hatch still available:

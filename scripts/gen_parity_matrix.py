@@ -78,8 +78,8 @@ NOT_A_CLIENT = {"Evidence", "Fires on a gateway", "Answered from"}
 #: Hand-kept, and checked: a name here that no longer appears in that table
 #: fails the run rather than standing as a claim about nothing.
 LOCAL = {
-    "checkconnected", "eventslost", "instrumentof", "lastrtt", "lastrttms",
-    "nextorderid", "nextsharedid", "parsealgoparams", "poll", "reset", "run",
+    "backlog", "checkconnected", "errorfrom", "eventslost", "instrumentof", "lastrtt", "lastrttms",
+    "nextorderid", "nextsharedid", "parsealgoparams", "poll", "questionretired", "refuse", "reset", "run",
     "serverversion", "sessionover", "setconnectoptions",
     "unreadwire", "waitfordata", "reqconfig", "reqconfigprotobuf",
     "updateconfig", "updateconfigprotobuf",
@@ -123,9 +123,17 @@ PLUMBING = {"keep_record", "shared_state", "session_token_bytes", "session", "co
 #: — so there is no moment before a session for `check_connected` to guard.
 #: Waiting on one order and reading an algorithm's parameters apart from an
 #: order are conveniences of the Rust surface's own. No reference client names
-#: any of the three. Checked as `LOCAL` is: one no longer on the surface said
-#: to have it, or now on the one said to have no use for it, fails the run.
-ONE_SURFACE = {"checkconnected": "rust", "awaitorder": "python", "parsealgoparams": "python"}
+#: any of the three. `refuse` puts a refusal a Rust caller makes of its own
+#: into the session's order, for a value the engine's types cannot carry; the
+#: Python surface refuses such a value itself, at the call that was handed it.
+#: `question_retired` is where a Rust wrapper hears a question's cancel take
+#: effect; the Python surface says nothing at a cancel, as ibapi's does.
+#: Checked as `LOCAL` is: one no longer on the surface said to have it, or now
+#: on the one said to have no use for it, fails the run.
+ONE_SURFACE = {
+    "checkconnected": "rust", "awaitorder": "python", "parsealgoparams": "python",
+    "questionretired": "python", "refuse": "python",
+}
 
 
 def as_camel(snake: str) -> str:
@@ -645,7 +653,11 @@ def main() -> int:
         # canonical list, in a table whose first column says "Call".
         canon = {plain(r[spelling]) for r in calls + backs for spelling in ("snake", "camel")}
         rust_plain = {plain(n) for n in (rust_extra or set())}
-        py_plain = {plain(m) for m in ours_extra}
+        # The Python surface's callbacks are on its wrapper, not its client: a
+        # callback beyond the canonical list, which the Rust page names beside
+        # the calls, is marked on the Python side from there.
+        ours_backs, _ = surface_of("ibkr_dx", "EWrapper", kind=inspect.isroutine)
+        py_plain = {plain(m) for m in ours_extra} | {plain(m) for m in (ours_backs or set())}
         # A field of the Rust client is no heading on its page, so a
         # counterpart that is one is looked for where it is declared.
         rust_fields = set(re.findall(

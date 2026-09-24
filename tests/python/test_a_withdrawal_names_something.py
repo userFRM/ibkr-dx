@@ -8,6 +8,8 @@ refuse an order that is genuinely live -- a refusal there leaves a real order
 working.
 """
 
+import time
+
 import ibkr_dx
 
 
@@ -50,6 +52,7 @@ def test_a_withdrawal_naming_nothing_says_so():
 
     c.cancelOrder(42, "")
 
+    c.poll()
     assert w.seen == [(42, 135)], f"no order is working under that number: {w.seen}"
     assert not c._test_take_commands(), "and nothing was sent under it"
 
@@ -81,5 +84,14 @@ def test_a_withdrawal_before_the_replay_has_landed_is_sent():
     c._test_connect("T", replay_done=False)
     c.cancelOrder(42, "")
     assert w.seen == [], f"nothing is refused before the venue has said: {w.seen}"
-    assert c._test_take_commands(), "and the withdrawal went out"
+    # Held by the engine for the venue's naming, and sent once its bound has
+    # passed.
+    sent = []
+    deadline = time.monotonic() + 5
+    while not sent and time.monotonic() < deadline:
+        sent = c._test_take_commands()
+        time.sleep(0.05)
+    c.poll()
+    assert w.seen == [], f"nothing is refused before the venue has said: {w.seen}"
+    assert sent, "and the withdrawal went out"
 

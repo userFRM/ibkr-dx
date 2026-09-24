@@ -12,6 +12,8 @@ language they wrote in.
 Run: pytest tests/python/test_a_truncated_holdings_answer_says_so.py -v
 """
 
+import time
+
 from ibkr_dx import EWrapper, EClient
 
 
@@ -32,9 +34,13 @@ def test_an_answer_given_before_the_account_finished_says_so():
     c = EClient(w)
     c._test_connect()
 
-    # No venue behind this session, so the account never finishes stating.
+    # No venue behind this session, so the account never finishes stating,
+    # and the engine answers once its wait has run out.
     c.req_positions()
-    c._test_dispatch_once()
+    deadline = time.monotonic() + 15
+    while not w.ended and time.monotonic() < deadline:
+        c._test_dispatch_once()
+        time.sleep(0.05)
 
     assert w.ended == 1, "the answer is still given"
     assert any("had not finished stating its holdings" in why for _, why in w.errors), w.errors

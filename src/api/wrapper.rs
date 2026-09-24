@@ -33,6 +33,18 @@ pub trait Wrapper {
     /// validation, 200 for a contract description that matches nothing, 504
     /// for a call made with no session.
     fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {}
+    /// An error, with what it is about: a request and whether nothing more
+    /// follows for it, an order and the operation it answers, a request that
+    /// carries no number, the session, or a lookup this client made for
+    /// itself. The number [`error`](Self::error) carries can be any of these
+    /// and does not say which; this says.
+    ///
+    /// Every error is delivered here. By default it goes on to `error`, under
+    /// the number [`ErrorOrigin::id`] states it under, so a wrapper that
+    /// implements only `error` sees exactly what it saw before this existed.
+    fn error_from(&mut self, origin: ErrorOrigin, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
+        self.error(origin.id(), error_code, error_string, advanced_order_reject_json);
+    }
     /// The venue's clock, in seconds since the epoch.
     fn current_time(&mut self, time: i64) {}
     /// The venue's clock, in milliseconds since the epoch.
@@ -120,6 +132,14 @@ pub trait Wrapper {
     fn position(&mut self, account: &str, contract: &Contract, pos: f64, avg_cost: f64) {}
     /// Every position has been stated.
     fn position_end(&mut self) {}
+    /// A question's cancel, confirmed where it stands: `cancel_positions`
+    /// or `req_account_updates(false, ..)`, the only questions with one.
+    ///
+    /// It follows every callback of the exchange it ends, and nothing of that
+    /// exchange follows it: a caller that serializes its questions moves on
+    /// here. A gateway says nothing at a cancel, so nothing reaches a caller
+    /// that does not implement this.
+    fn question_retired(&mut self, q: Question) {}
     /// A holding, answering `req_positions_multi`. Separate from `position`:
     /// a caller asks per account or model and is answered per request.
     fn position_multi(
@@ -487,6 +507,10 @@ impl<A: Wrapper + ?Sized, B: Wrapper + ?Sized> Wrapper for Tee<'_, A, B> {
         self.asked.error(req_id, error_code, error_string, advanced_order_reject_json);
         self.kept.error(req_id, error_code, error_string, advanced_order_reject_json);
     }
+    fn error_from(&mut self, origin: ErrorOrigin, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
+        self.asked.error_from(origin, error_code, error_string, advanced_order_reject_json);
+        self.kept.error_from(origin, error_code, error_string, advanced_order_reject_json);
+    }
     fn current_time(&mut self, time: i64) {
         self.asked.current_time(time);
         self.kept.current_time(time);
@@ -574,6 +598,10 @@ impl<A: Wrapper + ?Sized, B: Wrapper + ?Sized> Wrapper for Tee<'_, A, B> {
     fn position_end(&mut self) {
         self.asked.position_end();
         self.kept.position_end();
+    }
+    fn question_retired(&mut self, q: Question) {
+        self.asked.question_retired(q);
+        self.kept.question_retired(q);
     }
     fn position_multi(&mut self, req_id: i64, account: &str, model_code: &str, contract: &Contract, pos: f64, avg_cost: f64) {
         self.asked.position_multi(req_id, account, model_code, contract, pos, avg_cost);
@@ -909,6 +937,9 @@ pub mod tests {
         }
         fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, _: &str) {
             self.events.push(format!("error:{req_id}:{error_code}:{error_string}"));
+        }
+        fn question_retired(&mut self, q: Question) {
+            self.events.push(format!("question_retired:{q:?}"));
         }
         fn position_multi(
             &mut self, req_id: i64, account: &str, _model_code: &str,

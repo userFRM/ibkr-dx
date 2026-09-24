@@ -103,8 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("== reqContractDetails AAPL/SMART/STK/USD (req_id={REQ_ID})");
     let t_req = Instant::now();
-    client.req_contract_details(REQ_ID, &aapl)
-        .map_err(|e| format!("req_contract_details failed: {e}"))?;
+    client.req_contract_details(REQ_ID, &aapl);
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {

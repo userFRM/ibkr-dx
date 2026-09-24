@@ -84,13 +84,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let each = Duration::from_secs((duration / 3).max(1));
     for (req_id, mode, label) in [(1i64, 0i32, "realtime"), (2, 2, "frozen"), (3, 3, "delayed_frozen")] {
         println!("Subscribing to {symbol} (con_id={con_id}) as {label}...");
-        client.req_mkt_data_ex(req_id, &contract, "", false, false, mode, &[])?;
+        client.req_mkt_data_ex(req_id, &contract, "", false, false, mode, &[]);
         let deadline = Instant::now() + each;
         while Instant::now() < deadline {
             client.process_msgs(&mut wrapper);
             std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = client.cancel_mkt_data(req_id);
+        client.cancel_mkt_data(req_id);
         // The cancel has to reach the engine before the next mode claims the
         // contract, or the next subscription is refused as a duplicate.
         let settle = Instant::now() + Duration::from_millis(500);

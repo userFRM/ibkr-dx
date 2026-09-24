@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         currency: "USD".into(),
         ..Default::default()
     };
-    client.req_contract_details(1, &aapl)?;
+    client.req_contract_details(1, &aapl);
 
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {

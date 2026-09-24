@@ -64,15 +64,13 @@ def test_every_print_states_the_stream_it_came_from():
     w, c = _client()
     c._test_set_instrument_count(1)
     c._test_map_instrument(0, 0)
-    # Each subscription registers the kind it asked for under its request id.
-    c._test_set_tbt_kind(0, "AllLast")
-    c._test_push_tbt_trade(0, 412.55, 100, "NYSE")
+    # Each print carries the stream it arrived on.
+    c._test_push_tbt_trade(0, 412.55, 100, "NYSE", kind="AllLast")
     c._test_dispatch_once()
     assert w.prints == [(0, 2)], f"AllLast must be stated as 2, got {w.prints}"
 
     w.prints.clear()
-    c._test_set_tbt_kind(0, "Last")
-    c._test_push_tbt_trade(0, 412.60, 50, "NYSE")
+    c._test_push_tbt_trade(0, 412.60, 50, "NYSE", kind="Last")
     c._test_dispatch_once()
     assert w.prints == [(0, 1)], f"Last must be stated as 1, got {w.prints}"
 
@@ -82,6 +80,7 @@ def test_a_log_level_that_is_not_one_is_reported():
     that does not exist was told it had one."""
     w, c = _client()
     c.set_server_log_level(9)
+    c.poll()
     assert w.errors and "not a log level" in w.errors[-1][2]
 
     w.errors.clear()

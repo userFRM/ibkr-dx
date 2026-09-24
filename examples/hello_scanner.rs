@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let req_id = 1;
     println!("subscribing TOP_PERC_GAIN, STK.US.MAJOR…");
     let filters = [TagValue { tag: "priceAbove".into(), value: "5".into() }];
-    client.req_scanner_subscription(req_id, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25, &filters)?;
+    client.req_scanner_subscription(req_id, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25, &filters, "");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     drop(s);
-    client.cancel_scanner_subscription(req_id)?;
+    client.cancel_scanner_subscription(req_id);
     client.disconnect();
     Ok(())
 }

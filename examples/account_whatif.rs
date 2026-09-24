@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1) Resolve the contract.
     println!("resolving AXTI...");
-    client.req_contract_details(1, &contract)?;
+    client.req_contract_details(1, &contract);
     if !pump_until(&client, &mut w, &state, Duration::from_secs(15), |s| s.con_id != 0) {
         return Err("no contract details for AXTI within 15s".into());
     }
@@ -126,13 +126,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2) Read a reference price for a realistic limit.
     println!("requesting quote...");
-    client.req_mkt_data(2, &contract, "", true, false)?;
+    client.req_mkt_data(2, &contract, "", true, false);
     pump_until(&client, &mut w, &state, Duration::from_secs(10), |s| s.last > 0.0 || s.ask > 0.0);
     let (last, close, ask) = {
         let s = state.lock().unwrap();
         (s.last, s.close, s.ask)
     };
-    client.cancel_mkt_data(2).ok();
+    client.cancel_mkt_data(2);
     let reference = if last > 0.0 { last } else if ask > 0.0 { ask } else { close };
     if reference <= 0.0 {
         return Err("no reference price for AXTI — market data unavailable".into());
@@ -152,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     println!("what-if: BUY {qty} AXTI LMT {limit} oid={oid}");
-    client.place_order(oid, &contract, &order)?;
+    client.place_order(oid, &contract, &order);
 
     let got = pump_until(&client, &mut w, &state, Duration::from_secs(20), |s| s.preview.is_some());
     if !got {

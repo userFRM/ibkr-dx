@@ -157,3 +157,7 @@ IB_USERNAME=... IB_PASSWORD=... python examples/hello_tick_data.py
 * [Streaming ticks](./recipes/python/tick-data.md) · [L2 depth](./recipes/rust/streaming-l2.md)
 * [Order lifecycle](./recipes/python/order-lifecycle.md) — place, modify, cancel, fill
 * [Limits](./reference/limits.md) — read this before you depend on a call
+
+For an existing installation, [Moving to 0.2](./reference/migration-0.2.md)
+describes the request signatures, ordered callbacks, shutdown result and
+removed registration timeout.

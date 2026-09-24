@@ -7,6 +7,9 @@ use crate::types::*;
 
 /// Account snapshot, per-position info, and atomic instrument positions.
 pub struct PortfolioState {
+    /// The session's stamps, which a write of anything a read compares with
+    /// what its caller was last told marks.
+    stamps: super::record::Stamps,
     account: Mutex<AccountState>,
     /// Every figure the venue states about the account, under the name it
     /// states it by and in the currency it states it in.
@@ -65,8 +68,10 @@ pub struct PortfolioState {
 }
 
 impl PortfolioState {
-    pub(super) fn new() -> Self {
+    /// An empty one, marking the session's stamps as it is written.
+    pub(super) fn stamping(stamps: &super::record::Stamps) -> Self {
         Self {
+            stamps: stamps.clone(),
             account: Mutex::new(AccountState::default()),
             stated_account_values: Mutex::new(Vec::new()),
             account_download_complete: AtomicBool::new(false),
@@ -98,6 +103,7 @@ impl PortfolioState {
     /// than withdrawing it, so this replaces what it holds for that contract.
     #[doc(hidden)] pub fn set_position_elsewhere(&self, row: crate::types::PositionElsewhere) {
         self.positions_elsewhere.lock().unwrap().insert(row.con_id, row);
+        self.stamps.note_written();
     }
 
     /// The account figures describing one of the sets of holdings the account
@@ -115,6 +121,7 @@ impl PortfolioState {
         &self, held: crate::types::HeldElsewhere, name: String, value: String, currency: String,
     ) {
         self.values_elsewhere.lock().unwrap().insert((held, name, currency), value);
+        self.stamps.note_written();
     }
 
     /// Every position held, as the caller reads one.
@@ -149,6 +156,7 @@ impl PortfolioState {
             Some(slot) => slot.2 = value.to_string(),
             None => all.push((ledger, key.to_string(), value.to_string(), currency.to_string())),
         }
+        self.stamps.note_written();
     }
 
     /// Record a per-currency ledger figure separately from account figures
@@ -172,6 +180,7 @@ impl PortfolioState {
     /// on the first figure let the pre-drop struct through behind it.
     #[doc(hidden)] pub fn set_account(&self, account: &AccountState) {
         *self.account.lock().unwrap() = *account;
+        self.stamps.note_written();
     }
 
     /// Mark account download as complete (init burst processed).
@@ -197,6 +206,7 @@ impl PortfolioState {
         *under = None;
         drop(under);
         let unstated = std::mem::take(&mut *self.awaiting_restatement.lock().unwrap());
+        self.stamps.note_written();
         let mut held = self.position_infos.lock().unwrap();
         let mut moved = self.position_changes.lock().unwrap();
         Some(unstated.into_iter().filter(|con_id| match held.get_mut(con_id) {
@@ -353,6 +363,7 @@ impl PortfolioState {
         // drain running alongside this read the moved holding and then found
         // it again on the next drain, reporting one move twice.
         self.position_changes.lock().unwrap().insert(con_id);
+        self.stamps.note_written();
     }
 
     /// The holdings that have moved since this was last called, as they stand
@@ -379,10 +390,12 @@ impl PortfolioState {
         if let Some(v) = market_value { entry.market_value = v; }
         if let Some(v) = unrealized_pnl { entry.unrealized_pnl = v; entry.unrealized_stated = true; }
         if let Some(v) = realized_pnl { entry.realized_pnl = v; }
+        self.stamps.note_written();
     }
 
     #[doc(hidden)] pub fn set_position(&self, id: InstrumentId, pos: f64) {
         self.positions.get_or_grow(id).store(pos.to_bits(), Ordering::Relaxed);
+        self.stamps.note_written();
     }
 
     /// Store midnight seeds from 6040=143 P&L response, under the correlation
@@ -394,6 +407,7 @@ impl PortfolioState {
             map.insert(s.con_id, s);
         }
         *self.pnl_request_key.lock().unwrap() = request_key;
+        self.stamps.note_written();
     }
 
     /// Read midnight seeds for client-side P&L computation.
@@ -410,6 +424,7 @@ impl PortfolioState {
     /// updates the contracts it names and leaves the others as they stood.
     #[doc(hidden)] pub fn set_venue_prices(&self, prices: HashMap<i64, String>) {
         self.venue_prices.lock().unwrap().extend(prices);
+        self.stamps.note_written();
     }
 
     /// The price the venue states for a contract, as text.

@@ -92,6 +92,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TagValue>()?;
     m.add_class::<IneligibilityReason>()?;
     m.add_class::<OrderState>()?;
+    m.add_class::<ErrorOrigin>()?;
     m.add_class::<OrderAllocation>()?;
     m.add_class::<PriceCondition>()?;
     m.add_class::<TimeCondition>()?;

@@ -119,6 +119,17 @@ pub struct CancelReject {
     pub answers_a_live_change: bool,
 }
 
+impl CancelReject {
+    /// The operation this refuses: a cancel, or a change (434=2).
+    pub fn refuses(&self) -> crate::types::model::OrderOp {
+        if self.reject_type == 2 {
+            crate::types::model::OrderOp::Modify
+        } else {
+            crate::types::model::OrderOp::Cancel
+        }
+    }
+}
+
 /// Multi-char OrdType discriminants: values below 32, so they cannot collide
 /// with the single-char ASCII types.
 /// Used in `Order.ord_type` for order types whose FIX tag 40 value is more than one
@@ -848,8 +859,10 @@ pub enum OrderCondition {
         price: Price,
         /// Whether the condition is met above the value rather than below it.
         is_more: bool,
-        /// 0=default, 1=last, 2=bid/ask, 3=bid, 4=ask
-        trigger_method: u8,
+        /// How the trigger is judged: 0 default, 1 last, 2 bid/ask, 3 bid,
+        /// 4 ask, 7 last or bid/ask, 8 midpoint. An `int`, as the TWS API
+        /// carries it, and sent as given.
+        trigger_method: i32,
         /// Joined to the next condition with AND rather than OR. The last
         /// condition joins nothing, and this is not written for it.
         is_conjunction_connection: bool,
@@ -866,8 +879,9 @@ pub enum OrderCondition {
     },
     /// Trigger based on margin cushion percentage.
     Margin {
-        /// Percentage (e.g., 10 = 10%).
-        percent: u32,
+        /// Percentage (e.g., 10 = 10%). An `int`, as the TWS API carries
+        /// it, and sent as given.
+        percent: i32,
         /// Whether the condition is met above the value rather than below it.
         is_more: bool,
         /// Joined to the next condition with AND rather than OR. The last
@@ -1485,6 +1499,13 @@ pub enum OrderRequest {
         stated: crate::types::model::OrderCancel,
     },
     /// Withdraw every order on one contract.
+    GlobalCancel {
+        /// The contracts held when the request was taken.
+        instruments: Vec<InstrumentId>,
+        /// The caller's cancellation attributes.
+        stated: crate::types::model::OrderCancel,
+    },
+    /// Withdraw the working orders on one contract.
     CancelAll {
         /// The engine's own slot for the contract.
         instrument: InstrumentId,
@@ -1538,7 +1559,7 @@ impl OrderRequest {
     pub fn order_id(&self) -> OrderId {
         match self {
             Self::Cancel { order_id, .. } => *order_id,
-            Self::CancelAll { .. } => 0,
+            Self::CancelAll { .. } | Self::GlobalCancel { .. } => 0,
             Self::Modify { order_id, .. } => *order_id,
             | Self::SubmitEx { order_id, .. } => *order_id,
             Self::SubmitBracket { parent_id, .. } => *parent_id,
@@ -1565,7 +1586,7 @@ impl OrderRequest {
     /// the tracked order).
     pub fn instrument(&self) -> Option<InstrumentId> {
         match self {
-            Self::Cancel { .. } | Self::Modify { .. } => None,
+            Self::Cancel { .. } | Self::Modify { .. } | Self::GlobalCancel { .. } => None,
             Self::CancelAll { instrument, .. }
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
@@ -1594,7 +1615,8 @@ impl OrderBuffer {
     /// alone, the slot under a queued order was given back and handed to
     /// another contract, and the order went out on that one.
     pub fn holds(&self, id: InstrumentId) -> bool {
-        self.buf.iter().any(|r| r.instrument() == Some(id))
+        self.buf.iter().any(|r| r.instrument() == Some(id)
+            || matches!(r, OrderRequest::GlobalCancel { instruments, .. } if instruments.contains(&id)))
     }
 
     /// An empty buffer.
@@ -1643,6 +1665,11 @@ impl OrderBuffer {
     /// Whether anything is buffered.
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
+    }
+
+    /// How many requests are buffered.
+    pub fn len(&self) -> usize {
+        self.buf.len()
     }
 }
 

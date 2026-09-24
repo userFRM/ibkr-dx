@@ -565,6 +565,7 @@ def test_a_calculation_asked_before_the_model_waits_for_it():
     option = Contract()
     option.conId = 999002
     option.secType = "OPT"
+    option.exchange = "SMART"
     option.symbol = "SPY"
     option.strike = 500.0
     option.right = "C"

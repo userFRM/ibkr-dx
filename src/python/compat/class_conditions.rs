@@ -55,31 +55,20 @@ impl PriceCondition {
 
 impl PriceCondition {
     /// A condition this client cannot carry as stated is refused rather than
-    /// changed: a price the wire's fixed point cannot hold converted in
-    /// silence, and a trigger method outside the set the venue carries cast to
-    /// another, and the order went to the venue waiting for something the
-    /// caller never stated.
+    /// changed: a price the wire's fixed point cannot hold, converted in
+    /// silence, sent the order to the venue waiting for something the caller
+    /// never stated.
+    ///
+    /// The trigger method is an `int`, as the TWS API carries it, and goes to
+    /// the venue as stated: no gateway refusal of any value has been read.
     pub fn to_internal(&self) -> Result<OrderCondition, String> {
         crate::client_core::require_finite_price("a price condition's price", self.price)?;
-        // What the trigger method can state, as the reference client's
-        // `TriggerMethodEnum` names it and the order carries it: 0 default,
-        // 1 last, 2 bid/ask, 3 bid, 4 ask, 7 last-or-bid/ask, 8 midpoint.
-        // Anything else narrows to one of those or wraps on the cast, which
-        // is a different condition.
-        let trigger_method = match self.trigger_method {
-            0..=4 | 7 | 8 => self.trigger_method as u8,
-            other => return Err(format!(
-                "a price condition's trigger method {other} is not one the venue \
-                 carries on a condition: it is 0 to 4, 7 or 8, and anything else \
-                 would go out as a different trigger than the one stated",
-            )),
-        };
         Ok(OrderCondition::Price {
             con_id: self.con_id,
             exchange: self.exchange.clone(),
             price: crate::types::price_from_f64(self.price),
             is_more: self.is_more,
-            trigger_method,
+            trigger_method: self.trigger_method,
             is_conjunction_connection: self.is_conjunction_connection,
         })
     }
@@ -132,7 +121,7 @@ impl TimeCondition {
 #[derive(Clone)]
 pub struct MarginCondition {
     #[pyo3(get, set)]
-    pub percent: u32,
+    pub percent: i32,
     #[pyo3(get, set)]
     pub is_more: bool,
     #[pyo3(get, set)]
@@ -151,7 +140,7 @@ impl MarginCondition {
 
     #[new]
     #[pyo3(signature = (is_more=true, percent=0, is_conjunction_connection=true, **keywords))]
-    fn new(is_more: bool, percent: u32, is_conjunction_connection: bool, keywords: Option<&Bound<'_, pyo3::types::PyDict>>, py: Python<'_>) -> PyResult<Py<Self>> {
+    fn new(is_more: bool, percent: i32, is_conjunction_connection: bool, keywords: Option<&Bound<'_, pyo3::types::PyDict>>, py: Python<'_>) -> PyResult<Py<Self>> {
         let made = Py::new(py, Self { percent, is_more, is_conjunction_connection })?;
         set_from_keywords(made.bind(py).as_any(), keywords)?;
         Ok(made)
@@ -339,7 +328,7 @@ pub(crate) fn condition_from_internal(
                 exchange: exchange.clone(),
                 price: *price as f64 / PRICE_SCALE_F,
                 is_more: *is_more,
-                trigger_method: *trigger_method as i32,
+                trigger_method: *trigger_method,
             })?.into_any()
         }
         OrderCondition::Time { time, is_more, is_conjunction_connection } => Py::new(py, TimeCondition {
@@ -385,32 +374,27 @@ pub(crate) fn condition_from_internal(
 mod tests {
     use super::*;
 
-    /// A price condition carries the trigger methods the reference client's
-    /// `TriggerMethodEnum` names and the order already carries: 0 to 4, plus 7
-    /// (last-or-bid/ask) and 8 (midpoint). They were refused on a condition
-    /// while the order accepted them, so a program that set one on a condition
-    /// could not place the order at all.
+    /// A price condition's trigger method and a margin condition's percent
+    /// are the TWS API's `int`s, and each goes to the engine as stated: no
+    /// gateway refusal of any value has been read. 5, 6, a method past what a
+    /// byte holds and a negative percent included.
     #[test]
-    fn a_price_condition_carries_the_reference_trigger_methods() {
-        for tm in [0i32, 4, 7, 8] {
+    fn a_condition_carries_its_trigger_method_and_percent_as_stated() {
+        for tm in [0i32, 4, 5, 6, 7, 8, 256, -1] {
             let c = PriceCondition {
                 con_id: 1, exchange: "SMART".into(), price: 100.0,
                 is_more: true, trigger_method: tm, is_conjunction_connection: true,
             };
             match c.to_internal().unwrap_or_else(|e| panic!("trigger {tm} refused on a condition: {e}")) {
-                OrderCondition::Price { trigger_method, .. } => assert_eq!(trigger_method as i32, tm),
+                OrderCondition::Price { trigger_method, .. } => assert_eq!(trigger_method, tm),
                 other => panic!("not a price condition: {other:?}"),
             }
         }
-        // 5 and 6 are not in the enum; a condition stating one is refused
-        // rather than sent as a different trigger.
-        for tm in [5i32, 6] {
-            let c = PriceCondition {
-                con_id: 1, exchange: "SMART".into(), price: 100.0,
-                is_more: true, trigger_method: tm, is_conjunction_connection: true,
-            };
-            assert!(c.to_internal().is_err(), "trigger {tm} is not one the venue carries");
-        }
+        let margin = MarginCondition { percent: -5, is_more: false, is_conjunction_connection: true };
+        assert_eq!(
+            margin.to_internal(),
+            OrderCondition::Margin { percent: -5, is_more: false, is_conjunction_connection: true },
+        );
     }
 
 
@@ -457,10 +441,9 @@ mod tests {
         });
     }
 
-    /// A price condition stating a price the wire cannot hold or a trigger the
-    /// venue does not carry is refused, not changed: converted in silence, the
-    /// order went to the venue waiting on a zero price and a default trigger
-    /// the caller never stated.
+    /// A price condition stating a price the wire cannot hold is refused, not
+    /// changed: converted in silence, the order went to the venue waiting on a
+    /// zero price the caller never stated.
     #[test]
     fn a_price_condition_that_cannot_be_carried_is_refused_rather_than_changed() {
         Python::initialize();
@@ -478,36 +461,7 @@ mod tests {
             .expect_err("a price nobody can state is refused");
             assert!(why.contains("price"), "the refusal names the price: {why}");
 
-            let why = holding(PriceCondition {
-                con_id: 756733, exchange: "SMART".into(), price: 100.0,
-                is_more: true, trigger_method: 256, is_conjunction_connection: true,
-            })
-            .convert_conditions(py)
-            .expect_err("a trigger the venue does not carry is refused");
-            assert!(why.contains("trigger method"), "the refusal names the trigger: {why}");
         });
-
-        // The same guard the other surface's orders pass through: a condition
-        // built on this side in the shape the venue carries is refused there
-        // too, stated with a trigger the venue does not carry.
-        let built = crate::types::model::Order {
-            action: "BUY".into(),
-            total_quantity: 1.0,
-            order_type: "LMT".into(),
-            lmt_price: 10.0,
-            conditions: vec![OrderCondition::Price {
-                con_id: 756733,
-                exchange: "SMART".into(),
-                price: (100.0 * PRICE_SCALE_F) as Price,
-                is_more: true,
-                trigger_method: 5,
-                is_conjunction_connection: true,
-            }],
-            ..Default::default()
-        };
-        let why = crate::client_core::ClientCore::validate_order(&built, &crate::client_core::OrderSession::single(""))
-            .expect_err("a trigger the venue does not carry is refused on either surface");
-        assert!(why.message.contains("trigger method"), "the refusal names the trigger: {why}");
     }
 }
 

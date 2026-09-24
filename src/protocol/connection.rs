@@ -5,6 +5,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::Ordering;
 
 use native_tls::TlsStream;
 
@@ -73,9 +74,116 @@ pub enum Frame {
     Control(Vec<u8>),
 }
 
+/// A login socket observes cancellation between bounded reads and writes.
+/// Once installed on the engine it uses the connection's ordinary timeouts.
+#[derive(Debug)]
+pub struct LogonSocket<C = std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    socket: TcpStream,
+    cancel: Option<C>,
+    checking: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    read_timeout: std::cell::Cell<Option<std::time::Duration>>,
+    write_timeout: std::cell::Cell<Option<std::time::Duration>>,
+    polling: bool,
+    nonblocking: std::cell::Cell<bool>,
+}
+
+impl<C: std::borrow::Borrow<std::sync::atomic::AtomicBool>> LogonSocket<C> {
+    /// Wrap an opened socket for its login exchanges.
+    pub fn new(socket: TcpStream, cancel: Option<C>) -> io::Result<Self> {
+        let stream = Self {
+            read_timeout: std::cell::Cell::new(socket.read_timeout()?),
+            write_timeout: std::cell::Cell::new(socket.write_timeout()?),
+            socket, cancel, checking: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            polling: true, nonblocking: std::cell::Cell::new(false),
+        };
+        stream.set_read_timeout(stream.read_timeout.get())?;
+        stream.set_write_timeout(stream.write_timeout.get())?;
+        Ok(stream)
+    }
+
+    pub(crate) fn socket(&self) -> &TcpStream { &self.socket }
+
+    pub(crate) fn into_socket(self) -> TcpStream { self.socket }
+
+    pub(crate) fn cancellation_check(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.checking)
+    }
+
+    fn finish_logon(&mut self) {
+        self.checking.store(false, Ordering::Release);
+        self.polling = false;
+        self.cancel = None;
+    }
+
+    pub(crate) fn set_read_timeout(&self, bound: Option<std::time::Duration>) -> io::Result<()> {
+        self.read_timeout.set(bound);
+        self.socket.set_read_timeout(Some(bound.unwrap_or(std::time::Duration::from_secs(1)).min(std::time::Duration::from_secs(1))))
+    }
+
+    pub(crate) fn set_write_timeout(&self, bound: Option<std::time::Duration>) -> io::Result<()> {
+        self.write_timeout.set(bound);
+        self.socket.set_write_timeout(Some(bound.unwrap_or(std::time::Duration::from_secs(1)).min(std::time::Duration::from_secs(1))))
+    }
+
+    pub(crate) fn set_nonblocking(&self, value: bool) -> io::Result<()> {
+        self.nonblocking.set(value);
+        self.socket.set_nonblocking(value)
+    }
+
+    fn check(&self) -> io::Result<()> {
+        if self.checking.load(Ordering::Acquire)
+            && self.cancel.as_ref().is_some_and(|flag| flag.borrow().load(Ordering::Acquire))
+        {
+            // Interrupted is retried inside standard readers, so cancellation
+            // ends the transport operation and is reported by the login.
+            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "logon cancelled by the client"))
+        } else { Ok(()) }
+    }
+
+    fn retry(&self, error: &io::Error, start: std::time::Instant, bound: Option<std::time::Duration>) -> bool {
+        self.polling && !self.nonblocking.get() && read_found_nothing(error)
+            && bound.is_none_or(|bound| start.elapsed() < bound)
+    }
+}
+
+impl<C: std::borrow::Borrow<std::sync::atomic::AtomicBool>> Read for LogonSocket<C> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.polling { return self.socket.read(buf); }
+        let start = std::time::Instant::now();
+        loop {
+            self.check()?;
+            if !self.checking.load(Ordering::Acquire) { self.set_nonblocking(true)?; }
+            match self.socket.read(buf) {
+                Err(error) if self.retry(&error, start, self.read_timeout.get()) => {},
+                result => return result,
+            }
+        }
+    }
+}
+
+impl<C: std::borrow::Borrow<std::sync::atomic::AtomicBool>> Write for LogonSocket<C> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.polling { return self.socket.write(buf); }
+        let start = std::time::Instant::now();
+        loop {
+            self.check()?;
+            if !self.checking.load(Ordering::Acquire) { self.set_nonblocking(true)?; }
+            match self.socket.write(buf) {
+                Err(error) if self.retry(&error, start, self.write_timeout.get()) => {},
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.polling { self.check()?; }
+        self.socket.flush()
+    }
+}
+
 /// Stream wrapper supporting both TLS and raw TCP.
 enum Stream {
-    Tls(TlsStream<TcpStream>),
+    Tls(TlsStream<LogonSocket>),
     Raw(TcpStream),
 }
 
@@ -92,7 +200,7 @@ impl Stream {
     /// The underlying socket, whichever transport this is.
     fn socket(&self) -> &TcpStream {
         match self {
-            Self::Tls(s) => s.get_ref(),
+            Self::Tls(s) => s.get_ref().socket(),
             Self::Raw(s) => s,
         }
     }
@@ -193,6 +301,53 @@ pub(crate) fn read_found_nothing(err: &io::Error) -> bool {
     )
 }
 
+/// What a session has sent and received on the venue's connections, counted
+/// as each connection reads and writes.
+#[derive(Default, Debug)]
+pub struct TrafficCounts {
+    bytes_sent: std::sync::atomic::AtomicU64,
+    bytes_received: std::sync::atomic::AtomicU64,
+    messages_sent: std::sync::atomic::AtomicU64,
+    messages_received: std::sync::atomic::AtomicU64,
+}
+
+/// What a session has sent and received on the venue's connections since it
+/// opened: bytes at the venue protocol's framing layer, before TLS encryption
+/// and after decryption, and complete frames in each direction. Authentication
+/// exchanges before a connection is established are outside these counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Traffic {
+    /// Protocol bytes accepted for writing to the venue.
+    pub bytes_sent: u64,
+    /// Protocol bytes read from the venue.
+    pub bytes_received: u64,
+    /// Messages written to the venue, each counted once it was written whole.
+    pub messages_sent: u64,
+    /// Messages read from the venue, each counted once it was read whole.
+    pub messages_received: u64,
+}
+
+impl TrafficCounts {
+    /// The counts as they stand.
+    pub fn read(&self) -> Traffic {
+        use std::sync::atomic::Ordering::Relaxed;
+        Traffic {
+            bytes_sent: self.bytes_sent.load(Relaxed),
+            bytes_received: self.bytes_received.load(Relaxed),
+            messages_sent: self.messages_sent.load(Relaxed),
+            messages_received: self.messages_received.load(Relaxed),
+        }
+    }
+
+    fn add(&self, bytes_sent: u64, bytes_received: u64, messages_sent: u64, messages_received: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if bytes_sent != 0 { self.bytes_sent.fetch_add(bytes_sent, Relaxed); }
+        if bytes_received != 0 { self.bytes_received.fetch_add(bytes_received, Relaxed); }
+        if messages_sent != 0 { self.messages_sent.fetch_add(messages_sent, Relaxed); }
+        if messages_received != 0 { self.messages_received.fetch_add(messages_received, Relaxed); }
+    }
+}
+
 /// Per-connection state for an auth or data socket.
 pub struct Connection {
     stream: Stream,
@@ -259,6 +414,9 @@ pub struct Connection {
     /// and the connection is given up the way one is for a frame that failed
     /// to verify.
     unreadable: u64,
+    /// Where this connection counts what it reads and writes: its own from
+    /// the moment it is made, and its session's once the session takes it.
+    traffic: std::sync::Arc<TrafficCounts>,
 }
 
 impl Connection {
@@ -270,7 +428,8 @@ impl Connection {
     /// seq/sign_iv chain that already advanced for the not-yet-on-the-wire
     /// message. A bounded blocking write either commits the frame in full or
     /// reports how far it got, which `write_frame` acts on.
-    pub fn new(stream: TlsStream<TcpStream>) -> io::Result<Self> {
+    pub fn new(mut stream: TlsStream<LogonSocket>) -> io::Result<Self> {
+        stream.get_mut().finish_logon();
         Self::from_stream(Stream::Tls(stream))
     }
 
@@ -303,7 +462,20 @@ impl Connection {
             write_failed: false,
             read_failed: false,
             unreadable: 0,
+            traffic: Default::default(),
         })
+    }
+
+    /// Count from here into `session`'s counts, with what this connection has
+    /// counted so far: a connection is made, and its logon read and written,
+    /// before the session that takes it exists.
+    pub fn count_into(&mut self, session: &std::sync::Arc<TrafficCounts>) {
+        if std::sync::Arc::ptr_eq(&self.traffic, session) {
+            return;
+        }
+        let so_far = self.traffic.read();
+        session.add(so_far.bytes_sent, so_far.bytes_received, so_far.messages_sent, so_far.messages_received);
+        self.traffic = std::sync::Arc::clone(session);
     }
 
     /// Set HMAC keys and IVs after authentication.
@@ -324,6 +496,7 @@ impl Connection {
     /// was created).
     pub fn seed_buffer(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
+        self.traffic.add(0, data.len() as u64, 0, 0);
     }
 
     /// Whether the internal buffer contains unprocessed data.
@@ -365,6 +538,7 @@ impl Connection {
                 "connection closed",
             )),
             Ok(n) => {
+                self.traffic.add(0, n as u64, 0, 0);
                 // Past the bound this is not a frame arriving but a demand
                 // for memory: nothing this large completes into a frame this
                 // protocol carries, so the read is given up rather than
@@ -624,6 +798,7 @@ impl Connection {
         } else {
             self.unreadable = 0;
         }
+        self.traffic.add(0, 0, 0, frames.len() as u64);
         frames
     }
 
@@ -719,6 +894,7 @@ impl Connection {
             write_failed: false,
             read_failed: false,
             unreadable: 0,
+            traffic: Default::default(),
         };
         (conn, peer)
     }
@@ -739,6 +915,10 @@ impl Connection {
     /// of a send is relying on: without it, a frame could be lost while the
     /// transport stayed installed, and nothing would ever put it back.
     fn write_frame(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write_frame_waiting(bytes, true)
+    }
+
+    fn write_frame_waiting(&mut self, bytes: &[u8], wait: bool) -> io::Result<()> {
         if self.write_failed {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -775,11 +955,14 @@ impl Connection {
                         "peer accepted no more of the frame",
                     ));
                 }
-                Ok(n) => written += n,
+                Ok(n) => {
+                    written += n;
+                    self.traffic.add(n as u64, 0, 0, 0);
+                }
                 // A signal is not the peer's doing and costs nothing to retry.
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    if write_is_recoverable(&e, written, matches!(self.stream, Stream::Tls(_))) {
+                    if wait && write_is_recoverable(&e, written, matches!(self.stream, Stream::Tls(_))) {
                         // Offered again inside the budget the whole frame has,
                         // because nothing above this layer offers it again.
                         // Handed back instead, the frame was simply gone: the
@@ -798,6 +981,7 @@ impl Connection {
                 }
             }
         }
+        self.traffic.add(0, 0, 1, 0);
         Ok(())
     }
 
@@ -808,6 +992,20 @@ impl Connection {
     /// unsent; one that moved part of a frame finishes the transport, because
     /// the chain the peer verifies against has moved and cannot be rejoined.
     pub fn send_fix(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
+        self.send_fix_waiting(fields, true)
+    }
+
+    /// A cancelled login owes its logout without extending its wait for the venue.
+    pub(crate) fn logout_cancelled_logon(&mut self) -> io::Result<()> {
+        self.stream.socket().set_nonblocking(true)?;
+        self.send_fix_waiting(&[
+            (fix::TAG_MSG_TYPE, fix::MSG_LOGOUT),
+            (fix::TAG_SENDING_TIME, &crate::protocol::datetime::chrono_free_timestamp()),
+            (8372, "S"),
+        ], false)
+    }
+
+    fn send_fix_waiting(&mut self, fields: &[(u32, &str)], wait: bool) -> io::Result<()> {
         let next_seq = self.seq + 1;
         let msg = fix::fix_build(fields, next_seq);
         if log::log_enabled!(log::Level::Trace) {
@@ -819,7 +1017,7 @@ impl Connection {
             let (signed, iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
             (signed, Some(iv))
         };
-        self.write_frame(&to_send)?;
+        self.write_frame_waiting(&to_send, wait)?;
         self.seq = next_seq;
         if let Some(iv) = next_iv {
             self.sign_iv = iv;
@@ -864,6 +1062,7 @@ impl Connection {
     /// Inject pre-read bytes into the buffer (e.g., leftover from routing response).
     pub fn inject_buf(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
+        self.traffic.add(0, data.len() as u64, 0, 0);
     }
 }
 
@@ -1213,7 +1412,90 @@ mod tests {
             write_failed: false,
             read_failed: false,
             unreadable: 0,
+            traffic: Default::default(),
         }
+    }
+
+    /// A connection counts what crosses it: each byte its socket reads or
+    /// writes, each frame written whole and each read whole. Counted from the
+    /// moment it is made, and handed to the session that takes it with what it
+    /// had counted by then.
+    #[test]
+    fn a_connection_counts_what_crosses_it_and_hands_the_count_on() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let near = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut far, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(near).unwrap();
+
+        let heartbeat = fix_build(&[(35, "0")], 1);
+        conn.send_raw(&heartbeat).unwrap();
+        // What a logon read before the connection existed, handed to it.
+        conn.seed_buffer(&heartbeat);
+        assert_eq!(
+            conn.traffic.read(),
+            Traffic { bytes_sent: heartbeat.len() as u64, bytes_received: heartbeat.len() as u64, messages_sent: 1, messages_received: 0 },
+        );
+
+        let session = std::sync::Arc::new(TrafficCounts::default());
+        conn.count_into(&session);
+        conn.count_into(&session);
+        assert_eq!(session.read(), conn.traffic.read(), "handed on once, whole");
+
+        use std::io::Write as _;
+        far.write_all(&heartbeat).unwrap();
+        let began = std::time::Instant::now();
+        let mut read = 0;
+        while read < heartbeat.len() && began.elapsed() < std::time::Duration::from_secs(5) {
+            read += conn.try_recv().unwrap();
+        }
+        assert_eq!(conn.extract_frames().len(), 2, "the seeded frame and the one read");
+        assert_eq!(
+            session.read(),
+            Traffic {
+                bytes_sent: heartbeat.len() as u64,
+                bytes_received: 2 * heartbeat.len() as u64,
+                messages_sent: 1,
+                messages_received: 2,
+            },
+            "counted into the session from here",
+        );
+    }
+
+    #[test]
+    fn traffic_counts_bytes_before_a_frame_is_whole() {
+        let (mut conn, _peer) = Connection::for_test();
+        let message = fix_build(&[(35, "0")], 1);
+        let split = message.len() / 2;
+        conn.seed_buffer(&message[..split]);
+        assert!(conn.extract_frames().is_empty());
+        assert_eq!(conn.traffic.read().bytes_received, split as u64);
+        assert_eq!(conn.traffic.read().messages_received, 0);
+        conn.seed_buffer(&message[split..]);
+        assert_eq!(conn.extract_frames().len(), 1);
+        assert_eq!(conn.traffic.read().bytes_received, message.len() as u64);
+        assert_eq!(conn.traffic.read().messages_received, 1);
+        assert!(conn.extract_frames().is_empty());
+        assert_eq!(conn.traffic.read().messages_received, 1);
+    }
+
+    #[test]
+    fn traffic_counts_bytes_even_when_the_receive_buffer_is_full() {
+        let (mut conn, mut peer) = Connection::for_test();
+        conn.buf.resize(MAX_BUFFERED, 0);
+        peer.write_all(b"x").unwrap();
+        let bound = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match conn.try_recv() {
+                Err(why) => {
+                    assert_eq!(why.kind(), io::ErrorKind::InvalidData);
+                    break;
+                }
+                Ok(_) if std::time::Instant::now() < bound => std::thread::yield_now(),
+                other => panic!("expected the byte that cannot be buffered: {other:?}"),
+            }
+        }
+        assert_eq!(conn.traffic.read().bytes_received, 1);
+        assert_eq!(conn.traffic.read().messages_received, 0);
     }
 
     /// A header split across two reads is a frame, not garbage.
@@ -1347,6 +1629,7 @@ mod tests {
             write_failed: false,
             read_failed: false,
             unreadable: 0,
+            traffic: Default::default(),
         };
         // States near a gigabyte; the largest frame this protocol carries is
         // a compressed one, and nothing is used that inflates past a small
@@ -1846,6 +2129,7 @@ mod tests {
             write_failed: false,
             read_failed: false,
             unreadable: 0,
+            traffic: Default::default(),
         };
         let sent = conn.send_raw(b"8=FIX.4.1\x0135=V\x0110=000\x01");
         assert!(sent.is_ok(), "the frame goes out once the peer reads again: {sent:?}");
@@ -2085,5 +2369,113 @@ mod wedge_tests {
             .expect_err("a peer past the bound is given up on");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         assert_eq!(buf.len(), MAX_BUFFERED, "and nothing of it was kept");
+    }
+}
+
+#[cfg(test)]
+mod logon_cancel_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::AtomicBool};
+    use std::time::{Duration, Instant};
+
+    fn pair(cancel: Arc<AtomicBool>) -> (LogonSocket, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        socket.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        (LogonSocket::new(socket, Some(cancel)).unwrap(), peer)
+    }
+
+    fn fill_socket(socket: &TcpStream) {
+        socket.set_nonblocking(true).unwrap();
+        let bytes = vec![0u8; 64 * 1024];
+        for _ in 0..3 {
+            let mut writer = socket;
+            while writer.write(&bytes).is_ok() {}
+            while writer.write(&[0]).is_ok() {}
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        socket.set_nonblocking(false).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_sessions_logout_does_not_wait_for_a_blocked_peer() {
+        let (mut conn, _peer) = Connection::for_test();
+        fill_socket(conn.stream.socket());
+        conn.stream.socket().set_write_timeout(Some(Duration::from_millis(100))).unwrap();
+        let start = Instant::now();
+        assert!(conn.logout_cancelled_logon().is_err());
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert_eq!(conn.traffic.read().messages_sent, 0);
+    }
+
+    #[test]
+    fn a_cancelled_opening_logout_does_not_add_another_wait() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (mut socket, _peer) = pair(Arc::clone(&cancel));
+        fill_socket(socket.socket());
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.store(true, Ordering::Release);
+        });
+        let start = Instant::now();
+        assert_eq!(socket.read(&mut [0u8; 1]).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        socket.cancellation_check().store(false, Ordering::Release);
+        assert_eq!(socket.write_all(b"logout").unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(start.elapsed() < Duration::from_millis(1300));
+        setter.join().unwrap();
+    }
+
+    #[test]
+    fn a_logon_read_checks_its_cancel_within_a_second() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (mut socket, _peer) = pair(Arc::clone(&cancel));
+        assert!(socket.socket.read_timeout().unwrap().unwrap() <= Duration::from_secs(1));
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        assert_eq!(socket.read(&mut [0u8; 1]).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        assert!(started.elapsed() < Duration::from_millis(1300));
+        setter.join().unwrap();
+    }
+
+    #[test]
+    fn a_logon_write_checks_its_cancel_within_a_second() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (mut socket, _peer) = pair(Arc::clone(&cancel));
+        assert!(socket.socket.write_timeout().unwrap().unwrap() <= Duration::from_secs(1));
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel.store(true, Ordering::Release);
+        });
+        let bytes = vec![0u8; 16 * 1024 * 1024];
+        let started = Instant::now();
+        assert_eq!(socket.write_all(&bytes).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        assert!(started.elapsed() < Duration::from_millis(1300));
+        setter.join().unwrap();
+    }
+
+    #[test]
+    fn a_logon_socket_keeps_its_phase_bound_and_becomes_an_ordinary_socket() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (mut socket, mut peer) = pair(Arc::clone(&cancel));
+        socket.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let start = Instant::now();
+        assert!(read_found_nothing(&socket.read(&mut [0u8; 1]).unwrap_err()));
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        socket.finish_logon();
+        configure_socket(socket.socket()).unwrap();
+        cancel.store(true, Ordering::Release);
+        peer.write_all(b"x").unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(socket.read(&mut byte).unwrap(), 1);
+        assert_eq!(&byte, b"x");
+        let start = Instant::now();
+        assert!(read_found_nothing(&socket.read(&mut byte).unwrap_err()));
+        assert!(start.elapsed() < Duration::from_millis(100));
     }
 }

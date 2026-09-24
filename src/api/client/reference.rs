@@ -65,11 +65,22 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, bar_size: &str,
         what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
+    ) {
+        if let Err(why) = self.try_req_historical_data(req_id, contract, end_date_time, duration, bar_size, what_to_show, use_rth, format_date, keep_up_to_date) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_historical_data`](Self::req_historical_data), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_historical_data(
+        &self, req_id: i64, contract: &Contract,
+        end_date_time: &str, duration: &str, bar_size: &str,
+        what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), Refusal> {
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let contract = &*self.named_by_the_venue(contract)?;
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
         // A series of its own on the reference client's historical request,
         // served there by the other surface too; refused here as a bar type
         // this client cannot send, while a call of its own carried it.
@@ -112,22 +123,37 @@ impl EClient {
     }
 
     /// Cancel historical data. Matches `cancelHistoricalData` in C++.
-    pub fn cancel_historical_data(&self, req_id: i64) -> Result<(), Refusal> {
-        let wire = wire_req_id(req_id)?;
-        // A withdrawn stream leaves nothing running under this id.
-        self.core.historical_request_is_new(wire);
-        self.send(ControlCommand::CancelHistorical { req_id: wire })
+    pub fn cancel_historical_data(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            let wire = wire_req_id(req_id)?;
+            // A withdrawn stream leaves nothing running under this id.
+            self.core.historical_request_is_new(wire);
+            self.send(ControlCommand::CancelHistorical { req_id: wire })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// Request head timestamp. Matches `reqHeadTimeStamp` in C++.
     pub fn req_head_time_stamp(
         &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool,
         format_date: i32,
+    ) {
+        if let Err(why) = self.try_req_head_time_stamp(req_id, contract, what_to_show, use_rth, format_date) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_head_time_stamp`](Self::req_head_time_stamp), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_head_time_stamp(
+        &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool,
+        format_date: i32,
     ) -> Result<(), Refusal> {
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let contract = &*self.named_by_the_venue(contract)?;
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
         self.core.note_date_format(req_id, format_date);
         self.send(ControlCommand::FetchHeadTimestamp {
             contract: contract.into(),
@@ -142,7 +168,15 @@ impl EClient {
     // ── Contract Details ──
 
     /// Request contract details. Matches `reqContractDetails` in C++.
-    pub fn req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(), Refusal> {
+    pub fn req_contract_details(&self, req_id: i64, contract: &Contract) {
+        if let Err(why) = self.try_req_contract_details(req_id, contract) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_contract_details`](Self::req_contract_details), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(), Refusal> {
         self.send(ControlCommand::FetchContractDetails {
             contract: contract.into(),
             req_id: wire_req_id(req_id)?,
@@ -159,19 +193,35 @@ impl EClient {
     /// venue was down, and this client holds none back — a lookup made with no
     /// connection is refused there and then. A lookup already asked for is
     /// still answered, as it is through a gateway.
-    pub fn cancel_contract_data(&self, req_id: i64) -> Result<(), Refusal> {
-        let _ = req_id;
-        if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
-        Ok(())
+    pub fn cancel_contract_data(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            let _ = req_id;
+            if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
+            Ok(())
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// Request available exchanges for market depth.
-    pub fn req_mkt_depth_exchanges(&self) -> Result<(), Refusal> {
-        self.send(ControlCommand::FetchMktDepthExchanges)
+    pub fn req_mkt_depth_exchanges(&self) {
+        if let Err(why) = self.send(ControlCommand::FetchMktDepthExchanges) {
+            self.refuse_question(crate::types::model::Question::MktDepthExchanges, &why);
+        }
     }
 
+
     /// Request matching symbols. Matches `reqMatchingSymbols` in C++.
-    pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), Refusal> {
+    pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) {
+        if let Err(why) = self.try_req_matching_symbols(req_id, pattern) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_matching_symbols`](Self::req_matching_symbols), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), Refusal> {
         wire_text("a matching-symbols pattern", pattern)?;
         let pattern = matching_symbols_pattern(pattern)?;
         self.send(ControlCommand::FetchMatchingSymbols {
@@ -184,7 +234,15 @@ impl EClient {
     ///
     /// Independent of the events themselves: neither request needs the other,
     /// and either may be asked first.
-    pub fn req_wsh_meta_data(&self, req_id: i64) -> Result<(), Refusal> {
+    pub fn req_wsh_meta_data(&self, req_id: i64) {
+        if let Err(why) = self.try_req_wsh_meta_data(req_id) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_wsh_meta_data`](Self::req_wsh_meta_data), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_wsh_meta_data(&self, req_id: i64) -> Result<(), Refusal> {
         self.send(ControlCommand::FetchCalendarMetaData { req_id: wire_req_id(req_id)? })
     }
 
@@ -195,14 +253,24 @@ impl EClient {
     /// otherwise reach a caller who has said they are done with it. A cancel
     /// naming no waiting request says so rather than returning as though it
     /// acted.
-    pub fn cancel_wsh_meta_data(&self, req_id: i64) -> Result<(), Refusal> {
-        self.send(ControlCommand::CancelCalendar { req_id: wire_req_id(req_id)? })
+    pub fn cancel_wsh_meta_data(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::CancelCalendar { req_id: wire_req_id(req_id)? })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
 
+
     /// Stop waiting on the calendar's events. As above.
-    pub fn cancel_wsh_event_data(&self, req_id: i64) -> Result<(), Refusal> {
-        self.send(ControlCommand::CancelCalendar { req_id: wire_req_id(req_id)? })
+    pub fn cancel_wsh_event_data(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::CancelCalendar { req_id: wire_req_id(req_id)? })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// Ask the corporate-events calendar for events.
     ///
@@ -210,6 +278,18 @@ impl EClient {
     /// goes to the venue as written: the venue validates it, and rewriting it
     /// here would change what was asked.
     pub fn req_wsh_event_data(
+        &self,
+        req_id: i64,
+        query: crate::types::CalendarQuery,
+    ) {
+        if let Err(why) = self.try_req_wsh_event_data(req_id, query) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_wsh_event_data`](Self::req_wsh_event_data), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_wsh_event_data(
         &self,
         req_id: i64,
         query: crate::types::CalendarQuery,
@@ -227,6 +307,17 @@ impl EClient {
     pub fn req_sec_def_opt_params(
         &self, req_id: i64, underlying_symbol: &str, fut_fop_exchange: &str,
         underlying_sec_type: &str, underlying_con_id: i64,
+    ) {
+        if let Err(why) = self.try_req_sec_def_opt_params(req_id, underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_sec_def_opt_params`](Self::req_sec_def_opt_params), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_sec_def_opt_params(
+        &self, req_id: i64, underlying_symbol: &str, fut_fop_exchange: &str,
+        underlying_sec_type: &str, underlying_con_id: i64,
     ) -> Result<(), Refusal> {
         self.send(ControlCommand::FetchOptionParams {
             req_id: wire_req_id(req_id)?,
@@ -238,9 +329,14 @@ impl EClient {
     }
 
     /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
-    pub fn cancel_head_time_stamp(&self, req_id: i64) -> Result<(), Refusal> {
-        self.send(ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? })
+    pub fn cancel_head_time_stamp(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// The price increments a market rule states. Matches `reqMarketRule` in C++.
     ///
@@ -248,23 +344,27 @@ impl EClient {
     /// uses along with that contract's details. So this answers from what those
     /// have already brought in, and says so when the rule is not among them
     /// rather than returning in silence.
-    pub fn req_market_rule(&self, market_rule_id: i32, wrapper: &mut impl crate::api::wrapper::Wrapper) {
+    pub fn req_market_rule(&self, market_rule_id: i32) {
         match self.shared.reference.market_rule(market_rule_id) {
-            Some(rule) => wrapper.market_rule(market_rule_id as i64, &rule.price_increments.iter()
-                .map(|pi| crate::types::model::PriceIncrement { low_edge: pi.low_edge, increment: pi.increment })
-                .collect::<Vec<_>>()),
+            Some(rule) => self.reply(crate::bridge::Reply::MarketRule(
+                market_rule_id,
+                rule.price_increments.iter()
+                    .map(|pi| crate::types::model::PriceIncrement { low_edge: pi.low_edge, increment: pi.increment })
+                    .collect(),
+            )),
             // Against the id the venue reports a miss against, -1: the rule's
             // number is not a request number, nothing was ever sent under it,
             // and a caller branching on the pair reads both halves.
-            None => wrapper.error(
-                -1,
-                MARKET_RULE_NOT_KNOWN,
-                &format!(
-                    "market rule {market_rule_id} has not been seen on this session. Rules \
-                     arrive with the details of a contract that uses them, so ask for such a \
-                     contract first"
+            None => self.refuse_question(
+                crate::types::model::Question::MarketRule(market_rule_id),
+                &Refusal::stated(
+                    MARKET_RULE_NOT_KNOWN as i32,
+                    format!(
+                        "market rule {market_rule_id} has not been seen on this session. Rules \
+                         arrive with the details of a contract that uses them, so ask for such a \
+                         contract first"
+                    ),
                 ),
-                "",
             ),
         }
     }
@@ -297,18 +397,35 @@ impl EClient {
     // ── Scanner ──
 
     /// Request scanner parameters XML. Matches `reqScannerParameters` in C++.
-    pub fn req_scanner_parameters(&self) -> Result<(), Refusal> {
-        self.send(ControlCommand::FetchScannerParams)
+    pub fn req_scanner_parameters(&self) {
+        if let Err(why) = self.send(ControlCommand::FetchScannerParams) {
+            self.refuse_question(crate::types::model::Question::ScannerParameters, &why);
+        }
     }
+
 
     /// Subscribe to a market scanner. Matches `reqScannerSubscription` in C++.
     ///
     /// `filters` are the scanner filter tags named by `req_scanner_parameters`,
     /// e.g. `priceAbove` = `"10"` or `stkTypes` = `"inc:ETF"`.
+    /// `scanner_setting_pairs` is taken and not carried to the venue, with a
+    /// warning once when a caller states it.
     pub fn req_scanner_subscription(
         &self, req_id: i64, instrument: &str, location_code: &str,
-        scan_code: &str, max_items: u32, filters: &[TagValue],
+        scan_code: &str, max_items: u32, filters: &[TagValue], scanner_setting_pairs: &str,
+    ) {
+        if let Err(why) = self.try_req_scanner_subscription(req_id, instrument, location_code, scan_code, max_items, filters, scanner_setting_pairs) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_scanner_subscription`](Self::req_scanner_subscription), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_scanner_subscription(
+        &self, req_id: i64, instrument: &str, location_code: &str,
+        scan_code: &str, max_items: u32, filters: &[TagValue], scanner_setting_pairs: &str,
     ) -> Result<(), Refusal> {
+        crate::control::scanner::note_setting_pairs(scanner_setting_pairs);
         self.send(ControlCommand::SubscribeScanner {
             req_id: wire_req_id(req_id)?,
             instrument: instrument.into(),
@@ -320,7 +437,15 @@ impl EClient {
     }
 
     /// Cancel a scanner subscription. Matches `cancelScannerSubscription` in C++.
-    pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), Refusal> {
+    pub fn cancel_scanner_subscription(&self, req_id: i64) {
+        if let Err(why) = self.try_cancel_scanner_subscription(req_id) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`cancel_scanner_subscription`](Self::cancel_scanner_subscription), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_cancel_scanner_subscription(&self, req_id: i64) -> Result<(), Refusal> {
         self.send(ControlCommand::CancelScanner { req_id: wire_req_id(req_id)? })
     }
 
@@ -332,12 +457,24 @@ impl EClient {
     /// or `YYYYMMDD HH:MM:SS`, optionally with fractional seconds. Empty bounds
     /// are omitted; unreadable ones are refused so the window is not lost.
     ///
-    /// No more than three hundred are asked for however many are wanted. The
-    /// reference client caps it there before the request goes out, so a bigger
-    /// number is one the venue is never asked.
+    /// No more than three hundred are asked for however many are wanted. A
+    /// gateway caps `total_results` there before the request goes out, so a
+    /// bigger number is one the venue is never asked, and it passes a smaller
+    /// one on as stated, below nought included.
     pub fn req_historical_news(
         &self, req_id: i64, con_id: i64, provider_codes: &str,
-        start_time: &str, end_time: &str, max_results: u32,
+        start_time: &str, end_time: &str, total_results: i32,
+    ) {
+        if let Err(why) = self.try_req_historical_news(req_id, con_id, provider_codes, start_time, end_time, total_results) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_historical_news`](Self::req_historical_news), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_historical_news(
+        &self, req_id: i64, con_id: i64, provider_codes: &str,
+        start_time: &str, end_time: &str, total_results: i32,
     ) -> Result<(), Refusal> {
         crate::control::news::validate_news_window(start_time, end_time)?;
         self.send(ControlCommand::FetchHistoricalNews {
@@ -346,19 +483,24 @@ impl EClient {
             provider_codes: provider_codes.into(),
             start_time: start_time.into(),
             end_time: end_time.into(),
-            max_results: max_results.min(crate::control::news::MOST_HEADLINES_ASKED_FOR),
+            max_results: total_results.min(crate::control::news::MOST_HEADLINES_ASKED_FOR),
         })
     }
 
     /// Request a news article by provider and article ID. Matches `reqNewsArticle` in
     /// C++.
-    pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), Refusal> {
-        self.send(ControlCommand::FetchNewsArticle {
-            req_id: wire_req_id(req_id)?,
-            provider_code: provider_code.into(),
-            article_id: article_id.into(),
-        })
+    pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::FetchNewsArticle {
+                req_id: wire_req_id(req_id)?,
+                provider_code: provider_code.into(),
+                article_id: article_id.into(),
+            })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     // ── Corporate actions ──
 
@@ -380,18 +522,21 @@ impl EClient {
     pub fn req_adjustments(
         &self, req_id: i64, con_id: i64, sec_type: &str, exchange: &str,
         start_date: &str, end_date: &str,
-    ) -> Result<(), Refusal> {
-        // The reserved band is refused where every caller's number is narrowed,
-        // which is every request rather than this one: a number taken from it
-        // collides on any of them.
-        let numbered = wire_req_id(req_id)?;
-        // Said before the request goes out, so an answer that arrives has
-        // somewhere to be put, and given back where the request does not go
-        // out, since nothing will ever answer it.
-        self.shared.reference.expect_adjustments(numbered);
-        self.ask_for_adjustments(numbered, con_id, sec_type, exchange, start_date, end_date)
-            .inspect_err(|_| self.shared.reference.stop_waiting_for_adjustments(numbered))
+    ) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            // The reserved band is refused where every caller's number is narrowed,
+            // which is every request rather than this one: a number taken from it
+            // collides on any of them.
+            let numbered = wire_req_id(req_id)?;
+            // Where its answer is put is said by the engine, in the step that
+            // sends it, so a withdrawal and a request again under one number are
+            // taken in the order they were asked.
+            self.ask_for_adjustments(numbered, con_id, sec_type, exchange, start_date, end_date)
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// The corporate actions answering a
     /// [`req_adjustments`](EClient::req_adjustments) under this id, once they
@@ -416,11 +561,17 @@ impl EClient {
     /// venue serves the query until it is withdrawn. A withdrawal naming no
     /// query this client is waiting on, one already answered included, is
     /// reported on `error` under 300.
-    pub fn cancel_adjustments(&self, req_id: i64) -> Result<(), Refusal> {
-        let req_id = wire_req_id(req_id)?;
-        self.shared.reference.stop_waiting_for_adjustments(req_id);
-        self.send(ControlCommand::CancelCorporateActions { req_id })
+    pub fn cancel_adjustments(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            // What it held is let go of in the engine's step, in its place after
+            // the request it withdraws.
+            let req_id = wire_req_id(req_id)?;
+            self.send(ControlCommand::CancelCorporateActions { req_id })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// Send a corporate-actions request under a number already settled.
     ///
@@ -454,7 +605,15 @@ impl EClient {
     /// [`qualify_contract`](EClient::qualify_contract), or from any
     /// contract-details answer. A description is refused rather than sent as a
     /// request about contract zero.
-    pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), Refusal> {
+    pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) {
+        if let Err(why) = self.try_req_fundamental_data(req_id, contract, report_type) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_fundamental_data`](Self::req_fundamental_data), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), Refusal> {
         self.send(ControlCommand::FetchFundamentalData {
             req_id: wire_req_id(req_id)?,
             con_id: wire_con_id(contract.con_id, "a request for a fundamental report")?,
@@ -463,9 +622,14 @@ impl EClient {
     }
 
     /// Cancel fundamental data. Matches `cancelFundamentalData` in C++.
-    pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), Refusal> {
-        self.send(ControlCommand::CancelFundamentalData { req_id: wire_req_id(req_id)? })
+    pub fn cancel_fundamental_data(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::CancelFundamentalData { req_id: wire_req_id(req_id)? })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// Withdraw a historical news query.
     ///
@@ -475,9 +639,14 @@ impl EClient {
     /// answered: the venue serves it past the reply, so a withdrawal gated on
     /// this client's own pending list would send nothing in the case that
     /// leaves one running.
-    pub fn cancel_historical_news(&self, req_id: i64) -> Result<(), Refusal> {
-        self.send(ControlCommand::CancelHistoricalNews { req_id: wire_req_id(req_id)? })
+    pub fn cancel_historical_news(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::CancelHistoricalNews { req_id: wire_req_id(req_id)? })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     // ── Histogram ──
 
@@ -485,11 +654,18 @@ impl EClient {
     ///
     /// Named by its venue id, as
     /// [`req_fundamental_data`](EClient::req_fundamental_data) is.
-    pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), Refusal> {
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let contract = &*self.named_by_the_venue(contract)?;
+    pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) {
+        if let Err(why) = self.try_req_histogram_data(req_id, contract, use_rth, period) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_histogram_data`](Self::req_histogram_data), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), Refusal> {
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
         self.send(ControlCommand::FetchHistogramData {
             req_id: wire_req_id(req_id)?,
             con_id: wire_con_id(contract.con_id, "a request for a histogram")?,
@@ -501,9 +677,14 @@ impl EClient {
     }
 
     /// Cancel histogram data. Matches `cancelHistogramData` in C++.
-    pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), Refusal> {
-        self.send(ControlCommand::CancelHistogramData { req_id: wire_req_id(req_id)? })
+    pub fn cancel_histogram_data(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            self.send(ControlCommand::CancelHistogramData { req_id: wire_req_id(req_id)? })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     // ── Historical Ticks ──
 
@@ -522,36 +703,40 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         start_date_time: &str, end_date_time: &str,
         number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool,
-    ) -> Result<(), Refusal> {
-        // Before anything that reaches the venue, so an id it cannot carry is
-        // named as the trouble rather than whatever is checked first.
-        let wire_id = wire_req_id(req_id)?;
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let contract = &*self.named_by_the_venue(contract)?;
-        // Refused here rather than turned into trades on the way out.
-        crate::control::historical::tick_data_type(what_to_show)?;
-        // A count below zero is not a count. Cast unchecked it became a
-        // request for four billion ticks, which the venue answers by refusing
-        // a request the caller never made.
-        let number_of_ticks = u32::try_from(number_of_ticks).map_err(|_| {
-            Refusal::validation(format!("number_of_ticks {number_of_ticks} is negative"))
-        })?;
-        crate::control::historical::validate_tick_window(start_date_time, end_date_time)?;
-        self.send(ControlCommand::FetchHistoricalTicks {
-            contract: contract.into(),
-            req_id: wire_id,
-            start_date_time: start_date_time.into(),
-            end_date_time: end_date_time.into(),
-            filters: contract.lookup_filters(),
-            number_of_ticks,
-            what_to_show: what_to_show.into(),
-            use_rth,
-            ignore_size,
-            include_expired: contract.include_expired,
-        })
+    ) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            // Before anything that reaches the venue, so an id it cannot carry is
+            // named as the trouble rather than whatever is checked first.
+            let wire_id = wire_req_id(req_id)?;
+            // A contract given by id alone is named by the engine before the
+            // request goes: a request states the contract's type and its
+            // exchange, and both are the venue's to say.
+            // Refused here rather than turned into trades on the way out.
+            crate::control::historical::tick_data_type(what_to_show)?;
+            // A count below zero is not a count. Cast unchecked it became a
+            // request for four billion ticks, which the venue answers by refusing
+            // a request the caller never made.
+            let number_of_ticks = u32::try_from(number_of_ticks).map_err(|_| {
+                Refusal::validation(format!("number_of_ticks {number_of_ticks} is negative"))
+            })?;
+            crate::control::historical::validate_tick_window(start_date_time, end_date_time)?;
+            self.send(ControlCommand::FetchHistoricalTicks {
+                contract: contract.into(),
+                req_id: wire_id,
+                start_date_time: start_date_time.into(),
+                end_date_time: end_date_time.into(),
+                filters: contract.lookup_filters(),
+                number_of_ticks,
+                what_to_show: what_to_show.into(),
+                use_rth,
+                ignore_size,
+                include_expired: contract.include_expired,
+            })
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     /// Withdraw a historical ticks request. Matches `cancelHistoricalTicks` in
     /// C++.
@@ -562,11 +747,16 @@ impl EClient {
     /// connection to the venue was down, which this client never does. Ticks
     /// already asked for still arrive, and a request waiting for its contract
     /// to be named still goes once it is, as through a gateway.
-    pub fn cancel_historical_ticks(&self, req_id: i64) -> Result<(), Refusal> {
-        let _ = req_id;
-        if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
-        Ok(())
+    pub fn cancel_historical_ticks(&self, req_id: i64) {
+        if let Err(why) = (|| -> Result<(), Refusal> {
+            let _ = req_id;
+            if self.session_over() { return Err(Refusal::not_connected("Not connected")); }
+            Ok(())
+        })() {
+            self.refuse_request(req_id, &why);
+        }
     }
+
 
     // ── Historical Schedule ──
 
@@ -574,11 +764,21 @@ impl EClient {
     pub fn req_historical_schedule(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, use_rth: bool,
+    ) {
+        if let Err(why) = self.try_req_historical_schedule(req_id, contract, end_date_time, duration, use_rth) {
+            self.refuse_request(req_id, &why);
+        }
+    }
+
+    /// [`req_historical_schedule`](Self::req_historical_schedule), with its refusal handed back to the
+    /// caller rather than pushed into the session's order.
+    pub(crate) fn try_req_historical_schedule(
+        &self, req_id: i64, contract: &Contract,
+        end_date_time: &str, duration: &str, use_rth: bool,
     ) -> Result<(), Refusal> {
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let contract = &*self.named_by_the_venue(contract)?;
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
         self.send(ControlCommand::FetchHistoricalSchedule {
             contract: contract.into(),
             req_id: wire_req_id(req_id)?,
@@ -602,7 +802,7 @@ mod tests {
         let (client, _rx, _shared) = super::super::tests::test_client();
         let mut wrapper = RecordingWrapper::default();
 
-        client.req_market_rule(26, &mut wrapper);
+        client.req_market_rule(26); client.process_msgs(&mut wrapper);
 
         assert_eq!(wrapper.events.len(), 1, "the miss is answered, once");
         assert!(
@@ -618,7 +818,7 @@ mod tests {
         use crate::types::ControlCommand;
 
         let (client, rx, _shared) = super::super::tests::test_client();
-        client.req_matching_symbols(8, "  APPLE   INC ").unwrap();
+        client.try_req_matching_symbols(8, "  APPLE   INC ").unwrap();
         match rx.try_recv().expect("the search is asked for") {
             ControlCommand::FetchMatchingSymbols { pattern, .. } => {
                 assert_eq!(pattern, "APPLE INC", "trimmed, and its runs of spaces collapsed");
@@ -628,7 +828,7 @@ mod tests {
 
         for nothing_to_search_for in ["", "   ", "\u{a0}", "AAPL\n"] {
             let why = client
-                .req_matching_symbols(8, nothing_to_search_for)
+                .try_req_matching_symbols(8, nothing_to_search_for)
                 .expect_err("the venue refuses this rather than answering it");
             assert!(why.message.contains("visible characters"), "{}", why.message);
         }

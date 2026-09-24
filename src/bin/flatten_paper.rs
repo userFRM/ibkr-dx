@@ -78,14 +78,15 @@ fn main() {
         };
         let symbol = position.contract.symbol.clone();
         let order_id = session.next_order_id();
-        match session.place_order(order_id, &position.contract, &order) {
-            Ok(()) => {
-                let done = session.await_order(order_id, Duration::from_secs(30)).is_ok_and(|report| report.is_done());
+        // A refusal is heard where the order's reports are, and ends the wait.
+        session.place_order(order_id, &position.contract, &order);
+        match session.await_order(order_id, Duration::from_secs(30)) {
+            Ok(report) => {
                 println!("  {side} {} {symbol}: {}", position.position.abs(),
-                    if done { "closed" } else { "sent, still working" });
+                    if report.is_done() { "closed" } else { "sent, still working" });
                 closed += 1;
             }
-            Err(why) => println!("  {side} {} {symbol}: refused — {why}", position.position.abs()),
+            Err(why) => println!("  {side} {} {symbol}: {why}", position.position.abs()),
         }
     }
     println!("{closed} of {} placed", held.len());

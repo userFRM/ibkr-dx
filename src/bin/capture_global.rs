@@ -138,9 +138,9 @@ fn main() {
         let quantity = lot(&details);
 
         // Top of book.
-        let _ = client.req_mkt_data(req, &resolved, "", false, false);
+        client.req_mkt_data(req, &resolved, "", false, false);
         // Bars, which every market keeps whether or not it is open now.
-        let _ = client.req_historical_data(
+        client.req_historical_data(
             1000 + req, &resolved, "", "2 D", "1 hour", "TRADES", false, 1, false,
         );
         // And an order the venue prices without placing.
@@ -154,7 +154,7 @@ fn main() {
                 what_if: true,
                 ..Default::default()
             };
-            let _ = client.place_order(stamp + req, &resolved, &order);
+            client.place_order(stamp + req, &resolved, &order);
         }
 
         let before_bars = heard.bars;
@@ -193,7 +193,7 @@ fn main() {
                 action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0,
                 lmt_price: 1.0, what_if: true, ..Default::default()
             };
-            let _ = client.place_order(stamp + 100 + req, &resolved, &odd);
+            client.place_order(stamp + 100 + req, &resolved, &odd);
             let deadline = Instant::now() + Duration::from_secs(8);
             while Instant::now() < deadline {
                 client.process_msgs(&mut heard);
@@ -202,7 +202,7 @@ fn main() {
             let said = heard.said.first().map(|s| first_line(s)).unwrap_or_default();
             println!("{:<22} at {quantity} a lot; at one: {said}", "");
         }
-        let _ = client.cancel_mkt_data(req);
+        client.cancel_mkt_data(req);
     }
 
     client.disconnect();

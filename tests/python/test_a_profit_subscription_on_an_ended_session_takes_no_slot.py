@@ -24,5 +24,6 @@ def test_a_profit_subscription_on_an_ended_session_takes_no_slot():
     c._test_end_session()
     c.reqPnL(9, "", "")
     c.reqPnL(10, "", "")
+    c.poll()
     codes = [code for _, code in w.seen]
     assert codes.count(504) == 2, f"both refused for the session, neither as a duplicate: {w.seen}"

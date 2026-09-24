@@ -599,6 +599,7 @@ pub struct ScannedStrategy {
 }
 
 pub use crate::protocol::chain_model::{ChainModelParameters, ChainModelTerm};
+pub use crate::protocol::connection::Traffic;
 
 /// What the venue states about a contract itself on the tick that carries its
 /// price extremes, beyond the extremes.
@@ -687,6 +688,15 @@ pub struct TbtTrade {
     /// every quote change — and looking up by contract hands both of them
     /// whichever request was made last.
     pub req_id: i64,
+    /// Which of the two trade streams it arrived on: every trade, or the
+    /// exchange's own.
+    ///
+    /// The callback names the stream it carries, and the subscription is
+    /// what decided it, so it is carried from the subscription the record
+    /// arrived on. Written down at the call instead, a second request under
+    /// a number already carrying a stream — which the engine refuses —
+    /// relabelled every print of the stream that was running.
+    pub kind: TbtType,
     /// At what price.
     pub price: Price,
     /// How much.

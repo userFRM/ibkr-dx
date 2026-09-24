@@ -2,10 +2,9 @@
 
 use pyo3::prelude::*;
 
-use crate::bridge::SharedState;
 use crate::error_codes::Refusal;
+use crate::types::model::{ErrorOrigin, Question};
 use crate::types::*;
-use std::sync::atomic::Ordering;
 use super::EClient;
 use super::super::contract::Contract;
 use super::super::super::types::PRICE_SCALE_F;
@@ -44,50 +43,34 @@ impl EClient {
 
 #[pymethods]
 impl EClient {
-    /// Request P&L updates for the account.
-    ///
-    /// `account` is required, as a gateway requires it, and one the login
-    /// does not hold is refused in its words. Another account the login holds
-    /// is refused too, rather than answered with this account's profit.
-    /// `model_code` is taken and not applied: there is no model portfolio to
-    /// name here.
+    /// Subscribe to the named account's profit. The account is checked as a
+    /// gateway checks it. Each request has its own subscription; a repeated
+    /// active request number is refused under 102. A model is taken and not
+    /// applied, with a log notice once per session.
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
-        // The session before the slot: taken first, a refused request held
-        // the one slot there is, and the next request under another number
-        // was refused as a duplicate of one that never went.
+        // A failed connection check leaves the request number free.
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        // Another account's profit is not something this session can state.
-        // The figures are worked out from one set of midnight seeds against
-        // one book of holdings, and both belong to the account this session
-        // opened under; there is no second pair to answer another account
-        // from. So the request ends here — the venue never reports one
-        // account's profit under a request naming a different one, and
-        // reporting this account's figures under the caller's own request
-        // number is an answer it never gives.
-        //
-        // Refused before the slot for the reason above it: a request that will
-        // not be reported must not hold the one subscription there is.
         if let Err(why) = self.check_pnl_account(account) {
             return self.report_refusal(py, req_id, why);
         }
-        // Refused while another request holds the subscription, and nothing
-        // is asked of the venue for a request that will not be reported.
-        if let Err(why) = self.core.subscribe_pnl(req_id) {
+        let account = if account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), account);
+            self.account()
+        } else { account.to_string() };
+        if let Err(why) = self.core.subscribe_pnl(req_id, &account) {
             return self.report_refusal(py, req_id, why);
         }
-        let acct = self.account();
-        let _ = model_code;
+        let acct = account.to_string();
+        crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), model_code);
         // Answered on the error callback and returned normally, as a request
         // made before connecting already is. Raising instead is a path a
         // caller written against the reference client does not take, so the
         // two clients answered the same failure differently.
         if let Err(why) =
-            Self::send_control(py, &tx, ControlCommand::SubscribePnl { req_id, account: acct })
+            self.send_control(&tx, ControlCommand::SubscribePnl { req_id, single: false, account: acct })
         {
-            // And the one slot there is goes back with it. Held, the next
-            // request under any number was refused as a duplicate of a
-            // subscription the venue was never asked for.
+            // A failed admission leaves the request number free.
             self.core.unsubscribe_pnl(req_id);
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -100,61 +83,68 @@ impl EClient {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         // A failed send is reported. Discarded, the subscription stays up and
         // the caller is told the cancel succeeded.
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelPnl { req_id }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelPnl { req_id, single: false }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
     }
 
-    /// Request P&L for a single position.
-    ///
-    /// `account` is checked as `req_pnl` checks it, and for the reasons given
-    /// there; `model_code` is taken and not applied.
+    /// Subscribe to a position's profit in the named account.
+    /// The account is checked as for the account-level profit. A model is
+    /// taken and not applied, with a log notice once per session.
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         if let Err(why) = self.check_pnl_account(account) {
             return self.report_refusal(py, req_id, why);
         }
-        self.core.subscribe_pnl_single(req_id, con_id);
-        let _ = model_code;
+        let account = if account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), account);
+            self.account()
+        } else { account.to_string() };
+        if let Err(why) = self.core.subscribe_pnl_single(req_id, con_id, &account) {
+            return self.report_refusal(py, req_id, why);
+        }
+        crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), model_code);
+        if let Err(why) = self.send_control(&_tx, ControlCommand::SubscribePnl { req_id, single: true, account: account.to_string() }) {
+            self.core.unsubscribe_pnl_single(req_id);
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        }
         Ok(())
     }
 
 
     /// Cancel single-position P&L subscription.
-    fn cancel_pnl_single(&self, req_id: i64) -> PyResult<()> {
+    fn cancel_pnl_single(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         self.core.unsubscribe_pnl_single(req_id);
+        if let Err(why) = self.send_control(&_tx, ControlCommand::CancelPnl { req_id, single: true }) {
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        }
         Ok(())
     }
 
-    /// Request account summary.
-    ///
-    /// `group_name` is checked as a gateway checks it, and refused in its
-    /// words: an empty one, and on a login that is not an advisor's anything
-    /// but `All` or `AllNonProp`; `All` where the venue says the login may not
-    /// ask for it. Empty `tags` are refused the same way. What is answered is
-    /// the account this session opened under: on a login holding several,
-    /// `All` is answered for that one account, and the caller is told so on
-    /// `error` under 321 ahead of the answer.
-    ///
-    /// Two summaries may be open at once, as on a gateway; a third is refused
-    /// under 322.
+    /// Request an account summary. `All` answers for every account the login
+    /// holds. Account groups and `AllNonProp` are taken and not applied, with
+    /// a log notice once per session. Validation and the limit of two standing
+    /// summary requests follow a gateway.
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, py: Python<'_>, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         let shared = self.shared_state()?;
+        let accounts = if group_name == "All" { self.accounts.lock().unwrap().clone() } else {
+            crate::client_core::ClientCore::note_account_selection(&shared, group_name);
+            vec![self.account()]
+        };
         let checked = crate::client_core::ClientCore::check_account_summary(&shared, group_name, tags)
-            .and_then(|()| self.core.subscribe_account_summary(req_id, tags));
+            .and_then(|()| self.core.subscribe_account_summary(req_id, tags, accounts.clone()));
         if let Err(why) = checked {
             return self.report_refusal(py, req_id, why);
         }
-        if let Some(why) = crate::client_core::ClientCore::answered_for_the_session_account(
-            &shared, group_name, &self.account(),
-        ) {
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::validation(why))?;
+        for account in accounts {
+            if let Err(why) = self.send_control(&_tx, ControlCommand::RefreshAccount { account }) {
+                return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+            }
         }
         Ok(())
     }
@@ -173,140 +163,76 @@ impl EClient {
     /// program written against the reference client has no exception handling
     /// around a request, because that client does not raise there.
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_connected) = self.tx_or_report(-1)? else { return Ok(()) };
-        let shared = self.shared_state()?;
-        // Wait for CCP init burst to complete (up to 10s).
-        if !self.wait_for_the_download(py, &shared, -1)? { return Ok(()); }
-        if !shared.portfolio.account_download_complete() {
-            // Reported to the caller as well as the log, as on the other
-            // surface. A caller reading holdings has no other way to tell a
-            // truncated answer from a complete one, and an account that says
-            // nothing within the wait reads exactly like one holding nothing.
-            let why = "the account had not finished stating its holdings within the wait, \
-                       so what follows is what this session already held rather than what \
-                       the account holds";
-            log::warn!("{why}");
-            self.report_refusal(py, -1, Refusal::no_answer(why))?;
-        }
-        // A position feed names a holding by id and leaves the rest to the
-        // definition, which the engine asks for as the feed is read. That
-        // answer lands a moment after the account download is called complete,
-        // so reading straight through hands back a holding with no symbol,
-        // security type or currency on it — one a caller can neither price nor
-        // close — and nothing reads it again later.
-        //
-        // Bounded, and only while something is still unnamed: a definition the
-        // venue never sends must cost a caller a wait, not a hang.
-        // The set is read inside the wait and delivered as read. Waiting on
-        // one set and delivering another hands back a holding that arrives
-        // between the two, which no lookup has named.
-        // Watching before reading, as the other surface does and for the
-        // reason its own comment gives.
-        //
-        // Read first and registered after, a holding that moved while the
-        // answer was being assembled was taken by a watcher that already
-        // existed -- the queue is drained once for everyone -- and reached
-        // this caller nowhere: not in its answer, which had already been read,
-        // and not afterwards, because nothing here was yet watching. The
-        // window is real rather than theoretical: the naming wait below
-        // releases the interpreter for up to two seconds, and every delivery
-        // runs a caller's own code.
-        //
-        // The cost is the one that surface already accepts: the same holding
-        // may be stated twice. A holding states what it is rather than what
-        // changed, so a second statement of it is the same answer again.
-        //
-        // Not covered by a test: the window closes before this call returns,
-        // so nothing a single thread can drive tells the two orderings apart.
-        // Written here rather than pinned by a check that passes either way.
-        self.positions_requested.store(true, Ordering::Release);
-        // What moved before this answer is in the answer. Left standing, the
-        // pass that hands the answer over replays every one of them as a move,
-        // so a caller asking once is told about a holding twice — and the
-        // comment on the dispatch beside it says this call clears them, which
-        // it did not. Taken here, and given below to the per-request watchers,
-        // which have not been answered and would otherwise never hear of them.
-        let already_stated = shared.portfolio.drain_position_changes();
-        let positions = self.core.named_positions(&shared, |d| py.detach(|| std::thread::sleep(d)));
-        for pi in &positions {
-            let c_py = Py::new(py, self.position_contract(py, pi, &shared)?)?.into_any();
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            self.deliver(py, "position", (self.account().as_str(), &c_py, pi.position, avg_cost))?;
-        }
-        self.deliver(py, "position_end", ())?;
-        // What was taken above belongs to the per-request watchers too, and
-        // they were not answered here. Handed over now rather than dropped, or
-        // a holding that moved before this ask would reach them never.
-        let watching: Vec<i64> = {
-            let asked = self.positions_multi_requested.lock().unwrap();
-            let mut ids: Vec<i64> = asked.iter().copied().collect();
-            ids.sort_unstable();
-            ids
-        };
-        for pi in &already_stated {
-            let c_py = Py::new(py, self.position_contract(py, pi, &shared)?)?.into_any();
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            for req_id in &watching {
-                self.deliver(
-                    py,
-                    "position_multi",
-                    (*req_id, self.account().as_str(), "", &c_py, pi.position, avg_cost),
-                )?;
-            }
+        let refused = ErrorOrigin::Question { q: Question::Positions, ends: true };
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
+        // Answered where the account has stated what it holds, which the
+        // venue does as a session opens: the engine holds the question until
+        // then, and names the holdings' contracts for a moment after, so
+        // nothing waits here. Every holding and the end, as the account stands
+        // where the answer stands in the session's order, and each move after
+        // it on `position`: watched from there.
+        if let Err(why) = self.send_control(&tx, ControlCommand::Ask(crate::types::Ask::Positions)) {
+            return self.report_refusal_as(py, refused, Refusal::not_connected(why.to_string()));
         }
         Ok(())
     }
 
     /// Cancel positions.
-    // nothing to withdraw: the venue pushes what the account holds when the
-    // session opens and keeps it current. Nothing was subscribed, so nothing
-    // stops, and reporting an error for withdrawing a subscription that was
-    // never made would be wrong.
-    fn cancel_positions(&self) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        self.positions_requested.store(false, Ordering::Release);
+    // nothing to withdraw at the venue: it pushes what the account holds when
+    // the session opens and keeps it current. What stops is the reporting,
+    // where the engine confirms the cancel in its place, after everything the
+    // question was answered with; a `reqPositions` the engine still holds is
+    // withdrawn, never answered.
+    fn cancel_positions(&self, py: Python<'_>) -> PyResult<()> {
+        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        let retire = crate::types::Retirement::Question(Question::Positions);
+        if let Err(why) = self.send_control(&tx, ControlCommand::Retire(retire)) {
+            return self.report_refusal_as(py, ErrorOrigin::Session, Refusal::not_connected(why.to_string()));
+        }
         Ok(())
     }
 
-    /// Request account updates.
-    ///
-    /// `acct_code` is checked as a gateway checks it. On a login holding one
-    /// account it is ignored, as a gateway ignores it. On a login holding
-    /// several, a subscription naming none, or one the login does not hold, is
-    /// refused in a gateway's words. One it holds, or `All` where the login may
-    /// ask for every account, is answered with the figures of the account this
-    /// session opened under, which are the ones the venue states to it, and
-    /// the caller is told so on `error` under 321.
-    ///
-    /// Subscribing also asks the venue to state the figures now. It restates
-    /// them on its own schedule otherwise, which is unhurried: a session that
-    /// has just opened waits tens of seconds for its first set, and a caller
-    /// that subscribed and then read the account got nothing.
+    /// Subscribe to the named account's figures and holdings, or withdraw
+    /// the subscription. A single-account login ignores the name as a gateway
+    /// does. Subscribing asks the venue to restate that account now; the engine
+    /// holds the answer until its download ends or the existing wait expires.
     #[pyo3(signature = (subscribe, acct_code=""))]
     fn req_account_updates(&self, py: Python<'_>, subscribe: bool, acct_code: &str) -> PyResult<()> {
-        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        // A subscription is the question of the account's figures; its
+        // withdrawal, like `cancelPositions`, is the session's.
+        let refused = if subscribe {
+            ErrorOrigin::Question { q: Question::AccountUpdates, ends: true }
+        } else {
+            ErrorOrigin::Session
+        };
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
         let accounts = self.accounts.lock().unwrap().clone();
         let shared = self.shared_state()?;
         if let Err(why) = crate::client_core::ClientCore::check_account_updates(
             &shared, &accounts, subscribe, acct_code,
         ) {
-            return self.report_refusal(py, -1, why);
+            return self.report_refusal_as(py, refused, why);
         }
-        if subscribe
-            && let Some(why) = crate::client_core::ClientCore::answered_for_the_session_account(
-                &shared, acct_code, &self.account(),
-            )
-        {
-            log::warn!("{why}");
-            self.report_refusal(py, -1, Refusal::validation(why))?;
-        }
-        self.core.subscribe_account_updates(subscribe);
-        if subscribe {
-            let account = self.account();
-            if let Err(why) = Self::send_control(py, &tx, ControlCommand::RefreshAccount { account })
-            {
-                return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
-            }
+        let account = if crate::client_core::ClientCore::login_holds_several_accounts(&shared)
+            && !acct_code.eq_ignore_ascii_case("All") && acct_code != "AllNonProp" {
+            acct_code.to_string()
+        } else {
+            if acct_code == "AllNonProp" { crate::client_core::ClientCore::note_account_selection(&shared, acct_code); }
+            self.account()
+        };
+        // A withdrawal is the question's cancel: the engine withdraws a
+        // subscription it still holds and confirms the withdrawal in its
+        // place, after everything the subscription was answered with.
+        // Subscribed where the answer stands in the session's order, once the
+        // account has stated itself, which is where the first batch and its
+        // end are stated from.
+        let command = if subscribe {
+            ControlCommand::Ask(crate::types::Ask::AccountUpdates { account })
+        } else {
+            ControlCommand::Retire(crate::types::Retirement::Question(Question::AccountUpdates))
+        };
+        if let Err(why) = self.send_control(&tx, command) {
+            return self.report_refusal_as(py, refused, Refusal::not_connected(why.to_string()));
         }
         Ok(())
     }
@@ -318,24 +244,17 @@ impl EClient {
     /// list reads as a login holding none rather than as a question asked too
     /// early.
     fn req_managed_accts(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_connected) = self.tx_or_report(-1)? else { return Ok(()) };
+        let refused = ErrorOrigin::Question { q: Question::ManagedAccounts, ends: true };
+        let Some(_connected) = self.tx_or_report_as(refused)? else { return Ok(()) };
         self.deliver(py, "managed_accounts", (self.accounts_csv().as_str(),))?;
         Ok(())
     }
 
-    /// Request account updates for multiple accounts/models.
-    ///
-    /// `ledger_and_nlv` restricts the answer to the per-currency ledger, as a
-    /// gateway does: each currency's cash, market values and
-    /// `NetLiquidationByCurrency`, which is the net liquidation it means. The
-    /// account's other figures — `NetLiquidation`, `BuyingPower` and the rest
-    /// — are not delivered on such a request.
-    ///
-    /// The request is held open. A figure that moves after the first batch is
-    /// reported again under the same number, until
-    /// `cancelAccountUpdatesMulti` withdraws it — which is what the reference
-    /// client does, and what a caller watching a balance sheet through this
-    /// request is written for.
+    /// Subscribe to the named account's figures under this request number.
+    /// `ledger_and_nlv` selects the per-currency ledger and net liquidation.
+    /// A model is taken and not applied, with a log notice once per session.
+    /// The initial batch ends with `account_update_multi_end`; changes keep
+    /// arriving until the request is cancelled.
     #[pyo3(signature = (req_id, account, model_code, ledger_and_nlv=false))]
     fn req_account_updates_multi(
         &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
@@ -343,70 +262,16 @@ impl EClient {
         // Reported and returned, as `req_positions` above and every other
         // request before connecting. Raising made this one request out of the
         // set the caller had to guard.
-        let Some(_connected) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let shared = self.shared_state()?;
-        // The same wait the plain answer makes, on the flag that a dropped
-        // connection actually clears: the one below it was stored once at the
-        // first account message of the session and cleared nowhere, so the
-        // loop meant nothing after that and this path answered from the
-        // pre-drop book without a warning.
-        if !self.wait_for_the_download(py, &shared, req_id)? { return Ok(()); }
-        if !shared.portfolio.account_download_complete() {
-            let why = "the account had not finished stating its holdings within the wait, \
-                       so what follows is what this session already held rather than what \
-                       the account holds";
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::no_answer(why))?;
+        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), model_code);
+        let account = if account.is_empty() || account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), account);
+            self.account()
+        } else { account.to_string() };
+        let ask = crate::types::Ask::AccountUpdatesMulti { req_id, account, model_code: model_code.to_string(), ledger_and_nlv };
+        if let Err(why) = self.send_control(&tx, ControlCommand::Ask(ask)) {
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
-        // A figure the venue stated about another account is not something
-        // this session was told, so naming one is answered rather than taken.
-        if !account.is_empty() && account != self.account() {
-            let why = format!(
-                "account {account} was named and the figures that follow are {}'s, which \
-                 is the account this session opened under",
-                self.account(),
-            );
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::validation(why))?;
-        }
-        // Labelled with the account they belong to, not with the one that was
-        // asked about. Echoing the caller's own put another account's name on
-        // this account's net liquidation and buying power, which a caller
-        // keeping a book per account files as that account's balance sheet.
-        // The holdings answer beside this already says so.
-        let acct_name = self.account();
-        // Held open from here. The reference client keeps this request alive
-        // and reports each figure again as it moves; answered with one batch
-        // and nothing after, a caller watching its balance sheet through it
-        // watched a still picture. What it asked for is stated first.
-        self.core.ledger_only_for(req_id, ledger_and_nlv);
-        self.account_updates_multi_requested.lock().unwrap().insert(req_id);
-        // A model is a slice of the account; the figures below are the whole
-        // of it. Echoed onto the label, every one of them read as that model's
-        // — and a caller keeping a book per model files the account's net
-        // liquidation and buying power as one model's.
-        let model_code = if model_code.is_empty() { model_code } else {
-            let why = format!(
-                "model {model_code} was named and the figures that follow are the whole \
-                 account's, which is what this session is told",
-            );
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::validation(why))?;
-            ""
-        };
-        // Every figure the venue stated, in the currency it stated it in.
-        // Rebuilding from this client's typed copy reports an account held in
-        // any other currency as dollars, and drops every figure outside the
-        // handful that copy carries.
-        // Against this request's own record, which a fresh ask starts empty, so
-        // the batch is the account whole and every batch after it is the moves.
-        self.core.forget_account_figures_for(req_id);
-        for field in self.core.account_figures_that_moved(&shared, req_id) {
-            self.deliver(py, "account_update_multi",
-                (req_id, acct_name.as_str(), model_code,
-                 field.key.as_str(), field.value.as_str(), field.currency.as_str()))?;
-        }
-        self.deliver(py, "account_update_multi_end", (req_id,))?;
         Ok(())
     }
 
@@ -416,86 +281,33 @@ impl EClient {
     /// whether or not anyone is listening; what stops is the reporting — a
     /// figure that moves after this is no longer delivered on
     /// `accountUpdateMulti` for this request.
-    fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
-        self.core.forget_account_figures_for(req_id);
-        self.core.ledger_only_for(req_id, false);
+    ///
+    /// A request the engine still holds is withdrawn, never answered; one it
+    /// answered stops where the withdrawal stands, after its answer.
+    fn cancel_account_updates_multi(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        let retire = crate::types::Retirement::AccountUpdatesMulti(req_id);
+        if let Err(why) = self.send_control(&tx, ControlCommand::Retire(retire)) {
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        }
         Ok(())
     }
 
-    /// Request positions across multiple accounts/models.
+    /// Subscribe to holdings of the named account under this request number.
+    /// A model is taken and not applied, with a log notice once per session.
     #[pyo3(signature = (req_id, account, model_code))]
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         // As above.
-        let Some(_connected) = self.tx_or_report(req_id)? else { return Ok(()) };
-        let shared = self.shared_state()?;
-        // What moved before this asked is in the answer that follows, so it is
-        // dropped from the queue rather than fired as a change as well. Left
-        // standing, a caller whose first position call was this one was handed
-        // every holding, and then handed every holding again as a move that
-        // did not happen. Only where nobody was watching: a queue somebody
-        // else owns is not this call's to empty. The other surface does the
-        // same, in the same shape.
-        if !self.positions_requested.load(Ordering::Acquire)
-            && self.positions_multi_requested.lock().unwrap().is_empty()
-        {
-            shared.portfolio.drain_position_changes();
+        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), model_code);
+        let account = if account.is_empty() || account.eq_ignore_ascii_case("All") || account == "AllNonProp" {
+            crate::client_core::ClientCore::note_account_selection(self.shared_state()?.as_ref(), account);
+            self.account()
+        } else { account.to_string() };
+        let ask = crate::types::Ask::PositionsMulti { req_id, account, model_code: model_code.to_string() };
+        if let Err(why) = self.send_control(&tx, ControlCommand::Ask(ask)) {
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
-        // The same wait and the same warning the plain answer makes, and on
-        // the same flag. Waiting on whether anything had been heard at all,
-        // this was satisfied by the first account figure of a new connection —
-        // tens of rows before a holding was restated — so it answered from the
-        // book as it stood before the drop, and said nothing about it.
-        if !self.wait_for_the_download(py, &shared, req_id)? { return Ok(()); }
-        if !shared.portfolio.account_download_complete() {
-            let why = "the account had not finished stating its holdings within the wait, \
-                       so what follows is what this session already held rather than what \
-                       the account holds";
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::no_answer(why))?;
-        }
-        // Watching before reading, as on the other surface: the queue of moves
-        // is drained once for everyone watching, so a holding that moves while
-        // this answer is being assembled was taken by a watcher that already
-        // existed and reached this one nowhere.
-        self.positions_multi_requested.lock().unwrap().insert(req_id);
-        let held: Vec<_> = shared.portfolio.position_infos()
-            .into_iter()
-            .filter(|pi| pi.position != 0.0)
-            .collect();
-        if !account.is_empty() && account != self.account() {
-            let why = format!(
-                "account {account} was named and the holdings that follow are {}'s, which \
-                 is the account this session opened under",
-                self.account(),
-            );
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::validation(why))?;
-        }
-        // Labelled with the account they are on, not with the one that was
-        // asked about: these are the holdings of the account this session
-        // opened under, and echoing the caller's own put another account's
-        // name on them.
-        let on = self.account();
-        // A model is a slice of the account, and these are the whole of what
-        // it holds. Echoed onto the label, every holding read as that model's.
-        let model_code = if model_code.is_empty() { model_code } else {
-            let why = format!(
-                "model {model_code} was named and the holdings that follow are the whole \
-                 account's, which is what this session is told",
-            );
-            log::warn!("{why}");
-            self.report_refusal(py, req_id, Refusal::validation(why))?;
-            ""
-        };
-        for pi in &held {
-            let c_py = Py::new(py, self.position_contract(py, pi, &shared)?)?.into_any();
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            self.deliver(py, "position_multi",
-                (req_id, on.as_str(), model_code, &c_py, pi.position, avg_cost))?;
-        }
-        self.deliver(py, "position_multi_end", (req_id,))?;
         Ok(())
     }
 
@@ -505,9 +317,15 @@ impl EClient {
     // it current whether or not anyone is listening, as for
     // `cancel_positions`. What stops is the reporting — a holding that moves
     // after this is no longer delivered on `position_multi` for this request.
-    fn cancel_positions_multi(&self, req_id: i64) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        self.positions_multi_requested.lock().unwrap().remove(&req_id);
+    //
+    // A request the engine still holds is withdrawn, never answered; one it
+    // answered stops where the withdrawal stands, after its answer.
+    fn cancel_positions_multi(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        let retire = crate::types::Retirement::PositionsMulti(req_id);
+        if let Err(why) = self.send_control(&tx, ControlCommand::Retire(retire)) {
+            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        }
         Ok(())
     }
 
@@ -617,28 +435,14 @@ fn held_elsewhere_name(held: HeldElsewhere) -> &'static str {
 
 // Not a Python method: a helper the calls above share.
 impl EClient {
-    /// Wait for the account to finish stating itself, up to ten seconds, and
-    /// say whether the session is still there to answer — as on the other
-    /// surface. The session may end inside the wait, and what this would
-    /// answer from afterwards is the pre-drop book: checked at entry alone,
-    /// ten seconds of that book went out under a refusal for silence.
-    fn wait_for_the_download(&self, py: Python<'_>, shared: &SharedState, req_id: i64) -> PyResult<bool> {
-        for _ in 0..1000 {
-            if shared.portfolio.account_download_complete() { return Ok(true); }
-            if shared.reference.session_over().is_some() {
-                self.report_refusal(py, req_id, Refusal::not_connected("Not connected"))?;
-                return Ok(false);
-            }
-            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(10)));
-        }
-        Ok(true)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::SharedState;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     /// A connected client whose engine is a channel the test reads, and a
     /// wrapper that keeps every callback it is handed.
@@ -658,8 +462,9 @@ w = W()",
         ).unwrap();
         let wrapper = ns.get_item("w").unwrap().unwrap().unbind();
         client.__init__(wrapper.clone_ref(py)).unwrap();
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let (tx, rx) = std::sync::mpsc::channel();
         *client.shared.lock().unwrap() = Some(Arc::new(SharedState::new()));
+        client.shared_state().unwrap().set_session_account("DU123");
         *client.control_tx.lock().unwrap() = Some(tx);
         *client.account_id.lock().unwrap() = Some("DU123".into());
         client.connected.store(true, Ordering::Release);
@@ -704,56 +509,21 @@ w = W()",
         });
     }
 
-    /// A profit request naming an account this session did not open under is
-    /// refused and ends there. Answered instead with this account's figures
-    /// under the caller's own request number, a caller authorised on two
-    /// accounts read one account's profit as the other's, with nothing on any
-    /// callback to say so. Nothing is asked of the venue for a request that
-    /// will not be reported, and the one subscription slot stays free for the
-    /// request that comes next.
+    /// A held account is named on both profit requests without a refusal.
     #[test]
-    fn a_profit_request_naming_another_account_is_refused_rather_than_answered() {
+    fn a_profit_request_carries_the_named_account() {
         Python::initialize();
         Python::attach(|py| {
             let (client, rx, wrapper) = wired_client(py);
-            // A login holding both, so what is refused is the account this
-            // session did not open under rather than one the login lacks.
             *client.accounts.lock().unwrap() = vec!["DU123".into(), "DU999".into()];
-
             client.req_pnl(py, 7, "DU999", "").unwrap();
-            assert!(rx.try_recv().is_err(), "the venue is asked nothing");
-            assert_eq!(
-                *client.core.pnl_req_id.lock().unwrap(), None,
-                "the one slot there is was not taken by a request that was refused",
-            );
-
             client.req_pnl_single(py, 8, "DU999", "", 265_598).unwrap();
-            assert!(
-                !client.core.pnl_single_reqs.lock().unwrap().contains_key(&8),
-                "nothing is watched under a request that was refused",
-            );
-
-            // Both refusals reach the caller under the number it gave, naming
-            // the account it asked about.
-            let heard = wrapper.bind(py).getattr("calls").unwrap()
-                .extract::<Vec<(String, i64, i64, i64, String, String)>>().unwrap();
-            let refused: Vec<i64> = heard.iter()
-                .filter(|(name, _, _, code, message, _)| {
-                    name == "error"
-                        && *code == crate::error_codes::Refusal::VALIDATION as i64
-                        && message.contains("DU999")
-                })
-                .map(|(_, req_id, ..)| *req_id)
-                .collect();
-            assert_eq!(refused, vec![7, 8], "each refusal is reported once: {heard:?}");
-
-            // And the account this session did open under is still answered,
-            // in the slot the refusal did not take.
-            client.req_pnl(py, 9, "DU123", "").unwrap();
-            assert!(
-                matches!(rx.try_recv(), Ok(ControlCommand::SubscribePnl { req_id: 9, .. })),
-                "the session's own account is asked for as before",
-            );
+            for id in [7, 8] {
+                assert!(matches!(rx.try_recv(), Ok(ControlCommand::SubscribePnl { req_id, account, .. })
+                    if req_id == id && account == "DU999"));
+            }
+            client.dispatch_once(py, &client.shared_state().unwrap()).unwrap();
+            assert_eq!(wrapper.bind(py).getattr("calls").unwrap().len().unwrap(), 0);
         });
     }
 
@@ -767,8 +537,9 @@ w = W()",
             client.req_pnl(py, 7, "", "").unwrap();
             client.req_pnl_single(py, 8, "DU555", "", 265_598).unwrap();
             assert!(rx.try_recv().is_err(), "the venue is asked nothing");
-            assert_eq!(*client.core.pnl_req_id.lock().unwrap(), None);
+            assert!(client.core.pnl_req_id.lock().unwrap().is_empty());
             assert!(client.core.pnl_single_reqs.lock().unwrap().is_empty());
+            client.dispatch_once(py, &client.shared_state().unwrap()).unwrap();
             let heard = wrapper.bind(py).getattr("calls").unwrap()
                 .extract::<Vec<(String, i64, i64, i64, String, String)>>().unwrap();
             let refused: Vec<(i64, i64, String)> = heard.into_iter()

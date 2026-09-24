@@ -182,7 +182,8 @@ def test_the_log_level_in_the_environment_is_read_at_import():
             "c._test_connect()\n"
             "f = ibkr_dx.ExecutionFilter()\n"
             "f.specificDates = [20000101]\n"
-            "c.reqExecutions(1, f)\n")
+            "c.reqExecutions(1, f)\n"
+            "c.poll()\n")
     said = "The dates: [2000-01-01] are outside"
     at_info = _run(code, IBKR_DX_LOG_LEVEL="info")
     assert at_info.returncode == 0, at_info.stderr
@@ -218,12 +219,15 @@ def test_an_unset_log_level_is_the_level_the_logger_was_installed_at():
                 "f.specificDates = [20000101]\n"
                 "ibkr_dx.configure(log_level='info')\n"
                 "c.reqExecutions(1, f)\n"
+                "c.poll()\n"
                 "ibkr_dx.configure(log_level='')\n"
                 "c.reqExecutions(2, f)\n"
+                "c.poll()\n"
                 "print(ibkr_dx.settings()['log_level'])\n"
                 "ibkr_dx.configure(log_level='info')\n"
                 "ibkr_dx.configure(log_level=None)\n"
                 "c.reqExecutions(3, f)\n"
+                "c.poll()\n"
                 "print(ibkr_dx.settings()['log_level'])\n")
     assert done.returncode == 0, done.stderr
     assert done.stdout.splitlines() == ["None", "None"], done.stdout

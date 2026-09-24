@@ -78,9 +78,8 @@ fn main() {
             total_limit: Some(20),
             ..Default::default()
         };
-        if let Err(e) = client.req_wsh_event_data(9, query) {
-            println!("  the events could not be asked for: {e}");
-        }
+        // A refusal is heard on the error callback, and counted below.
+        client.req_wsh_event_data(9, query);
     }
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
@@ -94,9 +93,7 @@ fn main() {
     );
 
     // Then the event types.
-    if let Err(e) = client.req_wsh_meta_data(1) {
-        println!("  the event types could not be asked for: {e}");
-    }
+    client.req_wsh_meta_data(1);
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         client.process_msgs(&mut heard);
@@ -112,9 +109,7 @@ fn main() {
                 total_limit: Some(20),
                 ..Default::default()
             };
-            if let Err(e) = client.req_wsh_event_data(2, query) {
-                println!("  the events could not be asked for: {e}");
-            }
+            client.req_wsh_event_data(2, query);
         }
         Err(e) => println!("  the contract could not be resolved: {e}"),
     }

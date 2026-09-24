@@ -96,17 +96,168 @@ pub struct CalendarQuery {
     pub fill_competitors: bool,
 }
 
+/// A request the engine answers from what the session holds, once the venue
+/// has stated it: the account's holdings and figures, and what it is working.
+///
+/// Held in the engine's loop until then, so a call that asks returns at once
+/// and the answer stands where the venue's statement completes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ask {
+    /// `req_positions`: every holding, then `position_end`.
+    Positions,
+    /// `req_positions_multi`, under the caller's number.
+    PositionsMulti {
+        /// The caller's number.
+        req_id: i64,
+        /// The account named.
+        account: String,
+        /// The model label echoed on the answer.
+        model_code: String,
+    },
+    /// `req_account_updates(true, ..)`: the subscription starts where its
+    /// answer stands.
+    AccountUpdates {
+        /// The account named.
+        account: String,
+    },
+    /// `req_account_updates_multi`, under the caller's number.
+    AccountUpdatesMulti {
+        /// The caller's number.
+        req_id: i64,
+        /// The account named.
+        account: String,
+        /// The model label echoed on the answer.
+        model_code: String,
+        /// Whether only the ledger and the net liquidation were asked for.
+        ledger_and_nlv: bool,
+    },
+    /// `req_open_orders` or `req_all_open_orders`, once the venue has named
+    /// what the account is working.
+    OpenOrders(crate::types::model::Question),
+    /// `req_ids`, once the venue has named what the account is working: the
+    /// id is floored above it.
+    NextValidId,
+}
+
+/// A calculation answered from the venue's model for a contract, as the
+/// caller asked it: the engine keeps it on the slot the request is served on
+/// and answers it where the venue states the model.
+#[derive(Debug, Clone)]
+pub struct Calculation {
+    /// The contract it is on.
+    pub contract: crate::types::model::Contract,
+    /// Whether it inverts a price or prices a volatility.
+    pub wants_volatility: bool,
+    /// The option price or volatility the caller supplied.
+    pub option_price: f64,
+    /// The underlying price the caller supplied.
+    pub under_price: f64,
+}
+
+/// An order a caller placed, as its call states it.
+///
+/// The engine names the contract where the caller described it, registers it,
+/// runs the checks a gateway makes against the orders it holds, builds the
+/// order, and sends it or keeps it: none of that waits on the caller's thread.
+#[derive(Debug, Clone)]
+pub struct Placement {
+    /// The number it is placed under.
+    pub order_id: OrderId,
+    /// The contract as the caller stated it, legs and hedge included.
+    pub contract: crate::types::model::Contract,
+    /// The order as this session sends it, under its number.
+    pub order: crate::types::model::Order,
+    /// What a gateway says about an order it places anyway, said once the
+    /// order has gone or is kept.
+    pub warnings: Vec<crate::error_codes::Refusal>,
+}
+
+/// An exercise or a lapse of an option position, as its call states it.
+#[derive(Debug, Clone)]
+pub struct Exercise {
+    /// The caller's allocator, when the engine must assign a number after replay.
+    pub allocator: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// The number the caller stated, which a refusal is reported under.
+    pub req_id: i64,
+    /// The order number it goes out under.
+    pub order_id: OrderId,
+    /// Whether the caller stated that number, which may not be a working
+    /// order's, or was given one.
+    pub stated: bool,
+    /// The option.
+    pub contract: crate::types::model::Contract,
+    /// 1 exercises, 2 lapses.
+    pub action: u8,
+    /// How many contracts.
+    pub qty: Qty,
+    /// The account it is taken on, where one is named.
+    pub account: String,
+    /// What the instruction states about itself.
+    pub states: ExerciseStates,
+    /// Whether the caller overrides the natural action: an exercise of an
+    /// option out of the money, or a lapse of one in it, goes anyway rather
+    /// than being refused.
+    pub override_: bool,
+}
+
+/// What an exercise states beyond the instruction itself.
+///
+/// Three fields an order carries and an exercise did not take, though the same
+/// request goes out either way and the same tags carry them: when a person
+/// entered it, whose account it is for, and whether that person is a
+/// professional. A caller that named any of them was answered as though they
+/// had named none.
+#[derive(Debug, Default, Clone)]
+pub struct ExerciseStates {
+    /// When a person entered it, where a person did.
+    pub manual_order_time: String,
+    /// The account it is taken for, where that is not the one connected.
+    pub customer_account: String,
+    /// Whether the person it is for is a professional.
+    pub professional_customer: bool,
+}
+
+/// A bracket, placed as the one instruction the engine has for it: three
+/// orders under three consecutive numbers, linked by the venue.
+#[derive(Debug, Clone)]
+pub struct Bracket {
+    /// The contract all three are on.
+    pub contract: crate::types::model::Contract,
+    /// The entry's number; the exits are the next two.
+    pub parent_id: OrderId,
+    /// Whether the entry buys or sells.
+    pub side: Side,
+    /// How much.
+    pub quantity: f64,
+    /// Where the entry is, where the profit is taken, and where the loss is
+    /// stopped.
+    pub entry: f64,
+    /// Where the profit-taking exit sits.
+    pub take_profit: f64,
+    /// Where the protective exit sits.
+    pub stop_loss: f64,
+}
+
+/// A withdrawal the engine confirms in its place in the session's order, after
+/// every record of the exchange it ends and ahead of anything after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retirement {
+    /// `cancel_positions` or `req_account_updates(false, ..)`: the question's
+    /// cancel, which a wrapper hears on `question_retired`.
+    Question(crate::types::model::Question),
+    /// `cancel_positions_multi`, under the caller's number.
+    PositionsMulti(i64),
+    /// `cancel_account_updates_multi`, under the caller's number.
+    AccountUpdatesMulti(i64),
+}
+
 /// Which contract a news withdrawal is about.
 ///
 /// The slot is what the engine routes on, and a caller that has one names it.
-/// A caller that does not is the reason this is two shapes rather than one:
-/// the headlines are asked for before the contract is registered — a request
-/// that joins an existing subscription returns before that happens — so a
-/// registration that then fails leaves this side holding no slot for a
-/// subscription that did go out. Named by contract instead, the engine
-/// resolves it against the mapping it already keeps: the withdrawal was
-/// otherwise never sent at all, and the headlines ran for the rest of the
-/// session with nothing able to stop them.
+/// One that holds no slot names the contract by the venue's number, and the
+/// engine resolves it against the mapping it already keeps. The surfaces send
+/// neither: the engine asks for a request's headlines and withdraws them with
+/// the last request that asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewsSubject {
     /// The engine's own slot for the contract.
@@ -132,7 +283,14 @@ pub enum ControlCommand {
     /// `mode_9887` encodes per-request market-data mode via FIX field 9887:
     /// 0 = REALTIME (absent, default fan-out 264=442 BID_ASK + 264=443 LAST),
     /// 1 = DELAYED, 2 = FROZEN, 3 = DELAYED_FROZEN (the same 264=442 + 264=443 pair, each with 9887=N).
+    ///
+    /// The engine names the contract where the caller described it, registers
+    /// it, and serves the request off the subscription the contract already
+    /// has or asks for one; a record in the session's order says which slot
+    /// the request is served on, or why it is not.
     Subscribe {
+        /// The caller's number for the request.
+        req_id: i64,
         /// The contract this names.
         contract: ContractRef,
         /// What narrows the lookup that names it, where the caller described
@@ -147,6 +305,9 @@ pub enum ControlCommand {
         /// snapshot action and never with a feed named beside it, and the
         /// venue bills for each one.
         regulatory_snapshot: bool,
+        /// Whether the caller asked for a snapshot: the first whole quote,
+        /// then its end, then the request is withdrawn.
+        snapshot: bool,
         /// The extra series the caller named, by the venue's number for each.
         ///
         /// The number a caller states is the venue's own: a series is asked
@@ -154,159 +315,34 @@ pub enum ControlCommand {
         /// option model, the trading status and the venue map already are.
         /// Empty where the caller named none.
         generic_ticks: Vec<u32>,
-        /// Where this falls in the order of everything the client has asked
-        /// for.
-        ///
-        /// One number, rising, taken as the decision is made. The engine
-        /// records it against the slot a subscription lands on and reads it
-        /// again on a withdrawal: a withdrawal decided before the subscription
-        /// that is now live began is a withdrawal of a subscription that has
-        /// already gone, and it took down the one that replaced it — a caller
-        /// that had just asked for the contract, published as watching it,
-        /// with nothing on the wire.
-        issued: u64,
-        /// Where the engine sends the slot it registered, for a caller waiting
-        /// on one.
-        reply_tx: Option<std::sync::mpsc::SyncSender<Result<InstrumentId, crate::error_codes::Refusal>>>,
+        /// The providers to ask for the contract's headlines, where the caller
+        /// named the headlines series; none where it did not. Asked for once
+        /// per contract, by the first request that wants them.
+        news: Option<String>,
+        /// What a spread scan looks for, where this request is one: it rides
+        /// the scan's own request, so two scans of one contract each state
+        /// their own.
+        spread_scan: Option<String>,
+        /// A calculation the request's model answers, kept on the slot the
+        /// request is served on and answered where the venue states the model.
+        calculation: Option<Box<Calculation>>,
     },
-    /// Ask for extra series on a contract already being watched.
+    /// Withdraw a market-data request, by the caller's number for it.
     ///
-    /// A caller joining a subscription that is already up brings its own list
-    /// of series with it, and a series nobody has asked for yet has to be
-    /// asked for: the venue serves what it was asked, so a joiner naming one
-    /// the first caller did not name waited on a stream that was never
-    /// requested. What is already being served is not asked for twice.
-    AlsoAskForSeries {
-        /// The engine's own slot for the contract.
-        instrument: InstrumentId,
-        /// The venue's id for the contract the caller joined.
-        ///
-        /// A slot is given back and handed to another contract, and this
-        /// command can be handled after that has happened: named by slot
-        /// alone, a series one caller asked for on one contract was asked for
-        /// on whatever contract the slot had gone to.
-        con_id: i64,
-        /// The series the joining caller named, by the venue's number for each.
-        generic_ticks: Vec<u32>,
-        /// The number the request that took that slot asked under, as every
-        /// other command about a subscription states it.
-        took_it: u64,
-        /// Where this falls in the order of everything the client has asked
-        /// for.
-        ///
-        /// One number, rising, taken as the decision is made. The engine
-        /// records it against the slot a subscription lands on and reads it
-        /// again on a withdrawal: a withdrawal decided before the subscription
-        /// that is now live began is a withdrawal of a subscription that has
-        /// already gone, and it took down the one that replaced it — a caller
-        /// that had just asked for the contract, published as watching it,
-        /// with nothing on the wire.
-        issued: u64,
+    /// The engine took the request before this, so it decides whether there
+    /// is one to withdraw: a request still being named or held is forgotten,
+    /// one served off a subscription somebody else is also watching leaves it
+    /// up, and the last one on a contract takes the subscription down.
+    CancelMktData {
+        /// The caller's number for the request.
+        req_id: i64,
     },
-    /// Stop asking for series on a contract whose subscription stands.
-    ///
-    /// The other half of the pair above. A caller that joined a subscription
-    /// and brought series of its own withdraws, and the subscription stays up
-    /// for whoever opened it: the series nobody is asking for any more go with
-    /// the caller that asked for them. Left behind, the venue served them for
-    /// the life of the subscription that outlived their caller, and the
-    /// rebuild after a reconnect asked for them again.
-    StopAskingForSeries {
-        /// The engine's own slot for the contract.
-        instrument: InstrumentId,
-        /// The contract the caller believed that slot held.
-        ///
-        /// A slot is reusable, so its number alone cannot say which occupancy a
-        /// withdrawal was about: the slot goes to the next contract that needs
-        /// one, and a withdrawal decided against the contract that left took
-        /// down the subscription of the one that arrived. The engine keeps the
-        /// contract each subscription went out under and compares it here.
-        /// Zero where the caller named no contract of its own, which is every
-        /// contract the venue has not identified yet.
-        con_id: i64,
-        /// The number the request that took the slot asked under.
-        ///
-        /// The name of one occupancy of a reusable slot: the request wrote it
-        /// down as it took the slot and states it again as it gives it up, so
-        /// the engine can tell the subscription this withdrawal was decided
-        /// against from the one that replaced it. Zero where the withdrawal is
-        /// carried through a move, or where the session itself is closing.
-        took_it: u64,
-        /// The series nobody watching that contract asks for any more, by the
-        /// venue's number for each.
-        generic_ticks: Vec<u32>,
-        /// Where this falls in the order of everything the client has asked
-        /// for.
-        ///
-        /// One number, rising, taken as the decision is made. The engine
-        /// records it against the slot a subscription lands on and reads it
-        /// again on a withdrawal: a withdrawal decided before the subscription
-        /// that is now live began is a withdrawal of a subscription that has
-        /// already gone, and it took down the one that replaced it — a caller
-        /// that had just asked for the contract, published as watching it,
-        /// with nothing on the wire.
-        issued: u64,
-    },
-    /// A move has been installed: the callers of one slot are watching another.
-    ///
-    /// The engine holds the subscription on the slot they moved onto up until
-    /// this arrives, because until then nothing on the client side is recorded
-    /// as watching it and a withdrawal decided in the meantime cannot see them.
-    /// Said on the engine's own queue rather than by a flag the surface clears,
-    /// so it is ordered against the withdrawals already in flight.
-    MoveInstalled {
-        /// The slot whose callers moved.
-        from: InstrumentId,
-        /// The slot they moved onto.
-        into: InstrumentId,
-        /// The number they hold it under now, which nothing that decided
-        /// against the occupancy before it can name. Zero where nobody
-        /// arrived — the caller the move was for withdrew on the way — and
-        /// then the subscription that was held up for them is withdrawn.
-        took_it: u64,
-    },
-    /// Unsubscribe from market data for an instrument.
-    Unsubscribe {
-        /// The engine's own slot for the contract.
-        instrument: InstrumentId,
-        /// The contract the caller believed that slot held.
-        ///
-        /// A slot is reusable, so its number alone cannot say which occupancy a
-        /// withdrawal was about: the slot goes to the next contract that needs
-        /// one, and a withdrawal decided against the contract that left took
-        /// down the subscription of the one that arrived. The engine keeps the
-        /// contract each subscription went out under and compares it here.
-        /// Zero where the caller named no contract of its own, which is every
-        /// contract the venue has not identified yet.
-        con_id: i64,
-        /// The number the request that took the slot asked under.
-        ///
-        /// The name of one occupancy of a reusable slot: the request wrote it
-        /// down as it took the slot and states it again as it gives it up, so
-        /// the engine can tell the subscription this withdrawal was decided
-        /// against from the one that replaced it. Zero where the withdrawal is
-        /// carried through a move, or where the session itself is closing.
-        took_it: u64,
-        /// The series this caller asked for and nobody else watching the
-        /// contract did.
-        ///
-        /// They ride with the withdrawal because the subscription the engine
-        /// finds may not be the one this was decided against: another caller
-        /// asked for the contract in between and is being served off it. The
-        /// subscription then stands, and these are the only part of the
-        /// withdrawal still about what this caller asked for.
-        series: Vec<u32>,
-        /// Where this falls in the order of everything the client has asked
-        /// for.
-        ///
-        /// One number, rising, taken as the decision is made. The engine
-        /// records it against the slot a subscription lands on and reads it
-        /// again on a withdrawal: a withdrawal decided before the subscription
-        /// that is now live began is a withdrawal of a subscription that has
-        /// already gone, and it took down the one that replaced it — a caller
-        /// that had just asked for the contract, published as watching it,
-        /// with nothing on the wire.
-        issued: u64,
+    /// Withdraw a calculation: the engine forgets the question, and the watch
+    /// it opened for it where it opened one. A watch the caller opened itself
+    /// stays.
+    CancelCalculation {
+        /// The caller's number for the calculation.
+        req_id: i64,
     },
     /// Subscribe to tick-by-tick data via historical data connection.
     SubscribeTbt {
@@ -322,8 +358,6 @@ pub enum ControlCommand {
         /// Whether the caller asked for changes that move only the size to be
         /// left out.
         ignore_size: bool,
-        /// Where the engine sends the slot it registered.
-        reply_tx: Option<std::sync::mpsc::SyncSender<Result<InstrumentId, String>>>,
     },
     /// Unsubscribe from tick-by-tick data.
     /// Withdraw one tick stream, named by the request that opened it.
@@ -334,8 +368,6 @@ pub enum ControlCommand {
     UnsubscribeTbt {
         /// The caller's number for the request.
         req_id: i64,
-        /// The engine's own slot for the contract.
-        instrument: InstrumentId,
     },
     /// Subscribe to per-contract news ticks via CCP (264=292).
     SubscribeNews {
@@ -348,8 +380,6 @@ pub enum ControlCommand {
         sec_type: String,
         /// Which news providers.
         providers: String,
-        /// Where the engine sends the slot it registered.
-        reply_tx: Option<std::sync::mpsc::SyncSender<Result<InstrumentId, String>>>,
     },
     /// Unsubscribe from per-contract news ticks.
     UnsubscribeNews {
@@ -371,6 +401,8 @@ pub enum ControlCommand {
     SubscribePnl {
         /// The caller's number for the request.
         req_id: i64,
+        /// Whether this is a single-position profit request.
+        single: bool,
         /// Which account.
         account: String,
     },
@@ -398,6 +430,8 @@ pub enum ControlCommand {
     CancelPnl {
         /// The caller's number for the request.
         req_id: i64,
+        /// Whether this is a single-position profit request.
+        single: bool,
     },
     /// Update a strategy parameter.
     UpdateParam {
@@ -408,6 +442,33 @@ pub enum ControlCommand {
     },
     /// Submit an order from external caller (bridge mode).
     Order(OrderRequest),
+    /// Place an order, or restate one the venue is working, as the call
+    /// stated it.
+    Place(Box<Placement>),
+    /// Withdraw an order, by its number: one the engine still holds is never
+    /// sent, and one it sent is cancelled once the venue has named what the
+    /// account is working.
+    CancelOrder {
+        /// The order's number.
+        order_id: OrderId,
+        /// What the withdrawal states about itself.
+        stated: crate::types::model::OrderCancel,
+    },
+    /// Withdraw the working order the venue knows by this permanent number.
+    CancelOrderByPermId {
+        /// The venue's permanent number for it.
+        perm_id: i64,
+    },
+    /// Withdraw every order: what the engine holds, and every order the
+    /// account is working once the venue has named them.
+    GlobalCancel {
+        /// What each withdrawal states about itself.
+        stated: crate::types::model::OrderCancel,
+    },
+    /// Exercise or lapse an option position.
+    Exercise(Box<Exercise>),
+    /// Place a bracket.
+    Bracket(Box<Bracket>),
     /// Register an instrument from external caller (bridge mode).
     /// `identity` is what separates two contracts sharing a symbol: expiry,
     /// strike, right and multiplier, joined. Empty for a stock or a currency
@@ -419,9 +480,14 @@ pub enum ControlCommand {
         contract: ContractRef,
         /// What separates this contract from others sharing its symbol.
         identity: String,
-        /// Where the engine sends the slot it registered.
-        reply_tx: Option<std::sync::mpsc::SyncSender<Result<InstrumentId, String>>>,
     },
+    /// Answer a question from what the session holds, once the venue has
+    /// stated it. Held in the engine until then.
+    Ask(Ask),
+    /// Withdraw a question, or a numbered request answered from what the
+    /// session holds: one still held is never answered, and the withdrawal is
+    /// confirmed where it stands in the session's order.
+    Retire(Retirement),
     /// Request historical bar data via historical data connection.
     FetchHistorical {
         /// The caller's number for the request this answers.
@@ -535,14 +601,13 @@ pub enum ControlCommand {
     /// The venue states them as ordinary execution reports, ending with the
     /// same sentinel the opening replay ends with, so what this carries is the
     /// window they are read in rather than any payload of its own.
+    ///
+    /// One question on the wire at a time, and each answered where its
+    /// sentinel stands in the session's order: a second asked while the first
+    /// is out waits its turn.
     FetchCompletedOrders {
-        /// Which turn of the question this is.
-        ///
-        /// A caller that gives up leaves its own answer on its way, and the
-        /// answer is a run of ordinary reports that says nothing about which
-        /// question it answers — so the turn travels with the question and
-        /// comes back on the end, and a caller waits for the end of its own.
-        turn: u64,
+        /// Whether only the orders an API placed are asked for.
+        api_only: bool,
     },
     /// Request scanner parameter XML via historical data connection.
     FetchScannerParams,
@@ -599,7 +664,7 @@ pub enum ControlCommand {
         /// When it should stop.
         end_time: String,
         /// The most records wanted.
-        max_results: u32,
+        max_results: i32,
     },
     /// Request a news article via historical data connection.
     FetchNewsArticle {

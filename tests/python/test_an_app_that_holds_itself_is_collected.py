@@ -53,15 +53,17 @@ class Raises(EWrapper):
 
 
 def test_an_interrupt_raised_by_a_handler_ends_the_call_that_reached_it():
-    """A refusal is reported on ``error`` and the close on ``connectionClosed``.
-    The handler raising an ordinary exception is its own problem and stays
-    inside the call; an interrupt ends the call, as it ends a pass of the
-    dispatch loop. On these two paths it was swallowed, or left set for the
-    interpreter to report as a ``SystemError`` at whatever call came next."""
+    """A refusal is reported on ``error`` and the close on ``connectionClosed``,
+    each by the read that reaches it in the session's order. The handler
+    raising an ordinary exception is its own problem and stays inside the
+    read; an interrupt ends the read. On these two paths it was swallowed, or
+    left set for the interpreter to report as a ``SystemError`` at whatever
+    call came next."""
     client = EClient(Raises(KeyboardInterrupt()))
     client._test_connect("DU0000000")
+    client.setServerLogLevel(9)
     with pytest.raises(KeyboardInterrupt):
-        client.setServerLogLevel(9)
+        client.poll()
     client._test_push_stopped_event()
     with pytest.raises(KeyboardInterrupt):
         client.poll()
@@ -89,12 +91,11 @@ class InterruptsOnTheFirstTick(EWrapper):
 
 
 def test_a_pass_an_interrupt_ended_runs_no_more_of_the_callers_code():
-    """The session's end is read before the quotes on a pass, so a quote
+    """The session's final quotes are delivered before its close, so a quote
     handler raising an interrupt raises it out of ``poll`` with the close
-    still unsaid. ``run`` already left it unsaid; ``poll`` said it on the same
-    pass, which ran the close handler after the caller had asked to stop and
-    let what that handler raised stand in for the interrupt. The close is
-    said on the next pass, once."""
+    still unsaid. Said on the same pass, the close handler ran after the
+    caller had asked to stop and what it raised stood in for the interrupt.
+    The close is said on the next pass, once."""
     wrapper = InterruptsOnTheFirstTick()
     client = EClient(wrapper)
     client._test_connect("DU0000000")

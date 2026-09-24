@@ -446,7 +446,9 @@ fn take_what_if(
         if parsed.get(&39).map(String::as_str) == Some("8") && context.order(clord_id).is_some() {
             let reason = stated_reason(parsed);
             log::warn!("WhatIf refused: clord={clord_id} reason='{reason}'");
-            shared.orders.push_order_inactive(clord_id, ORDER_REJECTED_ERROR_CODE, reason);
+            shared.orders.push_order_inactive(
+                clord_id, crate::types::model::OrderOp::Place, ORDER_REJECTED_ERROR_CODE, reason,
+            );
             context.retire_order(clord_id);
             return true;
         }
@@ -993,7 +995,7 @@ impl CcpState {
                  they are handed over as they stand",
                 self.finished_orders.len(),
             );
-            self.deliver_finished_orders(shared, super::Handover::Final);
+            self.deliver_finished_orders(shared);
         }
         // And where that freed nothing, the oldest record the answer before
         // this one left behind makes room. It belongs to no answer now: this
@@ -1022,49 +1024,29 @@ impl CcpState {
     /// an order's events are not always adjacent and each states only what
     /// changed. Published one per report instead, a caller had to choose
     /// between the first report's fields and the last report's status.
-    pub(crate) fn deliver_finished_orders(
-        &mut self, shared: &SharedState, handover: super::Handover,
-    ) {
-        let held_now: Vec<super::FinishedOrder> = match handover {
-            // Everything the venue has finished stating, and nothing else:
-            // being the last handover does not make a record that says the
-            // order is working into one that says it has finished. Taken
-            // whole, a record still being built — which is what a window
-            // handed over at its bound, or on a connection going away, is full
-            // of — reached the caller as a completed order the venue never
-            // said was complete.
-            super::Handover::Final => {
-                let (finished, still_working) = std::mem::take(&mut self.finished_orders)
-                    .into_iter()
-                    .partition::<Vec<_>, _>(|held| held.status.is_terminal());
-                if !still_working.is_empty() {
-                    log::info!(
-                        "{} of the orders assembled for this answer are still being stated, \
-                         so they are not part of it and are kept",
-                        still_working.len(),
-                    );
-                }
-                // Kept, not dropped: a report states what changed and leaves
-                // the rest out, so the record is what every later report about
-                // that order is read against. Dropped here, the terminal
-                // report that finished it rebuilt the order from nothing and
-                // the caller was handed it without its contract, its terms or
-                // its quantities.
-                self.finished_orders = still_working;
-                finished
-            }
-            // Only the ones the venue has finished stating. A record still
-            // being built says the order is working, and a record saying that
-            // is one this client reads as an order the venue is holding — so a
-            // caller released early was handed live orders out of an answer
-            // about finished ones, and could aim a withdrawal at one.
-            super::Handover::SoFar => self
-                .finished_orders
-                .iter()
-                .filter(|held| held.status.is_terminal())
-                .cloned()
-                .collect(),
-        };
+    pub(crate) fn deliver_finished_orders(&mut self, shared: &SharedState) {
+        // Everything the venue has finished stating, and nothing else: being
+        // handed over does not make a record that says the order is working
+        // into one that says it has finished. Taken whole, a record still
+        // being built — which is what a window handed over at its bound, or on
+        // a connection going away, is full of — reached the caller as a
+        // completed order the venue never said was complete.
+        let (held_now, still_working) = std::mem::take(&mut self.finished_orders)
+            .into_iter()
+            .partition::<Vec<_>, _>(|held| held.status.is_terminal());
+        if !still_working.is_empty() {
+            log::info!(
+                "{} of the orders assembled for this answer are still being stated, \
+                 so they are not part of it and are kept",
+                still_working.len(),
+            );
+        }
+        // Kept, not dropped: a report states what changed and leaves the rest
+        // out, so the record is what every later report about that order is
+        // read against. Dropped here, the terminal report that finished it
+        // rebuilt the order from nothing and the caller was handed it without
+        // its contract, its terms or its quantities.
+        self.finished_orders = still_working;
         for held in held_now {
             // Handed over under the number a caller addresses the order by,
             // not under the name the venue files it under. The two are the
@@ -1657,16 +1639,8 @@ impl CcpState {
             // a run of ordinary reports and nothing else says it is over.
             if self.completed_orders_open {
                 self.completed_orders_open = false;
-                self.completed_orders_deadline = None;
-                self.deliver_finished_orders(shared, super::Handover::Final);
-                // Only where nobody has been told yet. A caller released on
-                // its own wait has had its answer, and a second signal left
-                // standing was read by the next caller as the answer to a
-                // question the venue had not begun.
-                if !self.completed_orders_answered {
-                    shared.orders.note_completed_orders_end_on(self.completed_orders_asked_on);
-                }
-                self.completed_orders_answered = false;
+                self.deliver_finished_orders(shared);
+                self.end_completed_orders(self.completed_orders_asked_on, shared);
                 log::info!("The venue has stated everything it has finished");
             }
             // Everything already working has now been named. The same record
@@ -1847,7 +1821,18 @@ impl CcpState {
             let reason = stated_reason(parsed);
             log::warn!("ExecReport REJECTED: clord={clord_id} reason='{reason}'");
             if !reason.is_empty() {
-                shared.orders.push_order_inactive(clord_id, ORDER_REJECTED_ERROR_CODE, reason);
+                // The refusal of an order the venue never acknowledged answers
+                // its placement. Of one it had working, it is the venue's own
+                // word on that order.
+                let op = if context
+                    .order(clord_id)
+                    .is_some_and(|o| o.status == crate::types::OrderStatus::PendingSubmit)
+                {
+                    crate::types::model::OrderOp::Place
+                } else {
+                    crate::types::model::OrderOp::Venue
+                };
+                shared.orders.push_order_inactive(clord_id, op, ORDER_REJECTED_ERROR_CODE, reason);
             }
         } else {
             log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
@@ -1945,7 +1930,13 @@ impl CcpState {
             } else {
                 reason
             };
-            shared.orders.push_order_inactive(clord_id, ORDER_INACTIVE_ERROR_CODE, told);
+            // 102 refuses the revision, 103 the cancellation.
+            let refused = if restatement_reason == "102" {
+                crate::types::model::OrderOp::Modify
+            } else {
+                crate::types::model::OrderOp::Cancel
+            };
+            shared.orders.push_order_inactive(clord_id, refused, ORDER_INACTIVE_ERROR_CODE, told);
             // And on the channel a refusal already travels on, so the record
             // the surfaces read goes back with the engine's. Said only in the
             // message above, the surfaces kept the terms of an attempt the
@@ -2129,7 +2120,10 @@ impl CcpState {
                 if status == crate::types::OrderStatus::Inactive {
                     let reason = stated_reason(parsed);
                     if !reason.is_empty() {
-                        shared.orders.push_order_inactive(clord_id, ORDER_INACTIVE_ERROR_CODE, reason);
+                        shared.orders.push_order_inactive(
+                            clord_id, crate::types::model::OrderOp::Venue, ORDER_INACTIVE_ERROR_CODE,
+                            reason,
+                        );
                     }
                 }
             }
@@ -2628,16 +2622,29 @@ impl CcpState {
         // Announced after everything this report changed is written. A caller
         // acts on a notification the moment it arrives, and each of those
         // actions reads a record this report writes.
-        if let Some(fill) = filled {
-            match booked_off {
-                Some(report) => shared.orders.push_fill_reported(fill, report),
-                None => shared.orders.push_fill(fill),
+        //
+        // One report is one record: a fill and the status the same report
+        // states go out together, each with what the report stated, so they
+        // reach a caller in the venue's order and are never paired up again
+        // by their quantities.
+        match (filled, announce) {
+            (Some(fill), Some(update)) => {
+                shared.orders.push_fill_and_status(fill, booked_off, update);
+                emit(event_tx, Event::Fill(fill));
+                emit(event_tx, Event::OrderUpdate(update));
             }
-            emit(event_tx, Event::Fill(fill));
-        }
-        if let Some(update) = announce {
-            shared.orders.push_order_update(update);
-            emit(event_tx, Event::OrderUpdate(update));
+            (Some(fill), None) => {
+                match booked_off {
+                    Some(report) => shared.orders.push_fill_reported(fill, report),
+                    None => shared.orders.push_fill(fill),
+                }
+                emit(event_tx, Event::Fill(fill));
+            }
+            (None, Some(update)) => {
+                shared.orders.push_order_update(update);
+                emit(event_tx, Event::OrderUpdate(update));
+            }
+            (None, None) => {}
         }
     }
 
@@ -2878,9 +2885,13 @@ impl CcpState {
         // from "it is too late to cancel". Delivered on the channel a refused
         // order's reason already uses.
         if let Some(text) = parsed.get(&58).filter(|t| !t.is_empty()) {
-            shared.orders.push_order_inactive(
-                oid, ORDER_INACTIVE_ERROR_CODE, text.clone(),
-            );
+            // 434 says which it refuses: 1 a cancel, 2 a change.
+            let refused = if reject_type == 2 {
+                crate::types::model::OrderOp::Modify
+            } else {
+                crate::types::model::OrderOp::Cancel
+            };
+            shared.orders.push_order_inactive(oid, refused, ORDER_INACTIVE_ERROR_CODE, text.clone());
         }
 
         let reject = crate::types::CancelReject {
@@ -2976,7 +2987,7 @@ fn decode_condition(c: &std::collections::HashMap<u32, String>) -> Option<crate:
         Some("3") => Some(OrderCondition::Time { time: text(TIME), is_more: is_more()?, is_conjunction_connection }),
         Some("4") => Some(OrderCondition::Margin {
             is_conjunction_connection,
-            percent: number(PERCENT)? as u32,
+            percent: number(PERCENT)? as i32,
             is_more: is_more()?,
         }),
         Some("5") => {

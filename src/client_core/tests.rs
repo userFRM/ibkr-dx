@@ -94,7 +94,6 @@ fn a_stream_is_never_served_off_the_one_shot() {
 fn a_caller_that_joins_mid_withdrawal_keeps_the_subscription() {
     use std::sync::Arc;
     let core = Arc::new(ClientCore::new());
-    let shared = Arc::new(SharedState::new());
     let iid: InstrumentId = 0;
 
     // Request 1 holds the contract, as a first subscription leaves it.
@@ -105,8 +104,8 @@ fn a_caller_that_joins_mid_withdrawal_keeps_the_subscription() {
     // holding the withdrawal at the point the join has to be serialized
     // against.
     let holders = core.instrument_to_req.lock().unwrap();
-    let (c, sh) = (Arc::clone(&core), Arc::clone(&shared));
-    let withdrawing = std::thread::spawn(move || c.unregister_mkt_data(&sh, 1));
+    let c = Arc::clone(&core);
+    let withdrawing = std::thread::spawn(move || c.unregister_mkt_data(1));
 
     std::thread::sleep(std::time::Duration::from_millis(150));
 
@@ -118,8 +117,7 @@ fn a_caller_that_joins_mid_withdrawal_keeps_the_subscription() {
     core.req_to_instrument.lock().unwrap().insert(2, iid);
     drop(holders);
 
-    let taken_down = withdrawing.join().unwrap().subscription;
-    assert_eq!(taken_down, None, "the subscription stays up for the caller that joined");
+    withdrawing.join().unwrap();
     assert_eq!(
         core.instrument_to_req.lock().unwrap().get(&iid), Some(&2),
         "and that caller holds it",
@@ -138,7 +136,6 @@ fn a_caller_that_joins_mid_withdrawal_keeps_the_subscription() {
 fn the_one_shot_keeps_its_kind_until_the_slot_changes_hands() {
     use std::sync::Arc;
     let core = Arc::new(ClientCore::new());
-    let shared = Arc::new(SharedState::new());
     let iid: InstrumentId = 0;
 
     core.instrument_to_req.lock().unwrap().insert(iid, 1);
@@ -148,8 +145,8 @@ fn the_one_shot_keeps_its_kind_until_the_slot_changes_hands() {
     // The withdrawal waits on the holder map, as every decision about a
     // subscription does.
     let holders = core.instrument_to_req.lock().unwrap();
-    let (c, sh) = (Arc::clone(&core), Arc::clone(&shared));
-    let withdrawing = std::thread::spawn(move || c.unregister_mkt_data(&sh, 1));
+    let c = Arc::clone(&core);
+    let withdrawing = std::thread::spawn(move || c.unregister_mkt_data(1));
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     assert!(
@@ -158,65 +155,11 @@ fn the_one_shot_keeps_its_kind_until_the_slot_changes_hands() {
     );
     drop(holders);
 
-    let taken_down = withdrawing.join().unwrap().subscription;
-    assert_eq!(taken_down, Some(iid), "and the subscription goes with it");
+    withdrawing.join().unwrap();
+    assert!(core.watchers_of(iid).is_empty(), "and the subscription goes with it");
     assert!(
         !core.chargeable_snapshot_reqs.lock().unwrap().contains(&1),
         "the number is an ordinary number again once the slot is given up",
-    );
-}
-
-/// A caller takes the series it brought with it.
-///
-/// A subscription is shared here and the series on it are not: a caller
-/// joining one brings its own list. Left behind when that caller withdrew, the
-/// venue served those series for as long as the subscription it joined
-/// outlived it — against an allowance that is counted — and every rebuild
-/// after a reconnect asked for them again. What another caller also named
-/// stays: that caller is still reading it.
-#[test]
-fn a_caller_takes_the_series_it_brought_with_it() {
-    let core = ClientCore::new();
-    // A millisecond is what a test gets by default, and this waits on a reply
-    // from a thread it has just spawned: under a suite running on every core
-    // that thread is not always scheduled inside one, and the wait then ends
-    // in a timeout whose code is not the one the engine refused under.
-    core.set_registration_timeout(std::time::Duration::from_secs(5));
-    // A millisecond is what a test gets by default, and this waits on a reply
-    // from a thread it has just spawned: under a suite running on every core
-    // that thread is not always scheduled inside one, and the wait then ends
-    // in a timeout whose code is not the one the engine refused under.
-    core.set_registration_timeout(std::time::Duration::from_secs(5));
-    let shared = SharedState::new();
-    let iid: InstrumentId = 0;
-
-    // The caller that opened the subscription, naming one series.
-    core.instrument_to_req.lock().unwrap().insert(iid, 1);
-    core.req_to_instrument.lock().unwrap().insert(1, iid);
-    core.series_by_req.lock().unwrap().insert(1, vec![233]);
-    // And one watching it, naming that one and one of its own.
-    core.instrument_followers.lock().unwrap().insert(iid, vec![2]);
-    core.req_to_instrument.lock().unwrap().insert(2, iid);
-    core.series_by_req.lock().unwrap().insert(2, vec![233, 236]);
-
-    let withdrawn = core.unregister_mkt_data(&shared, 2);
-    let (down, series_gone) = (withdrawn.subscription, withdrawn.series);
-    assert_eq!(down, None, "the subscription stays up for the caller that opened it");
-    assert_eq!(
-        series_gone, Some((iid, vec![236])),
-        "and only the series nobody else named goes with the caller that named it",
-    );
-
-    // The last caller takes the subscription itself, and what it asked for
-    // rides with the withdrawal: the subscription the engine finds may be one
-    // this caller knows nothing about, and then these are the only part of the
-    // withdrawal still about what it asked for.
-    let withdrawn = core.unregister_mkt_data(&shared, 1);
-    let (down, series_gone) = (withdrawn.subscription, withdrawn.series);
-    assert_eq!(down, Some(iid), "the subscription goes");
-    assert_eq!(
-        series_gone, Some((iid, vec![233])),
-        "and its own series go with it",
     );
 }
 
@@ -280,7 +223,7 @@ fn a_reclaimed_slot_takes_the_marks_of_what_was_watching_it() {
     core.req_to_instrument.lock().unwrap().insert(5, iid);
     core.chargeable_snapshot_reqs.lock().unwrap().insert(5);
     core.series_by_req.lock().unwrap().insert(5, vec![236]);
-    core.snapshot_reqs.lock().unwrap().insert(5, (std::time::Instant::now(), 0));
+    core.snapshot_reqs.lock().unwrap().insert(5, crate::client_core::SnapshotWait::new(0, false));
 
     shared.market.note_released_slot(iid, u64::MAX);
     core.forget_released_slots(&shared);
@@ -332,121 +275,6 @@ fn a_slot_given_again_is_not_forgotten_by_the_release_that_freed_it() {
     assert_eq!(core.watching(77), None, "the slot it named has gone back");
 }
 
-/// A move says when it has been installed, and what is watching the slot it
-/// moved onto.
-///
-/// The subscription on the slot a caller is moving onto is held up until the
-/// move is read, because until then nothing here is recorded as watching it. So
-/// the move has to say when it has been read — and where the caller it was for
-/// withdrew in the meantime, that nobody is watching what was held up for it:
-/// left, the subscription ran for the rest of the session against an allowance
-/// that is counted, with no request able to withdraw it.
-#[test]
-fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    let (from, into): (InstrumentId, InstrumentId) = (1, 2);
-
-    // One caller on the slot that is moving, and nothing on the slot it moves
-    // onto.
-    core.instrument_to_req.lock().unwrap().insert(from, 5);
-    core.req_to_instrument.lock().unwrap().insert(5, from);
-    assert!(
-        core.move_watchers(&shared, from, into) != 0,
-        "the caller that moved is watching the slot it moved onto, under a number of its own",
-    );
-    assert_eq!(core.watching(5), Some(into), "and is recorded there");
-
-    // And a move whose caller has gone leaves nothing watching.
-    core.instrument_to_req.lock().unwrap().insert(3, 9);
-    assert_eq!(
-        core.move_watchers(&shared, 3, 4), 0,
-        "nobody arrived, so the subscription held up for them is nobody's",
-    );
-
-    // The move is on its way from the moment it is stated until it is
-    // installed, not until it is taken off the queue: read off the queue, the
-    // answer turned false in exactly the window it is there for.
-    shared.market.push_subscription_move(from, into, 0);
-    let _ = shared.market.drain_subscription_moves();
-    assert!(
-        shared.market.a_move_is_on_its_way_into(into),
-        "still on its way once the queue is empty",
-    );
-    assert!(
-        shared.market.a_move_is_pending_from(from),
-        "and the slot it moves off is not free either: the move is the only \
-         thing that says where its callers went",
-    );
-    shared.market.note_a_move_is_read(from, into);
-    assert!(
-        !shared.market.a_move_is_on_its_way_into(into),
-        "and arrived once it is installed",
-    );
-    assert!(!shared.market.a_move_is_pending_from(from), "with the slot it left free");
-}
-
-/// A move that arrives with nobody left to move leaves the slot named after
-/// whoever was already watching it.
-///
-/// Two endings were modelled and there are three. Callers arrive and hold the
-/// slot under a number of their own; nobody arrives and nothing is watching,
-/// so the subscription is nobody's; or nobody arrives and somebody else has
-/// been watching all along — and then nothing renamed the occupancy, so the
-/// slot goes on being held under the number it already had.
-///
-/// Answered with the minted number in that third case, the engine renamed the
-/// occupancy to one this client never wrote down, and the caller that had been
-/// watching could no longer withdraw its own subscription: the call returned
-/// success, the venue went on streaming, and nothing could take it down again.
-#[test]
-fn a_move_with_nobody_left_to_move_keeps_the_number_the_slot_already_had() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    let (from, into): (InstrumentId, InstrumentId) = (7, 8);
-
-    // Somebody already watching the destination, under its own number.
-    let held = core.in_order();
-    {
-        let mut own = core.ownership();
-        own.take_or_follow(into, 11, &[], held, 265_598);
-    }
-
-    // A move whose caller withdrew on the way: nothing is on the slot that is
-    // moving.
-    let answered = core.move_watchers(&shared, from, into);
-
-    assert_eq!(
-        answered, held,
-        "nobody arrived, so the slot is still held under the number it had",
-    );
-    assert_eq!(core.watching(11), Some(into), "and its caller is still watching it");
-}
-
-/// A withdrawal names the contract its caller stated, not whatever the cache
-/// points at that slot with.
-///
-/// The cache holds one entry per contract and a release that has not been read
-/// yet leaves an earlier contract's entry pointing at the slot. Looked up
-/// there, a withdrawal carried a contract its caller never named and the engine
-/// refused it as being about another contract: the subscription could not be
-/// taken down at all.
-#[test]
-fn a_withdrawal_names_the_contract_its_caller_stated() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    let iid: InstrumentId = 0;
-
-    // The caller states its contract as it takes the slot.
-    assert!(!core.take_or_follow(iid, 4, &[], 9, 756_733), "it holds the slot");
-    // And an earlier contract's cache entry still points at the same slot.
-    core.con_id_to_instrument.lock().unwrap().insert(265_598, iid);
-
-    let withdrawn = core.unregister_mkt_data(&shared, 4);
-    assert_eq!(withdrawn.con_id, 756_733, "the contract its caller named");
-    assert_eq!(withdrawn.took_it, 9, "and the occupancy it took");
-}
-
 /// A session keeps no figure for a subscription it is not holding.
 ///
 /// The figure that tells one subscription under a number from the next is kept
@@ -456,7 +284,6 @@ fn a_withdrawal_names_the_contract_its_caller_stated() {
 #[test]
 fn a_session_keeps_no_figure_for_a_subscription_it_is_not_holding() {
     let core = ClientCore::new();
-    let shared = SharedState::new();
     let iid: InstrumentId = 3;
 
     core.instrument_to_req.lock().unwrap().insert(iid, 5);
@@ -464,39 +291,12 @@ fn a_session_keeps_no_figure_for_a_subscription_it_is_not_holding() {
     core.stamp_registration(5);
     assert!(core.registration_of(5).is_some(), "it is holding one");
 
-    let _ = core.unregister_mkt_data(&shared, 5);
+    core.unregister_mkt_data(5);
     assert!(core.registration_of(5).is_none(), "and holds none once it has given it up");
 
     core.stamp_registration(6);
     core.reset();
     assert!(core.registration_of(6).is_none(), "nor does the session that ended");
-}
-
-/// A registration the engine never took gives back what it bought.
-///
-/// The mark that says a number bought the venue's one-shot outlives the
-/// request that left it, and a caller told its request did not happen holds
-/// nothing. Left standing, the same number handed out again for an ordinary
-/// stream read as a one-shot: nothing follows it, so the next caller on that
-/// contract was kept out of the watchers and heard no quotes at all.
-#[test]
-fn a_registration_the_engine_never_took_gives_back_what_it_bought() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(8);
-    // The engine is gone, so the first word of the registration cannot be
-    // said.
-    drop(rx);
-
-    let answer = core.register_mkt_data(
-        &shared, &tx, 77, 265598, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, true, "", 0,
-    );
-    assert!(answer.is_err(), "the caller is told the request did not happen");
-    assert!(
-        !core.chargeable_snapshot_reqs.lock().unwrap().contains(&77),
-        "and the number it asked under is an ordinary number again",
-    );
 }
 
 /// A market-data type nobody recognises does not become the venue's word.
@@ -524,13 +324,13 @@ fn an_account_with_no_positions_still_reports_its_pnl() {
     shared.portfolio.set_account(&crate::types::AccountState::default());
     shared.portfolio.account_download_is_settled();
 
-    core.subscribe_pnl(7).unwrap();
-    let update = core.poll_pnl(&shared).expect("a subscription is answered");
+    core.subscribe_pnl(7, "").unwrap();
+    let update = core.poll_pnl(&shared).into_iter().next().expect("a subscription is answered");
     assert_eq!(update.req_id, 7);
     assert_eq!(update.daily_pnl, 0.0);
     assert_eq!(update.unrealized_pnl, 0.0);
     assert_eq!(update.realized_pnl, 0.0);
-    assert!(core.poll_pnl(&shared).is_none(), "the same figures do not repeat");
+    assert!(core.poll_pnl(&shared).into_iter().next().is_none(), "the same figures do not repeat");
 }
 
 /// The type a caller asks for has to reach the subscription, or asking for
@@ -737,7 +537,7 @@ fn seed_pnl_position(
 fn poll_pnl_no_subscription_returns_none() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    assert!(core.poll_pnl(&shared).is_none());
+    assert!(core.poll_pnl(&shared).into_iter().next().is_none());
 }
 
 /// A total missing one position is not a smaller correct total. When a
@@ -749,7 +549,7 @@ fn poll_pnl_no_subscription_returns_none() {
 fn one_unpriceable_position_sends_the_whole_account_to_the_gateway() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_pnl(11).unwrap();
+    core.subscribe_pnl(11, "").unwrap();
 
     // One ordinary position that prices fine.
     seed_pnl_position(&core, &shared, 1, 0, 1.0, 100.00, 101.00, 100.00);
@@ -774,7 +574,7 @@ fn one_unpriceable_position_sends_the_whole_account_to_the_gateway() {
     });
     shared.portfolio.account_download_is_settled();
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert!(
         (update.daily_pnl - 51.0).abs() < 1e-6,
         "the gateway's complete figure, not the one priceable position: daily={}",
@@ -793,7 +593,7 @@ fn an_unknown_seed_does_not_suppress_the_rest_of_a_single_callback() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(21, 756733);
+    core.subscribe_pnl_single(21, 756733, "").unwrap();
 
     seed_pnl_position(&core, &shared, 756733, 0, 10.0, 700.00, 735.00, 730.00);
     shared.portfolio.set_midnight_seeds(String::new(), vec![MidnightSeed {
@@ -827,7 +627,7 @@ fn an_unknown_seed_does_not_suppress_the_rest_of_a_single_callback() {
 fn an_unsizeable_overnight_position_is_not_priced_as_sold() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_pnl(7).unwrap();
+    core.subscribe_pnl(7, "").unwrap();
 
     // A quote and a seed, but no position row — the feed dropped it.
     core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
@@ -853,7 +653,7 @@ fn an_unsizeable_overnight_position_is_not_priced_as_sold() {
     });
     shared.portfolio.account_download_is_settled();
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert!(
         (update.daily_pnl - 50.0).abs() < 1e-6,
         "the stated figure stands; -7300 is the flat reading: daily={}",
@@ -870,7 +670,7 @@ fn an_unsizeable_overnight_position_is_not_priced_as_sold() {
 fn a_seed_without_a_quantity_is_not_read_as_opened_today() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_pnl(8).unwrap();
+    core.subscribe_pnl(8, "").unwrap();
 
     seed_pnl_position(&core, &shared, 756733, 0, 10.0, 700.00, 735.00, 730.00);
     shared.portfolio.set_midnight_seeds(String::new(), vec![MidnightSeed {
@@ -888,7 +688,7 @@ fn a_seed_without_a_quantity_is_not_read_as_opened_today() {
     });
     shared.portfolio.account_download_is_settled();
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert!(
         (update.daily_pnl - 50.0).abs() < 1e-6,
         "350 is the intraday synthesis, not the day's move: daily={}",
@@ -909,7 +709,7 @@ fn a_position_the_venue_says_has_made_nothing_is_reported_as_nothing() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(11, 8002);
+    core.subscribe_pnl_single(11, 8002, "").unwrap();
 
     // Held at 100, and the last print is 105 — so a figure worked out here
     // would say 50. The venue marks it at what it cost and states that it has
@@ -940,7 +740,7 @@ fn a_position_with_no_seed_and_no_cost_does_not_report_its_whole_value_as_the_da
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(11, 8003);
+    core.subscribe_pnl_single(11, 8003, "").unwrap();
 
     // Ten held, marked at 105, and the venue has stated no cost for them.
     seed_pnl_position(&core, &shared, 8003, 0, 10.0, 0.0, 105.0, 0.0);
@@ -965,7 +765,7 @@ fn a_position_with_no_seed_and_no_cost_sends_the_account_total_to_the_venues_fig
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(42).unwrap();
+    core.subscribe_pnl(42, "").unwrap();
 
     // What the venue says the account has made, which is complete by
     // construction and is what an incomplete local sum falls back to.
@@ -977,7 +777,7 @@ fn a_position_with_no_seed_and_no_cost_sends_the_account_total_to_the_venues_fig
     });
     seed_pnl_position(&core, &shared, 8004, 0, 10.0, 0.0, 105.0, 0.0);
 
-    let update = core.poll_pnl(&shared).expect("a subscription is answered");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("a subscription is answered");
     assert!(
         (update.daily_pnl - 12.5).abs() < 1e-6,
         "the venue's own total stands in: daily={}",
@@ -997,12 +797,12 @@ fn poll_pnl_intraday_opened_position_fires_callback() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(42).unwrap();
+    core.subscribe_pnl(42, "").unwrap();
 
     // 1 share bought at $735.00, now $735.07. No midnight seed (flat at midnight).
     seed_pnl_position(&core, &shared, 756733, 0, 1.0, 735.00, 735.07, 0.0);
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert_eq!(update.req_id, 42);
     assert!((update.daily_pnl - 0.07).abs() < 1e-6, "daily={}", update.daily_pnl);
     assert!((update.unrealized_pnl - 0.07).abs() < 1e-6);
@@ -1016,7 +816,7 @@ fn poll_pnl_overnight_position_with_seed_unchanged() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(99).unwrap();
+    core.subscribe_pnl(99, "").unwrap();
 
     // Held 10 SPY through midnight: qty_midnight=10, prev_close=$730, avg_cost=$700.
     // No fills today (money_traded=0). Current price $735.
@@ -1030,7 +830,7 @@ fn poll_pnl_overnight_position_with_seed_unchanged() {
         realized_pnl: 0.0,
     }]);
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     // daily = 10×735 - 10×730 - 0 = 50
     assert!((update.daily_pnl - 50.0).abs() < 1e-6, "daily={}", update.daily_pnl);
     // unrealized = 10 × (735 - 700) = 350
@@ -1048,7 +848,7 @@ fn poll_pnl_seeded_position_traded_intraday_uses_signed_net_cash() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(31).unwrap();
+    core.subscribe_pnl(31, "").unwrap();
 
     // Now holding 7 (was 10 at midnight), avg $100, last $110, prev close $100.
     seed_pnl_position(&core, &shared, 1, 0, 7.0, 100.00, 110.00, 100.00);
@@ -1061,7 +861,7 @@ fn poll_pnl_seeded_position_traded_intraday_uses_signed_net_cash() {
         realized_pnl: 30.0,
     }]);
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     // daily = 7×110 - 10×100 + 330 = 100 (70 remaining unrealized + 30 realized)
     assert!((update.daily_pnl - 100.0).abs() < 1e-6, "daily={}", update.daily_pnl);
     // unrealized = 7 × (110 - 100) = 70
@@ -1076,11 +876,11 @@ fn poll_pnl_change_detection_suppresses_duplicate() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(7).unwrap();
+    core.subscribe_pnl(7, "").unwrap();
     seed_pnl_position(&core, &shared, 1, 0, 1.0, 100.0, 101.0, 0.0);
-    assert!(core.poll_pnl(&shared).is_some());
+    assert!(core.poll_pnl(&shared).into_iter().next().is_some());
     // Same inputs → no callback.
-    assert!(core.poll_pnl(&shared).is_none());
+    assert!(core.poll_pnl(&shared).into_iter().next().is_none());
 }
 
 #[test]
@@ -1091,7 +891,7 @@ fn poll_pnl_falls_back_to_account_level_without_market_data() {
     // account-level P&L instead of returning None forever.
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_pnl(21).unwrap();
+    core.subscribe_pnl(21, "").unwrap();
 
     // Open position, but NO instrument mapping and NO quote pushed.
     shared.portfolio.set_position_info(PositionInfo {
@@ -1116,7 +916,7 @@ fn poll_pnl_falls_back_to_account_level_without_market_data() {
     shared.portfolio.set_account(&acct);
     shared.portfolio.account_download_is_settled();
 
-    let update = core.poll_pnl(&shared).expect("callback must fire from account-level P&L");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire from account-level P&L");
     assert_eq!(update.req_id, 21);
     assert!((update.daily_pnl - 12.50).abs() < 1e-6, "daily={}", update.daily_pnl);
     assert!((update.unrealized_pnl - 35.00).abs() < 1e-6, "unreal={}", update.unrealized_pnl);
@@ -1133,7 +933,7 @@ fn the_overnight_leg_is_valued_at_the_mark_the_venue_states() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(31).unwrap();
+    core.subscribe_pnl(31, "").unwrap();
 
     // Quoted at 101.25 now, with no locally derived previous close. The venue
     // states the mark it closed the contract at, which is what the
@@ -1157,7 +957,7 @@ fn the_overnight_leg_is_valued_at_the_mark_the_venue_states() {
         ..Default::default()
     });
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     // 10 × 101.25 now, against 10 × 100.00 the venue marked it at overnight.
     assert!((update.daily_pnl - 12.50).abs() < 1e-6, "daily={}", update.daily_pnl);
     assert!((update.unrealized_pnl - 12.50).abs() < 1e-6, "unreal={}", update.unrealized_pnl);
@@ -1175,7 +975,7 @@ fn the_venues_midnight_value_beats_the_clients_previous_close() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(32).unwrap();
+    core.subscribe_pnl(32, "").unwrap();
 
     // Quoted at 101.00 with a previous close of 90.00.
     seed_pnl_position(&core, &shared, 7001, 0, 10.0, 100.00, 101.00, 90.00);
@@ -1188,7 +988,7 @@ fn the_venues_midnight_value_beats_the_clients_previous_close() {
         realized_pnl: 0.0,
     }]);
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     // 1010.00 against the stated 1000.00, not against 10 × 90.00.
     assert!((update.daily_pnl - 10.0).abs() < 1e-6, "daily={}", update.daily_pnl);
 }
@@ -1203,7 +1003,7 @@ fn the_venues_midnight_value_beats_the_clients_previous_close() {
 fn a_mark_that_does_not_read_as_a_number_sends_the_account_to_the_venue() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_pnl(33).unwrap();
+    core.subscribe_pnl(33, "").unwrap();
 
     for (i, con_id) in [6001i64, 6002, 6003].into_iter().enumerate() {
         seed_pnl_position(&core, &shared, con_id, i as u32, 1.0, 50.00, 51.00, 0.0);
@@ -1241,7 +1041,7 @@ fn a_mark_that_does_not_read_as_a_number_sends_the_account_to_the_venue() {
     });
     shared.portfolio.account_download_is_settled();
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert!((update.daily_pnl - 12.0).abs() < 1e-6,
         "two contracts could not be marked, so the venue's total stands, daily={}",
         update.daily_pnl);
@@ -1262,7 +1062,7 @@ fn poll_pnl_prefers_quotes_over_account_level_when_priced() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl(22).unwrap();
+    core.subscribe_pnl(22, "").unwrap();
 
     // Priced position: 1 share, avg 100, last 101 → daily/unrealized = 1.00.
     seed_pnl_position(&core, &shared, 1, 0, 1.0, 100.0, 101.0, 0.0);
@@ -1275,7 +1075,7 @@ fn poll_pnl_prefers_quotes_over_account_level_when_priced() {
     };
     shared.portfolio.set_account(&acct);
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert!((update.daily_pnl - 1.0).abs() < 1e-6, "daily={}", update.daily_pnl);
     assert!((update.unrealized_pnl - 1.0).abs() < 1e-6, "unreal={}", update.unrealized_pnl);
 }
@@ -1295,8 +1095,8 @@ fn poll_pnl_single_routes_quote_by_con_id() {
     seed_pnl_position(&core, &shared, 111, 0, 1.0, 100.0, 105.0, 0.0);  // SPY
     seed_pnl_position(&core, &shared, 222, 1, 1.0, 200.0, 210.0, 0.0);  // QQQ
 
-    core.subscribe_pnl_single(50, 111);
-    core.subscribe_pnl_single(51, 222);
+    core.subscribe_pnl_single(50, 111, "").unwrap();
+    core.subscribe_pnl_single(51, 222, "").unwrap();
 
     let updates = core.poll_pnl_single(&shared);
     assert_eq!(updates.len(), 2);
@@ -1321,7 +1121,7 @@ fn poll_pnl_single_intraday_opened_position() {
     // is worked out from.
     shared.portfolio.account_download_is_settled();
     seed_pnl_position(&core, &shared, 756733, 0, 1.0, 735.00, 735.07, 0.0);
-    core.subscribe_pnl_single(42, 756733);
+    core.subscribe_pnl_single(42, 756733, "").unwrap();
 
     let updates = core.poll_pnl_single(&shared);
     assert_eq!(updates.len(), 1);
@@ -1349,7 +1149,7 @@ fn poll_pnl_single_overnight_position_with_seed() {
         money_traded: 0.0,
         realized_pnl: 12.34,
     }]);
-    core.subscribe_pnl_single(99, 756733);
+    core.subscribe_pnl_single(99, 756733, "").unwrap();
 
     let updates = core.poll_pnl_single(&shared);
     assert_eq!(updates.len(), 1);
@@ -1375,7 +1175,7 @@ fn a_multiplied_position_opened_today_reports_the_day_it_has_made() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(32, 4002);
+    core.subscribe_pnl_single(32, 4002, "").unwrap();
 
     // Ten option contracts bought today at 7.00 a unit — 7,000 paid — and
     // marked by the venue at 7,350 for the position.
@@ -1429,7 +1229,7 @@ fn a_multiplied_position_does_not_size_its_overnight_leg_from_a_unit_price() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(31, 4001);
+    core.subscribe_pnl_single(31, 4001, "").unwrap();
 
     // An option: ten contracts on a hundred units each, marked by the venue at
     // 7.35 a unit — 7,350 for the position, which is what the venue states.
@@ -1486,7 +1286,7 @@ fn poll_pnl_single_change_detection_suppresses_duplicate() {
     // is worked out from.
     shared.portfolio.account_download_is_settled();
     seed_pnl_position(&core, &shared, 1, 0, 1.0, 100.0, 101.0, 0.0);
-    core.subscribe_pnl_single(7, 1);
+    core.subscribe_pnl_single(7, 1, "").unwrap();
     assert_eq!(core.poll_pnl_single(&shared).len(), 1);
     // Same inputs → no emit.
     assert!(core.poll_pnl_single(&shared).is_empty());
@@ -1529,7 +1329,7 @@ fn a_chargeable_snapshot_is_answered_to_itself_and_ends_there() {
     core.instrument_to_req.lock().unwrap().insert(0, 4);
     core.instrument_followers.lock().unwrap().insert(0, vec![5]);
     core.chargeable_snapshot_reqs.lock().unwrap().insert(5);
-    core.snapshot_reqs.lock().unwrap().insert(5, (std::time::Instant::now(), 0));
+    core.snapshot_reqs.lock().unwrap().insert(5, crate::client_core::SnapshotWait::new(0, false));
 
     core.poll_instrument_ticks(&shared, 0, 4);
     assert!(!core.check_snapshot_done(5), "nothing answered yet");
@@ -1610,7 +1410,7 @@ fn poll_pnl_single_reports_a_fractional_move_in_the_holding() {
         con_id: 479624278, qty_midnight: Some(1.5), cost_midnight: Some(150.0),
         qty_traded: None, money_traded: 0.0, realized_pnl: 0.0,
     }]);
-    core.subscribe_pnl_single(7, 479624278);
+    core.subscribe_pnl_single(7, 479624278, "").unwrap();
     assert_eq!(core.poll_pnl_single(&shared).len(), 1);
     // The holding grows inside the same whole unit; the venue's marks stand.
     seed_pnl_position(&core, &shared, 479624278, 0, 1.9, 100.0, 101.0, 0.0);
@@ -1626,11 +1426,11 @@ fn poll_pnl_single_unsubscribe_clears_cache() {
     // is worked out from.
     shared.portfolio.account_download_is_settled();
     seed_pnl_position(&core, &shared, 1, 0, 1.0, 100.0, 101.0, 0.0);
-    core.subscribe_pnl_single(7, 1);
+    core.subscribe_pnl_single(7, 1, "").unwrap();
     let _ = core.poll_pnl_single(&shared);
     core.unsubscribe_pnl_single(7);
     // Re-subscribing with same req_id must re-emit (cache cleared on unsubscribe).
-    core.subscribe_pnl_single(7, 1);
+    core.subscribe_pnl_single(7, 1, "").unwrap();
     assert_eq!(core.poll_pnl_single(&shared).len(), 1);
 }
 /// Adaptive, algo and what-if orders leave `build_order_request` through
@@ -1962,7 +1762,7 @@ fn an_account_summary_reports_every_figure_the_venue_stated() {
     shared.portfolio.set_account_download_complete("AR.1");
     shared.portfolio.account_download_is_settled();
 
-    core.subscribe_account_summary(3, "All").unwrap();
+    core.subscribe_account_summary(3, "All", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").expect("a summary");
     assert_eq!(batch.req_id, 3);
     let names: Vec<&str> = batch.entries.iter().map(|e| e.tag.as_str()).collect();
@@ -1972,7 +1772,7 @@ fn an_account_summary_reports_every_figure_the_venue_stated() {
 
     // A figure stated in more than one currency is stated in each of them.
     core.unsubscribe_account_summary(3);
-    core.subscribe_account_summary(4, "TotalCashValue").unwrap();
+    core.subscribe_account_summary(4, "TotalCashValue", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").expect("a summary");
     assert_eq!(batch.entries.len(), 1);
     assert_eq!(batch.entries[0].tag, "TotalCashValue");
@@ -1980,7 +1780,7 @@ fn an_account_summary_reports_every_figure_the_venue_stated() {
 
     // And a tag the venue never stated reports nothing rather than a zero.
     core.unsubscribe_account_summary(4);
-    core.subscribe_account_summary(5, "Cushion").unwrap();
+    core.subscribe_account_summary(5, "Cushion", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").expect("a summary");
     assert!(batch.entries.is_empty(), "{:?}", batch.entries.len());
 }
@@ -2099,8 +1899,7 @@ fn an_execution_filters_account_is_refused_where_a_gateway_refuses_it() {
 
 /// The account a P&L request names is checked in a gateway's order and words
 /// — blank, not held, `All` where the login may not ask for every account or
-/// is one the venue adds accounts to — before this client's own refusal of an
-/// account other than the session's.
+/// is one the venue adds accounts to — before the request is subscribed.
 #[test]
 fn a_profit_request_is_refused_in_a_gateways_order() {
     let check = |shared: &SharedState, accounts: &[&str], account: &str| {
@@ -2114,9 +1913,7 @@ fn a_profit_request_is_refused_in_a_gateways_order() {
     assert_eq!(check(&shared, &["DU1"], " "), Err((321, "Account must not be empty".into())));
     assert_eq!(check(&shared, &["DU1"], "All"), Err((321, "Invalid account code".into())), "one account");
     let several = ["DU1", "DU2"];
-    let ours = |named: &str| -> Result<(), (i32, String)> { Err((321, format!(
-        "account {named} was named and this session opened under DU1, whose profit is not what was asked for",
-    ))) };
+    let ours = |_: &str| -> Result<(), (i32, String)> { Ok(()) };
     assert_eq!(check(&shared, &several, "all"), ours("all"), "a gateway takes every account");
     assert_eq!(check(&shared, &several, "DU2"), ours("DU2"));
 
@@ -2139,9 +1936,9 @@ fn a_profit_request_is_refused_in_a_gateways_order() {
 #[test]
 fn a_third_account_summary_is_refused_as_a_gateway_refuses_it() {
     let core = ClientCore::new();
-    core.subscribe_account_summary(3, "NetLiquidation").unwrap();
-    core.subscribe_account_summary(4, "NetLiquidation").unwrap();
-    let refused = core.subscribe_account_summary(5, "NetLiquidation").unwrap_err();
+    core.subscribe_account_summary(3, "NetLiquidation", vec![String::new()]).unwrap();
+    core.subscribe_account_summary(4, "NetLiquidation", vec![String::new()]).unwrap();
+    let refused = core.subscribe_account_summary(5, "NetLiquidation", vec![String::new()]).unwrap_err();
     assert_eq!(refused.code, 322);
     assert_eq!(
         refused.message,
@@ -2149,40 +1946,20 @@ fn a_third_account_summary_is_refused_as_a_gateway_refuses_it() {
     );
 }
 
-/// One slot serves the P&L subscription. A second asker under another
-/// request is refused rather than handed the slot, which took the updates
-/// away from the first caller without a word to either one. The first
-/// subscription keeps receiving, and asking again under the id that holds the
-/// slot is not a second subscription.
+/// Each profit request keeps its own subscription; only a reused number is refused.
 #[test]
-fn a_second_pnl_subscription_is_refused_not_silenced() {
+fn profit_requests_coexist_and_only_a_repeated_number_is_refused() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    shared.portfolio.set_account(&crate::types::AccountState::default());
-    // The venue has finished stating the account, which is what the reads
-    // below wait on: answered on the first figure instead, a summary asked for
-    // right after connecting was handed the few tags parsed so far.
-    shared.portfolio.holdings_restated_under("AR.1");
-    shared.portfolio.set_account_download_complete("AR.1");
     shared.portfolio.account_download_is_settled();
-
-    core.subscribe_pnl(7).unwrap();
-    let second = core.subscribe_pnl(8);
-    let why = second.expect_err("the slot is held, so a second asker is refused");
-    assert_eq!(why.code, Refusal::VALIDATION);
-    assert!(
-        why.message.contains("request 7"),
-        "the refusal names the holder: {}", why.message,
-    );
-    core.subscribe_pnl(7).unwrap_or_else(|e| panic!("asking again under the holder is allowed: {e:?}"));
-    assert_eq!(
-        core.poll_pnl(&shared).map(|u| u.req_id), Some(7),
-        "the first subscription still receives",
-    );
-
-    // A cancelled subscription frees the slot for another.
+    core.subscribe_pnl(7, "").unwrap();
+    core.subscribe_pnl(8, "").unwrap();
+    assert_eq!(core.subscribe_pnl(7, "").unwrap_err().code, 102);
+    assert_eq!(core.poll_pnl(&shared).iter().map(|u| u.req_id).collect::<Vec<_>>(), [7, 8]);
+    assert!(core.poll_pnl(&shared).is_empty());
     core.unsubscribe_pnl(7);
-    core.subscribe_pnl(8).unwrap();
+    shared.portfolio.set_account(&crate::types::AccountState { daily_pnl: PRICE_SCALE, ..Default::default() });
+    assert_eq!(core.poll_pnl(&shared).iter().map(|u| u.req_id).collect::<Vec<_>>(), [8]);
 }
 
 #[test]
@@ -2192,9 +1969,9 @@ fn two_account_summaries_receive_their_own_requested_values() {
     shared.portfolio.note_account_value("NetLiquidation", "75425.51", "USD");
     shared.portfolio.note_account_value("TotalCashValue", "5000.00", "EUR");
     shared.portfolio.account_download_is_settled();
-    core.subscribe_account_summary(3, "NetLiquidation").unwrap();
-    core.subscribe_account_summary(4, "TotalCashValue").unwrap();
-    assert!(core.subscribe_account_summary(5, "All").is_err(), "two is the venue's limit");
+    core.subscribe_account_summary(3, "NetLiquidation", vec![String::new()]).unwrap();
+    core.subscribe_account_summary(4, "TotalCashValue", vec![String::new()]).unwrap();
+    assert!(core.subscribe_account_summary(5, "All", vec![String::new()]).is_err(), "two is the venue's limit");
 
     for (req_id, tag, value, currency) in [
         (3, "NetLiquidation", "75425.51", "USD"),
@@ -2215,17 +1992,17 @@ fn two_account_summaries_receive_their_own_requested_values() {
     assert_eq!(batch.req_id, 4);
     assert_eq!(batch.entries[0].value, "5100.00");
     core.unsubscribe_account_summary(99);
-    assert!(core.subscribe_account_summary(5, "All").is_err(), "the initial batches leave both subscribed");
+    assert!(core.subscribe_account_summary(5, "All", vec![String::new()]).is_err(), "the initial batches leave both subscribed");
     core.unsubscribe_account_summary(3);
-    core.subscribe_account_summary(4, "NetLiquidation").unwrap();
+    core.subscribe_account_summary(4, "NetLiquidation", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").unwrap();
     assert_eq!(batch.req_id, 4, "reusing a request replaces its tags, not the other subscription");
     assert_eq!(batch.entries[0].tag, "NetLiquidation");
-    core.subscribe_account_summary(5, "All").unwrap();
+    core.subscribe_account_summary(5, "All", vec![String::new()]).unwrap();
     core.reset();
     assert!(core.prepare_account_summary(&shared, "DU1").is_none());
-    core.subscribe_account_summary(3, "All").unwrap();
-    core.subscribe_account_summary(4, "All").unwrap();
+    core.subscribe_account_summary(3, "All", vec![String::new()]).unwrap();
+    core.subscribe_account_summary(4, "All", vec![String::new()]).unwrap();
     assert!(core.prepare_account_summary(&shared, "DU1").is_some(), "reset forgets the last delivery too");
 }
 
@@ -2236,7 +2013,7 @@ fn an_account_summary_reports_changes_until_cancelled() {
     shared.portfolio.note_account_value("TotalCashValue", "5000.00", "EUR");
     shared.portfolio.note_account_value("TotalCashValue", "1000.00", "USD");
     shared.portfolio.account_download_is_settled();
-    core.subscribe_account_summary(3, "TotalCashValue").unwrap();
+    core.subscribe_account_summary(3, "TotalCashValue", vec![String::new()]).unwrap();
     assert_eq!(core.prepare_account_summary(&shared, "DU1").unwrap().entries.len(), 2);
 
     shared.portfolio.note_account_value("TotalCashValue", "5100.00", "EUR");
@@ -2257,7 +2034,7 @@ fn an_account_summary_reports_changes_until_cancelled() {
     core.unsubscribe_account_summary(3);
     shared.portfolio.note_account_value("TotalCashValue", "5300.00", "EUR");
     assert!(core.prepare_account_summary(&shared, "DU1").is_none(), "cancellation ends the updates");
-    core.subscribe_account_summary(3, "TotalCashValue").unwrap();
+    core.subscribe_account_summary(3, "TotalCashValue", vec![String::new()]).unwrap();
     assert_eq!(core.prepare_account_summary(&shared, "DU1").unwrap().entries.len(), 2, "a new subscription gets the full batch");
 }
 
@@ -2279,7 +2056,7 @@ fn a_ledger_tag_answers_with_the_currency_bucket_it_names() {
     }
     shared.portfolio.account_download_is_settled();
 
-    core.subscribe_account_summary(3, "$LEDGER").unwrap();
+    core.subscribe_account_summary(3, "$LEDGER", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").expect("a ledger request is answered");
     assert_eq!(
         batch.entries.iter().map(|e| (e.tag.as_str(), e.currency.as_str())).collect::<Vec<_>>(),
@@ -2288,7 +2065,7 @@ fn a_ledger_tag_answers_with_the_currency_bucket_it_names() {
     );
     core.unsubscribe_account_summary(3);
 
-    core.subscribe_account_summary(4, "$LEDGER:EUR").unwrap();
+    core.subscribe_account_summary(4, "$LEDGER:EUR", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").expect("a ledger request is answered");
     assert_eq!(
         batch.entries.iter().map(|e| (e.tag.as_str(), e.value.as_str())).collect::<Vec<_>>(),
@@ -2297,7 +2074,7 @@ fn a_ledger_tag_answers_with_the_currency_bucket_it_names() {
     );
     core.unsubscribe_account_summary(4);
 
-    core.subscribe_account_summary(5, "$LEDGER:ALL").unwrap();
+    core.subscribe_account_summary(5, "$LEDGER:ALL", vec![String::new()]).unwrap();
     let batch = core.prepare_account_summary(&shared, "DU1").expect("a ledger request is answered");
     assert_eq!(
         batch.entries.iter().map(|e| (e.tag.as_str(), e.currency.as_str())).collect::<Vec<_>>(),
@@ -2314,7 +2091,7 @@ fn a_ledger_tag_answers_with_the_currency_bucket_it_names() {
 fn an_option_holding_is_not_valued_from_a_per_unit_price() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_pnl(41).unwrap();
+    core.subscribe_pnl(41, "").unwrap();
 
     seed_pnl_position(&core, &shared, 7001, 0, 2.0, 3.00, 4.00, 3.00);
     shared.portfolio.set_position_info(PositionInfo {
@@ -2334,7 +2111,7 @@ fn an_option_holding_is_not_valued_from_a_per_unit_price() {
     });
     shared.portfolio.account_download_is_settled();
 
-    let update = core.poll_pnl(&shared).expect("callback must fire");
+    let update = core.poll_pnl(&shared).into_iter().next().expect("callback must fire");
     assert!((update.daily_pnl - 200.0).abs() < 1e-6,
         "the venue's total, not two dollars of per-unit move, daily={}",
         update.daily_pnl);
@@ -2351,7 +2128,7 @@ fn a_position_pnl_is_answered_without_a_market_data_subscription() {
     // A book the download has stated whole, which is the only book a profit
     // is worked out from.
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(9, 8001);
+    core.subscribe_pnl_single(9, 8001, "").unwrap();
 
     // No entry in con_id_to_instrument: nothing here subscribed to quotes.
     shared.portfolio.set_position_info(PositionInfo {
@@ -2388,7 +2165,7 @@ fn a_position_pnl_is_answered_without_a_market_data_subscription() {
 
 #[test]
 fn news_is_asked_for_from_the_providers_the_logon_named() {
-    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    let (tx, rx) = std::sync::mpsc::channel();
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.reference.set_news_providers(vec![
@@ -2397,22 +2174,19 @@ fn news_is_asked_for_from_the_providers_the_logon_named() {
     ]);
 
     // Every provider named on this attempt, and nothing if news was not asked
-    // for. The register also emits its own commands, which are not these.
-    // A contract of its own each time. The venue is asked for the headlines
-    // once per contract, so asking again for one already asked about would
-    // answer nothing whatever the entry said, and this is about the entry.
+    // for: they ride the request, and the engine asks the venue for them.
     let next = std::cell::Cell::new(265598i64);
     let asked = |tick_list: &str| -> Option<String> {
         let con_id = next.get();
         next.set(con_id + 1);
         let _ = core.register_mkt_data(
             &shared, &tx, con_id, con_id, "SPY", "SMART", "STK", "USD", &Default::default(),
-            false, false, tick_list, 0,
+            false, false, tick_list, 0, None, None,
         );
         let mut named = None;
         while let Ok(cmd) = rx.try_recv() {
-            if let ControlCommand::SubscribeNews { providers, .. } = cmd {
-                named = Some(providers);
+            if let ControlCommand::Subscribe { news, .. } = cmd {
+                named = news;
             }
         }
         named
@@ -2716,7 +2490,7 @@ fn a_peg_best_order_is_built_from_the_price_it_states() {
 #[test]
 fn a_snapshot_ends_on_the_venue_or_on_the_wait_from_asking() {
     let core = ClientCore::new();
-    core.snapshot_reqs.lock().unwrap().insert(1, (std::time::Instant::now(), 0));
+    core.snapshot_reqs.lock().unwrap().insert(1, crate::client_core::SnapshotWait::new(0, false));
     // Bid, ask, last, open — four of the five.
     for kind in [1, 2, 4, 14] {
         core.note_snapshot_tick(1, kind);
@@ -2729,7 +2503,7 @@ fn a_snapshot_ends_on_the_venue_or_on_the_wait_from_asking() {
     // What a kind CARRIED does not matter, only that it came: a pair states
     // its last as minus one and a contract yet to open states its open as
     // nothing, and both are the venue answering.
-    core.snapshot_reqs.lock().unwrap().insert(3, (std::time::Instant::now(), 0));
+    core.snapshot_reqs.lock().unwrap().insert(3, crate::client_core::SnapshotWait::new(0, false));
     for kind in [1, 2, 4, 14, 9] {
         core.note_snapshot_tick(3, kind);
     }
@@ -2739,32 +2513,78 @@ fn a_snapshot_ends_on_the_venue_or_on_the_wait_from_asking() {
     // the wait is measured from asking — so one that never heard anything is
     // swept rather than held for ever.
     let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(12);
-    core.snapshot_reqs.lock().unwrap().insert(2, (long_ago, 0));
+    core.snapshot_reqs.lock().unwrap().insert(
+        2, crate::client_core::SnapshotWait { asked_at: long_ago, ..crate::client_core::SnapshotWait::new(0, false) },
+    );
     assert!(core.check_snapshot_done(2), "nothing was ever stated, and the wait is up");
     assert!(core.snapshot_reqs.lock().unwrap().is_empty(), "and nothing is left waiting");
 }
 
-/// And a snapshot on a delayed or frozen feed ends the same way.
+/// And a snapshot on a delayed or frozen feed ends the same way, once the
+/// venue has also stated the last trade's time.
 ///
 /// Those feeds state their bid, ask, last, close and open under numbers of
 /// their own — which is what the caller was told to expect. Only the realtime
 /// numbers were read, so a snapshot on either feed could not be completed by
 /// anything the venue said: it ran to the eleven-second sweep every time,
-/// however promptly the venue answered.
+/// however promptly the venue answered. A gateway waits on a delayed feed for
+/// the time as well (88).
 #[test]
 fn a_delayed_snapshot_ends_on_the_venue_too() {
     let core = ClientCore::new();
-    core.snapshot_reqs.lock().unwrap().insert(2, (std::time::Instant::now(), 0));
-    // The delayed numbering: bid, ask, last, open, close.
-    for kind in [66, 67, 68, 76] {
+    core.mark_feed_delayed_for_test(4);
+    core.snapshot_reqs.lock().unwrap().insert(2, crate::client_core::SnapshotWait::new(4, false));
+    // The delayed numbering: bid, ask, last, open, close, then the time.
+    for kind in [66, 67, 68, 76, 75] {
         core.note_snapshot_tick(2, kind);
         assert!(!core.check_snapshot_done(2), "delayed kind {kind} leaves one to come");
     }
-    core.note_snapshot_tick(2, 75);
+    core.note_snapshot_tick(2, 88);
     assert!(
         core.check_snapshot_done(2),
-        "the delayed close was the last of them, and the venue had said everything",
+        "the delayed time was the last of them, and the venue had said everything",
     );
+}
+
+/// A snapshot of a contract a gateway marks as an option also waits for the
+/// venue's option model, 13, or 83 on a delayed feed; one of any other type
+/// does not. The bid's, ask's and last's greeks a gateway computes itself are
+/// not produced here, so nothing waits for them.
+#[test]
+fn an_options_snapshot_waits_for_the_model() {
+    for sec_type in ["OPT", "FOP", "IOPT", "WAR", "EC"] {
+        assert!(crate::client_core::marked_as_option(sec_type), "{sec_type}");
+    }
+    for sec_type in ["STK", "FUT", "CASH", "IND", "BAG", ""] {
+        assert!(!crate::client_core::marked_as_option(sec_type), "{sec_type}");
+    }
+
+    let core = ClientCore::new();
+    core.snapshot_reqs.lock().unwrap().insert(1, crate::client_core::SnapshotWait::new(0, true));
+    for kind in [1, 2, 4, 14, 9] {
+        core.note_snapshot_tick(1, kind);
+    }
+    for greek in [10, 11, 12] {
+        core.note_snapshot_tick(1, greek);
+    }
+    assert!(!core.check_snapshot_done(1), "an option's snapshot waits for its model");
+    core.note_snapshot_tick(1, 13);
+    assert!(core.check_snapshot_done(1), "the model was the last of them");
+
+    core.mark_feed_delayed_for_test(5);
+    core.snapshot_reqs.lock().unwrap().insert(2, crate::client_core::SnapshotWait::new(5, true));
+    for kind in [66, 67, 68, 76, 75, 88] {
+        core.note_snapshot_tick(2, kind);
+    }
+    assert!(!core.check_snapshot_done(2), "a delayed option's snapshot waits for its model");
+    core.note_snapshot_tick(2, 83);
+    assert!(core.check_snapshot_done(2), "stated on the delayed number");
+
+    core.snapshot_reqs.lock().unwrap().insert(3, crate::client_core::SnapshotWait::new(0, false));
+    for kind in [1, 2, 4, 14, 9] {
+        core.note_snapshot_tick(3, kind);
+    }
+    assert!(core.check_snapshot_done(3), "a stock's snapshot waits for no model");
 }
 
 
@@ -2780,60 +2600,6 @@ fn an_execution_is_stored_once_under_its_id() {
     let stored = core.snapshot_executions(&Default::default());
     let ids: Vec<&str> = stored.iter().map(|s| s.execution.exec_id.as_str()).collect();
     assert_eq!(ids, ["0001f4e8.1", "0001f4e8.2"], "each execution once, by id");
-}
-
-/// A family send that stops partway does not leave what it never sent reading
-/// as an order the venue is working.
-///
-/// An order reads as working here by being tracked with no placement held for
-/// it. What did not reach the engine comes out of the hold, so it cannot go out
-/// behind the next thing that transmits after the caller was told it did not
-/// go — and its record has to come out with it. Left standing, an id nothing
-/// ever sent was listed among the open orders and placing under it again
-/// revised an order the venue has never been given, beside a parent that did
-/// go and is resting there with nothing protecting it.
-#[test]
-fn a_family_send_that_stops_partway_forgets_what_it_did_not_send() {
-    let core = ClientCore::new();
-    let leg = |order_id: u64, parent_id: i64| {
-        let order = ApiOrder {
-            order_id: order_id as i64, action: "BUY".into(), total_quantity: 1.0,
-            order_type: "LMT".into(), lmt_price: 100.0, tif: "DAY".into(),
-            parent_id, transmit: false, ..Default::default()
-        };
-        let command = ClientCore::build_order_request(&order, order_id, 0, None)
-            .expect("a plain limit order is built");
-        (command, order)
-    };
-    // A parent and two children, each built and kept.
-    for (order_id, parent_id) in [(80u64, 0i64), (81, 80), (82, 80)] {
-        let (command, order) = leg(order_id, parent_id);
-        core.hold_until_transmitted(order_id, parent_id, command);
-        core.track_order(order_id, ApiContract::default(), order, 0);
-    }
-
-    // The parent goes; the engine is gone by the time the sibling behind it is
-    // offered, so neither it nor the order that asked to transmit went.
-    let (own, _) = leg(81, 80);
-    let mut offered = 0;
-    let sent = core.transmit_family(81, 80, own, |_| {
-        offered += 1;
-        offered == 1
-    });
-
-    assert!(sent.is_err(), "the caller is told the family did not all go");
-    assert!(
-        core.is_working_at_the_venue(80, None),
-        "the parent reached the engine and may be live at the venue",
-    );
-    assert!(
-        !core.is_working_at_the_venue(81, None),
-        "the order that asked to transmit did not reach the engine",
-    );
-    assert!(
-        !core.is_working_at_the_venue(82, None),
-        "nor did the sibling behind it, so neither is an order to withdraw or revise",
-    );
 }
 
 /// A replace carries every number a shape is defined by, and names each in
@@ -3367,7 +3133,7 @@ fn the_account_reads_wait_for_the_download_and_every_download_ends() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     core.subscribe_account_updates(true);
-    core.subscribe_account_summary(3, "All").unwrap();
+    core.subscribe_account_summary(3, "All", vec![String::new()]).unwrap();
 
     // A figure has arrived, and the download has not finished.
     shared.portfolio.holdings_restated_under("AR.1");
@@ -3422,13 +3188,13 @@ fn the_account_fallback_waits_for_the_download() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.portfolio.set_account(&crate::types::AccountState::default());
-    core.subscribe_pnl(7).unwrap();
+    core.subscribe_pnl(7, "").unwrap();
     assert!(
-        core.poll_pnl(&shared).is_none(),
+        core.poll_pnl(&shared).into_iter().next().is_none(),
         "nothing is answered from figures the download has not finished stating",
     );
     shared.portfolio.account_download_is_settled();
-    assert!(core.poll_pnl(&shared).is_some(), "answered once the account has stated itself whole");
+    assert!(core.poll_pnl(&shared).into_iter().next().is_some(), "answered once the account has stated itself whole");
 }
 
 /// Asking for the account again restates it. The reference client answers a
@@ -3506,19 +3272,19 @@ fn no_profit_is_worked_out_from_a_book_the_download_has_not_restated() {
     });
     core.cache_instrument(756733, 4);
     shared.market.push_quote(4, &crate::types::Quote { last: 151 * crate::types::PRICE_SCALE, ..Default::default() });
-    core.subscribe_pnl(7).unwrap();
-    core.subscribe_pnl_single(8, 756733);
-    assert!(core.poll_pnl(&shared).is_some(), "priced from the live quote while the book is whole");
+    core.subscribe_pnl(7, "").unwrap();
+    core.subscribe_pnl_single(8, 756733, "").unwrap();
+    assert!(core.poll_pnl(&shared).into_iter().next().is_some(), "priced from the live quote while the book is whole");
     assert!(!core.poll_pnl_single(&shared).is_empty());
 
     shared.portfolio.account_download_is_pending();
     shared.market.push_quote(4, &crate::types::Quote { last: 152 * crate::types::PRICE_SCALE, ..Default::default() });
-    assert!(core.poll_pnl(&shared).is_none(), "nothing while the download is pending, however the price moves");
+    assert!(core.poll_pnl(&shared).into_iter().next().is_none(), "nothing while the download is pending, however the price moves");
     assert!(core.poll_pnl_single(&shared).is_empty(), "for the position either");
 
     shared.portfolio.account_download_is_settled();
     shared.market.push_quote(4, &crate::types::Quote { last: 153 * crate::types::PRICE_SCALE, ..Default::default() });
-    assert!(core.poll_pnl(&shared).is_some(), "and again once the book is whole");
+    assert!(core.poll_pnl(&shared).into_iter().next().is_some(), "and again once the book is whole");
 }
 
 /// A summary asked for before the download finished is answered
@@ -3529,7 +3295,7 @@ fn no_profit_is_worked_out_from_a_book_the_download_has_not_restated() {
 fn a_summary_parked_behind_the_download_is_answered_when_the_session_ends() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    core.subscribe_account_summary(7, "NetLiquidation").unwrap();
+    core.subscribe_account_summary(7, "NetLiquidation", vec![String::new()]).unwrap();
     shared.portfolio.account_download_is_pending();
     assert!(core.prepare_account_summary(&shared, "DU1").is_none(), "parked while the download runs");
     shared.reference.set_session_over("the trading connection");
@@ -3540,34 +3306,32 @@ fn a_summary_parked_behind_the_download_is_answered_when_the_session_ends() {
 }
 
 
-/// `validate_order` carries a price condition whose trigger is 7 or 8, as it
-/// carries them on the order itself. The condition guard refused them while
-/// the order-level guard accepted them, so the same trigger was carried on an
-/// order and refused on its condition.
+/// A condition's trigger method and margin percent are the TWS API's `int`s,
+/// and every value goes to the venue as stated: no gateway refusal of either
+/// has been read, so none is made. What the venue answers to a value outside
+/// the methods it names, or to a negative percent, is its own to say.
 #[test]
-fn a_condition_trigger_of_7_or_8_is_carried() {
+fn a_condition_carries_its_trigger_method_and_percent_as_stated() {
     let priced = || ApiOrder {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    for tm in [0u8, 4, 7, 8] {
+    for tm in [0, 4, 5, 6, 7, 8, 9, 256, -1, i32::MAX] {
         let mut order = priced();
         order.conditions.push(crate::types::OrderCondition::Price {
             con_id: 756733, exchange: "SMART".into(), price: 100,
             is_more: true, trigger_method: tm, is_conjunction_connection: false,
         });
-        ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("")).unwrap_or_else(|e| panic!("condition trigger {tm} refused: {e:?}"));
+        ClientCore::validate_order(&order, &crate::client_core::OrderSession::single(""))
+            .unwrap_or_else(|e| panic!("condition trigger {tm} refused: {e:?}"));
     }
-    for tm in [5u8, 6] {
+    for percent in [-5, 0, 10, i32::MAX] {
         let mut order = priced();
-        order.conditions.push(crate::types::OrderCondition::Price {
-            con_id: 756733, exchange: "SMART".into(), price: 100,
-            is_more: true, trigger_method: tm, is_conjunction_connection: false,
+        order.conditions.push(crate::types::OrderCondition::Margin {
+            percent, is_more: false, is_conjunction_connection: false,
         });
-        assert!(
-            ClientCore::validate_order(&order, &crate::client_core::OrderSession::single("")).is_err(),
-            "condition trigger {tm} is not one the venue carries",
-        );
+        ClientCore::validate_order(&order, &crate::client_core::OrderSession::single(""))
+            .unwrap_or_else(|e| panic!("margin percent {percent} refused: {e:?}"));
     }
 }
 
@@ -3583,13 +3347,9 @@ fn a_condition_trigger_of_7_or_8_is_carried() {
 fn a_forgotten_baseline_states_the_quote_as_it_stands() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    let (tx, _rx) = std::sync::mpsc::sync_channel(64);
     shared.market.set_instrument_count(4);
 
     // Request 1 already holds the contract, as a first subscription leaves it.
-    // Seeded rather than registered: taking it needs an engine to answer, and
-    // what is under test is the branch a JOINING request takes, which returns
-    // before the engine is asked.
     let iid: InstrumentId = 0;
     core.con_id_to_instrument.lock().unwrap().insert(756733, iid);
     core.instrument_to_req.lock().unwrap().insert(iid, 1);
@@ -3605,14 +3365,16 @@ fn a_forgotten_baseline_states_the_quote_as_it_stands() {
         "and not again while it stands still",
     );
 
-    // The second joins it — through the register, which is where the baseline
-    // is forgotten. Doing that here instead would prove only that a cleared
-    // baseline restates, which the two lines above already say.
-    let joined = core.register_mkt_data(
-        &shared, &tx, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0,
-    ).expect("the second request joins it");
-    assert_eq!(joined, iid, "the same contract, so it followed rather than took one");
+    // The second joins it — through the engine's record of taking it, which
+    // is where the baseline is forgotten. Doing that here instead would prove
+    // only that a cleared baseline restates, which the two lines above
+    // already say.
+    core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
+        asked_at: std::time::Instant::now(),
+        req_id: 2, slot: iid, generation: 2, con_id: 756733, series: Vec::new(),
+        snapshot: false, one_shot: false, mode_9887: 0, marked: false,
+    });
+    assert_eq!(core.followers_of(iid), [2], "the same contract, so it followed rather than took one");
     assert!(
         core.poll_instrument_ticks(&shared, iid, 2).delivered,
         "a request that joins is owed the quote as it stands, not the next move",
@@ -3627,16 +3389,12 @@ fn a_forgotten_baseline_states_the_quote_as_it_stands() {
 /// reason is kept for it, and let go with the slot, so the next contract on that
 /// slot does not inherit the last one's refusal.
 #[test]
-fn a_request_joining_a_refused_subscription_is_told_the_same_reason() {
+fn registering_a_joiner_leaves_its_refusal_to_the_engine() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    let (tx, _rx) = std::sync::mpsc::sync_channel(64);
     shared.market.set_instrument_count(4);
 
     // Request 1 already holds the contract, as a first subscription leaves it.
-    // Seeded rather than registered: taking it needs an engine to answer, and
-    // what is under test is the branch a JOINING request takes, which returns
-    // before the engine is asked.
     let iid: InstrumentId = 0;
     core.con_id_to_instrument.lock().unwrap().insert(756733, iid);
     core.instrument_to_req.lock().unwrap().insert(iid, 1);
@@ -3646,16 +3404,15 @@ fn a_request_joining_a_refused_subscription_is_told_the_same_reason() {
     shared.market.push_subscription_failure(iid, "no entitlement".to_string());
     assert_eq!(shared.market.drain_subscription_failures().len(), 1);
 
-    // A second request joins the same contract — through the register, which is
-    // where the kept reason is handed to it.
-    core.register_mkt_data(
-        &shared, &tx, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0,
-    ).expect("the second request joins it");
-    let direct = shared.market.drain_subscription_failures_direct();
-    assert_eq!(direct.len(), 1, "the joiner is told: {direct:?}");
-    assert_eq!(direct[0].0, 2, "under its own number");
-    assert_eq!(direct[0].1, "no entitlement");
+    // A second request joins the same contract — through the engine's record
+    // of taking it. The engine carries its kept reason in a separate record.
+    core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
+        asked_at: std::time::Instant::now(),
+        req_id: 2, slot: iid, generation: 2, con_id: 756733, series: Vec::new(),
+        snapshot: false, one_shot: false, mode_9887: 0, marked: false,
+    });
+    assert!(shared.market.drain_subscription_failures_direct().is_empty());
+    assert_eq!(shared.market.failure_for_follower(iid).as_deref(), Some("no entitlement"));
 
     shared.market.note_released_slot(iid, u64::MAX);
     assert!(
@@ -3697,19 +3454,16 @@ fn a_subscription_the_venue_has_taken_is_no_longer_refused_for_a_joiner() {
 
 /// A slot given back takes what is queued under it, not only what is cached.
 ///
-/// Both of these name a slot rather than a contract, so the next contract to
-/// take the slot is who they reach. An increment acknowledged for the contract
-/// that left arrives as the new one's, and a move recorded for the old one
-/// repoints the new one's watchers at a third contract and takes its own slot
-/// out of the polling. A reader stalled in a callback is all it takes for the
-/// release to land in between.
+/// What is queued names a slot rather than a contract, so the next contract to
+/// take the slot is who it reaches: an increment acknowledged for the contract
+/// that left arrives as the new one's. A reader stalled in a callback is all it
+/// takes for the release to land in between.
 #[test]
 fn a_released_slot_leaves_nothing_queued_under_it() {
     let shared = SharedState::new();
     let slot: InstrumentId = 3;
 
     shared.market.push_tick_req_params(slot, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
-    shared.market.push_subscription_move(slot, 9, 0);
     shared.market.push_tick_news(crate::types::TickNews {
         instrument: slot,
         provider_code: "BRFG".into(),
@@ -3726,10 +3480,6 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
     assert!(
         shared.market.drain_tick_req_params().iter().all(|(at, _)| *at != slot),
         "no increment is delivered for the contract that left",
-    );
-    assert!(
-        shared.market.drain_subscription_moves().iter().all(|(a, b, _)| *a != slot && *b != slot),
-        "and no move naming its slot",
     );
     assert!(
         shared.market.drain_tick_news().iter().all(|n| n.instrument != slot),
@@ -3754,7 +3504,7 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
 fn no_subscription_is_taken_on_a_feed_that_is_over_for_the_session() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    let (tx, _rx) = std::sync::mpsc::sync_channel(64);
+    let (tx, _rx) = std::sync::mpsc::channel();
     shared.market.set_instrument_count(4);
 
     // A contract already watched, which is what a joining request finds.
@@ -3767,13 +3517,13 @@ fn no_subscription_is_taken_on_a_feed_that_is_over_for_the_session() {
 
     let joining = core.register_mkt_data(
         &shared, &tx, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0,
+        false, false, "", 0, None, None,
     );
     assert!(joining.is_err(), "the joiner is refused: {joining:?}");
 
     let fresh = core.register_mkt_data(
         &shared, &tx, 3, 272093, "MSFT", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0,
+        false, false, "", 0, None, None,
     );
     assert!(fresh.is_err(), "and so is a contract nobody is watching: {fresh:?}");
 }
@@ -3791,7 +3541,7 @@ fn an_unrealized_figure_holds_at_the_edge_rather_than_wrapping_past_it() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     shared.portfolio.account_download_is_settled();
-    core.subscribe_pnl_single(11, 8005);
+    core.subscribe_pnl_single(11, 8005, "").unwrap();
 
     let iid: InstrumentId = 0;
     core.con_id_to_instrument.lock().unwrap().insert(8005, iid);
@@ -3814,52 +3564,6 @@ fn an_unrealized_figure_holds_at_the_edge_rather_than_wrapping_past_it() {
     assert!(!updates.is_empty(), "the position is still reported");
 }
 
-/// A news subscription the venue refuses leaves nobody holding it, so a later
-/// ask on the same contract is the first again and sends anew. Without the
-/// release, the dedup that keeps one venue subscription for many askers holds
-/// the re-ask against a claim the venue already declined and no news arrives.
-#[test]
-fn a_refused_news_subscription_frees_a_later_ask() {
-    let core = ClientCore::new();
-    let con_id = 756733;
-    assert!(core.first_to_ask_for_news(con_id, 11), "the first ask sends");
-    assert!(!core.first_to_ask_for_news(con_id, 12), "a second is deduped against the first");
-    core.release_news_askers(con_id);
-    assert!(core.first_to_ask_for_news(con_id, 13), "after the refusal a later ask sends anew");
-}
-
-/// A caller told its headlines are coming has had them asked for.
-///
-/// The send fails because the engine is gone, and the branch below it returns
-/// success for a contract somebody else already watches without sending
-/// anything else — so a caller that asked for headlines was told it had them
-/// while nothing reached the engine at all. The record of who asked goes back
-/// with the refusal, or the next ask is deduped against this one.
-#[test]
-fn news_the_engine_never_heard_is_not_reported_as_asked_for() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    shared.market.set_instrument_count(4);
-    let (tx, rx) = std::sync::mpsc::sync_channel(64);
-    drop(rx); // the engine is gone
-
-    // A contract somebody already watches, so the quote half sends nothing.
-    let iid: InstrumentId = 0;
-    core.con_id_to_instrument.lock().unwrap().insert(756733, iid);
-    core.instrument_to_req.lock().unwrap().insert(iid, 1);
-    core.req_to_instrument.lock().unwrap().insert(1, iid);
-
-    let asked = core.register_mkt_data(
-        &shared, &tx, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "292", 0,
-    );
-    assert!(asked.is_err(), "the caller is told: {asked:?}");
-    assert!(
-        core.first_to_ask_for_news(756733, 3),
-        "and the next ask is not deduped against one nobody heard",
-    );
-}
-
 /// A P&L number pointed at another contract does not inherit the last one.
 ///
 /// A figure is only sent where it differs from the one sent before, so the
@@ -3870,77 +3574,24 @@ fn news_the_engine_never_heard_is_not_reported_as_asked_for() {
 #[test]
 fn a_pnl_number_taken_for_another_contract_starts_clean() {
     let core = ClientCore::new();
-    core.subscribe_pnl_single(11, 8001);
+    core.subscribe_pnl_single(11, 8001, "").unwrap();
     core.last_pnl_single.lock().unwrap().insert(11, [1, 2, 3, 4, 5]);
 
-    core.subscribe_pnl_single(11, 8002);
+    assert_eq!(core.subscribe_pnl_single(11, 8002, "").unwrap_err().code, 102);
+    core.unsubscribe_pnl_single(11);
+    core.subscribe_pnl_single(11, 8002, "").unwrap();
     assert!(
         !core.last_pnl_single.lock().unwrap().contains_key(&11),
         "the last contract's figures are not this one's",
     );
 }
 
-/// One number cannot be taken by two registrations at once.
-///
-/// The map that answers which contract a number watches cannot be written
-/// until the engine has named the slot, and that is a wait. Two callers on one
-/// number both read the map as free in that window and both went on: two slots
-/// ended up holding contracts under one number, the map kept whichever
-/// finished last, and the other slot's subscription stayed live on the wire
-/// with nothing able to withdraw it. That is the failure the check is written
-/// to prevent, and a check against a map nobody has written yet cannot.
+/// A joiner named by the engine starts with a fresh quote baseline.
+/// Its acknowledgement and refusal are engine records, never reader writes.
 #[test]
-fn one_number_cannot_be_registered_twice_at_once() {
-    use std::sync::Arc;
-    let core = Arc::new(ClientCore::new());
-    let shared = Arc::new(SharedState::new());
-    shared.market.set_instrument_count(8);
-    // Long enough that the first registration is still waiting when the second
-    // asks — the window the check has to cover.
-    core.set_registration_timeout(std::time::Duration::from_millis(1500));
-    let (tx, _rx) = std::sync::mpsc::sync_channel(64);
-
-    let first = {
-        let (core, shared, tx) = (Arc::clone(&core), Arc::clone(&shared), tx.clone());
-        std::thread::spawn(move || {
-            core.register_mkt_data(
-                &shared, &tx, 7, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-                false, false, "", 0,
-            )
-        })
-    };
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let second = core.register_mkt_data(
-        &shared, &tx, 7, 272093, "MSFT", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0,
-    );
-    let refusal = second.expect_err("the second is refused, not admitted");
-    assert_eq!(
-        refusal.code, crate::error_codes::DUPLICATE_TICKER_ID,
-        "refused as a duplicate number, not left to time out on its own: {refusal:?}",
-    );
-    let _ = first.join();
-}
-
-/// The other way into following pays the joiner what the first one does.
-///
-/// A contract named by symbol alone has no identity this side can resolve, so
-/// the engine is the first to know which slot it holds — and the branch that
-/// joins an existing subscription is reached only after that answer comes
-/// back. It paid none of the three things a joiner is owed. For those
-/// contracts it is not a narrow race but the ordinary path: every
-/// second-and-later subscriber took it, heard nothing on a contract that was
-/// not moving, was never told the increment, and where the subscription had
-/// been refused was told it had one.
-#[test]
-fn a_request_the_engine_names_the_slot_for_is_paid_like_any_joiner() {
+fn registering_a_named_joiner_resets_its_baseline_without_pushing_records() {
     let core = ClientCore::new();
-    // Answered from another thread, so the wait has to outlast being
-    // scheduled; see `followers_keep_the_subscriptions_market_data_type`.
-    core.set_registration_timeout(std::time::Duration::from_secs(30));
     let shared = SharedState::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(64);
     shared.market.set_instrument_count(4);
 
     let iid: InstrumentId = 0;
@@ -3954,206 +3605,23 @@ fn a_request_the_engine_names_the_slot_for_is_paid_like_any_joiner() {
     let _ = shared.market.drain_subscription_failures();
     core.last_quotes.lock().unwrap().insert(iid, [7i64; 16]);
 
-    // The engine, answering the registration with the slot it resolved.
-    let engine = std::thread::spawn(move || {
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = cmd {
-                let _ = reply.try_send(Ok(0));
-                return;
-            }
-        }
+    // Named by symbol, so this side holds no identity for it: the engine's
+    // record of taking it names the slot.
+    core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
+        asked_at: std::time::Instant::now(),
+        req_id: 2, slot: iid, generation: 2, con_id: 0, series: Vec::new(),
+        snapshot: false, one_shot: false, mode_9887: 0, marked: false,
     });
 
-    // Named by symbol, so this side holds no identity for it.
-    core.register_mkt_data(
-        &shared, &tx, 2, 0, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "", 0,
-    ).expect("the second request joins the one that is up");
-    let _ = engine.join();
-
-    assert!(
-        shared.market.drain_tick_req_params_direct().iter().any(|(at, _)| *at == 2),
-        "the joiner was never told the increment the subscription was acknowledged with",
-    );
-    let told = shared.market.drain_subscription_failures_direct();
-    assert!(
-        told.iter().any(|(at, _)| *at == 2),
-        "and was told it had a subscription the venue had already refused: {told:?}",
-    );
+    assert!(shared.market.drain_tick_req_params_direct().is_empty());
+    assert!(shared.market.drain_subscription_failures_direct().is_empty());
     assert!(
         !core.last_quotes.lock().unwrap().contains_key(&iid),
         "and the baseline still matched the quote, so nothing was ever stated to it",
     );
 }
 
-/// A caller moved onto another slot is joining a subscription, and is owed
-/// what a joiner is owed.
-///
-/// The engine says so when a lookup names a contract another slot already
-/// holds. Only the slot they left was cleared, so they arrived on one whose
-/// baseline already matched its quote and heard nothing until it next moved,
-/// were never told the increment it was acknowledged with, and where it had
-/// been refused were not told that either.
-#[test]
-fn a_caller_moved_onto_another_slot_is_paid_like_a_joiner() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    shared.market.set_instrument_count(4);
-    let from: InstrumentId = 1;
-    let into: InstrumentId = 0;
 
-    // The slot they are on, and the one that already holds the contract.
-    core.instrument_to_req.lock().unwrap().insert(from, 7);
-    core.req_to_instrument.lock().unwrap().insert(7, from);
-    core.instrument_to_req.lock().unwrap().insert(into, 1);
-    core.req_to_instrument.lock().unwrap().insert(1, into);
-    shared.market.push_tick_req_params(into, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
-    let _ = shared.market.drain_tick_req_params();
-    shared.market.push_subscription_failure(into, "no entitlement".to_string());
-    let _ = shared.market.drain_subscription_failures();
-    core.last_quotes.lock().unwrap().insert(into, [7i64; 16]);
-
-    core.move_watchers(&shared, from, into);
-
-    assert!(
-        shared.market.drain_tick_req_params_direct().iter().any(|(at, _)| *at == 7),
-        "the moved caller was never told the increment of the subscription it landed on",
-    );
-    let told = shared.market.drain_subscription_failures_direct();
-    assert!(
-        told.iter().any(|(at, _)| *at == 7),
-        "nor that the subscription it landed on had been refused: {told:?}",
-    );
-    assert!(
-        !core.last_quotes.lock().unwrap().contains_key(&into),
-        "and the baseline it arrived on already matched, so nothing was stated to it",
-    );
-}
-
-/// A registration that fails still withdraws the headlines it already asked
-/// for.
-///
-/// The headlines go out before the contract is registered, because a request
-/// that joins an existing subscription returns before that happens. So a
-/// registration that then fails leaves this side holding no slot — the mapping
-/// one comes from is written on the success path — and a withdrawal named by
-/// slot resolved to nothing and was never sent. The record of who asked was
-/// dropped all the same, so no later withdrawal reached them either: the
-/// headlines ran for the rest of the session, and the next request for the
-/// contract opened a second subscription beside the first.
-#[test]
-fn a_registration_that_fails_withdraws_the_headlines_it_asked_for() {
-    let core = ClientCore::new();
-    // A millisecond is what a test gets by default, and this waits on a reply
-    // from a thread it has just spawned: under a suite running on every core
-    // that thread is not always scheduled inside one, and the wait then ends
-    // in a timeout whose code is not the one the engine refused under.
-    core.set_registration_timeout(std::time::Duration::from_secs(5));
-    let shared = SharedState::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(64);
-    shared.market.set_instrument_count(4);
-
-    // The engine takes the news and then refuses the registration.
-    let engine = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = &cmd {
-                let _ = reply.try_send(Err(Refusal::stated(101, "Market data is over the limit")));
-            }
-            seen.push(cmd);
-        }
-        seen
-    });
-
-    let refused = core.register_mkt_data(
-        &shared, &tx, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-        false, false, "292", 0,
-    );
-    assert_eq!(refused.unwrap_err().code, 101, "the subscription keeps the engine's refusal code");
-    drop(tx);
-    let sent = engine.join().expect("the engine thread");
-
-    assert!(
-        sent.iter().any(|c| matches!(
-            c, ControlCommand::UnsubscribeNews { subject: NewsSubject::Contract(756733) },
-        )),
-        "the headlines it had already asked for were never withdrawn: {sent:?}",
-    );
-}
-
-/// A withdrawal arriving while the number is still taking its subscription is
-/// taken, and the registration takes back down what it opened.
-///
-/// The record a withdrawal reads is written when the engine's answer comes
-/// back, and a registration waits on that. In between there is nothing to
-/// find, so the withdrawal read as a number watching nothing — and refusing it
-/// for that is a refusal the venue never makes: the caller was told its
-/// withdrawal had not happened, the registration finished behind it, and it
-/// held a live subscription it believed was gone. Recorded against the
-/// registration instead, which re-reads it before it publishes anything.
-#[test]
-fn a_withdrawal_during_registration_takes_down_what_it_opened() {
-    let core = ClientCore::new();
-    let shared = SharedState::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(64);
-    shared.market.set_instrument_count(4);
-    // Wide enough that the withdrawal lands inside the wait. The tests here
-    // default to a millisecond, which would close the window this is about
-    // before the handshake below could finish inside it.
-    core.set_registration_timeout(std::time::Duration::from_secs(5));
-
-    // The engine holds the answer back until the withdrawal has been made,
-    // which is the window under test.
-    let (seen_tx, seen_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let (go_tx, go_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let engine = std::thread::spawn(move || {
-        let mut sent = Vec::new();
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = &cmd {
-                let _ = seen_tx.send(());
-                let _ = go_rx.recv();
-                let _ = reply.try_send(Ok(0));
-            }
-            sent.push(cmd);
-        }
-        sent
-    });
-
-    let core_ref = &core;
-    let shared_ref = &shared;
-    let tx_ref = &tx;
-    std::thread::scope(|scope| {
-        let taking = scope.spawn(move || core_ref.register_mkt_data(
-            shared_ref, tx_ref, 2, 756733, "SPY", "SMART", "STK", "USD", &Default::default(),
-            false, false, "", 0,
-        ));
-        seen_rx.recv().expect("the registration reached the engine");
-        assert!(
-            !core_ref.holds_mkt_data(2),
-            "nothing is recorded for it yet, which is the window",
-        );
-        assert!(
-            core_ref.withdraw_while_registering(2),
-            "the withdrawal was refused for arriving early, which the venue \
-             never does — and the subscription behind it went on living",
-        );
-        let _ = go_tx.send(());
-        taking.join().unwrap().expect("the registration itself was not refused");
-    });
-    drop(tx);
-    let sent = engine.join().expect("the engine thread ran");
-
-    assert!(
-        !core_ref.holds_mkt_data(2),
-        "the registration published a subscription under a number whose caller \
-         had already been told it was withdrawn",
-    );
-    assert_eq!(core_ref.watching(2), None, "a mapping was written for it all the same");
-    assert!(
-        sent.iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 0, .. })),
-        "the subscription it opened was never taken back down: {sent:?}",
-    );
-}
 
 /// An answer worked out here survives a slot going back to the table.
 ///
@@ -4194,92 +3662,37 @@ fn an_answer_this_side_worked_out_is_not_dropped_with_a_slot() {
 /// A follower receives the feed already subscribed, including after promotion.
 #[test]
 fn followers_keep_the_subscriptions_market_data_type() {
-    for con_id in [756733, 0] {
-        let core = ClientCore::new();
-        // This one answers from another thread, so the wait has to outlast
-        // being scheduled. A millisecond — what a test that wants the wait to
-        // fire states — is a race the suite loses under load, and the answer
-        // arriving late reads as an engine that went away.
-        core.set_registration_timeout(std::time::Duration::from_secs(30));
-        let shared = SharedState::new();
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let engine = std::thread::spawn(move || {
-            while let Ok(cmd) = rx.recv() {
-                if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = cmd {
-                    // The caller may have stopped waiting; that is its
-                    // business, and not this thread's to die over.
-                    let _ = reply.send(Ok(0));
-                }
-            }
-        });
-        let subscribe = |req_id| core.register_mkt_data(
-            &shared, &tx, req_id, con_id, "SPY", "SMART", "STK", "USD", &Default::default(),
-            false, false, "", core.subscription_mode(),
-        ).unwrap();
-
-        core.set_market_data_type(MDT_DELAYED);
-        subscribe(1);
-        core.set_market_data_type(MDT_REALTIME);
-        subscribe(2);
-        assert_eq!(core.check_mdt_needed(1, true), Some(MDT_DELAYED));
-        assert_eq!(core.check_mdt_needed(2, true), Some(MDT_DELAYED), "follower, conId {con_id}");
-        for holder in [1, 2] {
-            shared.market.push_quote(0, &Quote {
-                bid: (100 + holder) * crate::types::PRICE_SCALE,
-                ..Default::default()
-            });
-            assert_eq!(core.req_id_for_instrument(0), holder);
-            let polled = core.poll_instrument_ticks(&shared, 0, holder);
-            assert!(polled.delayed);
-            assert_eq!(polled.ticks[0].tick_type, 66);
-            let withdraw = core.unregister_mkt_data(&shared, holder).subscription;
-            assert_eq!(withdraw, (holder == 2).then_some(0));
-        }
-        subscribe(3);
-        assert_eq!(core.check_mdt_needed(3, true), Some(MDT_REALTIME), "a new subscription has its own mode");
-        drop(tx);
-        engine.join().unwrap();
-    }
-}
-
-/// Resolved contracts inherit the feed at their destination slot.
-#[test]
-fn moved_watchers_report_the_destination_subscriptions_type() {
     let core = ClientCore::new();
-    // Answered from another thread, so the wait has to outlast being
-    // scheduled; see `followers_keep_the_subscriptions_market_data_type`.
-    core.set_registration_timeout(std::time::Duration::from_secs(30));
     let shared = SharedState::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(64);
-    let engine = std::thread::spawn(move || {
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::Subscribe { contract, reply_tx: Some(reply), .. } = cmd {
-                // The caller may have stopped waiting; not this thread's to
-                // die over.
-                let _ = reply.send(Ok(contract.con_id as InstrumentId));
-            }
-        }
+    let subscribe = |req_id| core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
+        asked_at: std::time::Instant::now(),
+        req_id, slot: 0, generation: req_id as u64, con_id: 756733, series: Vec::new(),
+        snapshot: false, one_shot: false, mode_9887: core.subscription_mode(), marked: false,
     });
-    for (req_id, con_id, mode) in [(10, 1, 0), (20, 2, 1)] {
-        core.register_mkt_data(
-            &shared, &tx, req_id, con_id, "SPY", "SMART", "STK", "USD", &Default::default(),
-            false, false, "", mode,
-        ).unwrap();
-    }
-    assert_eq!(core.check_mdt_needed(20, true), Some(MDT_DELAYED));
-    core.move_watchers(&shared, 2, 1);
-    assert_eq!(core.watching(20), Some(1));
-    assert_eq!(core.check_mdt_needed(20, true), Some(MDT_REALTIME));
 
     core.set_market_data_type(MDT_DELAYED);
-    core.move_watchers(&shared, 1, 3);
-    for req_id in [10, 20] {
-        assert_eq!(core.watching(req_id), Some(3));
-        assert_eq!(core.check_mdt_needed(req_id, true), Some(MDT_REALTIME), "the feed moves with its slot");
+    subscribe(1);
+    core.set_market_data_type(MDT_REALTIME);
+    subscribe(2);
+    assert_eq!(core.check_mdt_needed(1, true), Some(MDT_DELAYED));
+    assert_eq!(core.check_mdt_needed(2, true), Some(MDT_DELAYED), "follower");
+    for holder in [1, 2] {
+        shared.market.push_quote(0, &Quote {
+            bid: (100 + holder) * crate::types::PRICE_SCALE,
+            ..Default::default()
+        });
+        assert_eq!(core.req_id_for_instrument(0), holder);
+        let polled = core.poll_instrument_ticks(&shared, 0, holder);
+        assert!(polled.delayed);
+        assert_eq!(polled.ticks[0].tick_type, 66);
+        core.unregister_mkt_data(holder);
+        assert_eq!(core.watchers_of(0).is_empty(), holder == 2, "the last one takes the slot's feed with it");
     }
-    drop(tx);
-    engine.join().unwrap();
+    subscribe(3);
+    assert_eq!(core.check_mdt_needed(3, true), Some(MDT_REALTIME), "a new subscription has its own mode");
 }
+
+
 
 /// A request lets go of a slot the engine has taken back.
 ///
@@ -5019,7 +4432,7 @@ fn account_summary_keeps_account_and_ledger_figures_apart() {
     shared.portfolio.note_account_value("AccruedCash", "-2580.38", "CHF");
     shared.portfolio.note_ledger_value("AccruedCash", "-238.28", "CHF");
     shared.portfolio.account_download_is_settled();
-    core.subscribe_account_summary(1, "All").unwrap();
+    core.subscribe_account_summary(1, "All", vec![String::new()]).unwrap();
     let initial = core.prepare_account_summary(&shared, "DU1").unwrap();
     assert_eq!(initial.entries.iter().map(|entry| entry.value.as_str()).collect::<Vec<_>>(), ["-2580.38", "-238.28"]);
     core.last_account_summary.lock().unwrap().get_mut(&1).unwrap().0 -= std::time::Duration::from_secs(180);
@@ -5029,4 +4442,69 @@ fn account_summary_keeps_account_and_ledger_figures_apart() {
     let moved = core.prepare_account_summary(&shared, "DU1").unwrap();
     assert_eq!(moved.entries.len(), 1);
     assert_eq!(moved.entries[0].value, "-2579.70");
+}
+
+#[test]
+fn named_accounts_keep_their_profit_and_summary_figures_separate() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    for (account, daily, net) in [("DU1", 10, "100"), ("DU2", 20, "200")] {
+        let portfolio = shared.portfolio_for(account);
+        portfolio.set_account(&crate::types::AccountState {
+            daily_pnl: daily * PRICE_SCALE, ..Default::default()
+        });
+        portfolio.note_account_value("NetLiquidation", net, "USD");
+        portfolio.account_download_is_settled();
+    }
+    core.subscribe_pnl(1, "DU1").unwrap();
+    core.subscribe_pnl(2, "DU2").unwrap();
+    core.subscribe_pnl(3, "DU1").unwrap();
+    assert_eq!(core.poll_pnl(&shared).iter().map(|u| (u.req_id, u.daily_pnl)).collect::<Vec<_>>(),
+        [(1, 10.0), (2, 20.0), (3, 10.0)]);
+    assert!(core.poll_pnl(&shared).is_empty());
+    core.subscribe_account_summary(4, "NetLiquidation", vec!["DU1".into(), "DU2".into()]).unwrap();
+    let summary = core.prepare_account_summary_for(&shared, 4).unwrap();
+    assert_eq!(summary.entries.iter().map(|e| (e.account.as_str(), e.value.as_str())).collect::<Vec<_>>(),
+        [("DU1", "100"), ("DU2", "200")]);
+    shared.portfolio_for("DU2").set_account(&crate::types::AccountState { daily_pnl: 25 * PRICE_SCALE, ..Default::default() });
+    assert_eq!(core.poll_pnl(&shared).iter().map(|u| (u.req_id, u.daily_pnl)).collect::<Vec<_>>(), [(2, 25.0)]);
+}
+
+#[test]
+fn a_positions_profit_stays_with_its_named_account() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    for (account, position) in [("DU1", 3.0), ("DU2", 7.0)] {
+        let portfolio = shared.portfolio_for(account);
+        portfolio.set_position_info(crate::types::PositionInfo {
+            con_id: 756733, position, avg_cost: 30 * PRICE_SCALE,
+            market_price: 40 * PRICE_SCALE, ..Default::default()
+        });
+        portfolio.account_download_is_settled();
+    }
+    core.subscribe_pnl_single(1, 756733, "DU1").unwrap();
+    core.subscribe_pnl_single(2, 756733, "DU2").unwrap();
+    assert_eq!(core.subscribe_pnl_single(1, 756733, "DU2").unwrap_err().code, 102);
+    let mut updates = core.poll_pnl_single(&shared);
+    updates.sort_by_key(|u| u.req_id);
+    assert_eq!(updates.iter().map(|u| (u.req_id, u.pos, u.daily_pnl)).collect::<Vec<_>>(),
+        [(1, 3.0, 30.0), (2, 7.0, 70.0)]);
+    core.unsubscribe_pnl_single(1);
+    core.subscribe_pnl_single(1, 756733, "DU2").unwrap();
+    let updates = core.poll_pnl_single(&shared);
+    assert_eq!(updates.iter().map(|u| (u.req_id, u.pos)).collect::<Vec<_>>(), [(1, 7.0)]);
+}
+
+#[test]
+fn a_snapshot_keeps_its_deadline_while_its_registration_waits_to_be_read() {
+    let shared = SharedState::new();
+    let core = ClientCore::new();
+    core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
+        req_id: 5, slot: 0, generation: 1, con_id: 756733, series: Vec::new(),
+        snapshot: true, one_shot: false, mode_9887: 0, marked: false,
+        asked_at: std::time::Instant::now() - std::time::Duration::from_secs(12),
+    });
+    assert!(core.check_snapshot_done(5), "a late read does not restart the wait");
 }

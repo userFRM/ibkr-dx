@@ -1,4 +1,4 @@
-# Python API Reference (v0.1.0)
+# Python API Reference (v0.2.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -65,7 +65,7 @@ def disconnect()
 
 #### `is_connected`
 
-Whether there is a session to make requests on.  False before `connect` and after `disconnect`, and false from the moment the engine gives the session up — which it writes down itself. The notice saying so goes out on a channel that drops what it cannot hold, and a program that drives its own loop, or none at all, is told nowhere else: it read connected on a session that was over, and went on issuing requests into it. The Rust surface answers this the same way.
+Whether there is a session to make requests on.  False before `connect` and after `disconnect`, and false from the moment the engine gives the session up — which it writes down itself. The record saying so is delivered only by a read, and a program that drives its own loop, or none at all, is told nowhere else: it read connected on a session that was over, and went on issuing requests into it. The Rust surface answers this the same way.
 
 ```python
 def is_connected()
@@ -199,10 +199,20 @@ def reset()
 
 #### `events_lost`
 
-How many engine events this session's channel discarded.  The engine never waits on a reader — a session that stalled on one would stop carrying market data — so an event arriving at a full channel is dropped. A program that acted on every fill it saw needs to know the difference between that and every fill there was. Zero for a session whose reader kept up.
+How many engine events this session's channel discarded: none.  This surface reads every engine callback through the session's one order, which keeps each record until a read delivers it, and attaches no event channel that could drop one.
 
 ```python
 def events_lost()
+```
+
+---
+
+#### `backlog`
+
+How many requests this client has handed the engine that the engine has not finished with: still waiting to be taken, or taken and held — for the contract to be named, in the order buffer, or behind the session's own replay. Zero before a session exists.  No call waits for the engine to take what it is handed, so this is what bounds what a caller has handed over. Read once per lap of the engine's loop, which takes at most 64 commands a lap.
+
+```python
+def backlog()
 ```
 
 ---
@@ -581,7 +591,7 @@ def qualify_contracts(contracts)
 
 #### `req_pnl`
 
-Request P&L updates for the account.  `account` is required, as a gateway requires it, and one the login does not hold is refused in its words. Another account the login holds is refused too, rather than answered with this account's profit. `model_code` is taken and not applied: there is no model portfolio to name here.
+Subscribe to the named account's profit. The account is checked as a gateway checks it. Each request has its own subscription; a repeated active request number is refused under 102. A model is taken and not applied, with a log notice once per session.
 
 ```python
 def req_pnl(req_id, account, model_code="")
@@ -611,7 +621,7 @@ def cancel_pnl(req_id)
 
 #### `req_pnl_single`
 
-Request P&L for a single position.  `account` is checked as `req_pnl` checks it, and for the reasons given there; `model_code` is taken and not applied.
+Subscribe to a position's profit in the named account. The account is checked as for the account-level profit. A model is taken and not applied, with a log notice once per session.
 
 ```python
 def req_pnl_single(req_id, account, model_code, con_id)
@@ -642,7 +652,7 @@ def cancel_pnl_single(req_id)
 
 #### `req_account_summary`
 
-Request account summary.  `group_name` is checked as a gateway checks it, and refused in its words: an empty one, and on a login that is not an advisor's anything but `All` or `AllNonProp`; `All` where the venue says the login may not ask for it. Empty `tags` are refused the same way. What is answered is the account this session opened under: on a login holding several, `All` is answered for that one account, and the caller is told so on `error` under 321 ahead of the answer.  Two summaries may be open at once, as on a gateway; a third is refused under 322.
+Request an account summary. `All` answers for every account the login holds. Account groups and `AllNonProp` are taken and not applied, with a log notice once per session. Validation and the limit of two standing summary requests follow a gateway.
 
 ```python
 def req_account_summary(req_id, group_name, tags)
@@ -692,7 +702,7 @@ def cancel_positions()
 
 #### `req_account_updates`
 
-Request account updates.  `acct_code` is checked as a gateway checks it. On a login holding one account it is ignored, as a gateway ignores it. On a login holding several, a subscription naming none, or one the login does not hold, is refused in a gateway's words. One it holds, or `All` where the login may ask for every account, is answered with the figures of the account this session opened under, which are the ones the venue states to it, and the caller is told so on `error` under 321.  Subscribing also asks the venue to state the figures now. It restates them on its own schedule otherwise, which is unhurried: a session that has just opened waits tens of seconds for its first set, and a caller that subscribed and then read the account got nothing.
+Subscribe to the named account's figures and holdings, or withdraw the subscription. A single-account login ignores the name as a gateway does. Subscribing asks the venue to restate that account now; the engine holds the answer until its download ends or the existing wait expires.
 
 ```python
 def req_account_updates(subscribe, acct_code="")
@@ -717,7 +727,7 @@ def req_managed_accts()
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models.  `ledger_and_nlv` restricts the answer to the per-currency ledger, as a gateway does: each currency's cash, market values and `NetLiquidationByCurrency`, which is the net liquidation it means. The account's other figures — `NetLiquidation`, `BuyingPower` and the rest — are not delivered on such a request.  The request is held open. A figure that moves after the first batch is reported again under the same number, until `cancelAccountUpdatesMulti` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
+Subscribe to the named account's figures under this request number. `ledger_and_nlv` selects the per-currency ledger and net liquidation. A model is taken and not applied, with a log notice once per session. The initial batch ends with `account_update_multi_end`; changes keep arriving until the request is cancelled.
 
 ```python
 def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=False)
@@ -734,7 +744,7 @@ def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=False)
 
 #### `cancel_account_updates_multi`
 
-Cancel multi-account updates.  The request stops being reported to. The venue keeps the account current whether or not anyone is listening; what stops is the reporting — a figure that moves after this is no longer delivered on `accountUpdateMulti` for this request.
+Cancel multi-account updates.  The request stops being reported to. The venue keeps the account current whether or not anyone is listening; what stops is the reporting — a figure that moves after this is no longer delivered on `accountUpdateMulti` for this request.  A request the engine still holds is withdrawn, never answered; one it answered stops where the withdrawal stands, after its answer.
 
 ```python
 def cancel_account_updates_multi(req_id)
@@ -748,7 +758,7 @@ def cancel_account_updates_multi(req_id)
 
 #### `req_positions_multi`
 
-Request positions across multiple accounts/models.
+Subscribe to holdings of the named account under this request number. A model is taken and not applied, with a log notice once per session.
 
 ```python
 def req_positions_multi(req_id, account, model_code)
@@ -1008,7 +1018,7 @@ def set_news_providers(providers)
 
 #### `req_mkt_data`
 
-Request market data for a contract.  `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
+Request market data for a contract.  With `snapshot`, `tickSnapshotEnd` follows once the snapshot is whole, as a gateway ends one: when the venue has stated the bid, the ask, the last, the open and the close; on a contract of a type a gateway marks as an option (`OPT`, `FOP`, `IOPT`, `WAR`, `EC`) also the option model, 13 (83 delayed); on a delayed feed also the last trade's time, 88; or eleven seconds after the request. Ticks 10, 11 and 12 (80, 81 and 82 delayed), the bid's, the ask's and the last's greeks, are not produced: a gateway computes them with an option model of its own, and the venue does not state them. A gateway's snapshot of an option also waits for them; this client's does not.  `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_mkt_data(req_id, contract, generic_tick_list="", snapshot=False, regulatory_snapshot=False, mkt_data_options=None)
@@ -2474,6 +2484,20 @@ What the venue said about a request, under the number it says it with. Codes fro
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `error_time` | `int` |  |
+| `error_code` | `int` | Error code. |
+| `error_string` | `str` | Error message. |
+| `advanced_order_reject_json` | `str` | JSON with advanced rejection details. |
+
+---
+
+#### `error_from`
+
+An error, with what it is about: a request and whether nothing more follows for it, an order and the operation it answers, a request that carries no number, the session, or a lookup this client made for itself. The number `error` carries can be any of these and does not say which; `origin` says.  Every error reaches a subclass of this class here. By default it goes on to `error`, under the number `origin.id` states it under, so a subclass that overrides only `error` is told exactly what it was told before. A wrapper that is not a subclass and has no method of this name is called on `error`, as the reference client calls it.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `origin` | `ErrorOrigin` | What the error is about: a request, an order and the operation on it, a request with no number of its own, the session, or a lookup this client made for itself. |
 | `error_time` | `int` |  |
 | `error_code` | `int` | Error code. |
 | `error_string` | `str` | Error message. |

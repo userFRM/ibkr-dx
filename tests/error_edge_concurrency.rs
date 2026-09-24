@@ -14,15 +14,29 @@ use ibkr_dx::engine::hot_loop::HotLoop;
 use ibkr_dx::protocol::fix;
 use ibkr_dx::types::*;
 
-fn test_client() -> (EClient, std::sync::mpsc::Receiver<ControlCommand>, Arc<SharedState>) {
+#[path = "support/engine.rs"]
+mod engine;
+use engine::Engine;
+
+fn test_client() -> (EClient, Engine, Arc<SharedState>) {
     let shared = Arc::new(SharedState::new());
-    let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(|| {});
     let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
     // Pre-seed instrument mappings so tests don't need a running hot loop.
     client.seed_instrument(756733, 0);
     client.seed_instrument(0, 1);
+    let rx = Engine::new(rx, &shared);
     (client, rx, shared)
+}
+
+/// What a call came to: a refusal is a record in the session's order, read
+/// here off the session.
+fn outcome(shared: &SharedState) -> Result<(), ibkr_dx::Refusal> {
+    match shared.drain_refused().pop() {
+        None => Ok(()),
+        Some((_, code, message)) => Err(ibkr_dx::Refusal::stated(code as i32, message)),
+    }
 }
 
 fn spy() -> Contract {
@@ -45,7 +59,7 @@ fn place_order_invalid_action_returns_error() {
         action: "INVALID".into(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = { client.place_order(1, &spy(), &order); outcome(&shared) };
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("Invalid action"));
 }
@@ -58,7 +72,7 @@ fn place_order_empty_action_returns_error() {
         action: String::new(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = { client.place_order(1, &spy(), &order); outcome(&shared) };
     assert!(result.is_err());
 }
 
@@ -70,7 +84,7 @@ fn place_order_unsupported_order_type_returns_error() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "NONSENSE".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = { client.place_order(1, &spy(), &order); outcome(&shared) };
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("Unsupported order type"));
 }
@@ -92,7 +106,7 @@ fn place_order_with_an_unmodelled_algo_is_sent() {
         algo_strategy: "Accumulate/Distribute".into(),
         ..Default::default()
     };
-    assert!(client.place_order(1, &spy(), &order).is_ok(), "carried, not refused");
+    assert!({ client.place_order(1, &spy(), &order); outcome(&shared) }.is_ok(), "carried, not refused");
 
     // An order this client does find wrong is still refused: the algorithm is
     // one it models and the parameter is not a number.
@@ -105,7 +119,7 @@ fn place_order_with_an_unmodelled_algo_is_sent() {
         }],
         ..Default::default()
     };
-    assert!(client.place_order(2, &spy(), &bad).is_err(), "read, and found wrong");
+    assert!({ client.place_order(2, &spy(), &bad); outcome(&shared) }.is_err(), "read, and found wrong");
 }
 
 #[test]
@@ -123,16 +137,16 @@ fn place_order_zero_con_id_asks_the_venue_to_name_it() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
     };
-    let refused = client.place_order(1, &contract, &order)
-        .expect_err("with nothing to answer it, the caller is told so");
-    // Nothing answered, which is not the same as the venue answering that it
-    // has no definition. The refusal says so under its own number rather than
-    // borrowing one the venue never sent.
-    assert_eq!(refused.code, ibkr_dx::api::error_codes::Refusal::NO_ANSWER);
-    let asked = rx.try_iter().any(|cmd| matches!(
-        cmd, ControlCommand::FetchContractDetails { contract: ibkr_dx::types::ContractRef { ref symbol, .. }, .. } if symbol == "TEST"
-    ));
-    assert!(asked, "the venue was asked to name the contract");
+    let mut venue = rx.with_trading();
+    client.place_order(1, &contract, &order);
+    assert!(rx.try_recv().is_err(), "nothing is placed while the contract is being named");
+    outcome(&shared).expect("and nothing is refused while the venue is asked");
+    let mut asked = [0u8; 4096];
+    let n = std::io::Read::read(&mut venue, &mut asked).expect("the lookup");
+    assert!(
+        String::from_utf8_lossy(&asked[..n]).contains("\u{1}55=TEST\u{1}"),
+        "the venue was asked to name the contract",
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -146,24 +160,24 @@ fn place_order_zero_con_id_asks_the_venue_to_name_it() {
 /// caller whose record disagrees with this client's has no way to learn it.
 #[test]
 fn cancel_mkt_data_under_a_number_that_holds_nothing_says_so() {
-    let (client, rx, _shared) = test_client();
-    let refused = client.cancel_mkt_data(999);
+    let (client, rx, shared) = test_client();
+    // The engine took the requests before this, so it is what says so.
+    let refused = { client.cancel_mkt_data(999); rx.pump(); outcome(&shared) };
     assert!(
         refused.as_ref().is_err_and(|why| why.code == 300),
         "nothing is being watched under that number: {refused:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
 }
 
 #[test]
 fn cancel_tick_by_tick_under_a_number_that_holds_nothing_says_so() {
-    let (client, rx, _shared) = test_client();
-    let refused = client.cancel_tick_by_tick_data(999);
+    let (client, rx, shared) = test_client();
+    // The engine took the requests before this, so it is what says so.
+    let refused = { client.cancel_tick_by_tick_data(999); rx.pump(); outcome(&shared) };
     assert!(
         refused.as_ref().is_err_and(|why| why.code == 300),
         "nothing is held under that number: {refused:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
 }
 
 /// A withdrawal naming an order this client is not working is answered rather
@@ -177,7 +191,9 @@ fn cancel_tick_by_tick_under_a_number_that_holds_nothing_says_so() {
 fn cancel_order_naming_nothing_is_answered_rather_than_sent() {
     let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
-    let refused = client.cancel_order(999999, "");
+    client.cancel_order(999999, "");
+    assert!(rx.try_recv().is_err(), "nothing was sent under it");
+    let refused = outcome(&shared);
     assert!(
         refused.as_ref().is_err_and(|why| why.code == 135),
         "no order is working under that number: {refused:?}",
@@ -187,9 +203,11 @@ fn cancel_order_naming_nothing_is_answered_rather_than_sent() {
 
 #[test]
 fn req_global_cancel_no_instruments_no_commands() {
-    let (client, rx, _shared) = test_client();
-    client.req_global_cancel("").unwrap();
+    let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
+    client.req_global_cancel("");
     assert!(rx.try_recv().is_err());
+    outcome(&shared).unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -202,7 +220,7 @@ fn disconnect_during_active_subscription() {
     shared.market.set_instrument_count(1);
 
     // Subscribe
-    let _ = client.req_mkt_data(1, &spy(), "", false, false);
+    let _ = { client.req_mkt_data(1, &spy(), "", false, false); outcome(&shared) };
     while rx.try_recv().is_ok() {}
 
     // Disconnect
@@ -554,7 +572,7 @@ fn concurrent_seqlock_multiple_readers() {
 #[test]
 fn concurrent_quote_by_instrument() {
     let shared = Arc::new(SharedState::new());
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(|| {});
     let client = Arc::new(EClient::from_parts(shared.clone(), tx, handle, "DU123".into()));
 
@@ -590,7 +608,7 @@ fn concurrent_quote_by_instrument() {
 #[test]
 fn concurrent_disconnect_during_process_msgs() {
     let shared = Arc::new(SharedState::new());
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(|| {});
     let client = Arc::new(EClient::from_parts(shared.clone(), tx, handle, "DU123".into()));
 
@@ -631,33 +649,19 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
 
-    // Answers registrations the way the engine does, and keeps what it was
-    // sent. A client assembled from parts has no engine behind it, so without
-    // this every subscribe waits out the registration timeout and fails, no
-    // request is ever mapped to an instrument, and the stale-state assertion
-    // at the end holds before the loop has run once.
-    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let engine = {
-        let sent = Arc::clone(&sent);
-        thread::spawn(move || {
-            while let Ok(command) = rx.recv() {
-                if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = &command {
-                    let _ = reply.send(Ok(0));
-                }
-                sent.lock().unwrap().push(command);
-            }
-        })
-    };
-
+    // Each call is taken by the engine before the next, and what it was
+    // handed is kept.
+    let mut sent = Vec::new();
     const CYCLES: usize = 100;
     for _ in 0..CYCLES {
-        client.req_mkt_data(1, &spy(), "", false, false).expect("the subscription was refused");
-        client.cancel_mkt_data(1).unwrap();
+        { client.req_mkt_data(1, &spy(), "", false, false); sent.extend(rx.try_iter()); outcome(&shared) }
+            .expect("the subscription was refused");
+        { client.cancel_mkt_data(1); sent.extend(rx.try_iter()); outcome(&shared) }.unwrap();
     }
-
 
     // After all subscribe/unsubscribe cycles, mapping should be cleared
     let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
     let q = Quote {
         bid: 999 * PRICE_SCALE,
         ..Quote::default()
@@ -667,16 +671,13 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
     // No ticks should arrive since all subscriptions were cancelled
     let ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();
     assert!(ticks.is_empty(), "no ticks after final unsubscribe");
+    assert!(
+        w.events.iter().all(|e| !e.starts_with("error:1:")),
+        "every cycle's request and withdrawal were taken: {:?}", w.events,
+    );
 
-    // Counted once the channel is closed and the stub has drained it: read
-    // before that, the last command of the loop is still in flight and the
-    // count is one short of what was sent.
-    drop(client);
-    engine.join().expect("the engine stub panicked");
-
-    let sent = sent.lock().unwrap();
     let subscribed = sent.iter().filter(|c| matches!(c, ControlCommand::Subscribe { .. })).count();
-    let withdrawn = sent.iter().filter(|c| matches!(c, ControlCommand::Unsubscribe { .. })).count();
+    let withdrawn = sent.iter().filter(|c| matches!(c, ControlCommand::CancelMktData { .. })).count();
     assert_eq!(subscribed, CYCLES, "not every cycle subscribed");
     assert_eq!(withdrawn, CYCLES, "not every cycle withdrew what it subscribed");
 }
@@ -689,7 +690,7 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
 fn concurrent_place_order_and_process_msgs() {
     let shared = Arc::new(SharedState::new());
     shared.market.set_instrument_count(1);
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(|| {});
     let client = Arc::new(EClient::from_parts(shared.clone(), tx, handle, "DU123".into()));
 
@@ -720,7 +721,7 @@ fn concurrent_place_order_and_process_msgs() {
                 action: "BUY".into(), total_quantity: 1.0,
                 order_type: "MKT".into(), ..Default::default()
             };
-            let _ = client_b.place_order(0, &spy(), &order);
+            let _ = { client_b.place_order(0, &spy(), &order); outcome(&shared) };
         }
     });
 
@@ -813,7 +814,7 @@ fn shared_state_all_drains_empty_after_first_call() {
         status: OrderStatus::Filled, filled_qty: 1.0, remaining_qty: 0.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0 });
     ss.orders.push_cancel_reject(CancelReject { order_id: 1, instrument: 0,
         reject_type: 1, reason_code: 0, answers_a_live_change: true, still_working: None, timestamp_ns: 0 });
-    ss.market.push_tbt_trade(TbtTrade { req_id: 1, instrument: 0, price: PRICE_SCALE,
+    ss.market.push_tbt_trade(TbtTrade { req_id: 1, kind: ibkr_dx::types::TbtType::Last, instrument: 0, price: PRICE_SCALE,
         size: 1, timestamp: 0, exchange: String::new(), conditions: String::new(),
         past_limit: false, unreported: false });
     ss.market.push_tbt_quote(TbtQuote { req_id: 1, instrument: 0, bid: PRICE_SCALE, ask: PRICE_SCALE,

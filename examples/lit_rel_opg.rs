@@ -69,10 +69,8 @@ fn run_one(
     state.lock().unwrap().statuses.clear();
     state.lock().unwrap().rejects.clear();
 
-    if let Err(e) = client.place_order(order_id, &aapl(), &order) {
-        eprintln!("  place_order failed: {e}");
-        return false;
-    }
+    // A refusal arrives on `error`, in its place, and the pump below reads it.
+    client.place_order(order_id, &aapl(), &order);
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut accepted = false;
@@ -96,7 +94,7 @@ fn run_one(
 
     if accepted {
         println!("  -> accepted (will cancel)");
-        let _ = client.cancel_order(order_id, "");
+        client.cancel_order(order_id, "");
         let cancel_deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < cancel_deadline {
             client.process_msgs(wrapper);

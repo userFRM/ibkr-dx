@@ -64,8 +64,6 @@ pub struct GatewaySettings {
     /// The port a farm connection opens on, where the venue's routing names
     /// none. Logging in is always on the port the protocol fixes for it.
     pub port: Option<u16>,
-    /// How long it waited to be admitted, in milliseconds.
-    pub registration_timeout_ms: Option<u64>,
     /// How much it wrote down. Logging reads this from `IBKR_DX_LOG_LEVEL`.
     pub log_level: Option<String>,
     /// Where it wrote it. Logging reads this from `IBKR_DX_LOG_DIR`.
@@ -163,8 +161,6 @@ pub struct SessionSettings {
     /// Which port a farm connection opens on, where the venue's routing names
     /// none.
     pub port: u16,
-    /// How long a call waits for the engine to name a contract before giving up.
-    pub registration_timeout: std::time::Duration,
     /// Which executions a session asks for when it opens.
     pub execution_reports: ExecutionReportScope,
     /// Whether a US stock on Nasdaq is named by the older spelling. Takes the
@@ -256,12 +252,6 @@ impl GatewaySettings {
                 .port
                 .or_else(|| std::env::var("IBKR_DX_MISC_PORT").ok().and_then(|v| v.parse().ok()))
                 .unwrap_or(crate::config::MISC_PORT),
-            registration_timeout: self
-                .registration_timeout_ms
-                .or_else(|| {
-                    std::env::var("IBKR_DX_REGISTRATION_TIMEOUT_MS").ok().and_then(|v| v.parse().ok())
-                })
-                .map_or(std::time::Duration::from_secs(5), std::time::Duration::from_millis),
             execution_reports: self.execution_reports.unwrap_or_else(|| {
                 // However it is spelled, and said out loud when it is spelled
                 // as neither. Matched against lowercase alone, `Today` fell to
@@ -372,6 +362,16 @@ mod tests {
     /// default. A program configured the old way keeps working.
     #[test]
     fn the_environment_is_what_a_caller_states_nothing_over() {
+        // Environment changes belong to this test's process alone.
+        if std::env::var("RUST_TEST_THREADS").as_deref() != Ok("1") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "settings::tests::the_environment_is_what_a_caller_states_nothing_over"])
+                .env("RUST_TEST_THREADS", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
         unsafe { std::env::set_var("IBKR_DX_LOCALE", "fr_FR") };
         let from_environment = GatewaySettings::default().resolve();
         assert_eq!(from_environment.locale, "fr_FR");
@@ -442,6 +442,7 @@ mod tests {
     #[test]
     fn a_setting_that_would_cut_itself_into_fields_is_refused() {
         let cut = GatewaySettings {
+            locale: Some(crate::config::IB_LOCALE.to_string()),
             timezone: Some("UTC\u{1}6900=0".into()),
             encoded: Some("j/p/en_US/S;extra".into()),
             build: Some("9999".into()),
@@ -472,7 +473,6 @@ mod tests {
             lan_ip: Some("10.0.0.9".into()),
             market_data_host: Some("m".into()),
             port: Some(1),
-            registration_timeout_ms: Some(2),
             log_level: Some("debug".into()),
             log_dir: Some("d".into()),
             log_queue: Some(4096),
@@ -491,7 +491,6 @@ mod tests {
         assert_eq!(resolved.lan_ip.as_deref(), Some("10.0.0.9"));
         assert_eq!(resolved.market_data_host.as_deref(), Some("m"));
         assert_eq!(resolved.port, 1);
-        assert_eq!(resolved.registration_timeout, std::time::Duration::from_millis(2));
         assert_eq!(resolved.execution_reports, ExecutionReportScope::Today);
         assert!(!resolved.island_for_nasdaq);
         assert!(!resolved.reconnect_on_socket_err);
@@ -510,7 +509,7 @@ mod tests {
         let GatewaySettings {
             timezone: _, locale: _, build: _, version: _, encoded: _, hardware_id: _,
             mac_address: _, lan_ip: _,
-            market_data_host: _, port: _, registration_timeout_ms: _,
+            market_data_host: _, port: _,
             log_level: _, log_dir: _, log_queue: _,
             execution_reports: _, island_for_nasdaq: _, reconnect_on_socket_err: _,
         } = all;

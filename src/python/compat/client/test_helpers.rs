@@ -6,11 +6,87 @@ use std::sync::atomic::Ordering;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use crate::bridge::{Event, SharedState};
+use crate::bridge::SharedState;
 use crate::control::historical::{HistoricalBar, HistoricalResponse, HeadTimestampResponse};
 use crate::types::*;
 
 use super::EClient;
+
+/// The engine's side of a test-connected client.
+///
+/// A test session has no venue behind it. What the engine carries in its own
+/// loop — an order from the call to the wire, a question answered from what
+/// the session holds, the completed-orders exchange — is handed to a loop of
+/// its own, and what that loop builds is kept as the commands it would send.
+/// Everything else a call sends is kept as it was sent, and a question as it
+/// was asked, for a test to read.
+pub(crate) struct TestEngine {
+    into: std::sync::mpsc::Sender<ControlCommand>,
+    engine: crate::engine::hot_loop::HotLoop,
+    out: std::collections::VecDeque<String>,
+}
+
+impl TestEngine {
+    fn new(shared: &Arc<SharedState>) -> Self {
+        let mut engine = crate::engine::hot_loop::HotLoop::new(shared.clone(), None, None);
+        let (into, taken) = std::sync::mpsc::channel();
+        engine.set_control_rx(taken);
+        Self { into, engine, out: std::collections::VecDeque::new() }
+    }
+
+    /// Take what the calls sent, and give the loop a lap.
+    fn take(&mut self, rx: &std::sync::mpsc::Receiver<ControlCommand>) {
+        for cmd in rx.try_iter() {
+            let order = matches!(
+                cmd,
+                ControlCommand::Place(_)
+                    | ControlCommand::CancelOrder { .. }
+                    | ControlCommand::CancelOrderByPermId { .. }
+                    | ControlCommand::GlobalCancel { .. }
+                    | ControlCommand::Exercise(_)
+                    | ControlCommand::Bracket(_)
+            );
+            let question = matches!(
+                cmd,
+                ControlCommand::Ask(_)
+                    | ControlCommand::Retire(_)
+                    | ControlCommand::FetchCompletedOrders { .. }
+                    | ControlCommand::Subscribe { .. }
+                    | ControlCommand::CancelMktData { .. }
+                    | ControlCommand::CancelCalculation { .. }
+                    | ControlCommand::SubscribeTbt { .. }
+                    | ControlCommand::UnsubscribeTbt { .. }
+            );
+            // An order is read back as what the loop builds of it; a question
+            // or a market-data request as it was asked, since the loop takes it
+            // rather than sending it on as it stands.
+            if question {
+                self.out.push_back(format!("{cmd:?}"));
+            }
+            if order || question {
+                let _ = self.into.send(cmd);
+            } else {
+                self.out.push_back(format!("{cmd:?}"));
+            }
+        }
+        self.engine.poll_once();
+        let built: Vec<String> = self.engine.context_mut().drain_pending_orders()
+            .map(|req| format!("{:?}", ControlCommand::Order(req)))
+            .collect();
+        self.out.extend(built);
+    }
+}
+
+impl EClient {
+    /// Give a test session's engine what the calls have sent so far.
+    pub(crate) fn _test_pump(&self) {
+        let rx = self._test_control_rx.lock().unwrap();
+        let mut engine = self._test_engine.lock().unwrap();
+        if let (Some(rx), Some(engine)) = (rx.as_ref(), engine.as_mut()) {
+            engine.take(rx);
+        }
+    }
+}
 
 /// A second a test-injected tick can plausibly have happened in.
 ///
@@ -34,7 +110,8 @@ impl EClient {
     }
 
     /// Seed the venue's model for a contract, as a market-data subscription
-    /// does when it publishes tick 13.
+    /// does when it publishes tick 13: the model, then the answers to the
+    /// calculations kept for it, as the engine pushes them.
     #[doc(hidden)]
     #[pyo3(signature = (instrument, implied_vol, opt_price, und_price, rho=f64::MAX, fugit=f64::MAX))]
     fn _test_push_option_model(
@@ -52,6 +129,7 @@ impl EClient {
             fugit,
             ..Default::default()
         });
+        crate::client_core::answer_kept_calculations(&shared, Some(instrument), None);
         Ok(())
     }
 
@@ -177,6 +255,7 @@ impl EClient {
             return Err(PyRuntimeError::new_err("Already connected"));
         }
         let shared = Arc::new(SharedState::new());
+        shared.set_session_account(&account_id);
         // No venue behind a test session, so the replay of what the account
         // already has on is over before it starts. Left unsaid, every request
         // for the open orders waits out the bound before answering. A test of
@@ -190,22 +269,20 @@ impl EClient {
         // want of one, which is the answer for a session that has heard
         // nothing — not for one that has just opened.
         shared.market.note_venue_time(&crate::protocol::datetime::chrono_free_timestamp());
-        let (tx, rx) = std::sync::mpsc::sync_channel(4096);
-        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(256);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self._test_engine.lock().unwrap() = Some(TestEngine::new(&shared));
         *self.shared.lock().unwrap() = Some(shared);
         *self.control_tx.lock().unwrap() = Some(tx);
-        *self.event_rx.lock().unwrap() = Some(event_rx);
         *self.account_id.lock().unwrap() = Some(account_id);
-        // Store event_tx so _test_push_disconnect_event can use it.
-        *self._test_event_tx.lock().unwrap() = Some(event_tx);
         // Kept alive: dropping the receiving end closes the channel, and every
         // request that sends one then fails on a client reporting itself
         // connected.
         *self._test_control_rx.lock().unwrap() = Some(rx);
         self.next_order_id.store(1000, Ordering::Relaxed);
         self.session_ended.store(false, Ordering::Release);
+        self.close_notified.store(false, Ordering::Release);
         self.port.store(port, Ordering::Release);
-        let accounts = accounts.unwrap_or_default();
+        let accounts = accounts.unwrap_or_else(|| vec![self.account()]);
         // What a logon names, which the checks on orders and on the account
         // requests read, as they read it on a real session.
         if let Some(shared) = self.shared.lock().unwrap().as_ref() {
@@ -225,6 +302,7 @@ impl EClient {
     #[doc(hidden)]
     fn _test_drop_engine(&self) {
         *self._test_control_rx.lock().unwrap() = None;
+        *self._test_engine.lock().unwrap() = None;
     }
 
     /// How many disconnects this client has counted.
@@ -261,9 +339,10 @@ impl EClient {
     /// answers both without publishing the engine's own types.
     #[doc(hidden)]
     fn _test_take_commands(&self) -> Vec<String> {
-        let held = self._test_control_rx.lock().unwrap();
-        let Some(rx) = held.as_ref() else { return Vec::new() };
-        rx.try_iter().map(|cmd| format!("{cmd:?}")).collect()
+        self._test_pump();
+        let mut engine = self._test_engine.lock().unwrap();
+        let Some(engine) = engine.as_mut() else { return Vec::new() };
+        engine.out.drain(..).collect()
     }
 
     /// Say which slot a contract's prices arrive in. Worth stating separately
@@ -274,20 +353,41 @@ impl EClient {
         self.core.con_id_to_instrument.lock().unwrap().insert(con_id, instrument);
     }
 
-    /// Map a reqId to an instrument slot.
+    /// Map a reqId to an instrument slot, on this side and in the engine's
+    /// record of the requests it has taken — under the contract
+    /// `_test_map_con_id` put in that slot, where it put one.
     #[doc(hidden)]
     fn _test_map_instrument(&self, req_id: i64, instrument: u32) {
         self.core.req_to_instrument.lock().unwrap().insert(req_id, instrument);
         self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
+        let con_id = self.core.con_id_to_instrument.lock().unwrap().iter()
+            .find_map(|(con_id, at)| (*at == instrument).then_some(*con_id))
+            .unwrap_or(0);
+        if let Some(engine) = self._test_engine.lock().unwrap().as_mut() {
+            engine.engine.md_requests.insert(req_id, crate::engine::hot_loop::market_requests::MdRequest {
+                slot: instrument, con_id, series: Vec::new(), news: None, scan: false,
+                for_calculation: false,
+            });
+        }
     }
 
-    /// Say which slot a tick stream is carried in, under the number the
-    /// caller gave it. Kept apart from the quote mapping: a request for
-    /// trades held in the quote table was handed the contract's quotes, and
-    /// withdrawing it took those away from whoever was watching them.
+    /// Say a tick stream is running under the number the caller gave it, in
+    /// this slot, as the engine records one it has asked the venue for.
     #[doc(hidden)]
     fn _test_map_tbt(&self, req_id: i64, instrument: u32) {
-        self.core.tbt_to_instrument.lock().unwrap().insert(req_id, instrument);
+        if let Some(engine) = self._test_engine.lock().unwrap().as_mut() {
+            engine.engine.hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
+                instrument,
+                query_id: format!("tbt_{req_id}"),
+                kind: TbtType::Last,
+                caller_req_id: req_id,
+                venue_id: 0,
+                ignore_size: false,
+                min_tick: 0,
+                size_tick: 0.0,
+                running: Default::default(),
+            });
+        }
     }
 
     /// Set instrument count on SharedState.
@@ -298,14 +398,16 @@ impl EClient {
         Ok(())
     }
 
-    /// Push a quote into SharedState for a given instrument.
+    /// Push a quote into SharedState for a given instrument, stamped with the
+    /// last trade's time `timestamp_ns` (none where it is nought).
     #[doc(hidden)]
-    #[pyo3(signature = (instrument, bid=0.0, ask=0.0, last=0.0, bid_size=0, ask_size=0, last_size=0, volume=0, open=0.0, high=0.0, low=0.0, close=0.0))]
+    #[pyo3(signature = (instrument, bid=0.0, ask=0.0, last=0.0, bid_size=0, ask_size=0, last_size=0, volume=0, open=0.0, high=0.0, low=0.0, close=0.0, timestamp_ns=1))]
     fn _test_push_quote(
         &self, instrument: u32,
         bid: f64, ask: f64, last: f64,
         bid_size: i64, ask_size: i64, last_size: i64,
         volume: i64, open: f64, high: f64, low: f64, close: f64,
+        timestamp_ns: u64,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
@@ -317,7 +419,7 @@ impl EClient {
             open: (open * ps) as i64, high: (high * ps) as i64,
             low: (low * ps) as i64, close: (close * ps) as i64,
             bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
-            timestamp_ns: 1,
+            timestamp_ns,
             halted: 0,
         };
         shared.market.push_quote(instrument, &q);
@@ -392,6 +494,13 @@ impl EClient {
             },
             Default::default(),
         );
+    }
+
+    /// State a generic tick's figures on a contract's slot.
+    #[doc(hidden)]
+    fn _test_push_stated_figures(&self, instrument: u32, tick: u32, values: Vec<f64>) -> PyResult<()> {
+        self.shared_state()?.market.note_stated_figures(instrument, tick, values);
+        Ok(())
     }
 
     /// Push an order update into SharedState.
@@ -542,6 +651,11 @@ impl EClient {
             client_id: self.client_id.load(Ordering::Acquire),
             ..Default::default()
         };
+        // And the engine's own record of what this session placed, which the
+        // checks on a withdrawal or a replace read.
+        if let Some(engine) = self._test_engine.lock().unwrap().as_mut() {
+            engine.engine.intake.note_placed(order_id, order.clone(), instrument);
+        }
         self.core.track_order(order_id, contract, order, instrument);
         Ok(())
     }
@@ -594,30 +708,24 @@ impl EClient {
         Ok(())
     }
 
-    /// Say which trade stream a tick-by-tick request asked for, as
-    /// `req_tick_by_tick_data` records it when the subscription is made.
+    /// Push a TBT trade into SharedState, on the trade stream `kind` names.
     #[doc(hidden)]
-    fn _test_set_tbt_kind(&self, req_id: i64, tick_type: &str) -> PyResult<()> {
-        let kind = match tick_type {
-            "AllLast" => 2,
-            "Last" => 1,
+    #[pyo3(signature = (instrument, price, size, exchange, kind="Last"))]
+    fn _test_push_tbt_trade(
+        &self, instrument: u32, price: f64, size: i64, exchange: &str, kind: &str,
+    ) -> PyResult<()> {
+        let kind = match kind {
+            "AllLast" => crate::types::TbtType::AllLast,
+            "Last" => crate::types::TbtType::Last,
             other => return Err(PyRuntimeError::new_err(format!("no such trade stream: {other}"))),
         };
-        self.tbt_kind.lock().unwrap().insert(req_id, kind);
-        Ok(())
-    }
-
-    /// Push a TBT trade into SharedState.
-    #[doc(hidden)]
-    fn _test_push_tbt_trade(
-        &self, instrument: u32, price: f64, size: i64, exchange: &str,
-    ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
         shared.market.push_tbt_trade(TbtTrade {
             // A size is held the way every size is held, so what a test
             // pushes reads back as the number of shares it named.
             req_id: instrument as i64,
+            kind,
             instrument,
             price: (price * ps) as i64,
             size: size * crate::types::QTY_SCALE,
@@ -731,7 +839,9 @@ impl EClient {
     #[doc(hidden)]
     fn _test_push_order_inactive(&self, order_id: u64, code: i32, message: &str) -> PyResult<()> {
         let shared = self.shared_state()?;
-        shared.orders.push_order_inactive(order_id, code, message.to_string());
+        shared.orders.push_order_inactive(
+            order_id, crate::types::model::OrderOp::Venue, code, message.to_string(),
+        );
         Ok(())
     }
 
@@ -755,20 +865,21 @@ impl EClient {
 
     /// Push account state into SharedState.
     #[doc(hidden)]
-    #[pyo3(signature = (net_liquidation=0.0, buying_power=0.0, daily_pnl=0.0, unrealized_pnl=0.0, realized_pnl=0.0))]
+    #[pyo3(signature = (net_liquidation=0.0, buying_power=0.0, daily_pnl=0.0, unrealized_pnl=0.0, realized_pnl=0.0, account=""))]
     fn _test_set_account(
         &self, net_liquidation: f64, buying_power: f64,
-        daily_pnl: f64, unrealized_pnl: f64, realized_pnl: f64,
+        daily_pnl: f64, unrealized_pnl: f64, realized_pnl: f64, account: &str,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
+        let portfolio = shared.portfolio_for(account);
         let ps = PRICE_SCALE as f64;
-        let mut acct = shared.portfolio.account();
+        let mut acct = portfolio.account();
         acct.net_liquidation = (net_liquidation * ps) as i64;
         acct.buying_power = (buying_power * ps) as i64;
         acct.daily_pnl = (daily_pnl * ps) as i64;
         acct.unrealized_pnl = (unrealized_pnl * ps) as i64;
         acct.realized_pnl = (realized_pnl * ps) as i64;
-        shared.portfolio.set_account(&acct);
+        portfolio.set_account(&acct);
         // And as the venue states them, which is what the account is reported
         // from: a figure this client holds and the venue never sent is not one
         // a caller hears about.
@@ -779,7 +890,7 @@ impl EClient {
             ("UnrealizedPnL", unrealized_pnl),
             ("RealizedPnL", realized_pnl),
         ] {
-            shared.portfolio.note_account_value(key, &format!("{value:.2}"), "");
+            portfolio.note_account_value(key, &format!("{value:.2}"), "");
         }
         Ok(())
     }
@@ -795,6 +906,24 @@ impl EClient {
     #[doc(hidden)]
     fn _test_finish_order_replay(&self) -> PyResult<()> {
         self.shared_state()?.orders.set_replay_done();
+        Ok(())
+    }
+
+    /// Say the venue has begun naming the orders already working and has not
+    /// finished, with the bound on the wait for it starting now.
+    #[doc(hidden)]
+    fn _test_begin_order_replay(&self) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.orders.replay_is_pending();
+        shared.orders.note_naming_began();
+        Ok(())
+    }
+
+    /// Say the executions this session holds start at `from`, in seconds
+    /// since the epoch.
+    #[doc(hidden)]
+    fn _test_hold_executions_from(&self, from: i64) -> PyResult<()> {
+        self.shared_state()?.reference.set_executions_held_from(Some(from));
         Ok(())
     }
 
@@ -830,13 +959,14 @@ impl EClient {
     /// key and in its own currency — on the per-currency ledger, where
     /// `ledger` says so.
     #[doc(hidden)]
-    #[pyo3(signature = (key, value, currency, ledger=false))]
-    fn _test_note_account_value(&self, key: &str, value: &str, currency: &str, ledger: bool) -> PyResult<()> {
+    #[pyo3(signature = (key, value, currency, ledger=false, account=""))]
+    fn _test_note_account_value(&self, key: &str, value: &str, currency: &str, ledger: bool, account: &str) -> PyResult<()> {
         let shared = self.shared_state()?;
+        let portfolio = shared.portfolio_for(account);
         if ledger {
-            shared.portfolio.note_ledger_value(key, value, currency);
+            portfolio.note_ledger_value(key, value, currency);
         } else {
-            shared.portfolio.note_account_value(key, value, currency);
+            portfolio.note_account_value(key, value, currency);
         }
         Ok(())
     }
@@ -848,26 +978,28 @@ impl EClient {
     /// holding set before this is one the download named rather than one the
     /// venue has stopped naming.
     #[doc(hidden)]
-    fn _test_finish_account_download(&self) -> PyResult<()> {
+    #[pyo3(signature = (account=""))]
+    fn _test_finish_account_download(&self, account: &str) -> PyResult<()> {
         let shared = self.shared_state()?;
-        shared.portfolio.set_account_download_complete("AR.1");
-        shared.portfolio.account_download_is_settled();
+        let portfolio = shared.portfolio_for(account);
+        portfolio.set_account_download_complete("AR.1");
+        portfolio.account_download_is_settled();
         Ok(())
     }
 
     /// Push a position into SharedState.
     #[doc(hidden)]
-    fn _test_set_position(&self, con_id: i64, position: f64, avg_cost: f64) -> PyResult<()> {
+    #[pyo3(signature = (con_id, position, avg_cost, account=""))]
+    fn _test_set_position(&self, con_id: i64, position: f64, avg_cost: f64, account: &str) -> PyResult<()> {
         let shared = self.shared_state()?;
+        let portfolio = shared.portfolio_for(account);
         let ps = PRICE_SCALE as f64;
-        shared.portfolio.set_position_info(PositionInfo {
+        portfolio.set_position_info(PositionInfo {
             con_id, position, avg_cost: (avg_cost * ps) as i64, ..Default::default()
         });
         Ok(())
     }
 
-    /// Run ONE iteration of the event dispatch loop.
-    #[doc(hidden)]
     #[doc(hidden)]
     fn _test_peek_ask_id(&self) -> PyResult<i64> {
         Ok(super::ask::peek_ask_id(&self.shared_state()?))
@@ -903,6 +1035,8 @@ impl EClient {
         Ok(())
     }
 
+    /// Run one iteration of the event dispatch loop.
+    #[doc(hidden)]
     fn _test_dispatch_once(&self, py: Python<'_>) -> PyResult<()> {
         if !self.connected.load(std::sync::atomic::Ordering::Acquire) {
             return Err(PyRuntimeError::new_err("Not connected"));
@@ -911,43 +1045,51 @@ impl EClient {
         self.dispatch_once(py, &shared)
     }
 
-    /// Inject an Event::Disconnected into the event channel (test-only).
+    /// The connection going, as the engine says it (test-only).
     #[doc(hidden)]
     fn _test_push_disconnect_event(&self) -> PyResult<()> {
-        let tx = self._test_event_tx.lock().unwrap();
-        let tx = tx.as_ref().ok_or_else(|| PyRuntimeError::new_err("No event channel"))?;
-        tx.send(Event::Disconnected).map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+        self.shared_state()?.set_connection_lost();
+        Ok(())
     }
 
-    /// Inject an `Event::Reconnected` — a transport carrying again (test-only).
+    /// The connection coming back, as the engine says it (test-only).
     #[doc(hidden)]
     fn _test_push_reconnect_event(&self) -> PyResult<()> {
-        let tx = self._test_event_tx.lock().unwrap();
-        let tx = tx.as_ref().ok_or_else(|| PyRuntimeError::new_err("No event channel"))?;
-        tx.send(Event::Reconnected).map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+        self.shared_state()?.set_connection_restored();
+        Ok(())
     }
 
-    /// Inject an `Event::Stopped` — a session the caller ended (test-only).
+    /// A session stopped, as the engine ends one: the reason, the loss it
+    /// records, and the session's last record (test-only).
     #[doc(hidden)]
     fn _test_push_stopped_event(&self) -> PyResult<()> {
-        let tx = self._test_event_tx.lock().unwrap();
-        let tx = tx.as_ref().ok_or_else(|| PyRuntimeError::new_err("No event channel"))?;
-        tx.send(Event::Stopped).map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+        let shared = self.shared_state()?;
+        shared.reference.set_session_over(crate::reliability::retry::DisconnectReason::ByDesign.as_str());
+        shared.set_connection_lost();
+        shared.push_closed();
+        Ok(())
     }
 
-    /// Raise the lossless connection-lost flag *without* sending the event, to
-    /// stand in for a bounded event channel that dropped the transition under a
-    /// consumer too far behind to drain it (test-only).
+    /// The same as `_test_push_disconnect_event`, by the name the engine's
+    /// own setter has (test-only).
     #[doc(hidden)]
     fn _test_set_connection_lost(&self) -> PyResult<()> {
         self.shared_state()?.set_connection_lost();
         Ok(())
     }
 
-    /// Raise the lossless connection-restored flag without the event (test-only).
+    /// The same as `_test_push_reconnect_event` (test-only).
     #[doc(hidden)]
     fn _test_set_connection_restored(&self) -> PyResult<()> {
         self.shared_state()?.set_connection_restored();
+        Ok(())
+    }
+
+    /// The session's last record, as the engine pushes it when its loop ends
+    /// (test-only).
+    #[doc(hidden)]
+    fn _test_push_closed(&self) -> PyResult<()> {
+        self.shared_state()?.push_closed();
         Ok(())
     }
 }

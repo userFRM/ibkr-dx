@@ -6,7 +6,6 @@
 //! decides whether the session exists.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 use num_bigint::BigUint;
@@ -167,7 +166,7 @@ pub(super) fn parse_auth_start_token(auth_start: &str) -> (String, Option<String
 /// asks for the second factor again. Skipping it there left an unattended
 /// client retrying a handshake it could never finish.
 pub(super) fn run_second_factor(
-    tls: &mut native_tls::TlsStream<TcpStream>,
+    tls: &mut native_tls::TlsStream<crate::protocol::connection::LogonSocket>,
     sf: SecondFactor<'_>,
 ) -> io::Result<SecondFactorOutcome> {
     let mut unread: Option<Vec<u8>> = None;

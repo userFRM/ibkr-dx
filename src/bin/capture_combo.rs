@@ -113,10 +113,9 @@ fn main() {
             ..Default::default()
         };
         println!("\n  {what}");
-        match client.place_order(id + n as i64, &spread(legs), &order) {
-            Ok(()) => {}
-            Err(e) => { println!("    refused before sending: {e}"); continue }
-        }
+        // A refusal, this client's or the venue's, is heard below with what
+        // the venue says.
+        client.place_order(id + n as i64, &spread(legs), &order);
         let deadline = Instant::now() + Duration::from_secs(12);
         while Instant::now() < deadline {
             client.process_msgs(&mut heard);

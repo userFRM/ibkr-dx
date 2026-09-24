@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     println!("{} bars, preview {}", bars.len(), preview.status);
 
-    client.req_mkt_data(1, &spy, "", false, false)?;
+    client.req_mkt_data(1, &spy, "", false, false);
     std::thread::sleep(std::time::Duration::from_secs(2));
     if let Some(quote) = client.quote(1) {
         // Prices are held as integers scaled by `PRICE_SCALE`.

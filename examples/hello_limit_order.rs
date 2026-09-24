@@ -77,13 +77,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("placing BUY 1 SPY LMT 1.00 (oid={order_id})");
-    client.place_order(order_id, &spy, &order)?;
+    client.place_order(order_id, &spy, &order);
 
     pump_until(&client, &mut wrapper, &state, Duration::from_secs(15),
                |s| s.statuses.iter().any(|(id, st)| *id == order_id && st == "Submitted"));
 
     println!("cancelling oid={order_id}");
-    client.cancel_order(order_id, "")?;
+    client.cancel_order(order_id, "");
 
     pump_until(&client, &mut wrapper, &state, Duration::from_secs(15),
                |s| s.statuses.iter().any(|(id, st)| *id == order_id && st == "Cancelled"));

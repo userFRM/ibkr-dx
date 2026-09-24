@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use native_tls::TlsConnector;
+use crate::protocol::connection::LogonSocket;
 use num_bigint::BigUint;
 use zeroize::Zeroizing;
 
@@ -434,6 +435,9 @@ pub(crate) fn farm_destination(
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing →
 /// Connection.
+///
+/// `cancel` takes the attempt back, read before the dial and before the
+/// logon goes out.
 pub fn connect_farm(
     settings: &crate::settings::SessionSettings,
     host: &str,
@@ -449,19 +453,33 @@ pub fn connect_farm(
     stated_port: Option<u16>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> io::Result<Connection> {
-    let cancelled = || {
-        cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-    };
-    if cancelled() {
-        return Err(cancelled_by_the_client(&format!("{farm_id} reconnect")));
-    }
+    connect_farm_under(
+        settings, host, farm_id, username, password, paper, server_session_id, session_key,
+        hw_info, encoded, farm, stated_port, &TakeBack::new(cancel),
+    )
+}
+
+/// [`connect_farm`], under a logon that may be taken back.
+fn connect_farm_under(
+    settings: &crate::settings::SessionSettings,
+    host: &str,
+    farm_id: &str,
+    username: &str,
+    password: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    farm: Farm,
+    stated_port: Option<u16>,
+    cancel: &TakeBack<'_>,
+) -> io::Result<Connection> {
+    let stage = format!("{farm_id} connect");
     let (farm_host, port) = farm_destination(settings, host, stated_port);
     log::info!("Connecting to {farm_id} {farm_host}:{port}");
-    let addr = format!("{farm_host}:{port}")
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
-    let farm_tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_FARM_CONNECT))
+    let addr = cancel.look_up(&format!("{farm_host}:{port}"), &stage)?;
+    let farm_tcp = cancel.dial(&addr, Duration::from_secs(TIMEOUT_FARM_CONNECT), &stage)
         .map_err(|e| io::Error::new(e.kind(), format!("{farm_id} TCP connect: {e}")))?;
     farm_tcp.set_nodelay(true)?;
     farm_tcp.set_read_timeout(Some(Duration::from_secs(TIMEOUT_FARM_CONNECT)))?;
@@ -472,7 +490,7 @@ pub fn connect_farm(
     // Key exchange (raw TCP)
     let mut channel = SecureChannel::new();
     let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
-    let mut stream = farm_tcp;
+    let mut stream = LogonSocket::new(farm_tcp, cancel.flag())?;
     stream.write_all(&dh_msg)?;
 
     let (payload, _) = ns::ns_recv(
@@ -494,9 +512,7 @@ pub fn connect_farm(
     // Checked again before the logon goes out: past this point the venue
     // holds an authenticated connection, and one the client has stopped
     // asking for must not be opened.
-    if cancelled() {
-        return Err(cancelled_by_the_client(&format!("{farm_id} reconnect")));
-    }
+    cancel.check(&stage)?;
 
     // Encrypted logon
     let farm_session_id = if server_session_id.is_empty() {
@@ -553,7 +569,7 @@ pub fn connect_farm(
     log::info!("{} routing response: {} bytes", farm_id, resp_buf.len());
 
     // Create Connection (switches to non-blocking), inject routing bytes
-    let mut conn = Connection::new_raw(stream)?;
+    let mut conn = Connection::new_raw(stream.into_socket())?;
     conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, read_iv);
     conn.heartbeat_secs = stated_heartbeat;
     conn.seq = 1; // routing request was seq=1; next send_fix will be seq=2
@@ -733,7 +749,7 @@ impl InFlight {
     /// that came before this found nothing to close, so the attempt ends here
     /// rather than going on to open a session nobody is waiting for.
     pub(crate) fn hold(&self, socket: &TcpStream, cancel: &std::sync::atomic::AtomicBool) -> io::Result<()> {
-        *self.0.lock().unwrap() = socket.try_clone().ok();
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(socket.try_clone()?);
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(cancelled_by_the_client("CCP reconnect"));
         }
@@ -743,7 +759,7 @@ impl InFlight {
     /// Close whatever the attempt has open, so a read or write in flight on it
     /// returns now.
     pub fn close(&self) {
-        if let Some(socket) = self.0.lock().unwrap().take() {
+        if let Some(socket) = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -752,7 +768,7 @@ impl InFlight {
     /// session the logon opens is owed a goodbye, and a stop must not close
     /// its socket before that goodbye is said on it.
     fn release(&self) {
-        self.0.lock().unwrap().take();
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
     }
 }
 
@@ -769,6 +785,21 @@ static RECONNECT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU
 #[cfg(test)]
 fn reconnect_port() -> u16 {
     RECONNECT_PORT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The port a first logon dials: the one the protocol fixes.
+#[cfg(not(test))]
+fn logon_port() -> u16 {
+    AUTH_PORT
+}
+
+/// In a test, the listener standing in the venue's place.
+#[cfg(test)]
+static LOGON_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(AUTH_PORT);
+
+#[cfg(test)]
+fn logon_port() -> u16 {
+    LOGON_PORT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Reconnect to the CCP (order/auth) server using cached session credentials.
@@ -1093,7 +1124,7 @@ fn reconnect_ccp_attempt(
         .build()
         .map_err(|e| io::Error::other(e.to_string()))?;
     let mut tls = shake_hands_by(
-        &connector, host, tcp, std::time::Instant::now() + Duration::from_secs(TIMEOUT_SSL_AUTH),
+        &connector, host, LogonSocket::new(tcp, None)?, std::time::Instant::now() + Duration::from_secs(TIMEOUT_SSL_AUTH),
     )?;
 
     let mut channel = SecureChannel::new();
@@ -1430,6 +1461,141 @@ pub struct GatewayConfig {
     /// no push to approve — so `None` fails the connect rather than falling
     /// back. See [`session::CodeProvider`] for the contract.
     pub code_provider: Option<session::CodeProvider>,
+    /// Set to take the logon back.
+    ///
+    /// Read before and after each name lookup; inside each dial, whose wait
+    /// is taken a second at a time; between the second factor's polls; and,
+    /// inside every handshake, read and write, whose socket timeouts are
+    /// checked at most a second apart. A
+    /// lookup cannot be cut short: it is bounded by the system's resolver.
+    /// A logon taken back ends with an error saying so.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+/// The cancellation checks surrounding name lookup and the connection dial.
+pub(crate) struct TakeBack<'a> {
+    cancel: Option<&'a std::sync::atomic::AtomicBool>,
+}
+
+impl<'a> TakeBack<'a> {
+    pub(crate) fn new(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Self { Self { cancel } }
+
+    fn flag(&self) -> Option<&'a std::sync::atomic::AtomicBool> { self.cancel }
+
+    fn taken(&self) -> bool {
+        self.cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    fn check(&self, what: &str) -> io::Result<()> {
+        if self.taken() { Err(cancelled_by_the_client(what)) } else { Ok(()) }
+    }
+
+    fn look_up(&self, target: &str, what: &str) -> io::Result<std::net::SocketAddr> {
+        self.check(what)?;
+        let addr = target.to_socket_addrs().and_then(|mut addresses| {
+            addresses.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))
+        });
+        self.check(what)?;
+        addr
+    }
+
+    fn dial(&self, addr: &std::net::SocketAddr, bound: Duration, what: &str) -> io::Result<TcpStream> {
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            self.check(what)?;
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("{what}: connect timed out")));
+            }
+            match TcpStream::connect_timeout(addr, left.min(Duration::from_secs(1))) {
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => return Err(e),
+                Ok(socket) => { self.check(what)?; return Ok(socket); }
+            }
+        }
+    }
+}
+
+/// A trading logon keeps its write half until a take-back has logged it out.
+struct OpeningSession<'a, S: Read + Write> {
+    stream: Option<S>,
+    take_back: &'a TakeBack<'a>,
+    seq: u32,
+    checking: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl OpeningSession<'_, native_tls::TlsStream<LogonSocket>> {
+    fn get_ref(&self) -> &LogonSocket { self.stream.as_ref().unwrap().get_ref() }
+
+    fn into_connection(mut self) -> io::Result<Connection> {
+        let mut conn = Connection::new(self.stream.take().unwrap())?;
+        conn.seq = self.seq;
+        Ok(conn)
+    }
+}
+
+impl<S: Read + Write> Read for OpeningSession<'_, S> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.stream.as_mut().unwrap().read(bytes)
+    }
+}
+
+impl<S: Read + Write> Write for OpeningSession<'_, S> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.stream.as_mut().unwrap().write(bytes)
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.take_back.check("logon")?;
+        self.stream.as_mut().unwrap().write_all(bytes)?;
+        if let Some(sequence) = fix_parse(bytes).get(&34).and_then(|n| n.parse::<u32>().ok()) {
+            self.seq = sequence + 1;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> { self.stream.as_mut().unwrap().flush() }
+}
+
+impl<S: Read + Write> Drop for OpeningSession<'_, S> {
+    fn drop(&mut self) {
+        if self.take_back.taken()
+            && let Some(stream) = self.stream.as_mut()
+        {
+            self.checking.store(false, std::sync::atomic::Ordering::Release);
+            let message = fix::fix_build(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_LOGOUT),
+                (fix::TAG_SENDING_TIME, &chrono_free_timestamp()),
+                (8372, "S"),
+            ], self.seq);
+            let _ = stream.write_all(&message);
+        }
+    }
+}
+
+/// A session opened during login is logged out if that login is taken back.
+struct LogonConnection<'a> {
+    conn: Option<Connection>,
+    take_back: &'a TakeBack<'a>,
+}
+
+impl std::ops::Deref for LogonConnection<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection { self.conn.as_ref().unwrap() }
+}
+
+impl std::ops::DerefMut for LogonConnection<'_> {
+    fn deref_mut(&mut self) -> &mut Connection { self.conn.as_mut().unwrap() }
+}
+
+impl Drop for LogonConnection<'_> {
+    fn drop(&mut self) {
+        if self.take_back.taken()
+            && let Some(conn) = self.conn.as_mut()
+        {
+            let _ = conn.logout_cancelled_logon();
+        }
+    }
 }
 
 /// What the second-factor gate needs, whether this is the first login or a
@@ -1443,9 +1609,9 @@ pub(crate) struct SecondFactor<'a> {
     pub code_provider: Option<&'a session::CodeProvider>,
     pub timeout_secs: u64,
     pub default_sub_type: &'a str,
-    /// Set when the client can take the wait back — a reconnect that was
-    /// stopped or whose recovery budget is spent. The gate checks it between
-    /// polls; the first login has nobody to cancel it and states none.
+    /// Set when the client can take the wait back: a reconnect that was
+    /// stopped or whose recovery budget is spent, or a first logon whose
+    /// caller took it back. The gate checks it between polls.
     pub cancel: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
@@ -1466,7 +1632,7 @@ enum PostAuth {
 /// retries within an overall deadline and ignores intervening messages,
 /// mirroring the CCP-reconnect path.
 fn wait_for_data_start(
-    tls: &mut native_tls::TlsStream<TcpStream>,
+    tls: &mut native_tls::TlsStream<LogonSocket>,
     channel: &mut SecureChannel,
     port: u16,
     mut unread: Option<Vec<u8>>,
@@ -1666,12 +1832,12 @@ fn read_routing_response<R: Read>(
 fn shake_hands_by(
     connector: &TlsConnector,
     host: &str,
-    tcp: TcpStream,
+    tcp: LogonSocket,
     deadline: std::time::Instant,
-) -> io::Result<native_tls::TlsStream<TcpStream>> {
+) -> io::Result<native_tls::TlsStream<LogonSocket>> {
     fn settle(
-        tls: native_tls::TlsStream<TcpStream>,
-    ) -> io::Result<native_tls::TlsStream<TcpStream>> {
+        tls: native_tls::TlsStream<LogonSocket>,
+    ) -> io::Result<native_tls::TlsStream<LogonSocket>> {
         tls.get_ref().set_nonblocking(false)?;
         Ok(tls)
     }
@@ -1708,9 +1874,10 @@ fn shake_hands_by(
 /// what is dialled is the auth port, for the reason stated below.
 fn dial_auth_server(
     config: &GatewayConfig,
+    take_back: &TakeBack<'_>,
     host: &str,
     port: u16,
-) -> io::Result<(native_tls::TlsStream<TcpStream>, SecureChannel)> {
+) -> io::Result<(native_tls::TlsStream<LogonSocket>, SecureChannel)> {
     // --- Phase 1: TLS + auth ---
     //
     // On the auth port, not the port the redirect named. The venue does
@@ -1723,12 +1890,10 @@ fn dial_auth_server(
     if port != AUTH_PORT {
         log::debug!("redirect named port {port}; auth is answered on {AUTH_PORT}");
     }
-    log::info!("Connecting to auth server {host}:{AUTH_PORT}");
-    let addr = format!("{host}:{AUTH_PORT}")
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
-    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_SSL_AUTH))?;
+    let port = logon_port();
+    log::info!("Connecting to auth server {host}:{port}");
+    let addr = take_back.look_up(&format!("{host}:{port}"), "logon")?;
+    let tcp = take_back.dial(&addr, Duration::from_secs(TIMEOUT_SSL_AUTH), "logon")?;
     // Where this machine is, as far as the venue is concerned: the address of
     // the socket that reached it. The identity announced at logon is built
     // from this in the client this replaces, rather than from a route probed
@@ -1749,7 +1914,7 @@ fn dial_auth_server(
         .build()
         .map_err(|e| io::Error::other(e.to_string()))?;
     let mut tls = shake_hands_by(
-        &connector, host, tcp, std::time::Instant::now() + Duration::from_secs(TIMEOUT_SSL_AUTH),
+        &connector, host, LogonSocket::new(tcp, config.cancel.clone())?, std::time::Instant::now() + Duration::from_secs(TIMEOUT_SSL_AUTH),
     )?;
 
     // Key exchange
@@ -1780,6 +1945,7 @@ fn dial_auth_server(
 /// worse than one that says which farm it has.
 fn connect_farms(
     config: &GatewayConfig,
+    take_back: &TakeBack<'_>,
     session_id: &str,
     token: &BigUint,
     hw_info: &str,
@@ -1794,17 +1960,17 @@ fn connect_farms(
         let paper = config.paper;
         let settings = config.settings.as_ref();
         let trading_handle = scope.spawn(move || {
-            connect_farm(settings, trading.0, trading.1, username, password,
-                paper, session_id, token, hw_info, encoded, Farm::MarketData, trading.2, None)
+            connect_farm_under(settings, trading.0, trading.1, username, password,
+                paper, session_id, token, hw_info, encoded, Farm::MarketData, trading.2, take_back)
         });
         let mktdata_handle = scope.spawn(move || {
-            connect_farm(settings, mktdata.0, mktdata.1, username, password,
-                paper, session_id, token, hw_info, encoded, Farm::Historical, mktdata.2, None)
+            connect_farm_under(settings, mktdata.0, mktdata.1, username, password,
+                paper, session_id, token, hw_info, encoded, Farm::Historical, mktdata.2, take_back)
         });
         let secdef_handle = secdef.map(|(host, farm, port)| {
             scope.spawn(move || {
-                connect_farm(settings, host, farm, username, password,
-                    paper, session_id, token, hw_info, encoded, Farm::SecurityDefinition, port, None)
+                connect_farm_under(settings, host, farm, username, password,
+                    paper, session_id, token, hw_info, encoded, Farm::SecurityDefinition, port, take_back)
             })
         });
         let trading = trading_handle.join().expect("trading farm thread panicked");
@@ -1842,8 +2008,9 @@ fn connect_farms(
 /// instead of failing with an error the caller would have to know how to
 /// retry.
 fn authenticate(
-    tls: &mut native_tls::TlsStream<TcpStream>,
+    tls: &mut native_tls::TlsStream<LogonSocket>,
     config: &GatewayConfig,
+    take_back: &TakeBack<'_>,
     auth_start: &[u8],
     resume_key: Option<BigUint>,
 ) -> io::Result<(BigUint, Option<Vec<u8>>)> {
@@ -1905,7 +2072,7 @@ fn authenticate(
                 code_provider: config.code_provider.as_ref(),
                 timeout_secs: config.ib_key_timeout_secs,
                 default_sub_type: &config.ib_key_token_sub_type,
-                cancel: None,
+                cancel: take_back.flag(),
             })?;
             (session_key, gate.unread)
         }
@@ -1918,7 +2085,17 @@ impl Gateway {
     /// Returns Gateway + farm Connection + auth Connection + optional historical data
     /// Connection.
     pub fn connect(config: &GatewayConfig) -> io::Result<Session> {
-        let first = Self::connect_to_host(config, &config.host, AUTH_PORT, 0);
+        let take_back = TakeBack::new(config.cancel.as_deref());
+        let result = Self::connect_through_doors(config, &take_back);
+        match result {
+            Err(_) if take_back.taken() => Err(cancelled_by_the_client("logon")),
+            result => result,
+        }
+    }
+
+    /// The configured host, then the others, until one answers.
+    fn connect_through_doors(config: &GatewayConfig, take_back: &TakeBack) -> io::Result<Session> {
+        let first = Self::connect_to_host(config, take_back, &config.host, AUTH_PORT, 0);
         let Err(why) = first else { return first };
 
         // A door that does not open is not an answer. Only when nothing
@@ -1931,8 +2108,9 @@ impl Gateway {
 
         let mut last = why;
         for host in doors_after(&config.host) {
+            take_back.check("logon")?;
             log::warn!("{} did not answer ({last}); trying {host}", config.host);
-            match Self::connect_to_host(config, &host, AUTH_PORT, 0) {
+            match Self::connect_to_host(config, take_back, &host, AUTH_PORT, 0) {
                 Ok(session) => {
                     log::info!("connected through {host}");
                     return Ok(session);
@@ -1951,6 +2129,7 @@ impl Gateway {
     /// Internal: connect to a specific host, with redirect depth tracking.
     fn connect_to_host(
         config: &GatewayConfig,
+        take_back: &TakeBack<'_>,
         host: &str,
         port: u16,
         redirect_depth: u32,
@@ -1979,7 +2158,7 @@ impl Gateway {
             None => config.settings.encoded.clone(),
         };
 
-        let (mut tls, mut channel) = dial_auth_server(config, host, port)?;
+        let (mut tls, mut channel) = dial_auth_server(config, take_back, host, port)?;
 
         // Composed behind the dial, not in front of it: the card this machine
         // names is the card of the interface the session opened on, which is
@@ -2053,7 +2232,7 @@ impl Gateway {
                 // it is worth trying if the one it named stops.
                 let knocked = host.to_string();
                 let mut session = Self::connect_to_host(
-                    config, redirect_host, redirect_port, redirect_depth + 1,
+                    config, take_back, redirect_host, redirect_port, redirect_depth + 1,
                 )?;
                 if !session.gateway.auth_hosts.contains(&knocked) {
                     session.gateway.auth_hosts.push(knocked);
@@ -2064,7 +2243,7 @@ impl Gateway {
         };
 
         let (session_key, mut post_auth_unread) =
-            authenticate(&mut tls, config, &auth_start, resume_key)?;
+            authenticate(&mut tls, config, take_back, &auth_start, resume_key)?;
 
         let competing = match wait_for_data_start(
             &mut tls, &mut channel, port, post_auth_unread.take(),
@@ -2079,7 +2258,7 @@ impl Gateway {
                 // same way the redirect above keeps it.
                 let knocked = host.to_string();
                 let mut session = Self::connect_to_host(
-                    config, &redirect_host, redirect_port, redirect_depth + 1,
+                    config, take_back, &redirect_host, redirect_port, redirect_depth + 1,
                 )?;
                 if !session.gateway.auth_hosts.contains(&knocked) {
                     session.gateway.auth_hosts.push(knocked);
@@ -2089,6 +2268,9 @@ impl Gateway {
         };
 
         // --- Phase 2: Auth server logon (over TLS) ---
+        take_back.check("logon")?;
+        let checking = tls.get_ref().cancellation_check();
+        let mut tls = OpeningSession { stream: Some(tls), take_back, seq: 1, checking };
         let logon_msg = build_ccp_logon(&config.settings, &hw_info, &encoded, CCP_HEARTBEAT, 1);
         log::info!("Sending auth logon ({} bytes)", logon_msg.len());
         tls.write_all(&logon_msg)?;
@@ -2190,7 +2372,7 @@ impl Gateway {
         tls.get_ref().set_read_timeout(None)?;
 
         // Auth connection (non-blocking TLS for hot loop)
-        let mut ccp_conn = Connection::new(tls)?;
+        let mut ccp_conn = LogonConnection { conn: Some(tls.into_connection()?), take_back };
         ccp_conn.seq = ccp_seq;
         ccp_conn.market_data_allowance = market_data_allowance;
         // The venue's stamp on this logon, where it gave one. The clock a
@@ -2267,8 +2449,9 @@ impl Gateway {
         let trading_host_for_gw = trading_host.clone();
         let trading_farm_for_gw = trading_farm.clone();
 
-        let (farm_conn, hmds_conn, secdef_conn) = connect_farms(
+        let farms = connect_farms(
             config,
+            take_back,
             &server_session_id,
             &farm_token,
             &hw_info,
@@ -2276,7 +2459,9 @@ impl Gateway {
             (&trading_host, &trading_farm, trading_port),
             (&mktdata_host, &mktdata_farm, mktdata_port),
             secdef.as_ref().map(|(h, f, p)| (h.as_str(), f.as_str(), *p)),
-        )?;
+        );
+        take_back.check("logon")?;
+        let (farm_conn, hmds_conn, secdef_conn) = farms?;
 
         // The accounts the logon names as this login's own, before the
         // family's join them: what a gateway counts when it decides whether an
@@ -2354,7 +2539,7 @@ impl Gateway {
         Ok(Session {
             gateway: gw,
             market_data: farm_conn,
-            trading: ccp_conn,
+            trading: ccp_conn.conn.take().unwrap(),
             historical: hmds_conn,
             security_definition: secdef_conn,
         })

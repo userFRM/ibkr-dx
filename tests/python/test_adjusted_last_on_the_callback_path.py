@@ -76,6 +76,7 @@ def test_adjusted_last_kept_up_to_date_is_refused():
         bar_size_setting="5 mins", what_to_show="ADJUSTED_LAST", use_rth=0,
         keep_up_to_date=True,
     )
+    c.poll()
     assert (3, 321, "Source price not supported with live updates") in w.errors, w.errors
 
 
@@ -101,6 +102,7 @@ def test_what_a_gateway_refuses_before_asking_is_refused_in_its_words():
             req_id, contract, end_date_time=end, duration_str="1 M",
             bar_size_setting=size, what_to_show=series, use_rth=1, keep_up_to_date=keep,
         )
+        c.poll()
         assert (req_id, 321, reason) in w.errors, (reason, w.errors)
     # A week and a month are kept up to date.
     for req_id, size in [(9, "1 week"), (10, "1 month")]:

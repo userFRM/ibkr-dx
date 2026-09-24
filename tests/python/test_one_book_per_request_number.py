@@ -36,6 +36,7 @@ def test_withdrawing_a_book_that_is_not_held_says_so():
 
     c.cancelMktDepth(7, False)
 
+    c.poll()
     assert w.seen == [(7, 310)], f"nothing is held under that number: {w.seen}"
 
 
@@ -49,6 +50,7 @@ def test_a_second_book_under_a_live_number_is_refused():
 
     c.reqMktDepth(7, contract(320227571, "QQQ"), 5, False, [])
 
+    c.poll()
     assert w.seen == [(7, 102)], f"the number already holds a book: {w.seen}"
 
     # Withdrawn, the number is the caller's again.

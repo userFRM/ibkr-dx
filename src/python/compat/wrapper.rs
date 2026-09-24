@@ -2,6 +2,8 @@
 
 use pyo3::prelude::*;
 
+use super::class_reports::ErrorOrigin;
+
 /// ibapi-compatible EWrapper base class.
 /// Users subclass this in Python and override callbacks they care about.
 /// All methods are no-ops by default.
@@ -85,6 +87,31 @@ impl EWrapper {
         _error_string: &str,
         _advanced_order_reject_json: &str,
     ) {
+    }
+
+    #[pyo3(signature = (origin, error_time, error_code, error_string, advanced_order_reject_json=""))]
+    /// An error, with what it is about: a request and whether nothing more
+    /// follows for it, an order and the operation it answers, a request that
+    /// carries no number, the session, or a lookup this client made for
+    /// itself. The number `error` carries can be any of these and does not
+    /// say which; `origin` says.
+    ///
+    /// Every error reaches a subclass of this class here. By default it goes on
+    /// to `error`, under the number `origin.id` states it under, so a subclass
+    /// that overrides only `error` is told exactly what it was told before. A
+    /// wrapper that is not a subclass and has no method of this name is called
+    /// on `error`, as the reference client calls it.
+    fn error_from(
+        slf: &Bound<'_, Self>,
+        origin: &Bound<'_, ErrorOrigin>,
+        error_time: i64,
+        error_code: i64,
+        error_string: &str,
+        advanced_order_reject_json: &str,
+    ) -> PyResult<()> {
+        let id = origin.get().0.id();
+        slf.call_method1("error", (id, error_time, error_code, error_string, advanced_order_reject_json))?;
+        Ok(())
     }
 
     /// The venue clock, in seconds since the epoch.

@@ -41,6 +41,7 @@ def test_a_withdrawal_reports_rather_than_raises():
     w, c = _session()
     # Returns normally, as the reference client's does.
     assert c.cancelHistoricalData(42) is None
+    c.poll()
     assert w.seen, "the caller is told on the callback it was written to read"
     req_id, code, _ = w.seen[-1]
     assert req_id == 42, f"under the number it asked with: {w.seen}"
@@ -71,6 +72,7 @@ def test_every_withdrawal_answers_the_same_way():
     ]:
         w, c = _session(setup)
         assert call(c) is None, "the call returns rather than raising"
+        c.poll()
         assert w.seen, f"nothing was reported for the call expecting {expect_id}"
         assert w.seen[-1][0] == expect_id, w.seen
         assert w.seen[-1][1] == 504, w.seen
@@ -92,10 +94,12 @@ def test_a_slot_taken_for_a_request_that_never_went_goes_back():
 
     w, c = _session()
     c.reqMktDepth(11, book, 5, False, [])
+    c.poll()
     assert w.seen and w.seen[-1][1] == 504, w.seen
     w.seen.clear()
     # The slot is free, so a withdrawal finds nothing held rather than a book.
     c.cancelMktDepth(11, False)
+    c.poll()
     assert w.seen and w.seen[-1][1] != 504, (
         "the slot was released, so this is 'no book held', not 'not connected'"
     )
@@ -104,10 +108,12 @@ def test_a_slot_taken_for_a_request_that_never_went_goes_back():
     # The session's own account: naming another is refused before the send is
     # ever attempted, and it is the send failing that this is about.
     c.reqPnL(12, "T", "")
+    c.poll()
     assert w.seen and w.seen[-1][1] == 504, w.seen
     w.seen.clear()
     # And the one P&L slot is free for the next number to take.
     c.reqPnL(13, "T", "")
+    c.poll()
     assert w.seen and w.seen[-1][1] == 504, (
         f"a retry is refused as not connected, not as a duplicate: {w.seen}"
     )
@@ -133,5 +139,6 @@ def test_no_book_is_taken_on_a_feed_that_is_over():
     book.exchange = "SMART"
     book.currency = "USD"
     assert c.reqMktDepth(21, book, 5, False, []) is None
+    c.poll()
     assert w.seen, "the caller is told"
     assert w.seen[-1][1] == 504, w.seen

@@ -249,7 +249,7 @@ fn a_subscription_naming_only_the_contract_id_is_answered() {
         currency: "USD".into(),
         ..Default::default()
     };
-    client.req_mkt_data(9002, &described, "", false, false).expect("subscribe described");
+    client.req_mkt_data(9002, &described, "", false, false);
     let control_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut control = None;
     while std::time::Instant::now() < control_deadline {
@@ -262,7 +262,7 @@ fn a_subscription_naming_only_the_contract_id_is_answered() {
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    let _ = client.cancel_mkt_data(9002);
+    client.cancel_mkt_data(9002);
     println!("  described: {}", if control.is_some() { "answered" } else { "silent" });
 
     let bare = Contract { con_id: 12087792, ..Default::default() };
@@ -272,9 +272,11 @@ fn a_subscription_naming_only_the_contract_id_is_answered() {
     // stock under this id. That is an answer, and a better one than silence —
     // recorded here the same way the silence is, because what this phase is
     // for is the described subscription below it.
-    let asked = client.req_mkt_data(req_id, &bare, "", false, false);
-    if let Err(refused) = &asked {
-        println!("  bare conId refused: {}", refused.message);
+    // A refusal is a record in the session's order, read off the session.
+    client.req_mkt_data(req_id, &bare, "", false, false);
+    let refused = client.shared_state().drain_refused();
+    for (_, _, why) in &refused {
+        println!("  bare conId refused: {why}");
     }
     let mut seen = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -288,8 +290,8 @@ fn a_subscription_naming_only_the_contract_id_is_answered() {
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    if asked.is_ok() {
-        let _ = client.cancel_mkt_data(req_id);
+    if refused.is_empty() {
+        client.cancel_mkt_data(req_id);
     }
     // What the venue does with each, recorded rather than asserted one way:
     // the described subscription is answered and the bare one is not, which is

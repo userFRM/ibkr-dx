@@ -9,7 +9,6 @@
 // because that is the path a program written against this client already
 // names, and used here for the same reason it was written.
 pub use crate::types::order_status::{is_open_or_reactivatable, is_open_status, order_status_str};
-use crate::types::NewsSubject;
 use std::collections::{HashMap, HashSet};
 use crate::error_codes::{
     CHANGE_CANNOT_CHANGE_TYPE, COMBINATION_LEG_INVALID, COMBINATION_NEEDS_LEGS, COMBO_AND_LEG_PRICES,
@@ -25,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::sync::LazyLock;
 
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::Sender;
 
 use crate::types::model::{
     Contract as ApiContract, CommissionAndFeesReport as ApiCommissionAndFeesReport,
@@ -171,6 +170,41 @@ fn as_delayed(tick_type: i32) -> i32 {
 /// Every kind a snapshot is made of: bid, ask, last, open, close.
 const SNAPSHOT_WHOLE: u8 = 1 | 2 | 4 | 8 | 16;
 
+/// The venue's option model, 13, or 83 on a delayed feed: what a snapshot of a
+/// contract a gateway marks as an option also waits for.
+const SNAPSHOT_MODEL: u8 = 32;
+
+/// The last trade's time on a delayed feed, 88: what a snapshot on a delayed
+/// feed also waits for.
+const SNAPSHOT_DELAYED_TIME: u8 = 64;
+
+/// Whether a gateway marks a contract of this type as an option, and so holds
+/// its snapshot for the option model too: options, futures options and index
+/// options, and warrants and the type that extends them.
+pub fn marked_as_option(sec_type: &str) -> bool {
+    matches!(sec_type, "OPT" | "FOP" | "IOPT" | "WAR" | "EC")
+}
+
+/// A snapshot a caller is waiting on.
+#[derive(Clone, Copy, Debug)]
+pub struct SnapshotWait {
+    /// When it was asked for, which its bound runs from.
+    pub asked_at: std::time::Instant,
+    /// Which of the kinds it waits for the venue has stated so far.
+    pub stated: u8,
+    /// The slot it is served on, whose feed says whether it is delayed.
+    pub slot: InstrumentId,
+    /// Whether its contract is of a type a gateway marks as an option.
+    pub marked: bool,
+}
+
+impl SnapshotWait {
+    /// One asked for now, nothing stated yet.
+    pub fn new(slot: InstrumentId, marked: bool) -> Self {
+        Self { asked_at: std::time::Instant::now(), stated: 0, slot, marked }
+    }
+}
+
 /// The last trade's yield, which a delayed feed states on the same record a
 /// live one does and a gateway does not publish from it.
 const DELAYED_LAST_YIELD_UNSENT: i32 = 52;
@@ -286,6 +320,8 @@ pub struct AccountSummaryBatch {
 
 /// One figure answering a summary request.
 pub struct AccountSummaryEntry {
+    /// The account whose figure this is.
+    pub account: String,
     /// Which figure this is, under the venue's name for it. Owned for the
     /// same reason the currency is: the set is the venue's, not a fixed list
     /// known here, and a summary built from such a list reported nothing for
@@ -316,9 +352,148 @@ pub struct PortfolioUpdateEntry {
     pub realized_pnl: f64,
 }
 
-/// One summary's last pass: when it ran, and what it stated then, keyed by
-/// ledger membership, figure and currency.
-type SummaryPass = (std::time::Instant, AccountFiguresTold);
+/// A slot's quote as a read took it before its cut, with what rode beside it.
+///
+/// Taken whole in the read's first step and compared with what the caller was
+/// last told only in its last, once the read's records have been delivered —
+/// and only where the slot is still held under the occupancy it was taken
+/// under, so a quote of a contract that has left the slot is never delivered
+/// as the next one's.
+pub struct PolledQuote {
+    /// The slot.
+    pub iid: InstrumentId,
+    /// The occupancy the quote was written under.
+    pub generation: u64,
+    /// The quote.
+    pub quote: Quote,
+    /// What the venue says about its two prices.
+    pub masks: (i64, i64),
+    /// The extra series stated since the last read.
+    pub series: Vec<crate::types::SeriesTick>,
+    /// The answer to a chargeable snapshot, where one came.
+    pub snapshot_answer: Option<Vec<crate::types::SeriesTick>>,
+}
+
+/// What a read took of the conflated state before its cut: the quotes, and
+/// every figure this side compares with what its caller was last told.
+///
+/// Delivered after the read's records. Where the read takes the session's
+/// last record, it is taken again and that is what is delivered: every writer
+/// has stopped by then, so it is final.
+#[derive(Default)]
+pub struct Polled {
+    /// Each held slot's quote.
+    pub quotes: Vec<PolledQuote>,
+    /// The holdings that moved, where anyone watches them.
+    pub positions: Vec<PositionInfo>,
+    /// Changes to holdings of other accounts.
+    pub named_positions: Vec<(String, PositionInfo)>,
+    /// The account's running profit, where it moved.
+    pub pnl: Vec<PnlUpdate>,
+    /// Each position's, where it moved.
+    pub pnl_single: Vec<PnlSingleUpdate>,
+    /// The account's figures, where subscribed.
+    pub account: Option<AccountUpdateBatch>,
+    /// And its holdings beside them.
+    pub portfolio: Vec<PortfolioUpdateEntry>,
+    /// The figures each multi-account request has not been told.
+    pub multi: Vec<(i64, Vec<AccountFieldUpdate>)>,
+    /// The summaries due.
+    pub summaries: Vec<AccountSummaryBatch>,
+    /// The maps of venues asked for early, answered or refused.
+    pub smart_components: Vec<(i64, Result<Vec<crate::types::SmartComponent>, Refusal>)>,
+}
+
+impl Polled {
+    /// This, with what a later poll took laid over it: the later value where
+    /// both hold one, and what only the earlier drained kept.
+    pub fn then(mut self, later: Polled) -> Polled {
+        let mut quotes = later.quotes;
+        for earlier in self.quotes {
+            match quotes.iter_mut().find(|q| q.iid == earlier.iid) {
+                Some(q) => {
+                    let mut series = earlier.series;
+                    series.append(&mut q.series);
+                    q.series = series;
+                    if q.snapshot_answer.is_none() {
+                        q.snapshot_answer = earlier.snapshot_answer;
+                    }
+                }
+                None => quotes.push(earlier),
+            }
+        }
+        for pi in later.positions {
+            match self.positions.iter_mut().find(|p| p.con_id == pi.con_id) {
+                Some(p) => *p = pi,
+                None => self.positions.push(pi),
+            }
+        }
+        for update in later.pnl {
+            self.pnl.retain(|u| u.req_id != update.req_id);
+            self.pnl.push(update);
+        }
+        for update in later.pnl_single {
+            self.pnl_single.retain(|u| u.req_id != update.req_id);
+            self.pnl_single.push(update);
+        }
+        let account = match (self.account, later.account) {
+            (Some(mut a), Some(b)) => {
+                for field in b.fields {
+                    a.fields.retain(|f| !(f.key == field.key && f.currency == field.currency));
+                    a.fields.push(field);
+                }
+                a.finished |= b.finished;
+                Some(a)
+            }
+            (a, b) => b.or(a),
+        };
+        for entry in later.portfolio {
+            self.portfolio.retain(|e| e.con_id != entry.con_id);
+            self.portfolio.push(entry);
+        }
+        for (req_id, fields) in later.multi {
+            match self.multi.iter_mut().find(|(id, _)| *id == req_id) {
+                Some((_, held)) => {
+                    for field in fields {
+                        held.retain(|f| !(f.key == field.key && f.currency == field.currency));
+                        held.push(field);
+                    }
+                }
+                None => self.multi.push((req_id, fields)),
+            }
+        }
+        for (account, position) in later.named_positions {
+            self.named_positions.retain(|(a, p)| a != &account || p.con_id != position.con_id);
+            self.named_positions.push((account, position));
+        }
+        self.summaries.extend(later.summaries);
+        self.smart_components.extend(later.smart_components);
+        Polled {
+            quotes,
+            positions: self.positions,
+            named_positions: self.named_positions,
+            pnl: self.pnl,
+            pnl_single: self.pnl_single,
+            account,
+            portfolio: self.portfolio,
+            multi: self.multi,
+            summaries: self.summaries,
+            smart_components: self.smart_components,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AccountRoutes {
+    updates: String,
+    multi: HashMap<i64, (String, String)>,
+    pub(crate) positions: HashMap<i64, (String, String)>,
+    summaries: HashMap<i64, Vec<String>>,
+}
+
+/// One summary's last pass: when it ran, and what it stated then, keyed by the
+/// figure and the currency it was stated in.
+type SummaryPass = (std::time::Instant, HashMap<(String, bool, String, String), String>);
 
 /// Fold the risk levels modelled here to the venue's names. Anything else
 /// travels as text in the parameter list; the venue owns that vocabulary.
@@ -742,30 +917,6 @@ pub enum GroupEvent {
     Updated(i64, String),
 }
 
-/// What both client surfaces share: which request is on which
-/// contract, what the venue last said, and what is still subscribed.
-/// An order built and not sent, waiting for one that transmits.
-pub struct HeldOrder {
-    /// The id it was placed under.
-    pub order_id: u64,
-    /// The order it hangs from, or zero.
-    pub parent_id: i64,
-    /// What will go out, exactly as it would have.
-    pub command: ControlCommand,
-}
-
-impl HeldOrder {
-    /// Whether what is held would place the order, rather than revise one the
-    /// venue is already working.
-    ///
-    /// The two are not the same withdrawal. Forgetting a placement is the
-    /// whole of it, because the venue was never given the order; forgetting a
-    /// revision leaves the order it was a revision to live at the venue.
-    fn places_the_order(&self) -> bool {
-        places_the_order(&self.command)
-    }
-}
-
 /// Put back what a restatement replaced, and square the outstanding quantity
 /// with it. Does nothing where nothing was kept.
 fn put_back_the_terms(tracked: &mut TrackedOrder) {
@@ -792,21 +943,6 @@ fn tracked_as_placed(
     }
 }
 
-/// Whether a command would place an order, rather than revise one the venue is
-/// already working.
-///
-/// Asked of the command rather than of the hold, because the order that
-/// transmits is sent from the caller's hand and is never in the hold by the
-/// time its send is accounted for.
-fn places_the_order(command: &ControlCommand) -> bool {
-    matches!(
-        command,
-        ControlCommand::Order(
-            OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. },
-        ),
-    )
-}
-
 /// What one historical request asked for.
 ///
 /// Kept because the reply states neither. The range written beside the last
@@ -825,46 +961,6 @@ pub struct HistoricalAsk {
     pub zone: String,
     /// Whether its bars are a day long or longer, and so dated by the day.
     pub by_day: bool,
-}
-
-/// A request number held for the length of a registration.
-///
-/// Given back when this drops, which is every way out of the call that took it
-/// — the refusals before the engine is asked, the wait timing out, the `?` on
-/// a send. A release written at each of those instead is a release somebody
-/// adds a path around later. The one path that gives it back itself is the
-/// success below, which has to read a withdrawal under the same acquisition.
-struct Registering<'a> {
-    held: &'a Mutex<std::collections::HashSet<(u8, i64)>>,
-    withdrawn: &'a Mutex<std::collections::HashSet<(u8, i64)>>,
-    key: (u8, i64),
-}
-
-impl Registering<'_> {
-    /// Give the number back, and say whether a withdrawal arrived while it was
-    /// held.
-    ///
-    /// Both under one acquisition. Given back first, a withdrawal landing in
-    /// between finds the claim gone and the record not yet written, and is
-    /// told there is nothing to withdraw — which is the answer that leaves a
-    /// caller holding a live subscription it believes is gone.
-    fn withdrawn_meanwhile(&self) -> bool {
-        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
-        let asked = self.withdrawn.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
-        held.remove(&self.key);
-        asked
-    }
-}
-
-impl Drop for Registering<'_> {
-    fn drop(&mut self) {
-        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
-        // A registration that never reached the point of reading it leaves no
-        // withdrawal behind for the next one under this number, which would
-        // otherwise take itself down having been asked for nothing of the kind.
-        self.withdrawn.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
-        held.remove(&self.key);
-    }
 }
 
 /// What a market-data request's generic tick list asks for.
@@ -913,55 +1009,6 @@ pub(crate) fn parse_generic_tick_list(list: &str) -> GenericTicks<'_> {
     }
     read.news_providers = providers.join("*");
     read
-}
-
-/// Which record a registration is taking: the quotes, or the tick stream.
-const TAKING_QUOTES: u8 = 0;
-const TAKING_TICKS: u8 = 1;
-
-/// What a withdrawal leaves for its caller to send.
-///
-/// Three questions, and they are not the same one: the subscription to
-/// withdraw, the contract whose headlines stop, and the series nobody
-/// watching that contract asks for any more. The quotes stay up for another
-/// caller while the other two end, so a caller told only about the quotes
-/// sent nothing and left both running.
-pub struct WhatAWithdrawalLeaves {
-    /// The subscription to withdraw, where this was the last caller watching
-    /// it.
-    pub subscription: Option<InstrumentId>,
-    /// The contract whose headlines stop.
-    pub headlines: Option<NewsSubject>,
-    /// The contract, and the series nobody watching it asks for any more.
-    ///
-    /// Said whether or not the subscription itself goes. Where it goes, they
-    /// ride with it, because the subscription the engine finds may not be the
-    /// one this was decided against — and then these are the only part of the
-    /// withdrawal that is still about what the caller asked for.
-    pub series: Option<(InstrumentId, Vec<u32>)>,
-    /// The number the request that took that slot asked under.
-    ///
-    /// What names one occupancy of a reusable slot. Read under the maps that
-    /// decide the withdrawal, so it is the occupancy this decision was about
-    /// and not whichever one holds the slot by the time the engine reads it.
-    pub took_it: u64,
-    /// The contract this client believed that slot held.
-    ///
-    /// What makes the withdrawal about one occupancy of a reusable slot rather
-    /// than about the slot: the engine keeps the contract each subscription
-    /// went out under and compares them. Zero where the venue has not
-    /// identified the contract yet, and then the number below is all there is.
-    pub con_id: i64,
-    /// Where this decision falls in the order of everything this client has
-    /// asked for.
-    ///
-    /// Taken as the decision is made, and sent with the commands that carry it
-    /// out. Taken as those commands are sent instead, a caller that asked for
-    /// the same contract in between had its brand-new subscription withdrawn
-    /// by this one: the engine cannot tell the subscription that was decided
-    /// against from the one that replaced it, and this number is what tells
-    /// them apart.
-    pub decided_at: u64,
 }
 
 /// What a request asking for a contract ended up as.
@@ -1074,12 +1121,6 @@ impl Ownership<'_> {
 pub type AccountFiguresTold = HashMap<(bool, String, String), String>;
 
 pub struct ClientCore {
-    /// How long a caller waits for the engine to name an instrument.
-    ///
-    /// Stated by the session. It was read from the process once and cached for
-    /// the life of it, so the first session to ask fixed the wait for every
-    /// session after it.
-    pub registration_timeout: std::sync::Mutex<std::time::Duration>,
     /// Whether this session refuses to send anything that changes a position.
     ///
     /// The reference API carries the same control. A research or reporting
@@ -1089,31 +1130,6 @@ pub struct ClientCore {
     // reqId <-> InstrumentId mapping
     /// Which contract each quote request is on.
     pub req_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
-    /// Numbers a registration is in the middle of taking.
-    ///
-    /// The map above answers which contract a number watches, and it cannot be
-    /// written until the engine has named the slot — which is a wait, and a
-    /// long one where the engine is busy. Two callers registering one number
-    /// in that window both read the map as free and both went on: two slots
-    /// ended up holding contracts under one number, the map kept whichever
-    /// finished last, and the other slot's subscription stayed live on the
-    /// wire with nothing able to withdraw it. That is the failure the check
-    /// beside the map is written to prevent, and checking a map nobody has
-    /// written yet cannot prevent it.
-    /// Keyed by which record is being taken as well as by the number: a
-    /// number may carry a quote subscription and a tick stream at once, and
-    /// the two are refused against their own records, so a claim that did not
-    /// say which would refuse a pair the client allows.
-    registering: Mutex<std::collections::HashSet<(u8, i64)>>,
-    /// Numbers withdrawn while the registration above was still in flight.
-    ///
-    /// A withdrawal that arrives in that window has no record to act on. The
-    /// venue withdraws it all the same, so it is written down here and the
-    /// registration reads it as it gives the number back: what it opened is
-    /// taken down again instead of published, and no record is left behind.
-    /// Keyed as the claim is, because the quotes and the tick stream under one
-    /// number are withdrawn separately.
-    withdrawn_while_registering: Mutex<std::collections::HashSet<(u8, i64)>>,
     /// Which registration a number is currently holding, counted.
     ///
     /// A number outlives the subscriptions made under it: a callback may
@@ -1125,19 +1141,12 @@ pub struct ClientCore {
     /// Which request owns each contract's quotes. One per contract:
     /// later callers follow it rather than opening a second.
     pub instrument_to_req: Mutex<HashMap<InstrumentId, i64>>,
-    /// Which contract each tick-by-tick request is on.
-    ///
-    /// Its own, because a trade stream is not a quote subscription. Kept in
-    /// the quote maps, a request for trades was handed the contract's quotes,
-    /// and withdrawing it took away the quotes another caller was watching.
-    pub tbt_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
     /// The other requests watching a contract that is already subscribed.
     ///
     /// One contract holds one subscription on the wire, and the same quote is
     /// handed to every caller that asked for it. Two parts of one program may
     /// watch the same contract.
     pub instrument_followers: Mutex<HashMap<InstrumentId, Vec<i64>>>,
-    // con_id → InstrumentId for find_or_register_instrument lookup
     /// The engine slot each contract id was given.
     pub con_id_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
     /// What each display group currently holds.
@@ -1165,7 +1174,7 @@ pub struct ClientCore {
     /// asked for never came.
     /// Snapshots being waited on: when each was asked for, and which of the
     /// kinds one is made of the venue has stated so far.
-    pub snapshot_reqs: Mutex<HashMap<i64, (std::time::Instant, u8)>>,
+    pub snapshot_reqs: Mutex<HashMap<i64, SnapshotWait>>,
     /// The requests that asked for the venue's one-shot snapshot.
     ///
     /// One of those is a request of its own and not a stream: the venue
@@ -1192,6 +1201,15 @@ pub struct ClientCore {
     /// of the contract now on it was forgotten, the venue went on streaming
     /// it, and no request could be found to deliver it to or to withdraw it.
     slot_taken_on: Mutex<HashMap<InstrumentId, u64>>,
+    /// The occupancy each slot is held under, as the engine's records have
+    /// said it so far.
+    ///
+    /// Written where the records that name it are delivered, so it stands
+    /// where they stand in the session's order. A quote, and every record
+    /// queued under a slot, carries the occupancy it was written under; one
+    /// that does not match this is the contract that left the slot, and is
+    /// not delivered as the one that took it.
+    slot_generation: Mutex<HashMap<InstrumentId, u64>>,
     /// And which contract the request that took each slot named.
     ///
     /// Written down as the slot is taken, because it is the caller's own and
@@ -1201,13 +1219,15 @@ pub struct ClientCore {
     /// refused as being about another contract.
     slot_took_contract: Mutex<HashMap<InstrumentId, i64>>,
 
+    pub(crate) account_routes: Mutex<AccountRoutes>,
+
     // PnL subscription state
-    /// The request a running profit is reported under.
-    pub pnl_req_id: Mutex<Option<i64>>,
+    /// Each profit request and the account whose figures it reports.
+    pub pnl_req_id: Mutex<std::collections::BTreeMap<i64, String>>,
     /// Which contract each single-position profit request is on.
-    pub pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
+    pub pnl_single_reqs: Mutex<HashMap<i64, (String, i64)>>, // req_id → account, con_id
     /// The last running profit stated: daily, unrealised, realised.
-    pub last_pnl: Mutex<[i64; 3]>, // [daily, unrealized, realized]
+    pub last_pnl: Mutex<HashMap<i64, [i64; 3]>>,
     // Per-req_id change detection for pnl_single: [pos, daily, unrealized, realized,
     // value] scaled.
     /// The same per position.
@@ -1299,14 +1319,6 @@ pub struct ClientCore {
     /// reply states neither, and the range stated beside the last bar is the
     /// request's own, so the request is what has to be kept.
     historical_asks: Mutex<HashMap<i64, HistoricalAsk>>,
-    /// Orders built and not sent, waiting for one that transmits.
-    ///
-    /// The field saying whether an order goes now is written into the
-    /// reference client's own message and never reaches the venue, so nothing
-    /// on the wire can hold an order back and this client holds it instead.
-    /// Kept in the order they were placed, which is the order they go out in.
-    held_orders: Mutex<Vec<HeldOrder>>,
-
     // Historical data keepUpToDate: req_ids that have completed initial batch.
     // Subsequent bars for these req_ids dispatch as historical_data_update.
     // Cleared when a request is made under the id again
@@ -1318,17 +1330,6 @@ pub struct ClientCore {
     // News subscription state
     /// Every provider this account may read.
     pub news_providers: Mutex<String>,
-    /// Which contracts news was asked for on.
-    /// Which requests asked for the headlines on a contract.
-    ///
-    /// Held by request, because the headlines stop when the last caller that
-    /// asked for them goes — not when the first one does, and not when the
-    /// quotes happen to end. Keyed by the contract rather than by the
-    /// instrument, because the venue is asked by contract and the decision to
-    /// ask is made before the instrument is known: keyed by instrument, two
-    /// requests racing for a contract neither had registered yet both found
-    /// nobody had asked, and both asked.
-    pub news_askers: Mutex<HashMap<i64, HashSet<i64>>>,
 
     // Contract cache for enrichment
     /// What the venue has said about each contract, kept so a second
@@ -1428,22 +1429,7 @@ pub const IMPL_VOL_OPTIONS: OptionList =
 pub const OPT_PRC_OPTIONS: OptionList =
     OptionList { request: "ReqCalcOptionPrice(55)", checked_as: None };
 
-/// What an exercise states beyond the instruction itself.
-///
-/// Three fields an order carries and an exercise did not take, though the same
-/// request goes out either way and the same tags carry them: when a person
-/// entered it, whose account it is for, and whether that person is a
-/// professional. A caller that named any of them was answered as though they
-/// had named none.
-#[derive(Debug, Default, Clone)]
-pub struct ExerciseStates {
-    /// When a person entered it, where a person did.
-    pub manual_order_time: String,
-    /// The account it is taken for, where that is not the one connected.
-    pub customer_account: String,
-    /// Whether the person it is for is a professional.
-    pub professional_customer: bool,
-}
+pub use crate::types::ExerciseStates;
 
 /// What the session an order goes out on says about it, which a gateway reads
 /// while it checks one: the account it logged in with, every account the login
@@ -1512,21 +1498,11 @@ impl ClientCore {
     /// An empty one.
     pub fn new() -> Self {
         Self {
-            // What a session that never states one waits. The library's own
-            // tests state a millisecond; see `set_registration_timeout`.
-            registration_timeout: Mutex::new(if cfg!(test) {
-                std::time::Duration::from_millis(1)
-            } else {
-                std::time::Duration::from_secs(5)
-            }),
             readonly: std::sync::atomic::AtomicBool::new(false),
             req_to_instrument: Mutex::new(HashMap::new()),
-            registering: Mutex::new(std::collections::HashSet::new()),
-            withdrawn_while_registering: Mutex::new(std::collections::HashSet::new()),
             registration_epoch: Mutex::new(HashMap::new()),
             epochs: std::sync::atomic::AtomicU64::new(0),
             instrument_to_req: Mutex::new(HashMap::new()),
-            tbt_to_instrument: Mutex::new(HashMap::new()),
             instrument_followers: Mutex::new(HashMap::new()),
             con_id_to_instrument: Mutex::new(HashMap::new()),
             display_groups: Mutex::new(HashMap::new()),
@@ -1537,10 +1513,12 @@ impl ClientCore {
             chargeable_snapshot_reqs: Mutex::new(std::collections::HashSet::new()),
             series_by_req: Mutex::new(HashMap::new()),
             slot_taken_on: Mutex::new(HashMap::new()),
+            slot_generation: Mutex::new(HashMap::new()),
             slot_took_contract: Mutex::new(HashMap::new()),
-            pnl_req_id: Mutex::new(None),
+            account_routes: Mutex::new(AccountRoutes::default()),
+            pnl_req_id: Mutex::new(std::collections::BTreeMap::new()),
             pnl_single_reqs: Mutex::new(HashMap::new()),
-            last_pnl: Mutex::new([0; 3]),
+            last_pnl: Mutex::new(HashMap::new()),
             last_pnl_single: Mutex::new(HashMap::new()),
             account_summary_req: Mutex::new(None),
             account_summary_other_req: Mutex::new(None),
@@ -1561,14 +1539,12 @@ impl ClientCore {
             tick_req_params_sent: Mutex::new(HashSet::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
-            held_orders: Mutex::new(Vec::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
             // Empty until something states them. Which providers an account
             // may read is the venue's answer, given at logon; a pair of codes
             // standing in for it asked for news from providers the account
             // may not be entitled to and left out the ones it is.
             news_providers: Mutex::new(String::new()),
-            news_askers: Mutex::new(HashMap::new()),
             contract_cache: Mutex::new(HashMap::new()),
             named_by_description: Mutex::new(HashMap::new()),
         }
@@ -1596,318 +1572,10 @@ impl ClientCore {
         Ok(())
     }
 
-    /// Keep an order back until one that transmits releases it.
-    ///
-    /// Nothing is sent and nothing is refused. The reference client's own
-    /// bracket sample places a parent and a take-profit this way and lets the
-    /// stop-loss send all three, so refusing it here made that sample — the
-    /// documented way to place a bracket — impossible.
-    pub fn hold_until_transmitted(&self, order_id: u64, parent_id: i64, command: ControlCommand) {
-        let mut held = self.held_orders.lock().unwrap();
-        held.retain(|other| other.order_id != order_id);
-        held.push(HeldOrder { order_id, parent_id, command });
-    }
-
-    /// Hold an order back and record it, as one step.
-    ///
-    /// The hold and the record together are what say an order exists here and
-    /// has not been sent, and taken one after the other they were read
-    /// between: a withdrawal running in the gap found the hold, took it, found
-    /// no record to remove and reported the order withdrawn — and the record
-    /// was written behind it, leaving an id that reads as an order the venue
-    /// is working while nothing was ever sent. Placing under that id again
-    /// then revises an order the venue has never been given.
-    pub fn hold_and_track(
-        &self,
-        order_id: u64,
-        parent_id: i64,
-        command: ControlCommand,
-        contract: ApiContract,
-        order: ApiOrder,
-        instrument: InstrumentId,
-    ) {
-        let mut held = self.held_orders.lock().unwrap();
-        let mut orders = self.open_orders.lock().unwrap();
-        held.retain(|other| other.order_id != order_id);
-        held.push(HeldOrder { order_id, parent_id, command });
-        orders.insert(order_id, tracked_as_placed(contract, order, instrument));
-    }
-
-    /// Forget a placement that was never sent, its record with it, as one
-    /// step, and say whether the order is now gone entirely.
-    ///
-    /// `false` where the id names something else — a revision waiting to be
-    /// transmitted, or nothing at all — and the caller still has a cancel to
-    /// send. The revision is taken out either way: the order it revises is
-    /// live, and the cancel composed for it has an answer coming.
-    ///
-    /// One step for the reason `hold_and_track` is: the two taken apart let a
-    /// placement running between them leave a record behind the withdrawal
-    /// that had just reported the order gone.
-    pub fn withdraw_held_placement(&self, order_id: u64) -> bool {
-        let mut held = self.held_orders.lock().unwrap();
-        let mut orders = self.open_orders.lock().unwrap();
-        let placement = held.iter()
-            .any(|h| h.order_id == order_id && h.places_the_order());
-        let before = held.len();
-        let mut a_revision_went = false;
-        held.retain(|other| {
-            if other.order_id != order_id {
-                return true;
-            }
-            if !other.places_the_order() {
-                a_revision_went = true;
-            }
-            false
-        });
-        let withdrew = held.len() != before;
-        if withdrew && placement {
-            orders.remove(&order_id);
-            // What hangs from a withdrawn placement goes with it. A child left
-            // held under it left the hold later, sent as an exit naming a
-            // parent the venue was never given, with its record standing here
-            // as a working order's.
-            let mut parents = vec![order_id];
-            while let Some(parent) = parents.pop() {
-                let hangs_from = |h: &HeldOrder| h.parent_id == parent as i64 && h.places_the_order();
-                let children: Vec<u64> = held.iter().filter(|h| hangs_from(h)).map(|h| h.order_id).collect();
-                held.retain(|h| !hangs_from(h));
-                for child in children {
-                    orders.remove(&child);
-                    parents.push(child);
-                }
-            }
-        } else if a_revision_went
-            && let Some(tracked) = orders.get_mut(&order_id)
-        {
-            // A revision that never left this process is not a revision the
-            // record may state. Left standing, every later cancel and replace
-            // restated a price nothing had ever been given.
-            put_back_the_terms(tracked);
-        }
-        withdrew && placement
-    }
-
-    /// Take back an order that never went, and say whether it was held.
-    ///
-    /// A held order is one the venue was never given, so withdrawing it is not
-    /// a message to the venue — it is forgetting a command that had not been
-    /// sent. Sent anyway, the venue answers that it knows no such order, and
-    /// the command stayed queued to go out later behind something that
-    /// transmits: a caller that withdrew a parent and then sent its stop-loss
-    /// had the parent it had cancelled placed for it.
-    /// Takes what is held under an id out of the hold, and says whether there
-    /// was any.
-    ///
-    /// Only that. What is held leaves the hold to be sent as often as it
-    /// leaves to be thrown away, and this cannot tell the two apart — a
-    /// restatement put back here was put back on the way out, so the venue
-    /// worked the new terms while the record stated the old ones. The two
-    /// paths that do throw a revision away say so themselves.
-    pub fn withdraw_held(&self, order_id: u64) -> bool {
-        let mut held = self.held_orders.lock().unwrap();
-        let before = held.len();
-        held.retain(|other| other.order_id != order_id);
-        held.len() != before
-    }
-
-    /// Take back everything held, and say how many there were.
-    ///
-    /// What a withdrawal of everything means for orders that were never sent.
-    /// The record of a placement goes with it: left standing, an id reads as a
-    /// working order's, and placing under it again becomes a modify of an order
-    /// nothing has ever submitted.
-    ///
-    /// A held revision of an order the venue is working keeps its record. The
-    /// revision goes, because it was never sent; the order it was a revision to
-    /// is live, and the withdrawal composed for it has an answer coming.
-    /// Dropped along with the revision, that order read as one that was never
-    /// placed, and placing under its id again built a fresh submission for an
-    /// order already on the market.
-    pub fn withdraw_all_held(&self) -> usize {
-        let taken: Vec<HeldOrder> = std::mem::take(&mut *self.held_orders.lock().unwrap());
-        let mut orders = self.open_orders.lock().unwrap();
-        for h in taken.iter().filter(|h| h.places_the_order()) {
-            orders.remove(&h.order_id);
-        }
-        // And the record of each order a discarded revision had restated goes
-        // back to what the venue holds: the revision never left this process,
-        // so nothing at the venue ever stated its terms.
-        for h in taken.iter().filter(|h| !h.places_the_order()) {
-            if let Some(tracked) = orders.get_mut(&h.order_id) {
-                put_back_the_terms(tracked);
-            }
-        }
-        taken.len()
-    }
-
-    /// The family an order that transmits would release, in the order it
-    /// goes, each still held under the id it was placed under.
-    ///
-    /// Gathered without taking anything out of the hold: a sender has to say
-    /// what reached the engine and what did not, and can only say it if what
-    /// has not gone yet is still there to be withdrawn or sent again. Each
-    /// member leaves the hold by its id, once its send is accounted for.
-    pub fn family_before(&self, order_id: u64, parent_id: i64) -> Vec<HeldOrder> {
-        let held = self.held_orders.lock().unwrap();
-        let mut going: Vec<HeldOrder> = Vec::new();
-        if parent_id != 0
-            && let Some(parent) = held.iter().find(|h| h.order_id == parent_id as u64)
-        {
-            going.push(HeldOrder {
-                order_id: parent.order_id,
-                parent_id: parent.parent_id,
-                command: parent.command.clone(),
-            });
-        }
-        for h in held.iter() {
-            // Beside it under the same parent, or hanging from this one. The
-            // parent already gathered cannot also count as a sibling.
-            let same_family = (parent_id != 0 && h.parent_id == parent_id)
-                || h.parent_id == order_id as i64;
-            let same_family = same_family
-                && h.order_id != order_id
-                && !going.iter().any(|g| g.order_id == h.order_id);
-            if same_family {
-                going.push(HeldOrder {
-                    order_id: h.order_id,
-                    parent_id: h.parent_id,
-                    command: h.command.clone(),
-                });
-            }
-        }
-        going
-    }
-
-    /// Send an order and whatever of its family was held, accounting for each.
-    ///
-    /// The family goes out as one thing or not at all, as far as the engine
-    /// allows: it stays held while it is sent, and each member leaves the hold
-    /// only once its send is accounted for. Taken out of the hold first and
-    /// then sent one by one, a send that failed partway left the parent live
-    /// at the venue with its protective children already forgotten, and the
-    /// caller was told only that the call had failed.
-    ///
-    /// `send` says whether the command reached the engine. Answers `Ok` when
-    /// everything went, and otherwise the message naming what reached the
-    /// engine and what did not.
-    pub fn transmit_family(
-        &self,
-        order_id: u64,
-        parent_id: i64,
-        own: ControlCommand,
-        mut send: impl FnMut(ControlCommand) -> bool,
-    ) -> Result<(), String> {
-        // The transmitting order leaves the hold whatever happens: it is the
-        // one that asked to go, and it cannot stay queued to go out behind a
-        // later transmit under the terms this call has just replaced.
-        self.withdraw_held(order_id);
-        // What a placement releases, and only a placement. A replace states new
-        // terms for an order the venue is already working, so nothing is
-        // waiting on it: gathered as a placement's family, a caller moving a
-        // parent's price had the exit it was still building sent for it,
-        // unpaired and unasked.
-        let family = if matches!(own, ControlCommand::Order(OrderRequest::Modify { .. })) {
-            Vec::new()
-        } else {
-            self.family_before(order_id, parent_id)
-        };
-        let mut reached: Vec<u64> = Vec::new();
-        for member in family.iter() {
-            // The engine takes its commands in order, so a send that did not
-            // reach it means none behind it will.
-            if !send(member.command.clone()) {
-                break;
-            }
-            reached.push(member.order_id);
-        }
-        let all_before_went = reached.len() == family.len();
-        let own_places = places_the_order(&own);
-        let own_went = all_before_went && send(own);
-        if all_before_went && own_went {
-            for member in &family {
-                self.withdraw_held(member.order_id);
-            }
-            return Ok(());
-        }
-        // A placement out of the hold that did not reach the engine is not an
-        // order the venue is working, and its record goes with the hold. An
-        // order is read as live here by being tracked with no placement held
-        // for it, so a record left behind put an id that was never sent among
-        // the open orders — and placing under it again revised an order the
-        // venue has never been given, beside a parent that may be resting
-        // there with nothing protecting it.
-        let mut forgotten: Vec<u64> = Vec::new();
-        // What did not reach the engine comes out of the hold, as what did:
-        // left queued, it would go out behind the next thing that transmits,
-        // after the caller had been told it did not go. Left held where
-        // nothing went at all, so a caller that opens another session on this
-        // client can send the family again.
-        if !reached.is_empty() {
-            for member in &family {
-                self.withdraw_held(member.order_id);
-                if reached.contains(&member.order_id) {
-                    continue;
-                }
-                if places_the_order(&member.command) {
-                    forgotten.push(member.order_id);
-                } else {
-                    // A revision that did not reach the engine is a revision
-                    // nothing has been given, and the record must not state
-                    // its terms: every later cancel and replace restates from
-                    // there.
-                    self.undo_restatement(member.order_id);
-                }
-            }
-        }
-        // The transmitting order left the hold at the top whatever happened,
-        // so its own record goes here where it did not reach the engine.
-        if !own_went && own_places {
-            forgotten.push(order_id);
-        }
-        for id in forgotten {
-            self.untrack_order(id);
-        }
-        let name = |ids: &[u64]| {
-            let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ");
-            if ids.len() == 1 { format!("order {list}") } else { format!("orders {list}") }
-        };
-        Err(if reached.is_empty() {
-            if family.is_empty() {
-                format!("the engine stopped before order {order_id} went out: nothing was sent")
-            } else {
-                let ids: Vec<u64> = family.iter().map(|m| m.order_id).collect();
-                format!(
-                    "the engine stopped before the family of order {order_id} went out: \
-                     nothing was sent, and {} {} still held",
-                    name(&ids),
-                    if ids.len() == 1 { "is" } else { "are" },
-                )
-            }
-        } else {
-            let mut missed: Vec<u64> = family.iter()
-                .map(|m| m.order_id)
-                .filter(|id| !reached.contains(id))
-                .collect();
-            if !own_went {
-                missed.push(order_id);
-            }
-            format!(
-                "the engine stopped while the family of order {order_id} was going out: \
-                 {} reached the engine and may be live at the venue; {} did not reach it",
-                name(&reached), name(&missed),
-            )
-        })
-    }
-
     /// Forget everything this session held, so the next one starts clean.
     pub fn reset(&self) {
         self.req_to_instrument.lock().unwrap().clear();
-        // An order held back never reached the venue. Carried into the next
-        // session it would go out under an id that session never issued.
-        self.held_orders.lock().unwrap().clear();
         self.instrument_to_req.lock().unwrap().clear();
-        self.tbt_to_instrument.lock().unwrap().clear();
         self.instrument_followers.lock().unwrap().clear();
         self.con_id_to_instrument.lock().unwrap().clear();
         self.last_quotes.lock().unwrap().clear();
@@ -1921,14 +1589,16 @@ impl ClientCore {
         // last one named.
         self.series_by_req.lock().unwrap().clear();
         self.slot_taken_on.lock().unwrap().clear();
+        self.slot_generation.lock().unwrap().clear();
         self.slot_took_contract.lock().unwrap().clear();
         // And which subscription each number was holding. Kept, the next
         // session's first withdrawal under a number reads a figure from the
         // session before it.
         self.registration_epoch.lock().unwrap().clear();
-        *self.pnl_req_id.lock().unwrap() = None;
+        *self.account_routes.lock().unwrap() = AccountRoutes::default();
+        self.pnl_req_id.lock().unwrap().clear();
         self.pnl_single_reqs.lock().unwrap().clear();
-        *self.last_pnl.lock().unwrap() = [0; 3];
+        self.last_pnl.lock().unwrap().clear();
         self.last_pnl_single.lock().unwrap().clear();
         *self.account_summary_req.lock().unwrap() = None;
         *self.account_summary_other_req.lock().unwrap() = None;
@@ -1953,7 +1623,6 @@ impl ClientCore {
         self.historical_asks.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
         self.news_providers.lock().unwrap().clear();
-        self.news_askers.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();
         // What the venue named for a description belongs to the session that
         // asked. Kept across a reconnect — or a login as somebody else — the
@@ -1968,41 +1637,6 @@ impl ClientCore {
     }
 
     // ── Registration helpers ──
-
-    /// What this session waits, stated when it opened.
-    ///
-    /// The library's own tests wait a millisecond: a test with no engine to
-    /// answer would otherwise wait the full default on every call.
-    pub fn set_registration_timeout(&self, waiting: std::time::Duration) {
-        *self.registration_timeout.lock().unwrap() = waiting;
-    }
-
-    fn registration_timeout(&self) -> std::time::Duration {
-        *self.registration_timeout.lock().unwrap()
-    }
-
-    /// Wait for the hot loop to register a contract, and answer with the slot
-    /// it gave. A registration the engine refuses — a contract numbered
-    /// beyond what a request carries — comes back as an `Err` for this request
-    /// alone; the engine keeps running. No contract is refused for want of
-    /// room.
-    fn recv_registration<E: Into<Refusal>>(
-        &self, reply_rx: std::sync::mpsc::Receiver<Result<InstrumentId, E>>,
-    ) -> Result<InstrumentId, Refusal> {
-        use std::sync::mpsc::RecvTimeoutError;
-        reply_rx.recv_timeout(self.registration_timeout())
-            .map_err(|why| match why {
-                // The engine took the command and then went. That is a session
-                // to reopen, not a venue that stayed silent, and a caller
-                // branching on the code has to be able to tell them apart.
-                RecvTimeoutError::Disconnected => {
-                    Refusal::not_connected("Engine stopped before it answered")
-                }
-                RecvTimeoutError::Timeout => Refusal::no_answer("Registration timed out"),
-            })?
-            // Keep the number the engine refused this request under.
-            .map_err(Into::into)
-    }
 
     /// Which slot this contract holds, as far as this client knows.
     ///
@@ -2113,117 +1747,6 @@ impl ClientCore {
         joined == Joined::Watching
     }
 
-    /// Point everything watching one slot at another.
-    ///
-    /// The engine says so when a lookup names a contract another slot already
-    /// holds: only one subscription per contract exists on the wire, so the
-    /// callers given the second slot have to read the first, or their quotes
-    /// arrive on a slot nothing is watching.
-    ///
-    /// Answers with the number that slot is held under once the move is done.
-    /// Where callers arrived it is theirs from this moment, and one that
-    /// nothing deciding against the occupancy before it can name. Zero says
-    /// the slot is nobody's: the caller this move was for withdrew on the way
-    /// and nothing else was watching, so the subscription held up for it is
-    /// held up for no one.
-    ///
-    /// Those are not the only two endings, which is what this answered wrongly.
-    /// A move can arrive with nobody left to move — its caller withdrew on the
-    /// way — onto a slot somebody else is already watching. Nothing arrived, so
-    /// nothing renamed the occupancy, and the slot goes on being held under the
-    /// number it already had. Answered with the minted number anyway, the
-    /// engine renamed the occupancy to one this client never wrote down, and
-    /// the caller that had been watching all along could no longer withdraw its
-    /// own subscription: the call returned success, the venue went on
-    /// streaming, and nothing could take it down again.
-    ///
-    /// The number is taken in the same acquisition that installs the move,
-    /// and the engine is told on its own queue. Told by a flag the surface
-    /// clears instead, a withdrawal already decided against the occupancy
-    /// before this one became valid again simply by arriving late.
-    pub(crate) fn move_watchers(
-        &self, shared: &SharedState, from: InstrumentId, into: InstrumentId,
-    ) -> u64 {
-        {
-            let mut modes = self.mdt_by_instrument.lock().unwrap();
-            if let Some(mode) = modes.remove(&from) {
-                modes.entry(into).or_insert(mode);
-            }
-        }
-        // The whole move under one acquisition of the ownership maps: a
-        // withdrawal that ran between taking the watchers off the old slot and
-        // putting them on the new one found nobody watching either, so it took
-        // the subscription down — and the request it had just withdrawn was
-        // put back on the new slot, live again under a number its caller had
-        // given up.
-        let mut moved: Vec<i64> = Vec::new();
-        // A number of their own: what could withdraw that subscription before
-        // they arrived cannot any more, and they can. The engine is told it on
-        // its own queue, so a withdrawal already decided against the occupancy
-        // before this one cannot become valid again by arriving late.
-        let taken_on = self.in_order();
-        let held_under = {
-            let mut own = self.ownership();
-            // And the contract that slot holds, as this client recorded it
-            // taking it — not whatever a cache happens to point at the slot
-            // with, which is the lookup the record beside it exists to
-            // replace, and read under the same acquisition as the move.
-            let moved_contract = own.took_contract.get(&into).copied().unwrap_or(0);
-            let held = own.holders.remove(&from);
-            own.taken_on.remove(&from);
-            let watchers = own.following.remove(&from).unwrap_or_default();
-            for req_id in held.into_iter().chain(watchers) {
-                // Only the ones still watching the slot that is moving. One
-                // withdrawn while this was under way is watching nothing.
-                if own.by_req.get(&req_id) != Some(&from) {
-                    continue;
-                }
-                own.take_or_follow(into, req_id, &[], taken_on, moved_contract);
-                own.taken_on.insert(into, taken_on);
-                own.by_req.insert(req_id, into);
-                // Under the same acquisition that moves it: a number stamped
-                // after the maps were released was stamped for a request that
-                // had since been withdrawn.
-                own.epoch.insert(req_id, self.epochs.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-                moved.push(req_id);
-            }
-            // What the slot is held under now, decided here rather than after
-            // the maps are let go: whether anything is watching it and which
-            // occupancy that is are one question, and asked separately a
-            // withdrawal in between answered the first yes and the second
-            // about a number that had gone.
-            let watched = own.holders.contains_key(&into)
-                || own.following.get(&into).is_some_and(|watchers| !watchers.is_empty());
-            if watched {
-                // The number this move installed where callers arrived, and
-                // the one the slot already had where none did.
-                own.taken_on.get(&into).copied().unwrap_or(taken_on)
-            } else {
-                0
-            }
-        };
-        for req_id in moved {
-            // Only where it is still watching what it was moved onto. A
-            // withdrawal running since the move was recorded leaves a number
-            // watching nothing, and what is owed a joiner was queued under
-            // that number anyway: the caller was answered after it had given
-            // the number up, and where the number had been handed out again it
-            // was answered about a contract it never asked for.
-            if self.watching(req_id) != Some(into) {
-                continue;
-            }
-            // Moved onto somebody else's subscription is joining one, and what
-            // a joiner is owed is owed here too. Only the slot they left was
-            // cleared, so they arrived on a contract whose baseline already
-            // matched its quote and heard nothing until it next moved, were
-            // never told the increment it was acknowledged with, and where it
-            // had been refused were not told that either.
-            self.mdt_sent.lock().unwrap().remove(&req_id);
-            self.pay_a_joiner(shared, into, req_id);
-        }
-        self.last_quotes.lock().unwrap().remove(&from);
-        held_under
-    }
 
     /// A gateway states these parameters once per request. The bid/ask and
     /// last subscriptions are acknowledged separately, and a follower can
@@ -2238,46 +1761,6 @@ impl ClientCore {
         watching.contains_key(&req_id) && self.tick_req_params_sent.lock().unwrap().insert(req_id)
     }
 
-    /// What a request that joins a subscription somebody else opened is owed.
-    ///
-    /// It asked the venue for nothing, so the venue answers it with nothing:
-    /// the acknowledgement went to whoever opened the subscription, a refusal
-    /// was drained when it arrived, and the quote is only stated where it
-    /// differs from a baseline this request had no part in setting. Each of
-    /// those has to be handed over here or the caller holds a number that
-    /// reads as subscribed and hears nothing on it.
-    ///
-    /// There is more than one way into following — the contract may be known
-    /// here, or the engine may be the first to know which slot it holds, which
-    /// is every contract named by symbol alone. Paid on one of them and not
-    /// the other, the second was the ordinary path for those contracts.
-    fn pay_a_joiner(&self, shared: &SharedState, instrument: InstrumentId, req_id: i64) {
-        // The venue sends a tickReqParams per reqMktData; a follower asked for
-        // none, so it is owed what the live subscription was acknowledged
-        // with. Before that acknowledgement there is none yet,
-        // and the pending one fans out to this follower when it arrives.
-        if let Some(params) = shared.market.tick_req_params_for_follower(instrument) {
-            shared.market.push_tick_req_params_for(req_id, params);
-        }
-        // And where the subscription this one joins was refused, it is refused
-        // too. The refusal is drained once and told to whoever held the
-        // contract then; a request joining afterwards heard nothing and
-        // received nothing — it had joined a subscription the venue had
-        // already declined, and nothing was ever going to arrive on it.
-        if let Some(reason) = shared.market.failure_for_follower(instrument) {
-            shared.market.push_subscription_failure_for(req_id, reason);
-        }
-        // And it is owed the quote as it stands. The ticks are worked out once
-        // per contract, against what was last sent for that contract, and
-        // fanned to everyone watching it — so a request joining a contract
-        // whose baseline already matches the quote was sent nothing at all,
-        // and on a contract that is not moving it stayed that way. Forgetting
-        // the baseline is what makes the next pass state everything the venue
-        // has said, which is what a subscription is answered with; it is the
-        // same mechanism a market-data drop uses. Everyone already watching
-        // hears those values restated, which is what they are holding.
-        self.last_quotes.lock().unwrap().remove(&instrument);
-    }
 
     /// Forget everyone recorded as watching a slot the engine has taken back.
     ///
@@ -2400,43 +1883,6 @@ impl ClientCore {
         }
     }
 
-    /// Find instrument ID for a contract, registering if needed.
-    /// Returns `Err` if the control channel is closed.
-    pub fn find_or_register_instrument(
-        &self,
-        shared: &SharedState,
-        control_tx: &SyncSender<ControlCommand>,
-        con_id: i64,
-        symbol: &str,
-        exchange: &str,
-        sec_type: &str,
-        identity: &str,
-    ) -> Result<InstrumentId, Refusal> {
-        // The cache is skipped when the caller states an identity, because the
-        // slot may have been allocated by a market-data subscription that had
-        // none — and the engine is where the identity is stored. Short-circuiting
-        // here sent the order with a correct security type and destination but no
-        // expiry, so a future named its exchange and not its month. Registration
-        // is idempotent: the engine returns the same slot and adopts the identity.
-        if identity.is_empty()
-            && let Some(iid) = self.cached_instrument(shared, con_id) {
-                return Ok(iid);
-            }
-
-        // Register new — only allocates an InstrumentId slot, does not subscribe to
-        // market data.
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        control_tx.send(ControlCommand::RegisterInstrument {
-            contract: ContractRef { con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(), ..Default::default() },
-            identity: identity.to_string(),
-            reply_tx: Some(reply_tx),
-        }).map_err(|e| Refusal::not_connected(format!("Engine stopped: {e}")))?;
-
-        let id = self.recv_registration(reply_rx)?;
-        self.cache_instrument(con_id, id);
-        Ok(id)
-    }
-
     /// A request is being made under this id, so whatever a request under it
     /// finished before is over.
     ///
@@ -2450,57 +1896,20 @@ impl ClientCore {
 
     // ── Subscription management ──
 
-    /// Record that this request asked for the headlines on an instrument.
+    /// Ask the engine for a market-data subscription.
     ///
-    /// Called on every way out of a registration. Registration leaves by more
-    /// than one door — the quotes may already be up, and may come up while
-    /// this request was being made — and the subscription is sent before any
-    /// of them. A door that does not record it sends headlines nothing will
-    /// ever withdraw.
-    /// Record that this request wants the headlines on a contract, and say
-    /// whether it is the first to ask.
-    ///
-    /// Decided and recorded together, so two requests racing for one contract
-    /// cannot both find that nobody has asked. The venue is asked by contract
-    /// and withdrawn by contract, so asking twice leaves a subscription the
-    /// one withdrawal cannot match.
-    pub(crate) fn first_to_ask_for_news(&self, con_id: i64, req_id: i64) -> bool {
-        let mut news = self.news_askers.lock().unwrap();
-        let askers = news.entry(con_id).or_default();
-        let first = askers.is_empty();
-        askers.insert(req_id);
-        first
-    }
-
-    /// Forget every caller that asked for news on a contract the venue
-    /// refused. A later ask is then the first again and sends anew, rather
-    /// than being deduped against a claim the venue already declined.
-    pub(crate) fn release_news_askers(&self, con_id: i64) {
-        self.news_askers.lock().unwrap().remove(&con_id);
-    }
-
-    /// Give back what a registration took before it was refused.
-    ///
-    /// Everything written down between the first word of a registration and
-    /// the slot it ends with is a lease this number holds, and a caller told
-    /// its request did not happen holds none of them. The marks outlive the
-    /// request that left them: a number recorded as having bought a one-shot
-    /// is never followed, so the same number handed out again for an ordinary
-    /// stream keeps the next caller on that contract out of the followers, and
-    /// a contract recorded as already asked for headlines is deduped against a
-    /// claim nobody holds and never asks again.
-    fn give_back_what_this_request_took(&self, con_id: i64, req_id: i64) {
-        self.release_news_askers(con_id);
-        self.chargeable_snapshot_reqs.lock().unwrap().remove(&req_id);
-        self.series_by_req.lock().unwrap().remove(&req_id);
-    }
-
-    /// Register a market data subscription mapping.
-    /// If `generic_tick_list` contains "292", also subscribes to per-contract news.
+    /// What needs no venue is checked here and the request is handed over.
+    /// The engine registers the contract, serves the request off the
+    /// subscription the contract already has or asks for one, and says in the
+    /// session's order which slot it is served on, or why it is not — so a
+    /// number already watching something, and a contract the venue will not
+    /// serve, are refused there. Nothing waits here. `spread_scan` rides the
+    /// request where it is a spread scan, and `calculation` where it is opened
+    /// to bring a calculation its model.
     pub fn register_mkt_data(
         &self,
         shared: &SharedState,
-        control_tx: &SyncSender<ControlCommand>,
+        control_tx: &Sender<ControlCommand>,
         req_id: i64,
         con_id: i64,
         symbol: &str,
@@ -2512,82 +1921,26 @@ impl ClientCore {
         regulatory_snapshot: bool,
         generic_tick_list: &str,
         mode_9887: i32,
-    ) -> Result<InstrumentId, Refusal> {
-        // A number already watching something cannot watch a second thing.
-        //
-        // Nothing refused it, and the two maps that answer "who is watching
-        // this contract" and "what is this request watching" then disagreed:
-        // the second contract took the request, and the first was left in the
-        // one map the delivery loop reads. The caller was handed both
-        // contracts' ticks under one number with nothing to tell them apart,
-        // its withdrawal reached only the second, and a second withdrawal
-        // reached nothing at all — so the first went on arriving under a
-        // number the caller had cancelled, for the life of the session.
-        //
-        // Refused here, before anything is sent: the venue is asked before the
-        // slot this request would take is known, so there is no later point at
-        // which refusing leaves nothing behind.
-        // Read and claimed under one lock, so a second caller on this number
-        // cannot pass the check while the first is still waiting to be given a
-        // slot. Held until this call returns, however it returns.
-        let claim = {
-            let watching = self.req_to_instrument.lock().unwrap();
-            let mut taking = self.registering.lock().unwrap();
-            if watching.contains_key(&req_id) || !taking.insert((TAKING_QUOTES, req_id)) {
-                return Err(Refusal::stated(
-                    DUPLICATE_TICKER_ID,
-                    format!(
-                        "request {req_id} is already watching a contract: withdraw it before \
-                         asking for another under the same number",
-                    ),
-                ));
-            }
-            Registering {
-                held: &self.registering,
-                withdrawn: &self.withdrawn_while_registering,
-                key: (TAKING_QUOTES, req_id),
-            }
-        };
-
+        spread_scan: Option<String>,
+        calculation: Option<Box<crate::types::Calculation>>,
+    ) -> Result<(), Refusal> {
         // A quote feed the engine has given up on serves nothing more this
-        // session. Refused here rather than beside the socket, because the two
-        // ways a request can be told it has a subscription part company before
-        // then: a request joining a contract already watched is answered from
-        // this side and never reaches the engine at all, so a guard there
-        // cannot see it. Both were told they had one — the joiner off a
-        // subscription that had stopped, the new one off a slot taken and a
-        // request recorded for a replay that is not coming — and both waited
-        // out the session for a first tick.
+        // session: there is no connection to write the request to and no
+        // reconnect coming to replay it, and a caller told it had a
+        // subscription waited out the session for a first tick.
         if let Some(why) = shared.market.market_data_over() {
             return Err(Refusal::not_connected(format!(
                 "market data is unavailable for the rest of this session: {why}",
             )));
         }
-
         // The chargeable snapshot is one burst by construction, so it ends the
         // way an ordinary snapshot does and the caller hears the same end.
         let snapshot = snapshot || regulatory_snapshot;
-        // Written down before anything can follow this request: what it asked
-        // for decides whether it may be followed at all.
-        if regulatory_snapshot {
-            self.chargeable_snapshot_reqs.lock().unwrap().insert(req_id);
-        }
         // News subscription if generic_tick_list names 292, bare or with the
         // providers to ask. The whole entry, not its last three characters:
         // "1292" is not 292, and matching on a suffix subscribes to news the
         // caller did not ask for.
         let asked = parse_generic_tick_list(generic_tick_list);
-        let wants_news = asked.news;
-        // And nothing else is served. Not because the protocol cannot carry
-        // it: a tick is asked for as a subscription of its own, under the
-        // venue's number for it in the request type, which is how the option
-        // model, the trading status and the venue map are already asked for
-        // here. What is missing is the venue's number for each of the numbers
-        // a caller names, and a reader for what each one answers with.
-        //
-        // So every other number is reported rather than accepted in silence —
-        // option volume, shortable shares. A caller hears that it will not
-        // arrive instead of watching for a tick that never comes.
         // Each remaining entry is asked for. The number a caller states is the
         // venue's own number for the series, so there is nothing to translate:
         // it goes out as a subscription of its own under that number, the way
@@ -2596,7 +1949,6 @@ impl ClientCore {
         // An entry that is not a number is not one of the venue's series, and
         // saying so is better than sending it and having the whole request
         // refused for the sake of one bad word in the list.
-        let generic_ticks = asked.series;
         if !asked.unread.is_empty() {
             log::warn!(
                 "the generic tick list named {}, which is not a number the venue \
@@ -2604,16 +1956,13 @@ impl ClientCore {
                 asked.unread.join(", "),
             );
         }
-        // Asked for once per contract, whoever asks. Recorded as the decision
-        // is made, so two callers racing for one contract cannot both find
-        // that nobody has asked.
-        if wants_news && self.first_to_ask_for_news(con_id, req_id) {
-            // The providers the entry itself named, else those a caller has
-            // named for the session, else what the logon said this account may
-            // read. The venue separates codes with a star.
+        // The providers the entry itself named, else those a caller has named
+        // for the session, else what the logon said this account may read. The
+        // venue separates codes with a star.
+        let news = asked.news.then(|| {
             let named = self.news_providers.lock().unwrap().clone();
-            let providers = if !asked.news_providers.is_empty() {
-                asked.news_providers
+            if !asked.news_providers.is_empty() {
+                asked.news_providers.clone()
             } else if named.is_empty() {
                 shared.reference.news_providers()
                     .iter()
@@ -2622,85 +1971,10 @@ impl ClientCore {
                     .join("*")
             } else {
                 named
-            };
-            // Reported, not discarded. A send fails because the engine is
-            // gone, and the branch below returns success for a contract
-            // somebody else already watches without sending anything else — so
-            // a caller that asked for headlines was told it had them while
-            // nothing had reached the engine at all. The record of who asked
-            // goes back with it, or the next ask is deduped against this one.
-            if let Err(gone) = control_tx.send(ControlCommand::SubscribeNews {
-                con_id,
-                symbol: symbol.to_string(),
-                sec_type: sec_type.to_string(),
-                providers,
-                reply_tx: None,
-            }) {
-                self.give_back_what_this_request_took(con_id, req_id);
-                return Err(Refusal::not_connected(format!("Engine stopped: {gone}")));
             }
-        }
-
-        // A contract already being watched needs no second subscription: this
-        // caller watches the one that is up, and hears the same quotes under
-        // its own request. Nothing goes to the engine.
-        //
-        // Except a chargeable snapshot, which is a request of its own and not
-        // a share of somebody's stream. Following one instead sends nothing,
-        // bills nothing, and lets an account with no entitlement hear an end
-        // it was never refused — off a stream it did not ask for.
-        if !regulatory_snapshot
-            && let Some(instrument) = self.cached_instrument(shared, con_id)
-            && self.follows_existing_subscription(instrument, req_id, &generic_ticks)
-        {
-            if snapshot {
-                self.snapshot_reqs.lock().unwrap().insert(req_id, (std::time::Instant::now(), 0));
-            }
-            self.pay_a_joiner(shared, instrument, req_id);
-            // And the series this caller named. The list that went to the
-            // venue is the first caller's, so a joiner naming a series nobody
-            // has asked for waited on a stream that was never requested. What
-            // is already being served is not asked for again — the engine
-            // holds what was asked and sends only the difference.
-            if !generic_ticks.is_empty() {
-                let _ = control_tx.send(ControlCommand::AlsoAskForSeries {
-                    instrument,
-                    con_id,
-                    generic_ticks: generic_ticks.clone(),
-                    took_it: self.what_took(instrument),
-                    issued: self.in_order(),
-                });
-            }
-            // The news subscription was sent above whether or not the quotes
-            // were already up, so it is recorded here as well. Recorded only
-            // on the path that also opened the quotes, it was never withdrawn:
-            // the caller stopped watching and the headlines kept coming.
-            return self.settle_registration(shared, control_tx, &claim, req_id, instrument);
-        }
-
-        // The number this registration asks under, kept: the slot it is given
-        // is recorded under the same number. Recorded under a fresh one taken
-        // when the engine answers, a registration the engine then gave up on
-        // was read as a later occupancy than the release that freed it — so
-        // nothing was forgotten, and the next contract to take that slot was
-        // reachable under the failed request's records.
-        let asked_on = self.in_order();
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        // Both sends give back what this request took before they report the
-        // engine gone. Returned straight, they left the mark that says this
-        // number bought a one-shot standing against a number nothing is
-        // watching under — so the same number handed out again for an ordinary
-        // stream read as a one-shot, and the next caller on that contract was
-        // kept out of the followers and heard nothing.
-        control_tx.send(ControlCommand::RegisterInstrument {
-            contract: ContractRef { con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(), ..Default::default() },
-            identity: String::new(),
-            reply_tx: None,
-        }).map_err(|e| {
-            self.give_back_what_this_request_took(con_id, req_id);
-            Refusal::not_connected(format!("Engine stopped: {e}"))
-        })?;
-        control_tx.send(ControlCommand::Subscribe {
+        });
+        shared.admit(control_tx, ControlCommand::Subscribe {
+            req_id,
             contract: ContractRef {
                 con_id, symbol: symbol.to_string(), exchange: exchange.to_string(),
                 sec_type: sec_type.to_string(), currency: currency.to_string(),
@@ -2711,93 +1985,53 @@ impl ClientCore {
             filters: filters.clone(),
             mode_9887,
             regulatory_snapshot,
-            generic_ticks: generic_ticks.clone(),
-            reply_tx: Some(reply_tx),
-            issued: asked_on,
-        }).map_err(|e| {
-            self.give_back_what_this_request_took(con_id, req_id);
-            Refusal::not_connected(format!("Engine stopped: {e}"))
-        })?;
+            snapshot,
+            generic_ticks: asked.series,
+            news,
+            spread_scan,
+            calculation,
+        })
+    }
 
-        // The engine answers this one. A conId-less contract has no client-side
-        // identity, so a duplicate can only be settled against the slot the
-        // engine resolved — and refusing here, after `Subscribe` had already
-        // gone out, left a live subscription the caller was told did not happen
-        // and held no req_id to cancel by. The engine now refuses
-        // before the subscribe reaches the wire and that refusal arrives here.
-        let instrument_id = match self.recv_registration(reply_rx) {
-            Ok(id) => id,
-            Err(refused) => {
-                // The headlines were asked for before this could fail, and the
-                // record of who asked is what decides whether the next caller
-                // sends the request at all. Left standing for a request that
-                // never started, this contract's headlines are never asked for
-                // again — the next caller reads somebody as already watching —
-                // and the subscription that did go out cannot be withdrawn,
-                // because the path that withdraws it needs a request this one
-                // no longer has.
-                // Named by contract, because this side has no slot for it: the
-                // headlines went out before the contract was registered and
-                // the registration is what just failed, so the mapping a slot
-                // would come from was never written. Named by slot it resolved
-                // to nothing, the withdrawal was never sent, and the headlines
-                // ran for the rest of the session with the record of who asked
-                // already dropped — so no later withdrawal reached them
-                // either, and the next request for the contract opened a
-                // second subscription on the wire beside the first.
-                if wants_news
-                    && let Some(subject) = self.release_news(shared, req_id)
-                {
-                    let _ = control_tx.send(ControlCommand::UnsubscribeNews { subject });
-                }
-                // And what this request was marked as and what it had asked
-                // for, because no record of it remains for a withdrawal to
-                // clean up. Left behind, the number reused for an ordinary
-                // stream read as the venue's one-shot and the callers on that
-                // contract were served as though it were one — and a series
-                // this request never got went on being served because a
-                // number nobody holds was still counted as asking for it.
-                self.chargeable_snapshot_reqs.lock().unwrap().remove(&req_id);
-                self.series_by_req.lock().unwrap().remove(&req_id);
-                return Err(refused);
-            }
-        };
-        self.cache_instrument(con_id, instrument_id);
-        // The contract may have been named only by symbol, in which case the
-        // engine is the first to know which slot it holds — and it may already
-        // be watched. This caller watches it too rather than taking it over —
-        // unless it asked for the chargeable snapshot, which is its own
-        // request and was already sent above.
-        if !regulatory_snapshot
-            && self.follows_existing_subscription(instrument_id, req_id, &generic_ticks)
-        {
-            if snapshot {
-                self.snapshot_reqs.lock().unwrap().insert(req_id, (std::time::Instant::now(), 0));
-            }
-            self.pay_a_joiner(shared, instrument_id, req_id);
-            // And the series this caller named, as on the path that never
-            // reached the engine: the list that went to the venue is the
-            // holder's.
-            if !generic_ticks.is_empty() {
-                let _ = control_tx.send(ControlCommand::AlsoAskForSeries {
-                    instrument: instrument_id,
-                    con_id,
-                    generic_ticks: generic_ticks.clone(),
-                    took_it: self.what_took(instrument_id),
-                    issued: self.in_order(),
-                });
-            }
-            return self.settle_registration(shared, control_tx, &claim, req_id, instrument_id);
+    /// Write down a market-data request the engine has taken, where its record
+    /// stands in the session's order: which slot it is served on, and whether
+    /// it holds the subscription there or watches the one somebody else holds.
+    ///
+    /// Written here rather than at the call, because the engine is the first
+    /// to know which slot a contract named by symbol holds, and a request
+    /// withdrawn before this is read is withdrawn in the same order.
+    pub fn note_mkt_data_taken(&self, _shared: &SharedState, taken: &crate::bridge::MarketDataTaken) {
+        let crate::bridge::MarketDataTaken {
+            req_id, slot, generation, con_id, ref series, snapshot, asked_at, one_shot, mode_9887, marked,
+        } = *taken;
+        self.cache_instrument(con_id, slot);
+        // Written down before it can be followed: what it asked for decides
+        // whether it may be followed at all.
+        if one_shot {
+            self.chargeable_snapshot_reqs.lock().unwrap().insert(req_id);
         }
-        // Somebody may have taken this contract while this request was being
-        // registered, in which case this one watches theirs. Either way the
-        // record of what it is watching is written there, under the maps that
-        // decide it.
-        let _ = self.take_or_follow(instrument_id, req_id, &generic_ticks, asked_on, con_id);
+        if snapshot {
+            self.snapshot_reqs.lock().unwrap().insert(req_id, SnapshotWait {
+                asked_at, ..SnapshotWait::new(slot, marked)
+            });
+        }
+        // A contract already being watched needs no second subscription: this
+        // request watches the one that is up, and hears the same quotes under
+        // its own number.
+        //
+        // Except a chargeable snapshot, which is a request of its own and not
+        // a share of somebody's stream. Following one instead sends nothing,
+        // bills nothing, and lets an account with no entitlement hear an end
+        // it was never refused — off a stream it did not ask for.
+        if !one_shot && self.follows_existing_subscription(slot, req_id, series) {
+            self.last_quotes.lock().unwrap().remove(&slot);
+            return;
+        }
+        let _ = self.take_or_follow(slot, req_id, series, generation, con_id);
         self.stamp_registration(req_id);
-        // A concurrent registration may already hold the subscription. Its
-        // mode still describes the feed everyone on this instrument receives.
-        self.mdt_by_instrument.lock().unwrap().entry(instrument_id).or_insert(
+        // A request beside it may already hold the subscription. Its mode
+        // still describes the feed everyone on this instrument receives.
+        self.mdt_by_instrument.lock().unwrap().entry(slot).or_insert(
             match mode_9887 {
                 1 => MDT_DELAYED,
                 2 => MDT_FROZEN,
@@ -2805,97 +2039,6 @@ impl ClientCore {
                 _ => self.market_data_type.load(Ordering::Relaxed),
             },
         );
-        if snapshot {
-            self.snapshot_reqs.lock().unwrap().insert(req_id, (std::time::Instant::now(), 0));
-        }
-        self.settle_registration(shared, control_tx, &claim, req_id, instrument_id)
-    }
-
-    /// Publish what a registration opened, or take it back down because it was
-    /// withdrawn while it was away.
-    ///
-    /// The record a withdrawal reads is written when the engine's answer comes
-    /// back, so a withdrawal arriving before that has nothing to act on. It is
-    /// answered all the same — the venue does not refuse one for arriving
-    /// early — and written down against the number instead. This is where that
-    /// is read, as the claim is given back and under the same acquisition, so
-    /// a withdrawal is either early enough to be seen here or late enough to
-    /// find the record it needs.
-    ///
-    /// Taken down through the ordinary withdrawal, because that is the one
-    /// that knows a subscription somebody else is also watching stays up and
-    /// passes to the next of them.
-    fn settle_registration(
-        &self,
-        shared: &SharedState,
-        control_tx: &SyncSender<ControlCommand>,
-        claim: &Registering<'_>,
-        req_id: i64,
-        instrument: InstrumentId,
-    ) -> Result<InstrumentId, Refusal> {
-        if !claim.withdrawn_meanwhile() {
-            return Ok(instrument);
-        }
-        let withdrawn = self.unregister_mkt_data(shared, req_id);
-        // Nothing is reported from here. The withdrawal was answered when it
-        // arrived, and a send failing now fails because the engine has gone —
-        // which takes the subscription with it.
-        if let Some(subject) = withdrawn.headlines {
-            let _ = control_tx.send(ControlCommand::UnsubscribeNews { subject });
-        }
-        let series = withdrawn.series;
-        if let Some(subscription) = withdrawn.subscription {
-            let _ = control_tx.send(ControlCommand::Unsubscribe {
-                instrument: subscription,
-                con_id: withdrawn.con_id,
-                took_it: withdrawn.took_it,
-                series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
-                issued: withdrawn.decided_at,
-            });
-        } else if let Some((slot, generic_ticks)) = series {
-            let _ = control_tx.send(ControlCommand::StopAskingForSeries {
-                instrument: slot,
-                con_id: withdrawn.con_id,
-                took_it: withdrawn.took_it,
-                generic_ticks,
-                issued: withdrawn.decided_at,
-            });
-        }
-        Ok(instrument)
-    }
-
-    /// Drop this request's claim on the headlines, and say whether that was
-    /// the last one. Called on every path out of a withdrawal: the quotes may
-    /// stay up for another caller while the headlines this one asked for stop.
-    pub(crate) fn release_news(&self, shared: &SharedState, req_id: i64) -> Option<NewsSubject> {
-        let emptied = {
-            let mut news = self.news_askers.lock().unwrap();
-            let mut done: Option<i64> = None;
-            for (con_id, askers) in news.iter_mut() {
-                if askers.remove(&req_id) {
-                    if askers.is_empty() {
-                        done = Some(*con_id);
-                    }
-                    break;
-                }
-            }
-            let con_id = done?;
-            news.remove(&con_id);
-            con_id
-        };
-        // Named by the slot where this side has one, and by the contract
-        // where it does not. It does not always: the headlines are asked for
-        // before the contract is registered, and the mapping a slot comes from
-        // is written when that succeeds — so a registration that fails leaves
-        // this holding nothing to name. Resolved to a slot or nothing, the
-        // withdrawal was simply never sent, while the record of who asked had
-        // already been dropped above: the headlines ran for the rest of the
-        // session with nothing able to stop them, and the next request for the
-        // contract opened a second subscription beside the first.
-        Some(
-            self.cached_instrument(shared, emptied)
-                .map_or(NewsSubject::Contract(emptied), NewsSubject::Slot),
-        )
     }
 
     /// Take a request number for a book, or say it already holds one.
@@ -2961,47 +2104,6 @@ impl ClientCore {
         self.req_to_instrument.lock().unwrap().contains_key(&req_id)
     }
 
-    /// Withdraw a number that is in the middle of taking a subscription on
-    /// another thread, and say whether there was one to withdraw.
-    ///
-    /// A registration waits on the engine, and the record an ordinary
-    /// withdrawal reads is written when that answer comes back. Between the
-    /// two there is nothing to find, so a withdrawal arriving in the gap read
-    /// as a number watching nothing. Refused for that, the caller was told its
-    /// withdrawal had not happened while the registration finished behind it
-    /// and the subscription lived — no answer the venue gives, and the one
-    /// state the caller cannot act on. Written down instead, and the
-    /// registration takes what it opened back down when it reads it. The gap
-    /// is as long as the wait, and the surface that releases the interpreter
-    /// lock across it makes a cancel from a timer thread an ordinary thing to
-    /// write.
-    pub fn withdraw_while_registering(&self, req_id: i64) -> bool {
-        self.note_withdrawal(TAKING_QUOTES, req_id)
-    }
-
-    /// The same for a tick stream.
-    ///
-    /// The two are claimed under keys of their own, so the quote answer above
-    /// says nothing about a number in the middle of taking one of these — and a
-    /// withdrawal that asked the wrong one read a stream still being registered
-    /// as a stream that was never there.
-    pub fn withdraw_while_registering_tbt(&self, req_id: i64) -> bool {
-        self.note_withdrawal(TAKING_TICKS, req_id)
-    }
-
-    /// Written under the claim's own lock, and only against a claim that is
-    /// still held: the registration reads it as it gives the claim back and
-    /// under the same acquisition, so a withdrawal recorded here is one the
-    /// registration has not yet stopped looking for.
-    fn note_withdrawal(&self, taking: u8, req_id: i64) -> bool {
-        let held = self.registering.lock().unwrap();
-        if !held.contains(&(taking, req_id)) {
-            return false;
-        }
-        self.withdrawn_while_registering.lock().unwrap().insert((taking, req_id));
-        true
-    }
-
     /// Which contract's slot a number is watching, if it is watching one.
     pub fn watching(&self, req_id: i64) -> Option<InstrumentId> {
         self.req_to_instrument.lock().unwrap().get(&req_id).copied()
@@ -3039,150 +2141,70 @@ impl ClientCore {
         self.registration_epoch.lock().unwrap().get(&req_id).copied()
     }
 
-    /// Unregister a market data subscription.
+    /// Forget a market-data request, where its withdrawal stands in the
+    /// session's order.
     ///
-    /// Answers with the subscription to withdraw, separately with the
-    /// instrument whose headlines stop, and separately again with the series
-    /// nobody watching that contract asks for any more. They are not the same
-    /// question: the quotes stay up for another caller while the headlines
-    /// this one asked for end and the series it brought with it go, and a
-    /// caller told only that the quotes stay up sent nothing — leaving the
-    /// headlines running and the venue serving series nobody reads.
-    pub fn unregister_mkt_data(
-        &self, shared: &SharedState, req_id: i64,
-    ) -> WhatAWithdrawalLeaves {
+    /// A request watching somebody else's subscription stops watching it, and
+    /// the subscription stays up for the rest. A request that held it hands
+    /// it to the next one watching rather than taking the quotes away from
+    /// them. What goes to the venue is the engine's to decide: it took the
+    /// request before its withdrawal, and knows who else is on the contract.
+    pub fn unregister_mkt_data(&self, req_id: i64) {
         // Whatever this id was waiting to finish, it is not waiting any
         // more. Left behind, the same id handed out again for an ordinary
         // stream reads as a snapshot and is withdrawn as soon as it has both
         // sides of a quote.
         self.snapshot_reqs.lock().unwrap().remove(&req_id);
-        // Which contract this number was watching, whether it held the
-        // subscription, who takes it over and whether it was the venue's
-        // one-shot are one question, answered under one acquisition. Answered
-        // a map at a time, a stream asking for the contract while the one-shot
-        // holding it was halfway through its withdrawal read the one-shot as
-        // an ordinary stream: it was recorded as watching, sent nothing of its
-        // own, and served off a burst that was already over.
-        let (instrument, take_it_down, series_gone, took_it, con_id, decided_at) = {
+        {
+            // Which contract this number was watching, whether it held the
+            // subscription, who takes it over and whether it was the venue's
+            // one-shot are one question, answered under one acquisition.
             let mut own = self.ownership();
-            // Taken here, under the maps that decide, so that a subscription
-            // taken by another caller after this decision carries a later
-            // number than the withdrawal that would take it down.
-            let decided_at = self.in_order();
             own.one_shot.remove(&req_id);
-            // Which subscription it was holding goes with the record of what it
-            // was watching. Removed before the maps were taken, a move running
-            // in between wrote a fresh one for a request this withdrawal then
-            // removed, and the number was left standing for a request watching
-            // nothing at all.
             own.epoch.remove(&req_id);
+            own.series.remove(&req_id);
             self.tick_req_params_sent.lock().unwrap().remove(&req_id);
-            let Some(instrument) = own.by_req.remove(&req_id) else {
-                own.series.remove(&req_id);
-                return WhatAWithdrawalLeaves {
-                    subscription: None, headlines: None, series: None,
-                    con_id: 0, took_it: 0, decided_at,
-                };
-            };
-            // A caller that was watching someone else's subscription stops
-            // watching it, and the subscription stays up for the rest. A
-            // caller that held it hands it to the next one watching rather
-            // than taking the quotes away from them.
-            let mut take_it_down = true;
-            if let Some(watchers) = own.following.get_mut(&instrument) {
-                let was_following = watchers.contains(&req_id);
-                watchers.retain(|&id| id != req_id);
-                let next = if was_following { None } else { watchers.first().copied() };
-                if let Some(next) = next {
-                    watchers.retain(|&id| id != next);
-                }
-                if watchers.is_empty() {
-                    own.following.remove(&instrument);
-                }
-                if was_following || next.is_some() {
+            if let Some(instrument) = own.by_req.remove(&req_id) {
+                let mut nobody_left = true;
+                if let Some(watchers) = own.following.get_mut(&instrument) {
+                    let was_following = watchers.contains(&req_id);
+                    watchers.retain(|&id| id != req_id);
+                    let next = if was_following { None } else { watchers.first().copied() };
                     if let Some(next) = next {
-                        own.holders.insert(instrument, next);
+                        watchers.retain(|&id| id != next);
                     }
-                    take_it_down = false;
+                    if watchers.is_empty() {
+                        own.following.remove(&instrument);
+                    }
+                    if was_following || next.is_some() {
+                        if let Some(next) = next {
+                            own.holders.insert(instrument, next);
+                        }
+                        nobody_left = false;
+                    }
+                }
+                if nobody_left {
+                    own.holders.remove(&instrument);
+                    own.taken_on.remove(&instrument);
+                    own.took_contract.remove(&instrument);
+                    // And everything else the slot leaves behind, under the
+                    // same acquisition that decided it goes.
+                    self.last_quotes.lock().unwrap().remove(&instrument);
+                    self.mdt_by_instrument.lock().unwrap().remove(&instrument);
+                    self.con_id_to_instrument.lock().unwrap()
+                        .retain(|_, iid| *iid != instrument);
                 }
             }
-            // Which occupancy of the slot this withdrawal is about, read here
-            // rather than left to the engine to work out from the slot number.
-            let took_it = own.taken_on.get(&instrument).copied().unwrap_or(0);
-            // The contract its caller named, not whatever the cache happens to
-            // point at this slot with.
-            let con_id = own.took_contract.get(&instrument).copied().unwrap_or(0);
-            if take_it_down {
-                own.holders.remove(&instrument);
-                own.taken_on.remove(&instrument);
-                own.took_contract.remove(&instrument);
-                // And everything else the slot leaves behind, under the same
-                // acquisition that decided it goes. Cleared after the maps
-                // were let go, a registration taking this slot in between had
-                // its own record wiped by this one: the feed it was admitted
-                // under was forgotten, and its delayed readings were then
-                // published under the numbers that mean a live market. The
-                // slot's own release already keeps these under its guard for
-                // the same reason.
-                self.last_quotes.lock().unwrap().remove(&instrument);
-                self.mdt_by_instrument.lock().unwrap().remove(&instrument);
-                self.con_id_to_instrument.lock().unwrap()
-                    .retain(|_, iid| *iid != instrument);
-            }
-            // What this caller brought with it goes with it. Only the series
-            // nobody else watching the contract named: the subscription stays
-            // up for them, and the series they asked for are theirs. Left
-            // behind, the venue served them for as long as that subscription
-            // outlived this caller, and every rebuild after a reconnect asked
-            // for them again.
-            let mine = own.series.remove(&req_id).unwrap_or_default();
-            let watching: Vec<i64> = own.holders.get(&instrument).copied()
-                .into_iter()
-                .chain(own.following.get(&instrument).cloned().unwrap_or_default())
-                .collect();
-            // Said even where the whole subscription goes: the engine may find
-            // that subscription already replaced by one this caller knows
-            // nothing about, and then the series this caller asked for are the
-            // only part of the withdrawal that still stands.
-            let series_gone: Vec<u32> = mine.into_iter()
-                .filter(|tick| {
-                    !watching.iter()
-                        .any(|other| own.series.get(other).is_some_and(|s| s.contains(tick)))
-                })
-                .collect();
-            (instrument, take_it_down, series_gone, took_it, con_id, decided_at)
-        };
+        }
         self.mdt_sent.lock().unwrap().remove(&req_id);
-        let series = (!series_gone.is_empty()).then_some((instrument, series_gone));
-        if !take_it_down {
-            return WhatAWithdrawalLeaves {
-                subscription: None,
-                headlines: self.release_news(shared, req_id),
-                series,
-                con_id,
-                took_it,
-                decided_at,
-            };
-        }
-        // The news half stays outside: it takes these maps again itself, and
-        // taking them twice on one thread is a deadlock rather than a race.
-        let stop_news = self.release_news(shared, req_id);
-        // The subscription goes whole, and its series with it: there is
-        // nothing left for them to be entries of.
-        WhatAWithdrawalLeaves {
-            subscription: Some(instrument),
-            headlines: stop_news,
-            series,
-            con_id,
-            took_it,
-            decided_at,
-        }
     }
 
-    /// Which occupancy of a slot this client is watching, as the number the
-    /// request that took it asked under. Zero where it is watching none.
-    pub(crate) fn what_took(&self, instrument: InstrumentId) -> u64 {
-        self.slot_taken_on.lock().unwrap().get(&instrument).copied().unwrap_or(0)
+    /// A caller is withdrawing a request: whatever it was registered as is
+    /// over from here, so work decided against that registration — a
+    /// snapshot's own withdrawal once its callback has run — is not done
+    /// against whatever the caller asks for next under the same number.
+    pub fn withdrawing(&self, req_id: i64) {
+        self.registration_epoch.lock().unwrap().remove(&req_id);
     }
 
     /// Drop the client-side conId cache entries for an instrument id. The
@@ -3327,92 +2349,36 @@ impl ClientCore {
         }
     }
 
-    /// Register a TBT subscription mapping.
+    /// Ask the engine for a tick-by-tick stream.
     ///
-    /// Answers with no slot where the stream was withdrawn while this was
-    /// waiting on the engine: it has been taken back down and nothing is
-    /// recorded under the number, so the caller has no stream to name a kind
-    /// for either.
+    /// The engine names the contract where the caller described it, refuses a
+    /// second stream under a number already carrying one, and asks the venue.
+    /// Nothing waits here.
     pub fn register_tbt(
         &self,
-        _shared: &SharedState,
-        control_tx: &SyncSender<ControlCommand>,
+        shared: &SharedState,
+        control_tx: &Sender<ControlCommand>,
         req_id: i64,
         con_id: i64,
         symbol: &str,
         sec_type: &str,
         exchange: &str,
+        currency: &str,
         tbt_type: TbtType,
         number_of_ticks: u32,
         ignore_size: bool,
-    ) -> Result<Option<InstrumentId>, Refusal> {
-        // A number already carrying a tick stream cannot carry a second.
-        //
-        // The same shape the quote subscription above refuses: two streams
-        // under one number stamped that number on every record, so a caller
-        // was handed one contract's trades and another's quotes with nothing
-        // to tell them apart and the tick kind of whichever asked last. The
-        // withdrawal reads the one record this keeps, so it reached the second
-        // stream only -- and with that record gone, a second withdrawal
-        // reached nothing at all and the first stream ran under a cancelled
-        // number for the life of the session.
-        //
-        // Refused here rather than where the subscribe is sent: the slot is
-        // registered whether or not the subscribe is refused, so a refusal
-        // downstream would still leave this record overwritten and the first
-        // stream orphaned. Before the send is the only point that leaves
-        // nothing behind.
-        //
-        // Read and claimed under one lock, as the quote path above does it and
-        // for the same reason: the record below cannot be written until the
-        // engine names the slot, so two callers on this number both read it as
-        // free and both went on.
-        let claim = {
-            let carrying = self.tbt_to_instrument.lock().unwrap();
-            let mut taking = self.registering.lock().unwrap();
-            if carrying.contains_key(&req_id) || !taking.insert((TAKING_TICKS, req_id)) {
-                return Err(Refusal::stated(
-                    DUPLICATE_TICKER_ID,
-                    format!(
-                        "request {req_id} is already carrying a tick stream: withdraw it \
-                         before asking for another under the same number",
-                    ),
-                ));
-            }
-            Registering {
-                held: &self.registering,
-                withdrawn: &self.withdrawn_while_registering,
-                key: (TAKING_TICKS, req_id),
-            }
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        control_tx.send(ControlCommand::SubscribeTbt {
-            contract: ContractRef { con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(), ..Default::default() },
+    ) -> Result<(), Refusal> {
+        shared.admit(control_tx, ControlCommand::SubscribeTbt {
+            contract: ContractRef {
+                con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(),
+                exchange: exchange.to_string(), currency: currency.to_string(),
+                ..Default::default()
+            },
             req_id,
             tbt_type,
             number_of_ticks,
             ignore_size,
-            reply_tx: Some(reply_tx),
-        }).map_err(|e| Refusal::not_connected(format!("Engine stopped: {e}")))?;
-
-        let instrument_id = self.recv_registration(reply_rx)?;
-        self.cache_instrument(con_id, instrument_id);
-        // A withdrawal that arrived while this was away found no record and
-        // was answered anyway, as the venue answers it. Read before the record
-        // is written and under the acquisition that gives the claim back, so
-        // the stream is taken down again rather than published under a number
-        // its caller has already stopped watching. Nothing is reported: the
-        // withdrawal was answered when it arrived, and a send failing now
-        // fails because the engine has gone, which takes the stream with it.
-        if claim.withdrawn_meanwhile() {
-            let _ = control_tx.send(ControlCommand::UnsubscribeTbt {
-                req_id,
-                instrument: instrument_id,
-            });
-            return Ok(None);
-        }
-        self.tbt_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        Ok(Some(instrument_id))
+        })
     }
 
     /// Look up req_id for an instrument.
@@ -3486,41 +2452,89 @@ impl ClientCore {
         self.pending_group_events.lock().unwrap().drain(..).collect()
     }
 
+    pub(crate) fn select_account_updates(&self, account: &str) {
+        self.account_routes.lock().unwrap().updates = account.to_string();
+    }
+
+    pub(crate) fn updates_account(&self, shared: &SharedState) -> String {
+        shared.account_name(&self.account_routes.lock().unwrap().updates)
+    }
+
+    pub(crate) fn select_multi_account(&self, req_id: i64, account: &str, model: &str) {
+        self.account_routes.lock().unwrap().multi.insert(req_id, (account.to_string(), model.to_string()));
+    }
+
+    pub(crate) fn multi_account(&self, shared: &SharedState, req_id: i64) -> String {
+        shared.account_name(self.account_routes.lock().unwrap().multi.get(&req_id).map(|(account, _)| account.as_str()).unwrap_or(""))
+    }
+
+    pub(crate) fn select_positions_account(&self, req_id: i64, account: &str, model: &str) {
+        self.account_routes.lock().unwrap().positions.insert(req_id, (account.to_string(), model.to_string()));
+    }
+
+    pub(crate) fn positions_account(&self, shared: &SharedState, req_id: i64) -> String {
+        shared.account_name(self.account_routes.lock().unwrap().positions.get(&req_id).map(|(account, _)| account.as_str()).unwrap_or(""))
+    }
+
+    pub(crate) fn multi_model(&self, req_id: i64) -> String {
+        self.account_routes.lock().unwrap().multi.get(&req_id).map(|(_, model)| model.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn multi_watchers(&self) -> Vec<i64> {
+        let mut ids: Vec<_> = self.account_routes.lock().unwrap().multi.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub(crate) fn forget_multi_account(&self, req_id: i64) {
+        self.account_routes.lock().unwrap().multi.remove(&req_id);
+    }
+
+    pub(crate) fn positions_model(&self, req_id: i64) -> String {
+        self.account_routes.lock().unwrap().positions.get(&req_id).map(|(_, model)| model.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn positions_watchers(&self) -> Vec<i64> {
+        let mut ids: Vec<_> = self.account_routes.lock().unwrap().positions.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub(crate) fn forget_positions_account(&self, req_id: i64) {
+        self.account_routes.lock().unwrap().positions.remove(&req_id);
+    }
+
+    /// A model or a group whose membership has not been stated stays unapplied.
+    pub(crate) fn note_account_selection(shared: &SharedState, name: &str) {
+        if !name.is_empty() { shared.note_unapplied_account_selection(name); }
+    }
+
     // ── PnL subscription management ──
 
-    /// Ask for the pnl.
-    ///
-    /// Refused while another request holds the subscription. One slot serves
-    /// it, and handing that slot to a second asker stopped the first one's
-    /// updates without a word to either caller. Asking again under the id
-    /// that already holds it is the same subscription, not a second one.
-    pub fn subscribe_pnl(&self, req_id: i64) -> Result<(), Refusal> {
-        let mut slot = self.pnl_req_id.lock().unwrap();
-        if let Some(held) = *slot && held != req_id {
-            return Err(Refusal::validation(format!(
-                "the account P&L is already subscribed under request {held}; \
-                 cancel that one before subscribing under another",
-            )));
+    /// Ask for the running profit under a request number of its own.
+    pub fn subscribe_pnl(&self, req_id: i64, account: &str) -> Result<(), Refusal> {
+        let mut requests = self.pnl_req_id.lock().unwrap();
+        if requests.contains_key(&req_id) {
+            return Err(Refusal::stated(crate::error_codes::DUPLICATE_TICKER_ID, "Duplicate ticker id"));
         }
-        *slot = Some(req_id);
-        // Nothing has been reported to this subscription yet. Without a value
-        // that no account can hold, an account whose P&L is genuinely zero
-        // matched the initial state and the caller was told nothing at all.
-        *self.last_pnl.lock().unwrap() = [i64::MIN; 3];
+        self.last_pnl.lock().unwrap().remove(&req_id);
+        requests.insert(req_id, account.to_string());
         Ok(())
     }
 
-    /// Stop the pnl.
+    /// Stop reporting the profit under this request number.
     pub fn unsubscribe_pnl(&self, req_id: i64) {
-        let mut pnl = self.pnl_req_id.lock().unwrap();
-        if *pnl == Some(req_id) {
-            *pnl = None;
-        }
+        self.pnl_req_id.lock().unwrap().remove(&req_id);
+        self.last_pnl.lock().unwrap().remove(&req_id);
     }
 
     /// Ask for the pnl single.
-    pub fn subscribe_pnl_single(&self, req_id: i64, con_id: i64) {
-        self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
+    pub fn subscribe_pnl_single(&self, req_id: i64, con_id: i64, account: &str) -> Result<(), Refusal> {
+        let mut requests = self.pnl_single_reqs.lock().unwrap();
+        if requests.contains_key(&req_id) {
+            return Err(Refusal::stated(crate::error_codes::DUPLICATE_TICKER_ID, "Duplicate ticker id"));
+        }
+        requests.insert(req_id, (account.to_string(), con_id));
         // What was last reported under this number belonged to whatever it
         // watched before. Kept, a number pointed at another contract inherited
         // the last one's day — or, where the two happened to agree, reported
@@ -3529,6 +2543,7 @@ impl ClientCore {
         // this one clears it for the same reason; taking the number without
         // withdrawing it did not.
         self.last_pnl_single.lock().unwrap().remove(&req_id);
+        Ok(())
     }
 
     /// Stop the pnl single.
@@ -3626,19 +2641,6 @@ impl ClientCore {
         Ok(())
     }
 
-    /// What a caller is told where an account request on a login holding
-    /// several accounts names more than, or other than, the account this
-    /// session opened under. The figures this client is given are that
-    /// account's, and they are what the request is answered with.
-    pub fn answered_for_the_session_account(
-        shared: &SharedState, named: &str, session: &str,
-    ) -> Option<String> {
-        (Self::login_holds_several_accounts(shared) && named != session).then(|| format!(
-            "{named} was named and the figures that follow are {session}'s, which is the \
-             account this session opened under",
-        ))
-    }
-
     /// The account an execution filter names, checked as a gateway checks it.
     ///
     /// A login holding one account is answered for it whatever is named, and
@@ -3661,15 +2663,9 @@ impl ClientCore {
         Ok(())
     }
 
-    /// The account a P&L request names, checked as a gateway checks it, then
-    /// against what this client can answer.
-    ///
-    /// A gateway refuses a blank account, one the login does not hold, and
-    /// `All` where the login may not ask for every account or is one the venue
-    /// adds accounts to. Profit here is worked out from one account's midnight
-    /// seeds and holdings — the account this session opened under — so any
-    /// other is refused too: answered, it would be that account's number on
-    /// this account's profit.
+    /// The account a profit request names, checked in a gateway's order.
+    /// Blank or unavailable accounts and prohibited all-account selections
+    /// are refused in its words.
     pub fn check_pnl_account(
         shared: &SharedState, accounts: &[String], session: &str, account: &str,
     ) -> Result<(), Refusal> {
@@ -3696,12 +2692,6 @@ impl ClientCore {
         if every && no_all {
             return Err(Refusal::validation("ALL account is not supported"));
         }
-        if account != session {
-            return Err(Refusal::validation(format!(
-                "account {account} was named and this session opened under {session}, \
-                 whose profit is not what was asked for",
-            )));
-        }
         Ok(())
     }
 
@@ -3709,7 +2699,7 @@ impl ClientCore {
     ///
     /// Both subscriptions stay until cancelled, including after their first
     /// answers; a third is refused under 322, as a gateway refuses it.
-    pub fn subscribe_account_summary(&self, req_id: i64, tags: &str) -> Result<(), Refusal> {
+    pub fn subscribe_account_summary(&self, req_id: i64, tags: &str, accounts: Vec<String>) -> Result<(), Refusal> {
         let tag_list: Vec<String> = tags.split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -3733,6 +2723,7 @@ impl ClientCore {
                  request first",
             ));
         };
+        self.account_routes.lock().unwrap().summaries.insert(req_id, accounts);
         *target = Some((req_id, tag_list));
         self.last_account_summary.lock().unwrap().remove(&req_id);
         Ok(())
@@ -3749,6 +2740,7 @@ impl ClientCore {
             *other = None;
         }
         self.last_account_summary.lock().unwrap().remove(&req_id);
+        self.account_routes.lock().unwrap().summaries.remove(&req_id);
     }
 
     // ── Account updates subscription management ──
@@ -4011,18 +3003,10 @@ impl ClientCore {
         self.open_orders.lock().unwrap().get(&order_id).is_some_and(|t| t.placed_here)
     }
 
-    /// Whether this id names an order the venue is working.
-    ///
-    /// A held order is tracked here and unknown to the venue, so the two are
-    /// not the same question. Asked as one, placing again under a held id
-    /// built a replace of an order nothing had ever submitted: the venue
-    /// refuses it, and the submit that was held stays queued to go out behind
-    /// the next thing that transmits — under the terms the caller had just
-    /// replaced.
-    ///
-    /// What decides it is a held submission, not a hold of any kind: a live
-    /// order can have a revision of its own waiting to be transmitted, and that
-    /// order is still one the venue is working.
+    /// Whether this id names an order the venue is working, as this side's
+    /// record stands: what decides a refusal at the call is a placement or a
+    /// change. The engine, which keeps what does not transmit, decides it for
+    /// the order itself.
     ///
     /// The venue's own book is asked beside this client's. An order the venue
     /// replayed at connect was not placed here, so it is in no local book, and
@@ -4031,32 +3015,8 @@ impl ClientCore {
     /// already working, and the record of the order it named was overwritten
     /// on the way.
     pub fn is_working_at_the_venue(&self, order_id: u64, venue: Option<&SharedState>) -> bool {
-        (self.is_order_tracked(order_id)
-            || venue.is_some_and(|v| v.orders.venue_is_working(order_id)))
-            && !self.holds_a_submission(order_id)
-    }
-
-    /// Whether a withdrawal under this number names anything.
-    ///
-    /// Read after the connect-time replay of the account's working set, which
-    /// is what makes it safe: an order carried over from a previous session is
-    /// not known here until that replay lands, and refusing a withdrawal of a
-    /// live order is worse than the silence this replaces. A held placement
-    /// has already been taken by the time this is asked.
-    pub fn a_withdrawal_names_something(&self, order_id: u64, venue: &SharedState) -> bool {
-        self.is_working_at_the_venue(order_id, Some(venue))
-    }
-
-    /// Whether this id names an order built and kept rather than sent.
-    pub fn is_held(&self, order_id: u64) -> bool {
-        self.held_orders.lock().unwrap().iter().any(|h| h.order_id == order_id)
-    }
-
-    /// Whether what is held under this id would place the order, rather than
-    /// revise one the venue is already working.
-    pub fn holds_a_submission(&self, order_id: u64) -> bool {
-        self.held_orders.lock().unwrap().iter()
-            .any(|h| h.order_id == order_id && h.places_the_order())
+        self.is_order_tracked(order_id)
+            || venue.is_some_and(|v| v.orders.venue_is_working(order_id))
     }
 
     /// Whether a replace names the contract the venue says the order is on.
@@ -4157,6 +3117,15 @@ impl ClientCore {
     pub fn modify_refusal(&self, order_id: u64, incoming: &ApiOrder, venue: Option<&SharedState>) -> Option<Refusal> {
         let tracked = self.tracked_order(order_id)
             .or_else(|| venue.and_then(|v| v.orders.get_order_info(order_id)).map(|info| info.order));
+        Self::modify_refusal_of(tracked, incoming, venue)
+    }
+
+    /// [`modify_refusal`](Self::modify_refusal), against the resting order
+    /// as its caller holds it: the engine's own record where it placed the
+    /// order, and otherwise the venue's statement of it.
+    pub fn modify_refusal_of(
+        tracked: Option<ApiOrder>, incoming: &ApiOrder, venue: Option<&SharedState>,
+    ) -> Option<Refusal> {
         if incoming.what_if || tracked.as_ref().is_some_and(|t| t.what_if) {
             return Some(Refusal::stated(
                 CHANGE_CANNOT_CHANGE_TYPE,
@@ -4287,6 +3256,26 @@ impl ClientCore {
         }
     }
 
+    /// Write what the engine did with an order a caller placed into this
+    /// side's record of it, where it stands in the session's order.
+    pub fn keep_the_book(&self, shared: &SharedState, entry: crate::bridge::OrderBook) {
+        match entry {
+            crate::bridge::OrderBook::Taken(taken) => {
+                let crate::bridge::TakenOrder { order_id, contract, order, instrument, restated } = *taken;
+                self.cache_contract(contract.con_id, contract.clone());
+                if restated {
+                    self.restate_order(Some(shared), order_id, contract, order, instrument);
+                } else {
+                    self.track_order(order_id, contract, order, instrument);
+                }
+            }
+            crate::bridge::OrderBook::Forgotten(order_id) => {
+                self.open_orders.lock().unwrap().remove(&order_id);
+            }
+            crate::bridge::OrderBook::RevisionForgotten(order_id) => self.undo_restatement(order_id),
+        }
+    }
+
     /// Track a newly placed order.
     pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
         self.open_orders.lock().unwrap()
@@ -4330,17 +3319,8 @@ impl ClientCore {
     /// client's own record has to go with it — the open-order snapshot unions
     /// the two, so leaving this one behind kept reporting the order the
     /// rejection was about.
-    ///
-    /// A revision of it waiting to be transmitted goes too: an order that has
-    /// left the book has nothing left to revise, and nothing took the revision
-    /// back. It stayed in the hold for the life of the session, and the next
-    /// order placed beside it released a replace for an order that had already
-    /// finished. A held placement stays: the venue was never given it, and it
-    /// is still the order the caller asked to send.
     pub fn untrack_order(&self, order_id: u64) {
         self.open_orders.lock().unwrap().remove(&order_id);
-        self.held_orders.lock().unwrap()
-            .retain(|h| h.order_id != order_id || h.places_the_order());
     }
 
     /// An order's permanent id and its parent.
@@ -4348,11 +3328,33 @@ impl ClientCore {
     /// The parent is the one this client recorded where it placed the order:
     /// the engine reads no parent from a report, but a client that placed the
     /// order was told. An order it did not place keeps the engine's answer.
-    pub(crate) fn perm_and_parent(&self, shared: &SharedState, order_id: u64) -> (i64, i64) {
-        let (perm_id, engine_parent) = shared.orders.get_order_info(order_id)
-            .map(|info| (info.order.perm_id, info.order.parent_id))
-            .unwrap_or((0, 0));
+    pub(crate) fn perm_and_parent_stated(
+        &self,
+        order_id: u64,
+        report: Option<&crate::bridge::RichOrderInfo>,
+        status: Option<&OrderUpdate>,
+    ) -> (i64, i64) {
+        let (perm_id, engine_parent) = match (report, status) {
+            (Some(info), _) if info.order.perm_id != 0 || info.order.parent_id != 0 => {
+                (info.order.perm_id, info.order.parent_id)
+            }
+            (_, Some(u)) => (u.perm_id, u.parent_id),
+            (Some(info), None) => (info.order.perm_id, info.order.parent_id),
+            (None, None) => (0, 0),
+        };
         (perm_id, self.tracked_parent_id(order_id).unwrap_or(engine_parent))
+    }
+
+    /// The client that placed an order: this client's record where it placed
+    /// it, the report's word otherwise, as that report stated it.
+    pub(crate) fn client_stated(
+        &self, order_id: u64, report: Option<&crate::bridge::RichOrderInfo>,
+    ) -> i32 {
+        self.open_orders.lock().unwrap().get(&order_id)
+            .map(|t| t.order.client_id)
+            .filter(|c| *c != 0)
+            .or_else(|| report.map(|info| info.order.client_id))
+            .unwrap_or(0)
     }
 
     /// Which client placed an order, as the venue states it on tag 109.
@@ -4643,8 +3645,33 @@ impl ClientCore {
         iid: InstrumentId,
         req_id: i64,
     ) -> QuotePollResult {
-        let q = shared.market.quote(iid);
-        let (eligible_mask, quote_state_mask) = shared.market.quote_attribute_masks(iid);
+        self.ticks_from(shared, Self::poll_quote(shared, iid), req_id)
+    }
+
+    /// Take a slot's quote, with the occupancy it was written under and what
+    /// rode beside it. The first step of a read; nothing is compared yet.
+    pub fn poll_quote(shared: &SharedState, iid: InstrumentId) -> PolledQuote {
+        let (quote, generation) = shared.market.quote_with_generation(iid);
+        PolledQuote {
+            iid,
+            generation,
+            quote,
+            masks: shared.market.quote_attribute_masks(iid),
+            series: shared.market.drain_series_ticks(iid),
+            snapshot_answer: shared.market.take_snapshot_answer(iid),
+        }
+    }
+
+    /// The ticks a polled quote makes against what the caller was last told,
+    /// the record of what it was told moved on to it.
+    pub fn ticks_from(
+        &self,
+        shared: &SharedState,
+        polled: PolledQuote,
+        req_id: i64,
+    ) -> QuotePollResult {
+        let PolledQuote { iid, quote: q, masks, series: stated_series, snapshot_answer, .. } = polled;
+        let (eligible_mask, quote_state_mask) = masks;
         let fields = [
             q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
             q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
@@ -4760,7 +3787,7 @@ impl ClientCore {
         // are decoded and handed over here, beside the quote they were asked
         // for alongside. Each already knows which of the four callbacks
         // carries it, because the venue's own record says.
-        for series in shared.market.drain_series_ticks(iid) {
+        for series in stated_series {
             match series.value {
                 // A yield is numbered as the feed is, the way the prices it
                 // travels with are: a delayed feed's go out on 103 and 104.
@@ -4807,7 +3834,7 @@ impl ClientCore {
         // carries, which are not renumbered for a delayed feed.
         let mut snapshot_ticks = Vec::new();
         let mut snapshot_strings = Vec::new();
-        if let Some(answer) = shared.market.take_snapshot_answer(iid) {
+        if let Some(answer) = snapshot_answer {
             let one_shots = self.chargeable_snapshot_reqs.lock().unwrap().clone();
             let asking: Vec<i64> = self.watchers_of(iid).into_iter()
                 .filter(|id| one_shots.contains(id))
@@ -4830,8 +3857,9 @@ impl ClientCore {
                         crate::types::SeriesValue::Generic(_) => {}
                     }
                 }
-                if let Some((_, stated)) = waiting.get_mut(&id) {
-                    *stated = SNAPSHOT_WHOLE;
+                // Its answer is the whole of it.
+                if let Some(wait) = waiting.get_mut(&id) {
+                    wait.stated = u8::MAX;
                 }
             }
         }
@@ -4869,20 +3897,29 @@ impl ClientCore {
             4 | 68 => 4,     // last
             14 | 76 => 8,    // open
             9 | 75 => 16,    // close
+            13 | 83 => SNAPSHOT_MODEL,
+            88 => SNAPSHOT_DELAYED_TIME,
             _ => return,
         };
-        if let Some((_, stated)) = self.snapshot_reqs.lock().unwrap().get_mut(&req_id) {
-            *stated |= bit;
+        if let Some(wait) = self.snapshot_reqs.lock().unwrap().get_mut(&req_id) {
+            wait.stated |= bit;
         }
     }
 
     /// A snapshot ends when the venue has stated every kind one is made of, or
     /// when long enough has passed since it was asked for.
     ///
-    /// Both are the reference client's: it holds a snapshot until the bid, the
-    /// ask, the last, the open and the close have each been delivered, and
-    /// sweeps anything still waiting eleven seconds after the REQUEST — not
-    /// eleven since the last thing heard.
+    /// Both are a gateway's: it holds a snapshot until the bid, the ask, the
+    /// last, the open and the close have each been delivered, and sweeps
+    /// anything still waiting eleven seconds after the REQUEST — not eleven
+    /// since the last thing heard. On a contract it marks as an option it also
+    /// waits for the option model (13, or 83 on a delayed feed), and on a
+    /// delayed feed for the last trade's time (88).
+    ///
+    /// A gateway also waits, on an option, for the bid's, the ask's and the
+    /// last's greeks (10 to 12, or 80 to 82), which it computes with an option
+    /// model of its own. This client computes none of them, so no snapshot
+    /// waits for them.
     ///
     /// Waiting on the quiet instead, as this did, ends a snapshot on a pause
     /// rather than on an answer, and a contract the venue never says anything
@@ -4894,10 +3931,17 @@ impl ClientCore {
         const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(11);
 
         let mut waiting = self.snapshot_reqs.lock().unwrap();
-        let Some((asked_at, stated)) = waiting.get(&req_id).copied() else {
+        let Some(wait) = waiting.get(&req_id).copied() else {
             return false;
         };
-        if stated == SNAPSHOT_WHOLE || asked_at.elapsed() >= GIVE_UP_AFTER {
+        let mut whole = SNAPSHOT_WHOLE;
+        if wait.marked {
+            whole |= SNAPSHOT_MODEL;
+        }
+        if self.feed_is_delayed(wait.slot) {
+            whole |= SNAPSHOT_DELAYED_TIME;
+        }
+        if wait.stated & whole == whole || wait.asked_at.elapsed() >= GIVE_UP_AFTER {
             waiting.remove(&req_id);
             return true;
         }
@@ -4921,12 +3965,89 @@ impl ClientCore {
             .collect()
     }
 
+    /// A slot is held from here under `generation`, as the engine's record of
+    /// it says. Written where that record is delivered.
+    pub fn note_slot_taken(&self, slot: InstrumentId, generation: u64) {
+        self.slot_generation.lock().unwrap().insert(slot, generation);
+    }
+
+    /// The occupancy a slot was held under has ended.
+    pub fn note_slot_released(&self, slot: InstrumentId, generation: u64) {
+        let mut held = self.slot_generation.lock().unwrap();
+        if held.get(&slot) == Some(&generation) {
+            held.remove(&slot);
+        }
+    }
+
+    /// The occupancy a slot is held under as this side has read it; nought
+    /// where nothing has named one.
+    pub fn generation_held(&self, slot: InstrumentId) -> u64 {
+        self.slot_generation.lock().unwrap().get(&slot).copied().unwrap_or(0)
+    }
+
+    /// Take the conflated state, as a read's first step: every held slot's
+    /// quote, and each figure that has moved since the caller was last told.
+    ///
+    /// Taken before the read's cut, so a change that followed a record's push
+    /// is delivered no earlier than that record. `positions_watched` says
+    /// whether anyone is watching the holdings, and `multi_watchers` which
+    /// multi-account requests stand: nothing is drained that nobody reads.
+    pub fn poll_conflated(
+        &self, shared: &SharedState, positions_watched: bool, multi_watchers: &[i64],
+    ) -> Polled {
+        let quotes = self
+            .snapshot_instruments()
+            .into_iter()
+            .map(|(iid, ..)| Self::poll_quote(shared, iid))
+            .collect();
+        let positions = if positions_watched {
+            shared.portfolio.drain_position_changes()
+        } else {
+            Vec::new()
+        };
+        let account = self.prepare_account_updates(shared);
+        let portfolio = if account.is_some() {
+            self.prepare_portfolio_updates(shared)
+        } else {
+            Vec::new()
+        };
+        let multi = multi_watchers
+            .iter()
+            .map(|req_id| (*req_id, self.account_figures_that_moved(shared, *req_id)))
+            .filter(|(_, moved)| !moved.is_empty())
+            .collect();
+        // One batch per summary due. Two may be open at once.
+        let mut summaries = Vec::new();
+        while summaries.len() < 2
+            && let Some(batch) = self.prepare_account_summary(shared, "")
+        {
+            summaries.push(batch);
+        }
+        Polled {
+            quotes,
+            positions,
+            named_positions: if positions_watched {
+                shared.account_portfolios().into_iter().filter(|(_, p)| !std::sync::Arc::ptr_eq(p, &shared.portfolio))
+                    .flat_map(|(a, p)| p.drain_position_changes().into_iter().map(move |pi| (a.clone(), pi))).collect()
+            } else { Vec::new() },
+            pnl: self.poll_pnl(shared),
+            pnl_single: self.poll_pnl_single(shared),
+            account,
+            portfolio,
+            multi,
+            summaries,
+            smart_components: shared
+                .reference
+                .drain_smart_component_answers(std::time::Instant::now()),
+        }
+    }
+
     /// What the venue last marked a contract at, which is its price at
     /// midnight rather than its price now. Read at the point of use; text that
     /// is not a usable price leaves the contract unmarked, rather than valuing
     /// it at whatever the characters happened to come to.
-    fn midnight_price(shared: &SharedState, con_id: i64) -> Option<Price> {
-        let raw = shared.portfolio.venue_price(con_id)?;
+    fn midnight_price(portfolio: &crate::bridge::PortfolioState, con_id: i64) -> Option<Price> {
+        let raw = portfolio.venue_price(con_id)?;
         let price = raw.trim().parse::<f64>().ok().filter(|p| p.is_finite())?;
         Some(crate::types::price_from_f64(price)).filter(|&p| p != 0)
     }
@@ -4938,21 +4059,26 @@ impl ClientCore {
     /// and a live quote for whatever the venue did not state.
     /// For positions opened intraday (no seed), synthesizes
     /// moneyTraded = -qtyNow × avgCost so the formula collapses to unrealized P&L.
-    pub fn poll_pnl(&self, shared: &SharedState) -> Option<PnlUpdate> {
-        let req_id = (*self.pnl_req_id.lock().unwrap())?;
+    pub fn poll_pnl(&self, shared: &SharedState) -> Vec<PnlUpdate> {
+        let requests = self.pnl_req_id.lock().unwrap().clone();
+        requests.into_iter().filter_map(|(req_id, account)| self.poll_pnl_request(shared, req_id, &account)).collect()
+    }
+
+    fn poll_pnl_request(&self, shared: &SharedState, req_id: i64, account: &str) -> Option<PnlUpdate> {
+        let portfolio = shared.portfolio_for(account);
         // Nothing until the venue has stated the account whole on this
         // connection. A trading-connection drop leaves the quotes flowing
         // while the book is stale, and the sum below multiplied the pre-drop
         // quantities by live prices on every tick: a holding the account
         // closed during the outage went on being valued, and its profit
         // reported, until the download arrived.
-        if !shared.portfolio.account_download_complete() {
+        if !portfolio.account_download_complete() {
             return None;
         }
 
-        let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
+        let seeds: HashMap<i64, MidnightSeed> = portfolio.midnight_seeds()
             .into_iter().map(|s| (s.con_id, s)).collect();
-        let positions = shared.portfolio.position_infos();
+        let positions = portfolio.position_infos();
 
         let mut con_ids: HashSet<i64> = seeds.keys().copied().collect();
         for pi in &positions {
@@ -4972,7 +4098,7 @@ impl ClientCore {
 
         for con_id in con_ids {
             let seed = seeds.get(&con_id);
-            let pi = shared.portfolio.position_info(con_id);
+            let pi = portfolio.position_info(con_id);
 
             // Realized P&L is stated outright by the row and does not depend on
             // knowing either quantity, so it accrues before the guards below.
@@ -5025,7 +4151,7 @@ impl ClientCore {
             // mark it closed the contract at, and that is what the overnight
             // leg is valued against; a locally derived previous close is used
             // only where the venue said nothing.
-            let prev_close = Self::midnight_price(shared, con_id).unwrap_or(prev_close);
+            let prev_close = Self::midnight_price(&portfolio, con_id).unwrap_or(prev_close);
             if seed.and_then(|s| s.cost_midnight).is_none() && prev_close == 0 && qty_midnight != 0.0 {
                 // Nothing to value the overnight leg against, so this position
                 // is missing from the total too.
@@ -5086,7 +4212,7 @@ impl ClientCore {
         // by construction, so one unpriceable position sends the whole account
         // to them rather than reporting a partial sum as if it were the total.
         if priced == 0 || unpriceable > 0 {
-            let acct = shared.portfolio.account();
+            let acct = portfolio.account();
             total_daily = acct.daily_pnl as f64 / PRICE_SCALE_F;
             total_unrealized = acct.unrealized_pnl as f64 / PRICE_SCALE_F;
             total_realized = acct.realized_pnl as f64 / PRICE_SCALE_F;
@@ -5098,10 +4224,10 @@ impl ClientCore {
             crate::types::price_from_f64(total_realized),
         ];
         let mut last = self.last_pnl.lock().unwrap();
-        if pnl == *last {
+        if last.get(&req_id) == Some(&pnl) {
             return None;
         }
-        *last = pnl;
+        last.insert(req_id, pnl);
         Some(PnlUpdate {
             req_id,
             daily_pnl: total_daily,
@@ -5115,23 +4241,24 @@ impl ClientCore {
     /// computes daily/realized from the matching midnight seed, and synthesizes
     /// money_traded = qty_now × avg_cost for intraday-opened positions.
     pub fn poll_pnl_single(&self, shared: &SharedState) -> Vec<PnlSingleUpdate> {
-        let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.lock().unwrap()
-            .iter().map(|(&r, &c)| (r, c)).collect();
+        let reqs = self.pnl_single_reqs.lock().unwrap().clone();
         // As for the account's own profit: nothing from a book the download
         // has not restated on this connection.
-        if reqs.is_empty() || !shared.portfolio.account_download_complete() {
+        if reqs.is_empty() {
             return Vec::new();
         }
 
-        let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
-            .into_iter().map(|s| (s.con_id, s)).collect();
         self.forget_released_slots(shared);
         let con_id_map = self.con_id_to_instrument.lock().unwrap();
         let mut last_cache = self.last_pnl_single.lock().unwrap();
         let mut results = Vec::new();
 
-        for (req_id, con_id) in reqs {
-            let Some(pi) = shared.portfolio.position_info(con_id) else { continue; };
+        for (req_id, (account, con_id)) in reqs {
+            let portfolio = shared.portfolio_for(&account);
+            if !portfolio.account_download_complete() { continue; }
+            let seeds: HashMap<i64, MidnightSeed> = portfolio.midnight_seeds()
+                .into_iter().map(|s| (s.con_id, s)).collect();
+            let Some(pi) = portfolio.position_info(con_id) else { continue; };
             let qty_now = pi.position;
             let avg_cost = pi.avg_cost;
 
@@ -5180,7 +4307,7 @@ impl ClientCore {
             // As in poll_pnl, the venue's mark is what the overnight leg is
             // valued against, so the two callbacks value the same position from
             // the same figures.
-            let prev_close = Self::midnight_price(shared, con_id)
+            let prev_close = Self::midnight_price(&portfolio, con_id)
                 .unwrap_or_else(|| quote.map_or(0, |q| q.close));
             // What the venue says the position was worth at midnight, which the
             // client otherwise has to size from the overnight quantity and a
@@ -5286,10 +4413,11 @@ impl ClientCore {
     /// Each figure is delivered once and again whenever it changes, per
     /// currency: a figure stated in two currencies is two figures.
     pub fn prepare_account_updates(&self, shared: &SharedState) -> Option<AccountUpdateBatch> {
+        let portfolio = shared.portfolio_for(&self.account_routes.lock().unwrap().updates);
         if !self.account_updates_subscribed.load(Ordering::Acquire) {
             return None;
         }
-        let stated = shared.portfolio.stated_account_values();
+        let stated = portfolio.stated_account_values();
         if stated.is_empty() {
             return None;
         }
@@ -5318,7 +4446,7 @@ impl ClientCore {
         // observed: written with the test first, `&&` short-circuits while a
         // download is running, the latch is never cleared, and the end is
         // still said only once for the life of the client.
-        let complete = shared.portfolio.account_download_complete();
+        let complete = portfolio.account_download_complete();
         let finished = !self.account_end_sent.swap(complete, Ordering::AcqRel) && complete;
         Some(AccountUpdateBatch { fields, finished })
     }
@@ -5343,11 +4471,12 @@ impl ClientCore {
     pub fn account_figures_that_moved(
         &self, shared: &SharedState, req_id: i64,
     ) -> Vec<AccountFieldUpdate> {
+        let portfolio = shared.portfolio_for(&self.multi_account(shared, req_id));
         let ledger_only = self.ledger_only_multi.lock().unwrap().contains(&req_id);
         let mut held = self.last_stated_account_multi.lock().unwrap();
         let already = held.entry(req_id).or_default();
         let mut moved = Vec::new();
-        for (ledger, key, value, currency) in shared.portfolio.stated_account_values() {
+        for (ledger, key, value, currency) in portfolio.stated_account_values() {
             if ledger_only && !ledger {
                 continue;
             }
@@ -5379,6 +4508,7 @@ impl ClientCore {
     /// Prepare portfolio updates (position entries) for account streaming.
     /// Returns changed/new position infos when account updates are subscribed.
     pub fn prepare_portfolio_updates(&self, shared: &SharedState) -> Vec<PortfolioUpdateEntry> {
+        let portfolio = shared.portfolio_for(&self.account_routes.lock().unwrap().updates);
         if !self.account_updates_subscribed.load(Ordering::Acquire) {
             return Vec::new();
         }
@@ -5389,11 +4519,11 @@ impl ClientCore {
         // including any the account had closed while the connection was down.
         // A caller summing what it was worth read zero exposure until the
         // venue got round to pricing them again.
-        if !shared.portfolio.account_download_complete() {
+        if !portfolio.account_download_complete() {
             return Vec::new();
         }
 
-        let current = shared.portfolio.position_infos();
+        let current = portfolio.position_infos();
         let mut prev_guard = self.last_portfolio.lock().unwrap();
         let is_first = prev_guard.is_none();
 
@@ -5463,6 +4593,18 @@ impl ClientCore {
 
     /// Prepare the initial summary or the values changed since its last interval.
     pub fn prepare_account_summary(&self, shared: &SharedState, _account_id: &str) -> Option<AccountSummaryBatch> {
+        self.prepare_account_summary_where(shared, None)
+    }
+
+    /// The same for one request alone, for a call that answers and reads only
+    /// its own.
+    pub fn prepare_account_summary_for(&self, shared: &SharedState, req_id: i64) -> Option<AccountSummaryBatch> {
+        self.prepare_account_summary_where(shared, Some(req_id))
+    }
+
+    fn prepare_account_summary_where(
+        &self, shared: &SharedState, only: Option<i64>,
+    ) -> Option<AccountSummaryBatch> {
         // Wait for gateway account data before delivering summary.
         // As above: on the download being finished. Answered on the first
         // figure, a summary asked for right after connecting -- which is the
@@ -5471,9 +4613,6 @@ impl ClientCore {
         // A session that has ended lets it through: no download is
         // coming, and parked behind the gate the caller could neither receive
         // its end nor withdraw it on the ended session.
-        if !shared.portfolio.account_download_complete() && shared.reference.session_over().is_none() {
-            return None;
-        }
         let mut req = self.account_summary_req.lock().unwrap();
         let mut other = self.account_summary_other_req.lock().unwrap();
         let mut last = self.last_account_summary.lock().unwrap();
@@ -5487,7 +4626,6 @@ impl ClientCore {
         // states its figures in came back as zero: the copy is filled from the
         // rows the venue sends, and a summary asked for before they arrive
         // reported an empty account rather than nothing.
-        let stated = shared.portfolio.stated_account_values();
         // "All" is the venue's word for every figure it holds. Matched against
         // a local list of names instead, "All" matches none of them and
         // returns empty, and any figure absent from that list is dropped with
@@ -5495,8 +4633,16 @@ impl ClientCore {
         // Empty tags are refused before this, as a gateway refuses them; a
         // list of nothing but separators is answered as "All" here, and what
         // the venue answers one with has not been seen.
-        let asked: Vec<(i64, Vec<String>)> = req.iter().chain(other.iter()).cloned().collect();
+        let asked: Vec<(i64, Vec<String>)> = req.iter().chain(other.iter())
+            .filter(|(id, _)| only.is_none_or(|only| only == *id))
+            .cloned().collect();
         for (req_id, tags) in &asked {
+            let accounts = self.account_routes.lock().unwrap().summaries.get(req_id).cloned()
+                .unwrap_or_else(|| vec![shared.account_name("")]);
+            let portfolios: Vec<_> = accounts.iter().map(|account| (account, shared.portfolio_for(account))).collect();
+            if !session_over && portfolios.iter().any(|(_, p)| !p.account_download_complete()) { continue; }
+            let stated: Vec<_> = portfolios.iter().flat_map(|(account, p)| p.stated_account_values().into_iter()
+                .map(|(ledger, key, value, currency)| ((*account).clone(), ledger, key, value, currency))).collect();
             let initial = !last.contains_key(req_id);
             let (when, already) = last.entry(*req_id)
                 .or_insert_with(|| (std::time::Instant::now(), HashMap::new()));
@@ -5507,15 +4653,16 @@ impl ClientCore {
             let wants_all = tags.is_empty() || tags.iter().any(|t| t == "All");
             let entries: Vec<_> = stated
                 .iter()
-                .filter(|(_, key, _, currency)| {
+                .filter(|(_, _, key, _, currency)| {
                     wants_all || tags.iter().any(|t| Self::answers_tag(t, key, currency))
                 })
-                .filter_map(|(ledger, key, value, currency)| {
-                    let previous = already.insert((*ledger, key.clone(), currency.clone()), value.clone());
+                .filter_map(|(account, ledger, key, value, currency)| {
+                    let previous = already.insert((account.clone(), *ledger, key.clone(), currency.clone()), value.clone());
                     if previous.as_ref() == Some(value) {
                         return None;
                     }
                     Some(AccountSummaryEntry {
+                        account: account.clone(),
                         tag: key.clone(), value: value.clone(), currency: currency.clone(),
                     })
                 })
@@ -5673,7 +4820,7 @@ impl ClientCore {
     }
 
     /// Pre-validate order fields that don't depend on instrument ID.
-    /// Call this before `find_or_register_instrument` to fail fast.
+    /// Call this before the order is handed to the engine, to fail fast.
     ///
     /// Where a gateway refuses an order while it validates it, it answers under
     /// 321 and puts the name of the request it was validating in front of the
@@ -5703,19 +4850,10 @@ impl ClientCore {
                     }
                 }
             }
-            // A price condition's trigger method states the set the order
-            // carries and the reference enumerates: 0 to 4, 7 or 8. Another
-            // value is a caller's mistake and is reported rather than sent as
-            // a different trigger.
-            if let crate::types::OrderCondition::Price { trigger_method, .. } = condition
-                && !matches!(*trigger_method, 0..=4 | 7 | 8)
-            {
-                return Err(Refusal::stated(TRIGGER_METHOD_INVALID, format!(
-                    "a price condition's trigger method {trigger_method} is not one \
-                     the venue carries on a condition: it is 0 to 4, 7 or 8, and \
-                     anything else would go out as a different trigger than the one stated",
-                )));
-            }
+            // A price condition's trigger method, and a margin condition's
+            // percent, are `int`s as the TWS API carries them, and go to the
+            // venue as stated: no gateway refusal of either has been read, so
+            // none is made here.
         }
 
         // Reject non-finite and out-of-range numerics up front, before any
@@ -6639,9 +5777,10 @@ impl ClientCore {
     /// side, no price, and the action on the attributes so the encoder every
     /// other order goes through emits it.
     ///
-    /// The override the documented signature takes is not here. It is a
-    /// validation bypass the venue's front end applies while it builds the
-    /// order, so no tag carries it and there is nothing to send.
+    /// The override the documented signature takes is not here. It waives the
+    /// check the engine makes against the option's standing in the money
+    /// before the order is built, so no tag carries it and there is nothing to
+    /// send.
     pub fn build_exercise_request(
         order_id: OrderId, instrument: InstrumentId, action: u8, qty: Qty,
         account: String, stated: ExerciseStates,
@@ -7043,8 +6182,30 @@ impl ClientCore {
         // can now hold the slot this contract used to name.
         let by_its_own_id = self.cached_instrument(shared, contract.con_id);
         let instrument = by_its_own_id
-            .or_else(|| watched_under.and_then(|req_id| self.watching(req_id)))
-            .ok_or_else(|| OPTION_MODEL_UNSTATED.to_string())?;
+            .or_else(|| watched_under.and_then(|req_id| self.watching(req_id)));
+        solve_option_on(shared, instrument, contract, solve)
+    }
+}
+
+/// Solve a question about an option against the venue's model for the
+/// contract in `instrument`, or say why it cannot be answered.
+///
+/// Of this side's records only the slot is read, and it is handed in: the
+/// model and the dividend schedule are the session's own. So the engine can
+/// answer a kept question where it writes the model, on the slot the question's
+/// watch took.
+pub(crate) fn solve_option_on(
+    shared: &SharedState,
+    instrument: Option<InstrumentId>,
+    contract: &crate::types::model::Contract,
+    solve: impl Fn(
+        crate::control::option_model::OptionTerms,
+        crate::control::option_model::VenueModel,
+        &[(f64, f64)],
+    ) -> Option<f64>,
+) -> Result<f64, crate::error_codes::Refusal> {
+    {
+        let instrument = instrument.ok_or_else(|| OPTION_MODEL_UNSTATED.to_string())?;
         let stated = shared
             .market
             .option_model(instrument)
@@ -7207,7 +6368,62 @@ impl ClientCore {
              picking one rather than solving for it")
         })
     }
+}
 
+/// Answer the calculations kept for a model, now that one may be stated.
+///
+/// Called by the engine where it writes a contract's model — `slot` — so each
+/// answer is pushed right behind the model it was solved against and before
+/// anything the engine pushes later, the session's last record included; and
+/// by a call that has just kept one — `only` — in case the model arrived while
+/// it was keeping it. The answer goes on 53 under the question's own number; a
+/// question the model cannot answer is refused under it; one still waiting on
+/// a model stays kept.
+pub fn answer_kept_calculations(
+    shared: &SharedState, slot: Option<InstrumentId>, only: Option<i64>,
+) {
+    shared.market.answer_kept_calculations(
+        |req_id, kept| slot.is_none_or(|slot| kept.slot == slot) && only.is_none_or(|id| id == req_id),
+        |req_id, kept| {
+            let (asked, und) = (kept.option_price, kept.under_price);
+            let solved = solve_option_on(shared, Some(kept.slot), &kept.contract, |terms, model, schedule| {
+                if kept.wants_volatility {
+                    crate::control::option_model::implied_volatility(terms, model, schedule, asked, und)
+                } else {
+                    crate::control::option_model::option_price(terms, model, schedule, asked, und)
+                }
+            });
+            match solved {
+                Ok(figure) => {
+                    let (implied_vol, opt_price) = if kept.wants_volatility {
+                        (figure, asked)
+                    } else {
+                        (asked, figure)
+                    };
+                    shared.market.push_option_computation(crate::types::OptionComputation {
+                        implied_vol,
+                        opt_price,
+                        und_price: und,
+                        ..crate::types::OptionComputation::solved(req_id)
+                    });
+                    true
+                }
+                // Only one of the refusals resolves by waiting: the one saying
+                // the venue has not stated its model yet. The rest are
+                // permanent, and read as "not yet" they leave the question
+                // kept for the life of the session with its caller told
+                // neither an answer nor a reason.
+                Err(why) if why.message == OPTION_MODEL_UNSTATED => false,
+                Err(why) => {
+                    shared.push_refused(
+                        crate::types::model::ErrorOrigin::Request { id: req_id, ends: true },
+                        i64::from(why.code), why.message,
+                    );
+                    true
+                }
+            }
+        },
+    );
 }
 
 

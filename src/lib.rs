@@ -98,7 +98,7 @@ mod python;
 // Re-exports for convenience.
 pub use control::adjustments::{AdjustedContract, Adjustment, AdjustmentKind, scale_before};
 pub use error_codes::Refusal;
-pub use api::{EClient, EClientConfig, Wrapper};
+pub use api::{EClient, EClientConfig, EngineEnd, Shutdown, Traffic, Wrapper};
 
 /// What a session is opened with: the same type [`EClient`] takes.
 pub use api::EClientConfig as Config;

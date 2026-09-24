@@ -367,3 +367,73 @@ camel_aliases_copy! {
         get_yield_redemption_date_alias set_yield_redemption_date_alias yieldRedemptionDate yield_redemption_date i64;
     }
 }
+
+/// What an error is about, as `EWrapper.error_from` is told it.
+///
+/// `kind` is one of five: `"Request"`, a numbered request; `"Order"`, an order
+/// and the operation on it; `"Question"`, a request that carries no number and
+/// has an end of its own; `"Session"`; or `"Internal"`, a lookup this client
+/// made for itself under its own number. `id` is the number `error` states it
+/// under: the request's or the order's, the lookup's, and -1 for the rest.
+/// `ends` says, of a request or a question, whether nothing more follows for
+/// it — a notice its answer follows does not end it. `op` names the operation
+/// on an order the error answers: `"Place"`, `"Modify"`, `"Cancel"`,
+/// `"Exercise"`, or `"Venue"` for the venue's own word on a working order.
+/// `question` names the request with no number: `"OpenOrders"`,
+/// `"MarketRule(26)"` and so on. Each is `None` where it does not apply.
+#[pyclass(frozen, name = "ErrorOrigin")]
+pub struct ErrorOrigin(pub(crate) crate::types::model::ErrorOrigin);
+
+#[pymethods]
+impl ErrorOrigin {
+    /// Which of the five it is.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        use crate::types::model::ErrorOrigin as O;
+        match self.0 {
+            O::Request { .. } => "Request",
+            O::Order { .. } => "Order",
+            O::Question { .. } => "Question",
+            O::Session => "Session",
+            O::Internal(_) => "Internal",
+        }
+    }
+
+    /// The number `error` states it under.
+    #[getter]
+    fn id(&self) -> i64 {
+        self.0.id()
+    }
+
+    /// Of a request or a question, whether nothing more follows for it.
+    #[getter]
+    fn ends(&self) -> Option<bool> {
+        use crate::types::model::ErrorOrigin as O;
+        match self.0 {
+            O::Request { ends, .. } | O::Question { ends, .. } => Some(ends),
+            _ => None,
+        }
+    }
+
+    /// Of an order, the operation the error answers.
+    #[getter]
+    fn op(&self) -> Option<String> {
+        match self.0 {
+            crate::types::model::ErrorOrigin::Order { op, .. } => Some(format!("{op:?}")),
+            _ => None,
+        }
+    }
+
+    /// Of a question, which one.
+    #[getter]
+    fn question(&self) -> Option<String> {
+        match self.0 {
+            crate::types::model::ErrorOrigin::Question { q, .. } => Some(format!("{q:?}")),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ErrorOrigin({:?})", self.0)
+    }
+}

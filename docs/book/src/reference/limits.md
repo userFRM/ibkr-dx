@@ -119,13 +119,13 @@ security type.* This client sends both and the venue answers, for the reason
 above: the lists are read here, but how each is keyed to an exchange is not
 established.
 
-## An exercise's override
+## Alternate exercise transport
 
-A gateway told `override` is false waits for the venue's word on where the
-option stands and refuses an exercise of one out of the money, or a lapse of
-one in it, under 322. It sets no bound on that wait. This client does not ask
-for the venue's word: it sends the exercise as given whatever `override` says,
-and says so in the log where `override` is false.
+An exercise checks the selected account's positive position and waits for its
+in-the-money figure, including when override is set. Override bypasses the
+natural exercise/lapse check. The quantity is limited to the whole-contract
+position captured before the wait. The alternate exercise transport named by
+some logins is not implemented.
 
 ## Numbered ticks this client does not deliver
 
@@ -497,7 +497,7 @@ the volatility order and the pegged-to-stock order — nor are the four
 volatility pegs. Each carries prices or companions not yet established here,
 and is refused by name.
 
-## An account summary is this session's account
+## Account groups and models
 
 `reqAccountSummary` is checked as a gateway checks it and refused in its
 words, before anything is taken: empty tags (*Tags cannot be null*), an empty
@@ -509,18 +509,11 @@ to, under 10200. A third summary while two are open is refused under 322, as a
 gateway refuses it. The tag `All` is what asks for every figure; a group of
 `All` with empty tags is refused.
 
-What is answered is the account stream this session is already receiving,
-filtered for the tags the caller asked for. For a login holding one account
-that is the same answer a gateway gives, which is the case this was written
-and measured against. On a login holding several accounts, `All` covers the
-account this session opened under, not every account, and the caller is told
-so on `error` under 321 ahead of the answer. An advisor's own group names are
-passed through and answered the same way: a gateway refuses a group the
-advisor does not have, and this client does not check the name against the
-advisor's groups.
-
-The rows themselves are encoded the same way either way. What differs is which
-accounts they are for.
+An `All` summary includes every account held by the login. Named-account
+updates, positions and profit subscriptions answer for the selected account.
+`AllNonProp`, advisor group membership and model selection are not applied;
+they are accepted with a warning once per selection and session. Multi-account
+answers retain the caller's model label without applying that model.
 
 ## Executions and fills are the ones the venue restated, not the account's history
 

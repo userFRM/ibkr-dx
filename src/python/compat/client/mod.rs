@@ -11,24 +11,20 @@ mod stubs;
 #[cfg(feature = "test-helpers")]
 mod test_helpers;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::Sender;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::auth::session::{CodeProvider, IbKeyChallenge, SecondFactor};
-use crate::bridge::{Event, SharedState};
+use crate::bridge::SharedState;
 use crate::client_core::ClientCore;
 
-/// What the reference client reports for a request made before connecting.
-const NOT_CONNECTED_CODE: i64 = 504;
 use crate::gateway::{Gateway, GatewayConfig, Session};
 use crate::types::*;
-use super::contract::Contract;
 
 /// ibapi-compatible EClient class.
 /// Wraps the internal engine and dispatches events to an EWrapper subclass.
@@ -63,12 +59,12 @@ pub struct EClient {
     /// Set by connect(), cleared by disconnect.
     pub(crate) shared: Mutex<Option<Arc<SharedState>>>,
     /// Set by connect(), cleared by disconnect.
-    pub(crate) control_tx: Mutex<Option<SyncSender<ControlCommand>>>,
-    pub(crate) next_order_id: AtomicU64,
+    pub(crate) control_tx: Mutex<Option<Sender<ControlCommand>>>,
+    pub(crate) next_order_id: Arc<AtomicU64>,
     /// Where the last id handed out is kept, and under which key. Empty when
     /// the caller asked for no file, which makes the counter this session's
     /// alone and lets it collide with what an earlier one used.
-    pub(crate) _thread: Mutex<Option<thread::JoinHandle<()>>>,
+    pub(crate) _thread: Mutex<Option<Arc<crate::api::client::Joiner>>>,
     /// Set by connect(), cleared by disconnect.
     pub(crate) account_id: Mutex<Option<String>>,
     /// Every account this login holds, the first being `account_id`.
@@ -107,7 +103,6 @@ pub struct EClient {
     /// `positionMulti` is the same live feed as `position`, asked for under a
     /// request id and withdrawn under it. Held apart from that flag because
     /// both may be watching at once and each is answered on its own callback.
-    pub(crate) positions_multi_requested: Mutex<std::collections::HashSet<i64>>,
     /// The requests watching the account's figures per account or model.
     ///
     /// `accountUpdateMulti` is a subscription, not a question: a figure that
@@ -115,7 +110,6 @@ pub struct EClient {
     /// until the caller withdraws it. Held apart from the plain account
     /// subscription beside it, because both may be open at once and each is
     /// answered on its own callback.
-    pub(crate) account_updates_multi_requested: Mutex<std::collections::HashSet<i64>>,
     /// Whether this session is finished rather than merely disconnected.
     ///
     /// The engine announces a loss it is still working on and a loss it has
@@ -138,10 +132,20 @@ pub struct EClient {
     /// program written against it may hold a lock across a request and take it
     /// again in the callback. Answered inside the request, as these were, that
     /// program stops there and neither side ever moves. What is answered is
-    /// built when the request is made, so it states what was true then; it
-    /// reaches the wrapper on the next pass, in the order the answers were
-    /// made.
-    pub(crate) waiting_answers: Mutex<std::collections::VecDeque<(&'static str, Py<pyo3::types::PyTuple>)>>,
+    /// built when the request is made, so it states what was true then.
+    ///
+    /// Each holds Python objects the engine's thread must not own, so it is
+    /// kept here rather than in the session's queues — stamped from the
+    /// session's counter under this queue's lock, and handed over by a read in
+    /// its place among the engine's records.
+    pub(crate) waiting_answers: Mutex<std::collections::VecDeque<(u64, &'static str, Py<pyo3::types::PyTuple>)>>,
+    /// One read at a time, as on the other surface: the queues empty as they
+    /// are read, and two threads reading at once — which the free-threaded
+    /// interpreter allows — would each take part of one read.
+    pub(crate) reading: Mutex<()>,
+    /// What a read took and did not deliver because a handler raised an
+    /// interrupt part way through, handed over first by the next read.
+    pub(crate) undelivered: Mutex<Option<dispatch::Undelivered>>,
     /// The number this session connected under, as the caller gave it.
     ///
     /// One session holds the account here, so this does not route anything.
@@ -156,38 +160,15 @@ pub struct EClient {
     /// When the venue says this session logged in, by its own clock and in
     /// its own spelling. Held only while there is a session.
     pub(crate) logged_in_at: Mutex<Option<String>>,
-    /// Receiver for engine events (disconnects, etc.).
-    pub(crate) event_rx: Mutex<Option<std::sync::mpsc::Receiver<Event>>>,
-    /// What this session's event channel discarded because it was full.
-    ///
-    /// Kept rather than handed away: counted into a total nobody holds, a
-    /// program that acted on every event it saw had no way to tell that from
-    /// every event there was.
-    pub(crate) events_lost: Arc<std::sync::atomic::AtomicU64>,
-    /// Sender for test-injected events (test-only).
-    #[doc(hidden)]
-    pub(crate) _test_event_tx: Mutex<Option<std::sync::mpsc::SyncSender<Event>>>,
     /// Holds the control channel's receiving end for a test-connected client.
     /// Dropping it closed the channel, so a client that reported itself
     /// connected failed every request that sends one.
     pub(crate) _test_control_rx: Mutex<Option<std::sync::mpsc::Receiver<ControlCommand>>>,
-    /// Which kind of trade stream each tick-by-tick request asked for, as the
-    /// number the callback states it under: 1 for the exchange's own prints
-    /// and 2 for every print including those reported away from it.
-    ///
-    /// The trade record does not carry the kind, so it is kept per request id.
-    /// Without it a caller holding both subscriptions cannot tell the two
-    /// streams apart.
-    pub(crate) tbt_kind: Mutex<HashMap<i64, i32>>,
-    /// Option calculations asked for before the venue had stated a model for
-    /// the contract, kept until it does.
-    ///
-    /// The venue states a model only for a contract something is watching, so
-    /// a question about one nobody watches opens the watch and waits rather
-    /// than being refused for having been asked first. Answered on each
-    /// dispatch pass and dropped when the caller withdraws it.
-    pub(crate) pending_option_calcs:
-        Mutex<HashMap<i64, crate::api::client::PendingOptionCalc>>,
+    /// The engine's loop for a test-connected client: what it carries — an
+    /// order from the call to the wire, a question answered from what the
+    /// session holds — is taken by a loop of its own.
+    #[cfg(feature = "test-helpers")]
+    pub(crate) _test_engine: Mutex<Option<test_helpers::TestEngine>>,
     /// The orders this session has seen the venue finish with, kept.
     ///
     /// The queue they arrive on empties as it is read and the venue does not
@@ -207,27 +188,20 @@ pub struct EClient {
 
 impl Drop for EClient {
     fn drop(&mut self) {
-        // Both taken out of their locks first. A guard built in the scrutinee
-        // is held for the whole body, and these bodies block: the sends are
-        // bounded, and the join waits on the engine thread.
+        // Both cloned outside their locks first. A guard built in the scrutinee
+        // is held for the whole body, and the join waits on the engine
+        // thread.
+        if let Some(shared) = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+            shared.close_admission();
+        }
         let tx = self.control_tx.lock().unwrap().clone();
         if let Some(tx) = tx {
-            // Dropping the client ends the session, so the venue is told. The
-            // channel is bounded and these wait on a hot loop that is behind,
-            // and dealloc runs with the GIL held — so detach for them, the same
-            // way the join below does, and for the same reason.
-            let sent = Python::try_attach(|py| {
-                py.detach(|| {
-                    let _ = tx.send(ControlCommand::Logout);
-                    let _ = tx.send(ControlCommand::Shutdown);
-                });
-            });
-            if sent.is_none() {
-                let _ = tx.send(ControlCommand::Logout);
-                let _ = tx.send(ControlCommand::Shutdown);
-            }
+            // Dropping the client ends the session, so the venue is told.
+            // Admitted like any command: nothing here waits for the loop.
+            let _ = self.send_control(&tx, ControlCommand::Logout);
+            let _ = self.send_control(&tx, ControlCommand::Shutdown);
         }
-        let thread = self._thread.lock().unwrap().take();
+        let thread = self._thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         if let Some(h) = thread {
             // A wedged engine never returns from join. Detach so
             // that stall parks this thread, not the whole interpreter
@@ -348,7 +322,7 @@ impl EClient {
             code_provider: Mutex::new(None),
             shared: Mutex::new(None),
             control_tx: Mutex::new(None),
-            next_order_id: AtomicU64::new(0),
+            next_order_id: Arc::new(AtomicU64::new(0)),
             _thread: Mutex::new(None),
             account_id: Mutex::new(None),
             accounts: Mutex::new(Vec::new()),
@@ -356,17 +330,14 @@ impl EClient {
             connected: AtomicBool::new(false),
             positions_requested: AtomicBool::new(false),
             deferred_evictions: Mutex::new(std::collections::HashSet::new()),
-            positions_multi_requested: Mutex::new(std::collections::HashSet::new()),
-            account_updates_multi_requested: Mutex::new(std::collections::HashSet::new()),
             session_ended: AtomicBool::new(false),
             close_notified: AtomicBool::new(false),
             waiting_answers: Mutex::new(std::collections::VecDeque::new()),
-            event_rx: Mutex::new(None),
-            events_lost: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            _test_event_tx: Mutex::new(None),
+            reading: Mutex::new(()),
+            undelivered: Mutex::new(None),
             _test_control_rx: Mutex::new(None),
-            tbt_kind: Mutex::new(HashMap::new()),
-            pending_option_calcs: Mutex::new(HashMap::new()),
+            #[cfg(feature = "test-helpers")]
+            _test_engine: Mutex::new(None),
             completed: Mutex::new(Vec::new()),
             core: ClientCore::new(),
         }
@@ -507,8 +478,12 @@ impl EClient {
         // it opened, so a session stays open at the venue while this one runs.
         // Stopped and joined before the state is reset, so the engine that is
         // going cannot write into what the new session has been given.
-        self.stop_engine(py);
-        self.forget_last_session();
+        let disconnects_before = self.disconnects.load(Ordering::Acquire);
+        {
+            let (_turn, _reading) = self.lifecycle_turn(py);
+            self.stop_engine(py);
+            self.forget_last_session();
+        }
         // Stated before the logon rather than after it, so a caller reading it
         // during `connect` reads this session's number and not the last one's.
         self.client_id.store(client_id, Ordering::Release);
@@ -534,6 +509,7 @@ impl EClient {
             ib_key_token_sub_type: ib_key_token_sub_type
                 .unwrap_or_else(|| crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into()),
             code_provider,
+            cancel: None,
             // Whatever was left in the file the caller named. A file that
             // cannot be read is a slower start, not a failed one: the password
             // is still here, and a file whose whole point is to avoid needing
@@ -545,9 +521,8 @@ impl EClient {
             }),
         };
 
-        // Read before the GIL goes, compared after it comes back.
-        let disconnects_before = self.disconnects.load(Ordering::Acquire);
         let result = py.detach(|| Gateway::connect(&config));
+        let (_turn, _reading) = self.lifecycle_turn(py);
         // A disconnect answered for this connect while it was in the venue's
         // hands. It found nothing installed to stop and said the session
         // closed; going on to install this one would leave the caller holding
@@ -560,7 +535,11 @@ impl EClient {
             claim.kept = true;
             // Dropped rather than installed, which closes every socket it
             // opened. Detached because those closes talk to the venue.
-            py.detach(move || drop(result));
+            py.detach(move || {
+                if let Ok(mut session) = result {
+                    let _ = session.trading.logout_cancelled_logon();
+                }
+            });
             return Err(PyRuntimeError::new_err(
                 "Connection abandoned: disconnect() was called while it was still logging in",
             ));
@@ -589,24 +568,19 @@ impl EClient {
             Some(gw.logged_in_at.clone()).filter(|stamp| !stamp.is_empty());
         let shared = Arc::new(SharedState::new());
         shared.set_settings(config.settings.clone());
-        self.core.set_registration_timeout(config.settings.registration_timeout);
         gw.populate_init_data(&shared);
 
         let connect_host = config.host.clone();
         let connect_username = config.username.clone();
         let connect_password = config.password.clone();
         let connect_paper = config.paper;
-        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(256);
         let (mut hot_loop, control_tx) = crate::engine::hot_loop::HotLoop::for_session(
             gw,
             shared.clone(),
-            // This session's own count of what it discarded, so a program with
-            // two sessions is not told about the other one's — and held here,
-            // so it can be asked.
-            Some(crate::engine::hot_loop::EventSink::new(
-                event_tx,
-                Arc::clone(&self.events_lost),
-            )),
+            // No event channel: every engine callback reaches this surface
+            // through the session's one order, the connection's going and
+            // coming back included.
+            None,
             farm_conn, ccp_conn, hmds_conn, secdef_conn, core_id,
             crate::gateway::CallerAuth {
                 // The settings the session opened under, not the defaults. Left
@@ -642,11 +616,10 @@ impl EClient {
 
         *self.shared.lock().unwrap() = Some(shared.clone());
         *self.control_tx.lock().unwrap() = Some(control_tx);
-        *self.event_rx.lock().unwrap() = Some(event_rx);
         // Counted from whatever the venue names as working, once it has;
         // nothing is carried over from the last run.
         self.next_order_id.store(0, Ordering::Relaxed);
-        *self._thread.lock().unwrap() = Some(handle);
+        *self._thread.lock().unwrap() = Some(Arc::new(crate::api::client::Joiner::new(handle)));
         self.session_ended.store(false, Ordering::Release);
         self.close_notified.store(false, Ordering::Release);
         // Stated again here, where the session exists, and not only where the
@@ -686,6 +659,7 @@ impl EClient {
 
     /// Disconnect from IB.
     fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
+        let (_turn, _reading) = self.lifecycle_turn(py);
         // A session that was held has ended; a client that never connected
         // has no session to be told the close of.
         let had_a_session = self.shared.lock().unwrap().is_some();
@@ -699,11 +673,16 @@ impl EClient {
         if had_a_session {
             self.session_ended.store(true, Ordering::Release);
         }
-        // Reset per-session state so connect() can be called again.
+        // Reset per-session state so connect() can be called again. Nothing
+        // the session queued is delivered after this: its queues go with it.
         *self.shared.lock().unwrap() = None;
         *self.control_tx.lock().unwrap() = None;
-        *self.event_rx.lock().unwrap() = None;
         self.forget_last_session();
+        // As the reference client closes: once the wire work above is done,
+        // `connection_closed` inside the call, and nothing after it.
+        if had_a_session {
+            self.tell_the_caller_it_closed(py)?;
+        }
         Ok(())
     }
 
@@ -711,11 +690,10 @@ impl EClient {
     ///
     /// False before `connect` and after `disconnect`, and false from the
     /// moment the engine gives the session up — which it writes down itself.
-    /// The notice saying so goes out on a channel that drops what it cannot
-    /// hold, and a program that drives its own loop, or none at all, is told
-    /// nowhere else: it read connected on a session that was over, and went
-    /// on issuing requests into it. The Rust surface answers this the same
-    /// way.
+    /// The record saying so is delivered only by a read, and a program that
+    /// drives its own loop, or none at all, is told nowhere else: it read
+    /// connected on a session that was over, and went on issuing requests
+    /// into it. The Rust surface answers this the same way.
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed) && !self.the_engine_gave_the_session_up()
     }
@@ -922,15 +900,42 @@ impl EClient {
         self.disconnect(py)
     }
 
-    /// How many engine events this session's channel discarded.
+    /// How many engine events this session's channel discarded: none.
     ///
-    /// The engine never waits on a reader — a session that stalled on one would
-    /// stop carrying market data — so an event arriving at a full channel is
-    /// dropped. A program that acted on every fill it saw needs to know the
-    /// difference between that and every fill there was. Zero for a session
-    /// whose reader kept up.
+    /// This surface reads every engine callback through the session's one
+    /// order, which keeps each record until a read delivers it, and attaches
+    /// no event channel that could drop one.
     fn events_lost(&self) -> u64 {
-        self.events_lost.load(Ordering::Acquire)
+        0
+    }
+
+    /// What this session has sent and received on the venue's connections
+    /// since it opened, as a dict: `bytes_sent`, `bytes_received`,
+    /// `messages_sent` and `messages_received`. Bytes are the protocol bytes
+    /// on established connections, before TLS encryption and after decryption;
+    /// messages are whole frames, including heartbeats. Authentication before
+    /// a connection is established is outside these counts. All nought where there is no
+    /// session.
+    fn traffic<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let counts = self.shared.lock().unwrap().as_ref().map(|shared| shared.traffic()).unwrap_or_default();
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("bytes_sent", counts.bytes_sent)?;
+        dict.set_item("bytes_received", counts.bytes_received)?;
+        dict.set_item("messages_sent", counts.messages_sent)?;
+        dict.set_item("messages_received", counts.messages_received)?;
+        Ok(dict)
+    }
+
+    /// How many requests this client has handed the engine that the engine
+    /// has not finished with: still waiting to be taken, or taken and held —
+    /// for the contract to be named, in the order buffer, or behind the
+    /// session's own replay. Zero before a session exists.
+    ///
+    /// No call waits for the engine to take what it is handed, so this is
+    /// what bounds what a caller has handed over. Read once per lap of the
+    /// engine's loop, which takes at most 64 commands a lap.
+    fn backlog(&self) -> usize {
+        self.shared.lock().unwrap().as_ref().map_or(0, |shared| shared.backlog())
     }
 
     /// Deliver everything waiting, once, and return.
@@ -941,15 +946,15 @@ impl EClient {
     /// stand. This is one pass of the same dispatch.
     fn poll(&self, py: Python<'_>) -> PyResult<()> {
         // Not gated on the connection. A session the engine is still
-        // rebuilding is disconnected and not over, and the event saying it
+        // rebuilding is disconnected and not over, and the record saying it
         // came back arrives on this same pump — so a pump that stopped at the
         // loss could never deliver it, and the caller stayed stood down on a
         // session that had recovered.
         // A pass an interrupt ended is over, as it is in `run`: no more of the
-        // caller's code runs on it, and the close is said on the next pass.
-        // Said whether or not a session stands: `disconnect()` takes the
-        // session away, and a program driving its own loop is told the close
-        // on the pass after, as the reference client tells it.
+        // caller's code runs on it, and what it had taken is handed over first
+        // on the next pass. The close is the delivery of the session's last
+        // record, or said inside the caller's own `disconnect()`; the call
+        // after the pass says it only where neither has.
         // The session taken out from under its lock before the pass runs:
         // the pass locks the same mutex to check the session is still the
         // client's, and a guard kept alive across it deadlocked every poll.
@@ -1191,24 +1196,22 @@ impl Drop for Connecting<'_> {
 impl EClient {
     /// Stop the engine this client is running and wait for it.
     ///
-    /// Both taken out of their locks first, as in `Drop`: the sends are bounded
-    /// and the join waits on the engine, so a guard spanning either blocks
-    /// every other thread that needs the same lock. Detached for both — the
-    /// channel is bounded and a wedged engine never returns from a join, so
-    /// holding the GIL across either stalls every Python thread rather than
-    /// this call alone.
+    /// Both cloned outside their locks first, as in `Drop`: the join waits on
+    /// the engine, so a guard spanning it blocks every other thread that needs
+    /// the same lock. Detached for the join — a wedged engine never returns
+    /// from one, so holding the GIL across it stalls every Python thread
+    /// rather than this call alone.
     fn stop_engine(&self, py: Python<'_>) {
-        let tx = self.control_tx.lock().unwrap().take();
-        if let Some(tx) = tx {
-            // The session is ending, so the venue is told before the engine
-            // stops. Left to notice its sender went away, the loop takes the
-            // path that sends no logout and withdraws nothing it opened.
-            py.detach(|| {
-                let _ = tx.send(ControlCommand::Logout);
-                let _ = tx.send(ControlCommand::Shutdown);
-            });
+        if let Some(shared) = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+            shared.close_admission();
         }
-        let thread = self._thread.lock().unwrap().take();
+        let tx = self.control_tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        if let Some(tx) = tx {
+            // Start finishing while the session still holds its sender.
+            let _ = self.send_control(&tx, ControlCommand::Logout);
+            let _ = self.send_control(&tx, ControlCommand::Shutdown);
+        }
+        let thread = self._thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         if let Some(h) = thread {
             py.detach(|| {
                 let _ = h.join();
@@ -1230,18 +1233,12 @@ impl EClient {
         *self.auth_host.lock().unwrap() = None;
         *self.logged_in_at.lock().unwrap() = None;
         self.positions_requested.store(false, Ordering::Release);
-        self.positions_multi_requested.lock().unwrap().clear();
         // And the account-figure watchers beside them. Left standing, a second
         // session on the same client delivers its own figures under a request
         // number the caller made on a session that has gone.
-        self.account_updates_multi_requested.lock().unwrap().clear();
         self.deferred_evictions.lock().unwrap().clear();
-        self.tbt_kind.lock().unwrap().clear();
-        self.pending_option_calcs.lock().unwrap().clear();
+        *self.undelivered.lock().unwrap() = None;
         self.completed.lock().unwrap().clear();
-        // Counted per session, so a caller reading it is told what this
-        // session lost rather than a total carried over from the last.
-        self.events_lost.store(0, Ordering::Relaxed);
         // Answers owed to the session that ended. Left queued, the next
         // session's first pass would hand over another session's positions and
         // orders under request numbers nobody there gave out.
@@ -1254,26 +1251,75 @@ impl EClient {
     ///
     /// Reported rather than raised: the reference client answers a request it
     /// refuses on the error callback and returns, so a program written against
-    /// it handles refusals there and nowhere else. What that handler raises is
-    /// answered for as any callback's is: logged if ordinary, and otherwise
-    /// what the call raises.
+    /// it handles refusals there and nowhere else. Pushed into the session's
+    /// order at the call and delivered by the next read, after everything
+    /// pushed before the call, as a gateway's rejection arrives after
+    /// everything it wrote before it.
     pub(crate) fn report_refusal(
         &self,
         py: Python<'_>,
         req_id: i64,
         refusal: crate::error_codes::Refusal,
     ) -> PyResult<()> {
+        self.report_refusal_as(py, request_origin(req_id), refusal)
+    }
+
+    /// As [`report_refusal`](Self::report_refusal), with what the refusal is
+    /// about stated: an order and the operation on it, or a request that
+    /// carries no number.
+    pub(crate) fn report_refusal_as(
+        &self,
+        py: Python<'_>,
+        origin: crate::types::model::ErrorOrigin,
+        refusal: crate::error_codes::Refusal,
+    ) -> PyResult<()> {
         // A call that answers took this number for its own question, so the
         // refusal is left where that call takes the refusals of its question,
         // which it raises as the other surface returns them — not put to the
         // program under a number it never used.
-        if u64::try_from(req_id).is_ok_and(crate::api::client::a_question_of_ours)
+        let id = origin.id();
+        if u64::try_from(id).is_ok_and(crate::api::client::a_question_of_ours)
             && let Ok(shared) = self.shared_state()
         {
-            shared.reference.push_historical_error(req_id as u32, refusal.code, refusal.message);
+            shared.reference.push_historical_error(id as u32, refusal.code, refusal.message);
             return Ok(());
         }
-        self.notify(py, "error", (req_id, raised_now(), refusal.code, refusal.message, ""))
+        // A record in the session's order, pushed at the call: it reaches the
+        // caller after everything pushed before the call, as a gateway's
+        // rejection does. Once admission has closed, or with no session,
+        // there is no subsequent read to deliver the refusal.
+        match self.shared_state() {
+            Ok(shared) if !shared.admission_closed() => {
+                shared.push_refused(origin, i64::from(refusal.code), refusal.message);
+                Ok(())
+            }
+            _ => self.notify_error(py, origin, i64::from(refusal.code), &refusal.message),
+        }
+    }
+
+    /// A placement refused at its call: a new order, or a change to one the
+    /// venue is working.
+    pub(crate) fn refuse_placement(
+        &self,
+        py: Python<'_>,
+        order_id: i64,
+        refusal: crate::error_codes::Refusal,
+    ) -> PyResult<()> {
+        self.report_refusal_as(py, self.placement_origin(order_id), refusal)
+    }
+
+    /// What an error about placing this order is about: a change where the
+    /// venue is working the order, a new order otherwise.
+    pub(crate) fn placement_origin(&self, order_id: i64) -> crate::types::model::ErrorOrigin {
+        let shared = self.shared.lock().unwrap().clone();
+        let replacing = u64::try_from(order_id)
+            .is_ok_and(|oid| self.core.is_working_at_the_venue(oid, shared.as_deref()));
+        let op = if replacing {
+            crate::types::model::OrderOp::Modify
+        } else {
+            crate::types::model::OrderOp::Place
+        };
+        crate::types::model::ErrorOrigin::Order { id: order_id, op }
     }
 
     /// A request's free-form option list, written as the reference client
@@ -1320,7 +1366,7 @@ impl EClient {
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|shared| shared.reference.session_over().is_some())
+            .is_some_and(|shared| shared.admission_closed() || shared.reference.session_over().is_some())
     }
 
     /// Whether the engine has given the trading connection up for good.
@@ -1342,8 +1388,17 @@ impl EClient {
     /// Raising instead made a caller written against that client take a
     /// different path here than it takes there. What the handler raises is
     /// logged if ordinary, as `notify` logs it, and otherwise ends the call.
-    pub(crate) fn tx_or_report(&self, req_id: i64) -> PyResult<Option<SyncSender<ControlCommand>>> {
-        self.tx_unless_it_is_over(req_id, self.the_engine_gave_the_session_up())
+    pub(crate) fn tx_or_report(&self, req_id: i64) -> PyResult<Option<Sender<ControlCommand>>> {
+        self.tx_or_report_as(request_origin(req_id))
+    }
+
+    /// As [`tx_or_report`](Self::tx_or_report), for a request that carries
+    /// no number of its own.
+    pub(crate) fn tx_or_report_as(
+        &self,
+        origin: crate::types::model::ErrorOrigin,
+    ) -> PyResult<Option<Sender<ControlCommand>>> {
+        self.tx_unless_it_is_over(origin, self.the_engine_gave_the_session_up())
     }
 
     /// The channel an order goes down, or nothing and the caller told why.
@@ -1356,16 +1411,16 @@ impl EClient {
     /// working order because the prices had stopped.
     pub(crate) fn tx_or_report_for_trading(
         &self,
-        req_id: i64,
-    ) -> PyResult<Option<SyncSender<ControlCommand>>> {
-        self.tx_unless_it_is_over(req_id, self.the_engine_gave_the_trading_connection_up())
+        origin: crate::types::model::ErrorOrigin,
+    ) -> PyResult<Option<Sender<ControlCommand>>> {
+        self.tx_unless_it_is_over(origin, self.the_engine_gave_the_trading_connection_up())
     }
 
     fn tx_unless_it_is_over(
         &self,
-        req_id: i64,
+        origin: crate::types::model::ErrorOrigin,
         over: bool,
-    ) -> PyResult<Option<SyncSender<ControlCommand>>> {
+    ) -> PyResult<Option<Sender<ControlCommand>>> {
         // Taken before the arms run. The `None` arm calls user code, and a
         // handler that disconnects or issues another request would wait on
         // this same lock while holding the GIL.
@@ -1387,14 +1442,14 @@ impl EClient {
                 // comes out as a `SystemError` at whatever the interpreter
                 // calls next, nowhere near the handler.
                 Python::attach(|py| {
-                    self.notify(py, "error", (req_id, raised_now(), NOT_CONNECTED_CODE, "Not connected", ""))
+                    self.report_refusal_as(py, origin, crate::error_codes::Refusal::not_connected("Not connected"))
                 })?;
                 Ok(None)
             }
         }
     }
 
-    pub(crate) fn tx(&self) -> PyResult<SyncSender<ControlCommand>> {
+    pub(crate) fn tx(&self) -> PyResult<Sender<ControlCommand>> {
         self.control_tx.lock().unwrap().clone()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))
     }
@@ -1506,20 +1561,23 @@ impl EClient {
         }
     }
 
-    /// Send a control command to the engine. `control_tx` is a sync_channel(64)
-    /// channel: a full queue is normal backpressure (the hot loop is behind,
-    /// not gone) and `send` is meant to wait for it to drain, so the send
-    /// itself stays blocking. What must not happen is waiting with the GIL
-    /// held, stalling every Python thread instead of just this call
- ///, so the wait runs detached, and only the actual send
-    /// crosses that boundary; `cmd` must already be a plain owned value by
-    /// the time it's built (never touching Python state once detached).
-    pub(crate) fn send_control(py: Python<'_>, tx: &SyncSender<ControlCommand>, cmd: ControlCommand) -> PyResult<()> {
-        // The error carries the command back, which is the whole command by
-        // value. Nothing here wants it returned, so it is described and dropped
-        // while still detached rather than moved across the boundary.
-        py.detach(|| tx.send(cmd).map_err(|e| e.to_string()))
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {e}")))
+    /// Admit a command to the engine, without waiting for it: the channel is
+    /// unbounded, so nothing here holds the interpreter or the caller. Counted
+    /// in the session's backlog until the engine has finished with it.
+    pub(crate) fn send_control(&self, tx: &Sender<ControlCommand>, cmd: ControlCommand) -> PyResult<()> {
+        let shared = self.shared.lock().unwrap().clone();
+        let sent = match shared {
+            Some(shared) => shared.admit(tx, cmd).map_err(|refused| refused.message),
+            // The error carries the command back, which nothing here wants.
+            None => tx.send(cmd).map_err(|gone| format!("Engine stopped: {gone}")),
+        };
+        // A test session's engine takes what is sent as it is sent, as a
+        // session's own loop takes it ahead of anything the venue says back.
+        #[cfg(feature = "test-helpers")]
+        if sent.is_ok() {
+            self._test_pump();
+        }
+        sent.map_err(PyRuntimeError::new_err)
     }
 
     /// Announce the session that has just opened: the socket, the accounts the
@@ -1645,37 +1703,20 @@ impl EClient {
         A: IntoPyObject<'py, Target = pyo3::types::PyTuple, Output = Bound<'py, pyo3::types::PyTuple>>,
         PyErr: From<A::Error>,
     {
-        self.waiting_answers
-            .lock()
-            .unwrap()
-            .push_back((name, args.into_pyobject(py)?.unbind()));
-        Ok(())
-    }
-
-    /// Hand over everything a request answered, oldest first.
-    ///
-    /// A callback that raises is logged and the rest still go, which is how the
-    /// dispatch loop already treats one: what the caller wrote is the caller's
-    /// problem and the answers behind it are still owed. An interrupt ends the
-    /// pass, because nothing can carry on through one — what is left stays
-    /// queued for the pass after it.
-    pub(crate) fn hand_over_what_is_waiting(&self, py: Python<'_>) -> PyResult<()> {
+        let args = args.into_pyobject(py)?.unbind();
         let shared = self.shared.lock().unwrap().clone();
-        // Answers requested by a callback wait for the next pass, so a caller
-        // asking again cannot keep engine events behind this phase forever.
-        let waiting = self.waiting_answers.lock().unwrap().len();
-        for _ in 0..waiting {
-            // Taken out before it is handed over: the callback is the caller's
-            // code and may issue another request, which queues behind what is
-            // left rather than being lost or handed over twice.
-            let Some((name, args)) = self.waiting_answers.lock().unwrap().pop_front() else {
-                return Ok(());
-            };
-            self.notify(py, name, args.bind(py).clone())?;
-            if shared.as_ref().is_some_and(|shared| !self.is_current_session(shared)) {
-                return Ok(());
-            }
-        }
+        // Stamped under this queue's own lock, as a record is under its
+        // queue's, so a read's cut takes it exactly when it takes everything
+        // pushed before it.
+        #[cfg(test)]
+        crate::bridge::hooks::run(&crate::bridge::hooks::BEFORE_ANSWER_STAMP);
+        let mut waiting = self.waiting_answers.lock().unwrap();
+        let current = self.shared.lock().unwrap();
+        let Some(shared) = shared.filter(|session| current.as_ref().is_some_and(|now| Arc::ptr_eq(session, now))) else {
+            return Ok(());
+        };
+        let stamp = shared.take_stamp();
+        waiting.push_back((stamp, name, args));
         Ok(())
     }
 
@@ -1710,6 +1751,49 @@ impl EClient {
         }
     }
 
+    /// The callback an error is delivered on, and its arguments.
+    ///
+    /// `error_from`, with what the error is about, where the wrapper's class
+    /// has that method: every subclass of `EWrapper` does, and by default it
+    /// goes on to `error`. Otherwise `error`, under the number the origin
+    /// states it under, as the reference client's wrapper is called. The class
+    /// is asked rather than the object, so a wrapper answering any name it is
+    /// asked for is called on `error`, as it always was.
+    pub(crate) fn error_callback(
+        &self,
+        py: Python<'_>,
+        origin: crate::types::model::ErrorOrigin,
+        error_time: i64,
+        code: i64,
+        msg: &str,
+    ) -> PyResult<(&'static str, Py<pyo3::types::PyTuple>)> {
+        let wrapper = self.wrapper.read().unwrap().as_ref().map(|w| w.clone_ref(py));
+        let with_origin = match wrapper {
+            Some(w) => w.bind(py).get_type().hasattr("error_from")?,
+            None => false,
+        };
+        if with_origin {
+            let origin = Py::new(py, super::class_reports::ErrorOrigin(origin))?;
+            let args = (origin, error_time, code, msg, "").into_pyobject(py)?.unbind();
+            return Ok(("error_from", args));
+        }
+        let args = (origin.id(), error_time, code, msg, "").into_pyobject(py)?.unbind();
+        Ok(("error", args))
+    }
+
+    /// Say an error inside the call, where the reference client says it:
+    /// logged if the handler raises something ordinary, as `notify` does.
+    pub(crate) fn notify_error(
+        &self,
+        py: Python<'_>,
+        origin: crate::types::model::ErrorOrigin,
+        code: i64,
+        msg: &str,
+    ) -> PyResult<()> {
+        let (name, args) = self.error_callback(py, origin, raised_now(), code, msg)?;
+        self.notify(py, name, args.bind(py).clone())
+    }
+
     /// Every account this login holds, comma separated, which is the shape
     /// the reference client answers `managed_accounts` in. Falls back to the
     /// default account so a client built by hand still answers something.
@@ -1718,40 +1802,23 @@ impl EClient {
         if accounts.is_empty() { self.account() } else { accounts.join(",") }
     }
 
-    /// Find instrument ID for a contract, registering if needed. The hot
-    /// loop can take up to `REGISTRATION_TIMEOUT` to reply, so the round
-    /// trip runs with the GIL released: otherwise a slow reply stalls every
-    /// Python thread, not just this call.
-    ///
-    /// Answers a refusal rather than raising one: a session that went away
-    /// mid-request and a wait that ran out are both refusals, and each
-    /// surface states its own way of reporting them.
-    pub(crate) fn find_or_register_instrument(
-        &self, py: Python<'_>, contract: &Contract,
-    ) -> Result<u32, crate::error_codes::Refusal> {
-        let Some(tx) = self.control_tx.lock().unwrap().clone() else {
-            return Err(crate::error_codes::Refusal::not_connected("Not connected"));
-        };
-        let shared = self.shared_state()
-            .map_err(|_| crate::error_codes::Refusal::not_connected("Not connected"))?;
-        let con_id = contract.con_id;
-        let symbol = contract.symbol.clone();
-        let exchange = contract.exchange.clone();
-        let sec_type = contract.sec_type.clone();
-        let identity = crate::types::model::contract_identity(
-            &contract.last_trade_date_or_contract_month, contract.strike,
-            &contract.right, &contract.multiplier, &contract.currency,
-        );
-        py.detach(|| self.core.find_or_register_instrument(
-            &shared, &tx, con_id, &symbol, &exchange, &sec_type, &identity,
-        ))
-    }
+
 }
 
 /// Register EClient on the module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EClient>()?;
     Ok(())
+}
+
+/// What a refusal of a request is about: the request under its number, or
+/// the session where it names none.
+pub(crate) fn request_origin(req_id: i64) -> crate::types::model::ErrorOrigin {
+    if req_id == -1 {
+        crate::types::model::ErrorOrigin::Session
+    } else {
+        crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }
+    }
 }
 
 /// When this client raised something itself, in milliseconds.
@@ -1770,6 +1837,27 @@ pub(crate) fn raised_now() -> i64 {
 mod tests {
     use super::*;
     use pyo3::Python;
+
+    #[test]
+    fn traffic_reports_the_sessions_bytes_and_frames() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, _w) = wired_client(py);
+            let (mut conn, _peer) = crate::protocol::connection::Connection::for_test();
+            conn.count_into(shared.traffic_counts());
+            let message = crate::protocol::fix::fix_build(&[(35, "0")], 1);
+            conn.send_raw(&message).unwrap();
+            conn.seed_buffer(&message);
+            assert_eq!(conn.extract_frames().len(), 1);
+            let counts = client.call_method0(py, "traffic").unwrap();
+            for key in ["bytes_sent", "bytes_received"] {
+                assert_eq!(counts.bind(py).get_item(key).unwrap().extract::<u64>().unwrap(), message.len() as u64);
+            }
+            for key in ["messages_sent", "messages_received"] {
+                assert_eq!(counts.bind(py).get_item(key).unwrap().extract::<u64>().unwrap(), 1);
+            }
+        });
+    }
 
     /// A callback reaches the caller under the name the reference client gives
     /// it, including the three that client spells with its letters run together.
@@ -1802,7 +1890,6 @@ mod tests {
             assert_eq!(client.get().account(), "");
             assert!(client.get().accounts.lock().unwrap().is_empty());
             assert!(client.get().shared.lock().unwrap().is_none());
-            assert_eq!(client.get().events_lost.load(Ordering::Acquire), 0);
 
             // And a pump on it does nothing rather than dispatching against a
             // session that is not there.
@@ -1910,6 +1997,7 @@ mod tests {
 
     use crate::types::model::{Contract as ApiContract, Order as ApiOrder};
     use crate::types::PositionInfo;
+    use super::super::contract::Contract;
 
     /// A client that is its own wrapper — `App(EWrapper, EClient)` built with
     /// `wrapper=self` — is found by the cyclic collector, and the drop it runs
@@ -1935,7 +2023,7 @@ mod tests {
                 thread::sleep(std::time::Duration::from_millis(50));
                 exited_here.store(true, Ordering::Release);
             });
-            *client.get()._thread.lock().unwrap() = Some(engine);
+            *client.get()._thread.lock().unwrap() = Some(Arc::new(crate::api::client::Joiner::new(engine)));
             let was = client.get().wrapper.write().unwrap().replace(client.clone_ref(py).into_any());
             drop(was);
 
@@ -1998,17 +2086,117 @@ w = W()",
         let w = recording_wrapper(py);
         let client = client_with(py, w.clone_ref(py));
         let shared = Arc::new(SharedState::new());
-        let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+        shared.set_session_account("DU123");
+        let (tx, rx) = std::sync::mpsc::channel();
         *client.shared.lock().unwrap() = Some(shared.clone());
         *client.control_tx.lock().unwrap() = Some(tx);
         *client.account_id.lock().unwrap() = Some("DU123".into());
         client.connected.store(true, Ordering::Release);
-        // A registration answered from another thread has to outlast being
-        // scheduled. The millisecond a test states when it WANTS the wait to
-        // fire is a race a loaded suite loses, and losing it reads as an
-        // engine that went away; a test that wants the short one says so.
-        client.core.set_registration_timeout(std::time::Duration::from_secs(30));
         (Py::new(py, client).unwrap(), rx, shared, w)
+    }
+
+    #[test]
+    fn an_answer_cannot_enter_a_successor_sessions_queue() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, previous, _w) = wired_client(py);
+            for _ in 0..100 { previous.take_stamp(); }
+            let successor = Arc::new(SharedState::new());
+            let moving = client.clone_ref(py);
+            let new_session = successor.clone();
+            crate::bridge::hooks::set(&crate::bridge::hooks::BEFORE_ANSWER_STAMP, move || {
+                *moving.get().shared.lock().unwrap() = Some(new_session.clone());
+                moving.get().waiting_answers.lock().unwrap().clear();
+            });
+            client.get().deliver(py, "current_time", (1,)).unwrap();
+            crate::bridge::hooks::clear(&crate::bridge::hooks::BEFORE_ANSWER_STAMP);
+            assert!(client.get().waiting_answers.lock().unwrap().is_empty());
+            client.get().deliver(py, "current_time", (2,)).unwrap();
+            assert!(client.get().waiting_answers.lock().unwrap()[0].0 < successor.next_seq());
+        });
+    }
+
+    #[test]
+    fn disconnect_finishes_the_wire_before_its_python_callback() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, rx, shared, w) = wired_client(py);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let conn = crate::protocol::connection::Connection::new_raw(socket).unwrap();
+            let mut engine = crate::engine::hot_loop::HotLoop::new(shared.clone(), None, None);
+            engine.ccp_conn = Some(conn);
+            engine.set_account_id("DU123".into());
+            engine.set_control_rx(rx);
+            shared.orders.set_replay_done();
+            w.bind(py).setattr("wire_done", false).unwrap();
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            py.run(c"def closed(): w.calls.append(('closed', w.wire_done))\nw.connectionClosed = closed", Some(&g), None).unwrap();
+            let tx = client.get().tx().unwrap();
+            shared.admit(&tx, ControlCommand::Place(Box::new(crate::types::Placement {
+                order_id: 7,
+                warnings: Vec::new(),
+                contract: crate::api::Contract { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
+                order: crate::api::Order { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0, lmt_price: 100.0, ..Default::default() },
+            }))).unwrap();
+            let observed = w.clone_ref(py);
+            let handle = thread::spawn(move || {
+                use std::io::Read;
+                engine.run_with_panic_recovery();
+                let mut wire = String::new();
+                peer.read_to_string(&mut wire).unwrap();
+                assert!(wire.find("35=D\u{1}").unwrap() < wire.find("35=5\u{1}").unwrap());
+                Python::attach(|py| observed.bind(py).setattr("wire_done", true).unwrap());
+            });
+            *client.get()._thread.lock().unwrap() = Some(Arc::new(crate::api::client::Joiner::new(handle)));
+            client.call_method0(py, "disconnect").unwrap();
+            py.run(c"assert w.calls == [('closed', True)], w.calls", Some(&g), None).unwrap();
+        });
+    }
+
+    #[test]
+    fn live_session_refusals_follow_the_records_before_the_call() {
+        Python::initialize();
+        Python::attach(|py| {
+            for trading in [false, true] {
+                let (client, _rx, shared, w) = wired_client(py);
+                shared.set_connection_lost();
+                if trading { shared.reference.set_trading_over("ended"); }
+                else { shared.reference.set_session_over("ended"); }
+                let origin = crate::types::model::ErrorOrigin::Session;
+                if trading { client.get().tx_or_report_for_trading(origin).unwrap(); }
+                else { client.get().tx_or_report_as(origin).unwrap(); }
+                assert_eq!(w.bind(py).getattr("calls").unwrap().len().unwrap(), 0);
+                client.call_method0(py, "poll").unwrap();
+                let g = pyo3::types::PyDict::new(py);
+                g.set_item("w", &w).unwrap();
+                py.run(c"assert [c[3] for c in w.calls if c[0] == 'error'] == [1100, 504], w.calls", Some(&g), None).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn a_request_whose_receiver_ended_reports_its_refusal() {
+        Python::initialize();
+        Python::attach(|py| {
+            for expression in ["c.req_completed_orders()", "c.request_fa(1)",
+                "c.replace_fa(9, 1, '<List/>')", "c.req_wsh_meta_data(9)",
+                "c.cancel_wsh_meta_data(9)", "c.cancel_wsh_event_data(9)"] {
+                let (client, rx, shared, w) = wired_client(py);
+                drop(rx);
+                shared.push_refused(crate::types::model::ErrorOrigin::Session, 2103, "feed ended");
+                let g = pyo3::types::PyDict::new(py);
+                g.set_item("c", &client).unwrap();
+                g.set_item("w", &w).unwrap();
+                py.run(&std::ffi::CString::new(expression).unwrap(), Some(&g), None).unwrap();
+                assert_eq!(w.bind(py).getattr("calls").unwrap().len().unwrap(), 0);
+                client.call_method0(py, "poll").unwrap();
+                py.run(c"assert [c[3] for c in w.calls if c[0] == 'error'] == [2103, 504], w.calls", Some(&g), None).unwrap();
+            }
+        });
     }
 
     /// What a subscription was acknowledged with reaches `tickReqParams` as
@@ -2043,11 +2231,8 @@ assert w.calls == [('tickReqParams', 7, 0.01, '9c0001', 3)], w.calls
     fn tick_req_params_is_once_per_request_and_a_reused_number_is_told_again() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, w) = wired_client(py);
-            let c = client.get();
-            c.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
-            c.core.req_to_instrument.lock().unwrap().insert(1, 0);
-            c.core.instrument_to_req.lock().unwrap().insert(0, 1);
+            let (client, rx, shared, w) = wired_client(py);
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
             let g = pyo3::types::PyDict::new(py);
             g.set_item("w", &w).unwrap();
             g.set_item("c", &client).unwrap();
@@ -2059,7 +2244,10 @@ assert w.calls == [('tickReqParams', 7, 0.01, '9c0001', 3)], w.calls
 def tick_params(*args):
     w.calls.append(('tickReqParams',) + args)
 w.tickReqParams = tick_params
+c.reqMktData(1, contract, '', False, False)
 ", Some(&g), None).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
             let params = crate::bridge::TickReqParams {
                 min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
             };
@@ -2068,6 +2256,7 @@ w.tickReqParams = tick_params
             });
             py.run(c"c.reqMktData(2, contract, '', False, False)", Some(&g), None).unwrap();
             shared.market.push_tick_req_params(0, params.clone());
+            engine.pump();
             client.call_method0(py, "poll").unwrap();
             py.run(c"
 for req_id in (1, 2):
@@ -2079,23 +2268,21 @@ for req_id in (1, 2):
 assert len([x for x in w.calls if x[0] == 'tickReqParams']) == 2, w.calls
 c.cancelMktData(2)
 c.reqMktData(2, contract, '', False, False)
-c.poll()
-assert w.calls.count(('tickReqParams', 2, 0.01, '9c0001', 3)) == 2, w.calls
 ", Some(&g), None).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"assert w.calls.count(('tickReqParams', 2, 0.01, '9c0001', 3)) == 2, w.calls", Some(&g), None).unwrap();
         });
     }
 
-    /// A request withdrawn before its parameters were delivered is told
-    /// nothing, and its number, used again, is told the new request's.
+    /// A withdrawn request receives no late acknowledgement; reusing its
+    /// number gives the new request the parameters the contract now holds.
     #[test]
     fn tick_req_params_withdrawn_before_delivery_go_to_the_number_used_again() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, w) = wired_client(py);
-            let c = client.get();
-            c.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
-            c.core.req_to_instrument.lock().unwrap().insert(1, 0);
-            c.core.instrument_to_req.lock().unwrap().insert(0, 1);
+            let (client, rx, shared, w) = wired_client(py);
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
             let g = pyo3::types::PyDict::new(py);
             g.set_item("w", &w).unwrap();
             g.set_item("c", &client).unwrap();
@@ -2103,22 +2290,33 @@ assert w.calls.count(('tickReqParams', 2, 0.01, '9c0001', 3)) == 2, w.calls
                 con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
                 exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
             }).unwrap()).unwrap();
-            shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
-                min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
-            });
             py.run(c"
 def tick_params(*args):
     w.calls.append(('tickReqParams',) + args)
 w.tickReqParams = tick_params
+c.reqMktData(1, contract, '', False, False)
+", Some(&g), None).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            let params = crate::bridge::TickReqParams {
+                min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+            };
+            py.run(c"c.reqMktData(2, contract, '', False, False)", Some(&g), None).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"c.cancelMktData(2)", Some(&g), None).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            shared.market.push_tick_req_params(0, params);
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"
 told = lambda: w.calls.count(('tickReqParams', 2, 0.01, '9c0001', 3))
-c.reqMktData(2, contract, '', False, False)
-c.cancelMktData(2)
-c.poll()
 assert told() == 0, w.calls
 c.reqMktData(2, contract, '', False, False)
-c.poll()
-assert told() == 1, w.calls
 ", Some(&g), None).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            py.run(c"assert told() == 1, w.calls", Some(&g), None).unwrap();
         });
     }
 
@@ -2246,17 +2444,25 @@ for value, expected_value in zip(call[4:], expected):
     fn news_and_models_are_delivered_only_to_current_watchers() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, w) = wired_client(py);
-            client.get().core.req_to_instrument.lock().unwrap().extend([(1, 0), (2, 0)]);
-            client.get().core.instrument_to_req.lock().unwrap().insert(0, 1);
-            client.get().core.instrument_followers.lock().unwrap().insert(0, vec![2]);
+            let (client, rx, shared, w) = wired_client(py);
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
+            let spy = Py::new(py, Contract {
+                con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
+                exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+            }).unwrap();
+            for req_id in [1i64, 2] {
+                client.call_method1(py, "req_mkt_data", (req_id, &spy, "", false, false)).unwrap();
+            }
+            engine.pump();
+            client.get().dispatch_once(py, &shared).unwrap();
+            let slot = client.get().core.watching(1).expect("the engine took it");
             let publish = || {
                 shared.market.push_tick_news(TickNews {
-                    instrument: 0, timestamp: 0, provider_code: "BRFG".into(),
+                    instrument: slot, timestamp: 0, provider_code: "BRFG".into(),
                     article_id: "BRFG$1".into(), headline: "SPY headline".into(),
                 });
                 shared.market.push_option_computation(OptionComputation {
-                    instrument: 0, ..Default::default()
+                    instrument: slot, ..Default::default()
                 });
             };
             let g = pyo3::types::PyDict::new(py);
@@ -2269,11 +2475,15 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
 w.calls.clear()
 ", Some(&g), None).unwrap();
 
-            publish();
+            // Withdrawn where the engine takes the cancels, so what the venue
+            // says of the contract after that is nobody's.
             client.call_method1(py, "cancel_mkt_data", (1,)).unwrap();
             client.call_method1(py, "cancel_mkt_data", (2,)).unwrap();
+            engine.pump();
+            client.get().dispatch_once(py, &shared).unwrap();
+            publish();
             shared.market.push_option_computation(OptionComputation {
-                instrument: 0, answers: Some(7), ..Default::default()
+                instrument: slot, answers: Some(7), ..Default::default()
             });
             client.get().dispatch_once(py, &shared).unwrap();
             py.run(c"
@@ -2301,18 +2511,18 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
-    /// The engine writes down why a session finished; the notice saying so
-    /// goes out on a channel that drops what it cannot hold. A loop ending
-    /// only on the notice waits for ever on a session that is already over.
+    /// A session the engine ends is over at its last record. The engine
+    /// writes down why it finished and pushes `Closed` last; the read that
+    /// takes it ends the loop, whatever else was or was not queued.
     #[test]
-    fn a_session_recorded_as_over_ends_the_loop_without_the_notice() {
+    fn a_session_the_engine_ends_is_over_at_its_last_record() {
         Python::initialize();
         Python::attach(|py| {
             let (client, _rx, shared, _w) = wired_client(py);
-            // Nothing is queued: this is the notice having been dropped.
             shared.reference.set_session_over(
                 crate::reliability::retry::DisconnectReason::EngineStopped.as_str(),
             );
+            shared.push_closed();
             let client = client.borrow(py);
             client.dispatch_once(py, &shared).unwrap();
             assert!(
@@ -2364,8 +2574,9 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 "and queued for an engine that has stopped",
             );
 
-            // Refused the way a request made with no session is refused, on
-            // the error callback and under that number.
+            // The session's admission has not closed yet, so its queued
+            // refusal is delivered by the next read under that number.
+            client.dispatch_once(py, &shared).unwrap();
             let calls = wrapper.bind(py).getattr("calls").unwrap();
             let heard = calls
                 .extract::<Vec<(String, i64, i64, i64, String, String)>>()
@@ -2374,7 +2585,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 heard.iter().any(|(name, req_id, _, code, message, _)| {
                     name == "error"
                         && *req_id == 7
-                        && *code == NOT_CONNECTED_CODE
+                        && *code == 504
                         && message == "Not connected"
                 }),
                 "the caller is told on the error callback: {heard:?}",
@@ -2397,7 +2608,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
             // hold a second session.
             let successor = Arc::new(SharedState::new());
             let (successor_tx, _successor_rx) =
-                std::sync::mpsc::sync_channel::<ControlCommand>(16);
+                std::sync::mpsc::channel::<ControlCommand>();
             *client.get().shared.lock().unwrap() = Some(successor.clone());
             *client.get().control_tx.lock().unwrap() = Some(successor_tx);
 
@@ -2617,6 +2828,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 }).unwrap();
                 client.call_method1(py, "req_mkt_depth", (1i64, &contract, rows, false)).unwrap();
                 assert!(rx.try_recv().is_err(), "nothing was sent for {reason}");
+                client.call_method0(py, "poll").unwrap();
                 let g = pyo3::types::PyDict::new(py);
                 g.set_item("w", &w).unwrap();
                 let said: Vec<(i64, i64, String)> = py
@@ -2772,7 +2984,9 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
 
     /// One pass can carry two reports for the same order: an acknowledgement
     /// and then a fill. Keeping one report per order dropped the earlier one,
-    /// and the caller was never told the order had been acknowledged.
+    /// and the caller was never told the order had been acknowledged. Each is
+    /// said in the order the venue sent it, the fill with the status its own
+    /// report stated.
     // Drives the client through the methods that push state into it, which
     // a wheel does not carry: see the `test-helpers` feature.
     #[cfg(feature = "test-helpers")]
@@ -2780,27 +2994,39 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn an_acknowledgement_survives_a_fill_in_the_same_pass() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, _shared, w) = wired_client(py);
+            let (client, _rx, shared, w) = wired_client(py);
 
             // The venue acknowledges the order, then fills half of it, both
             // before the caller pumps the queue again.
             client.call_method1(py, "_test_push_order_update",
                 (88u64, 0u32, "Submitted", 0.0f64, 100.0f64)).unwrap();
-            client.call_method1(py, "_test_push_fill",
-                (0u32, 88u64, "BUY", 150.0f64, 50i64, 50i64, 0.0f64)).unwrap();
-            client.call_method1(py, "_test_push_order_update",
-                (88u64, 0u32, "PartiallyFilled", 50.0f64, 50.0f64)).unwrap();
+            let q = crate::types::qty_from_wire(50);
+            shared.orders.push_fill_and_status(
+                crate::types::Fill {
+                    instrument: 0, order_id: 88, side: crate::types::Side::Buy,
+                    price: 150 * crate::types::PRICE_SCALE, qty: q, remaining: q,
+                    timestamp_ns: 100, cum_qty: q, avg_price: 150 * crate::types::PRICE_SCALE,
+                },
+                None,
+                crate::types::OrderUpdate {
+                    order_id: 88, instrument: 0, status: crate::types::OrderStatus::PartiallyFilled,
+                    filled_qty: 50.0, remaining_qty: 50.0, avg_price: 0, perm_id: 0, parent_id: 0,
+                    timestamp_ns: 100,
+                },
+            );
 
             client.call_method0(py, "_test_dispatch_once").unwrap();
 
             let g = pyo3::types::PyDict::new(py);
             g.set_item("w", &w).unwrap();
-            let reported: usize = py.eval(
-                c"len([c for c in w.calls if c[0] in ('order_status', 'orderStatus')])",
+            // A partial fill is named working, as the reference client names
+            // it: what tells the two apart is the quantity filled.
+            let reported: Vec<(String, f64)> = py.eval(
+                c"[(c[2], c[3]) for c in w.calls if c[0] in ('order_status', 'orderStatus')]",
                 Some(&g), None,
             ).unwrap().extract().unwrap();
             assert_eq!(
-                reported, 2,
+                reported, [("Submitted".to_string(), 0.0), ("Submitted".to_string(), 50.0)],
                 "the acknowledgement was dropped by the fill that followed it",
             );
         });
@@ -2817,7 +3043,8 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn a_holding_that_moves_after_the_request_is_reported() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, w) = wired_client(py);
+            let (client, rx, shared, w) = wired_client(py);
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
             shared.portfolio.account_download_is_settled();
             let held = |qty: f64| PositionInfo {
                 con_id: 756733, position: qty, symbol: "SPY".into(),
@@ -2825,6 +3052,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
             };
             shared.portfolio.set_position_info(held(1.0));
             client.call_method0(py, "req_positions").unwrap();
+            crate::api::client::tests::the_engine_answers(&rx, &shared);
             client.call_method0(py, "_test_dispatch_once").unwrap();
 
             let g = pyo3::types::PyDict::new(py);
@@ -2849,6 +3077,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
 
             // Withdrawn, so what moves after is no longer reported.
             client.call_method0(py, "cancel_positions").unwrap();
+            crate::api::client::tests::the_engine_answers(&rx, &shared);
             shared.portfolio.set_position_info(held(5.0));
             client.call_method0(py, "_test_dispatch_once").unwrap();
             assert_eq!(reported(), asked + 1, "a withdrawn ask is not answered further");
@@ -2862,7 +3091,8 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn a_position_carries_the_contract_it_is_a_position_in() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, w) = wired_client(py);
+            let (client, rx, shared, w) = wired_client(py);
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
             client.get().core.cache_contract(756733, ApiContract {
                 con_id: 756733, symbol: "SPY".into(), sec_type: "OPT".into(),
                 exchange: "SMART".into(), currency: "USD".into(),
@@ -2878,6 +3108,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
 
             client.call_method0(py, "req_positions").unwrap();
             client.call_method1(py, "req_positions_multi", (1i64, "DU123", "")).unwrap();
+            crate::api::client::tests::the_engine_answers(&rx, &shared);
             client.borrow(py).dispatch_once(py, &shared).unwrap();
 
             let g = pyo3::types::PyDict::new(py);
@@ -3059,13 +3290,17 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn an_order_can_be_cancelled_by_its_perm_id() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, rx, _shared, _w) = wired_client(py);
-            client.get().core.track_order(
-                77,
-                ApiContract { con_id: 756733, symbol: "SPY".into(), ..Default::default() },
-                ApiOrder { order_id: 77, total_quantity: 1.0, perm_id: 91011, ..Default::default() },
-                0,
-            );
+            let (client, rx, shared, _w) = wired_client(py);
+            let rx = crate::api::client::tests::Engine::new(rx, &shared);
+            // An order the venue named as working, under the permanent number
+            // its reports carry.
+            shared.orders.set_replay_done();
+            shared.orders.push_order_info(77, crate::bridge::RichOrderInfo {
+                contract: ApiContract { con_id: 756733, symbol: "SPY".into(), ..Default::default() },
+                order: ApiOrder { order_id: 77, total_quantity: 1.0, perm_id: 91011, ..Default::default() },
+                order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
+                last_exec: Default::default(),
+            });
 
             client.call_method1(py, "cancel_order_by_perm_id", (91011i64,)).unwrap();
             match rx.try_recv().expect("a cancel must reach the engine") {
@@ -3089,9 +3324,8 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 sec_type: "STK".into(), exchange: "SMART".into(),
                 ..Default::default()
             }).unwrap();
-            // The registration reply comes from an engine no test has, so the
-            // call itself fails; the commands are on the channel either way.
-            let _ = client.call_method1(py, "req_mkt_data_ex", (1i64, &contract, "", false, false, 2i32));
+            client.call_method1(py, "req_mkt_data_ex", (1i64, &contract, "", false, false, 2i32))
+                .expect("handed to the engine");
 
             let mut mode = None;
             while let Ok(cmd) = rx.try_recv() {
@@ -3194,12 +3428,10 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         Python::attach(|py| {
             let (client, _rx, shared, _w) = wired_client(py);
             let client = client.borrow(py);
-            let (event_tx, event_rx) = std::sync::mpsc::sync_channel(16);
-            *client.event_rx.lock().unwrap() = Some(event_rx);
 
             // It came back, and went again before anybody read either.
+            shared.set_connection_lost();
             shared.set_connection_restored();
-            event_tx.send(crate::bridge::Event::Reconnected).unwrap();
             shared.set_connection_lost();
 
             client.dispatch_once(py, &shared).unwrap();
@@ -3264,53 +3496,29 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
-    /// A withdrawal during registration is taken, and the registration takes
-    /// the stream back down rather than publishing it.
+    /// A tick stream withdrawn while the engine is still naming its contract
+    /// is forgotten there: the naming's answer opens nothing, and the
+    /// withdrawal is not refused for arriving early.
     #[test]
-    fn a_python_tick_withdrawal_during_registration_takes_the_stream_back_down() {
+    fn a_python_tick_withdrawal_during_its_naming_sends_nothing() {
         Python::initialize();
         Python::attach(|py| {
             let (client, rx, shared, wrapper) = wired_client(py);
-            // The handshake below holds the reply while the withdrawal is
-            // tried, and registration waits on that reply. Tests default the
-            // wait to a millisecond, which the handshake cannot finish inside:
-            // it would time out, drop the reply's receiver, and both threads
-            // panic on the send and the join. Wide enough that the wait is the
-            // window under test, not a race the test loses.
-            client.get().core.set_registration_timeout(std::time::Duration::from_secs(5));
-            let (seen_tx, seen_rx) = std::sync::mpsc::sync_channel(1);
-            let (go_tx, go_rx) = std::sync::mpsc::sync_channel(1);
-            let engine = std::thread::spawn(move || {
-                match rx.recv().unwrap() {
-                    ControlCommand::SubscribeTbt { reply_tx: Some(reply), .. } => {
-                        seen_tx.send(()).unwrap();
-                        go_rx.recv().unwrap();
-                        let _ = reply.send(Ok(0));
-                    }
-                    other => panic!("expected a tick subscription: {other:?}"),
-                }
-                rx
-            });
-            std::thread::scope(|scope| {
-                let core = &client.get().core;
-                let tx = client.get().control_tx.lock().unwrap().clone().unwrap();
-                let taking = scope.spawn(move || core.register_tbt(
-                    &shared, &tx, 7, 756733, "SPY", "STK", "SMART", TbtType::AllLast, 0, false,
-                ));
-                py.detach(move || seen_rx.recv().unwrap());
-                assert!(
-                    !core.withdraw_while_registering(7),
-                    "a tick claim is distinct from a quote claim",
-                );
-                client.call_method1(py, "cancel_tick_by_tick_data", (7,)).unwrap();
-                go_tx.send(()).unwrap();
-                assert_eq!(
-                    taking.join().unwrap().unwrap(), None,
-                    "the stream was published under a number whose caller had \
-                     already been told it was withdrawn",
-                );
-            });
-            let rx = engine.join().unwrap();
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
+            let described = Py::new(py, Contract {
+                symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                currency: "USD".into(), ..Default::default()
+            }).unwrap();
+            client.call_method1(py, "req_tick_by_tick_data", (7, &described, "AllLast", 0i32, false))
+                .unwrap();
+            engine.pump();
+            assert_eq!(engine.engine().ccp.pending_named.len(), 1, "held while the venue names it");
+
+            client.call_method1(py, "cancel_tick_by_tick_data", (7,)).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            assert!(engine.engine().ccp.pending_named.is_empty(), "the held stream is forgotten");
+            assert!(engine.engine().hmds.tbt_subscriptions.is_empty(), "and nothing was asked for it");
             let heard = wrapper.bind(py).getattr("calls").unwrap()
                 .extract::<Vec<(String, i64, i64, i64, String, String)>>().unwrap();
             assert!(
@@ -3318,59 +3526,50 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 "the withdrawal was refused for arriving early, which the venue \
                  never does: {heard:?}",
             );
-            assert!(
-                client.get().core.tbt_to_instrument.lock().unwrap().get(&7).is_none(),
-                "a record was left behind for a stream the caller withdrew",
-            );
-            assert!(
-                matches!(rx.try_recv().unwrap(), ControlCommand::UnsubscribeTbt { req_id: 7, instrument: 0 }),
-                "the stream the registration opened was never taken back down",
-            );
         });
     }
 
     /// A subscription states the contract's security type, and a caller that
-    /// gave an id alone stated none. Sent as it stands, the engine takes the
-    /// request, finds no type for it, and gives it up — so the caller reads no
-    /// quotes and is told nothing under its own request id.
+    /// gave an id alone stated none. The request goes to the engine as it
+    /// stands, and the engine asks the venue what the contract is before the
+    /// subscription goes out — rather than giving it up untyped, which left
+    /// the caller reading no quotes and told nothing under its own request id.
     #[test]
     fn a_quote_request_names_a_contract_given_by_id_alone() {
         Python::initialize();
         Python::attach(|py| {
             let (client, rx, shared, _w) = wired_client(py);
-            let venue = naming_the_contract(rx, shared, a_future_on_cme());
-            let contract = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
+            let contract = Py::new(py, Contract { con_id: 893091670, ..Default::default() }).unwrap();
 
             client
                 .call_method1(py, "req_mkt_data", (1i64, &contract, "", false, false))
                 .unwrap();
+            engine.pump();
 
-            let (asked, rx) = venue.join().unwrap();
             assert!(
-                matches!(asked.last(), Some(ControlCommand::FetchContractDetails { .. })),
-                "the venue was never asked to name the contract: {asked:?}",
+                shared.market.drain_subscription_failures().is_empty(),
+                "the subscription was given up untyped",
             );
-            let subscribed = std::iter::from_fn(|| rx.try_recv().ok())
-                .find_map(|cmd| match cmd {
-                    ControlCommand::Subscribe { contract, .. } => Some(contract),
-                    _ => None,
-                })
-                .expect("the quotes were never asked for");
-            assert_eq!(subscribed.sec_type, "FUT", "the subscription went out untyped");
-            assert_eq!(subscribed.exchange, "CME");
+            assert_eq!(
+                engine.engine().ccp.pending_named.len(), 1,
+                "the venue was never asked to name the contract",
+            );
         });
     }
 
-    /// The same for a historical request, which states the type too. An empty
-    /// one is asked as a US stock, so a future named by id alone was answered
-    /// with some share's bars.
+    /// The same for a historical request, which states the type too. The
+    /// request goes to the engine as it stands, and the engine asks the venue
+    /// to name the contract by its id before the bars are asked for: sent as
+    /// a US stock, a future named by id alone was answered with some share's
+    /// bars.
     #[test]
     fn a_historical_request_names_a_contract_given_by_id_alone() {
         Python::initialize();
         Python::attach(|py| {
             let (client, rx, shared, _w) = wired_client(py);
-            let venue = naming_the_contract(rx, shared, a_future_on_cme());
-            let contract = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
+            let contract = Py::new(py, Contract { con_id: 495512563, ..Default::default() }).unwrap();
 
             client
                 .call_method1(
@@ -3378,53 +3577,20 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                     (1i64, &contract, "", "1 D", "1 hour", "TRADES", 1i32),
                 )
                 .unwrap();
+            let sent: Vec<ControlCommand> = engine.try_iter().collect();
+            assert_eq!(sent.len(), 1, "handed over as it stands: {sent:?}");
 
-            let (asked, rx) = venue.join().unwrap();
-            assert!(
-                matches!(asked.last(), Some(ControlCommand::FetchContractDetails { .. })),
-                "the venue was never asked to name the contract: {asked:?}",
-            );
-            let ControlCommand::FetchHistorical { contract, .. } =
-                rx.try_recv().expect("the bars were never asked for")
-            else {
-                panic!("a historical request sent something else");
-            };
-            assert_eq!(contract.sec_type, "FUT", "the query went out as a US stock");
-            assert_eq!(contract.exchange, "CME");
-        });
-    }
-
-    /// The contract a caller names by id alone, as the venue names it back.
-    fn a_future_on_cme() -> crate::control::contracts::ContractDefinition {
-        crate::control::contracts::ContractDefinition {
-            con_id: 756733,
-            sec_type: crate::control::contracts::SecurityType::Future,
-            exchange: "CME".into(),
-            ..Default::default()
-        }
-    }
-
-    /// Stand in for the venue's contract lookup: answer the first one that
-    /// reaches the engine with `def`, and hand back what was sent and the
-    /// channel, so the caller can read whatever followed the lookup.
-    fn naming_the_contract(
-        rx: std::sync::mpsc::Receiver<ControlCommand>,
-        shared: Arc<SharedState>,
-        def: crate::control::contracts::ContractDefinition,
-    ) -> thread::JoinHandle<(Vec<ControlCommand>, std::sync::mpsc::Receiver<ControlCommand>)> {
-        thread::spawn(move || {
-            let mut sent = Vec::new();
-            while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                let lookup = matches!(cmd, ControlCommand::FetchContractDetails { .. });
-                if let ControlCommand::FetchContractDetails { req_id, .. } = &cmd {
-                    shared.reference.push_contract_details(*req_id, def.clone());
-                    shared.reference.push_contract_details_end(*req_id);
-                }
-                sent.push(cmd);
-                if lookup { break; }
+            let mut held = engine.engine();
+            for cmd in sent {
+                assert!(
+                    held.ccp.hold_until_named(
+                        cmd, &mut None, &mut crate::engine::hot_loop::HeartbeatState::new(), &shared,
+                    ).is_none(),
+                    "the venue was never asked to name the contract",
+                );
             }
-            (sent, rx)
-        })
+            assert!(shared.reference.drain_historical_errors().is_empty(), "and nothing was refused");
+        });
     }
 
     /// `all_msgs=False` asks for the bulletins still to come, and the ones the
@@ -3464,48 +3630,35 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     #[cfg(feature = "test-helpers")]
     #[test]
     fn a_callback_replacing_the_session_ends_the_old_dispatch_pass() {
-        #[pyfunction]
-        fn answer_subscriptions(client: &EClient) {
-            let rx = client._test_control_rx.lock().unwrap().take().unwrap();
-            *client._thread.lock().unwrap() = Some(thread::spawn(move || {
-                while let Ok(cmd) = rx.recv() {
-                    match cmd {
-                        ControlCommand::Subscribe { reply_tx: Some(reply), .. } => {
-                            let _ = reply.send(Ok(0));
-                        }
-                        ControlCommand::Shutdown => break,
-                        _ => {}
-                    }
-                }
-            }));
-        }
         Python::initialize();
         Python::attach(|py| {
             for boundary in ["managedAccounts", "tickReqParams"] {
-                let (client, rx, _shared, w) = wired_client(py);
-                *client.get()._test_control_rx.lock().unwrap() = Some(rx);
-                answer_subscriptions(client.get());
+                let w = recording_wrapper(py);
+                let client = Py::new(py, client_with(py, w.clone_ref(py))).unwrap();
+                client.call_method0(py, "_test_connect").unwrap();
                 let g = pyo3::types::PyDict::new(py);
                 g.set_item("client", &client).unwrap();
                 g.set_item("w", &w).unwrap();
                 g.set_item("Contract", py.get_type::<Contract>()).unwrap();
                 g.set_item("boundary", boundary).unwrap();
-                g.set_item("answer_subscriptions", wrap_pyfunction!(answer_subscriptions, py).unwrap()).unwrap();
                 py.run(c"
 client._test_set_instrument_count(1)
 a = Contract()
 a.conId, a.symbol, a.secType, a.exchange = 100, 'AAA', 'STK', 'SMART'
 client.req_mkt_data(1, a)
+client._test_take_commands()
 client._test_push_quote(0, bid=123)
 def replace_session(*args):
     client.disconnect()
     client._test_connect()
-    answer_subscriptions(client)
     client._test_set_instrument_count(1)
     b = Contract()
     b.conId, b.symbol, b.secType, b.exchange = 200, 'BBB', 'STK', 'SMART'
     client.req_mkt_data(9, b)
     client.req_managed_accts()
+    setattr(w, boundary, lambda *args: None)
+    client.poll()
+    setattr(w, boundary, replace_session)
 setattr(w, boundary, replace_session)
 ", Some(&g), None).unwrap();
                 if boundary == "managedAccounts" {
@@ -3517,7 +3670,6 @@ setattr(w, boundary, replace_session)
                     market.push_tick_req_params_for(1, params);
                 }
                 client.call_method0(py, "poll").unwrap();
-                assert_eq!(client.get().core.watching(9), Some(0), "the callback installs the new subscription");
                 assert_eq!(client.get().waiting_answers.lock().unwrap().len(), 1,
                     "the new session's answer waits for its own pass");
                 let prices: Vec<(i64, f64)> = py.eval(
@@ -3526,13 +3678,17 @@ setattr(w, boundary, replace_session)
                 ).unwrap().extract().unwrap();
                 assert!(prices.is_empty(), "the old session delivered prices after {boundary}: {prices:?}");
                 w.bind(py).delattr(boundary).unwrap();
+                // The new session's own pass reads the engine's record of the
+                // subscription the callback asked for.
+                client.call_method0(py, "poll").unwrap();
+                assert_eq!(client.get().core.watching(9), Some(0), "the new session's pass installs the subscription");
                 client.call_method1(py, "_test_push_quote", (0, 456.0)).unwrap();
                 client.call_method0(py, "poll").unwrap();
                 let prices: Vec<(i64, f64)> = py.eval(
                     c"[(c[1], c[3]) for c in w.calls if c[0] in ('tickPrice', 'tick_price')]",
                     Some(&g), None,
                 ).unwrap().extract().unwrap();
-                assert!(prices.contains(&(9, 456.0)), "the next pass delivers the new session's quote");
+                assert!(prices.contains(&(9, 456.0)), "the next pass delivers the new session's quote: {prices:?}");
             }
         });
     }
@@ -3556,7 +3712,7 @@ setattr(w, boundary, replace_session)
             });
             let kwargs = pyo3::types::PyDict::new(py);
             kwargs.set_item("host", "127.0.0.1").unwrap();
-            kwargs.set_item("settings", [("hardware_id", "0123456789abcdef")].into_iter().collect::<HashMap<_, _>>()).unwrap();
+            kwargs.set_item("settings", [("hardware_id", "0123456789abcdef")].into_iter().collect::<std::collections::HashMap<_, _>>()).unwrap();
             let err = client.call_method(py, "connect", (), Some(&kwargs)).unwrap_err();
             py.detach(|| server.join().unwrap());
             assert!(err.to_string().contains("Connection abandoned"), "got {err}");
@@ -3591,8 +3747,10 @@ w.connectAck = lambda: (w.calls.append(('connectAck',)), client.disconnect())
 
             let said: Vec<String> = py.eval(c"[c[0] for c in w.calls]", Some(&g), None)
                 .unwrap().extract().unwrap();
+            // The caller's `disconnect()` says the close inside the call, as
+            // the reference client's does, and nothing of the session follows.
             assert_eq!(
-                said, ["connectAck"],
+                said, ["connectAck", "connectionClosed"],
                 "a session the handler closed went on announcing itself",
             );
         });
@@ -3635,6 +3793,7 @@ client.req_managed_accts()
         Python::attach(|py| {
             for interrupt in [false, true] {
                 let (client, rx, shared, w) = wired_client(py);
+                let rx = crate::api::client::tests::Engine::new(rx, &shared);
                 shared.market.set_instrument_count(1);
                 shared.orders.set_replay_done();
                 client.get().core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
@@ -3669,10 +3828,73 @@ w.openOrder = preview
                     result.unwrap();
                     assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { order_id: 42, .. }))),
                         "placing the preview's number must submit a new order");
+                    // The engine's record of it, where it stands in the
+                    // session's order.
+                    client.get().dispatch_once(py, &shared).unwrap();
                     assert!(!client.get().core.tracked_order(42).unwrap().what_if,
                         "the new placement remains tracked after the callback");
                 }
             }
+        });
+    }
+
+    #[test]
+    fn concurrent_python_stops_wait_for_the_same_engine() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, _shared, _w) = wired_client(py);
+            let (release, released) = std::sync::mpsc::channel();
+            let engine = thread::spawn(move || released.recv().unwrap());
+            *client.get()._thread.lock().unwrap() = Some(Arc::new(crate::api::client::Joiner::new(engine)));
+            let callers: Vec<_> = (0..2).map(|_| {
+                let client = client.clone_ref(py);
+                thread::spawn(move || Python::attach(|py| client.get().stop_engine(py)))
+            }).collect();
+            py.detach(|| thread::sleep(std::time::Duration::from_millis(50)));
+            assert!(callers.iter().all(|caller| !caller.is_finished()));
+            release.send(()).unwrap();
+            py.detach(|| { for caller in callers { caller.join().unwrap(); } });
+        });
+    }
+
+    #[test]
+    fn a_python_close_waits_for_the_read_and_allows_its_callback_to_close_again() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, _shared, w) = wired_client(py);
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("client", &client).unwrap();
+            g.set_item("w", &w).unwrap();
+            py.run(c"
+import threading
+entered, release = threading.Event(), threading.Event()
+events = []
+def answer(*args):
+    entered.set()
+    release.wait()
+    events.append('answer')
+def close():
+    events.append('closed')
+    client.disconnect()
+w.currentTime = answer
+w.connectionClosed = close
+client.req_current_time()
+", Some(&g), None).unwrap();
+            let reading = {
+                let client = client.clone_ref(py);
+                thread::spawn(move || Python::attach(|py| client.call_method0(py, "poll").map(|_| ())))
+            };
+            assert!(g.get_item("entered").unwrap().unwrap().call_method1("wait", (1.0,)).unwrap().extract::<bool>().unwrap());
+            let closing = {
+                let client = client.clone_ref(py);
+                thread::spawn(move || Python::attach(|py| client.call_method0(py, "disconnect").map(|_| ())))
+            };
+            py.detach(|| thread::sleep(std::time::Duration::from_millis(50)));
+            let closed_early = closing.is_finished();
+            g.get_item("release").unwrap().unwrap().call_method0("set").unwrap();
+            py.detach(|| { reading.join().unwrap().unwrap(); closing.join().unwrap().unwrap(); });
+            assert!(!closed_early, "the read still had a callback in progress");
+            assert_eq!(g.get_item("events").unwrap().unwrap().extract::<Vec<String>>().unwrap(), ["answer", "closed"]);
         });
     }
 
@@ -3689,14 +3911,14 @@ w.openOrder = preview
             let reconnect_provider = provider.clone();
             let heard = Arc::new(Mutex::new(Vec::new()));
             let heard_here = heard.clone();
-            *client.get()._thread.lock().unwrap() = Some(thread::spawn(move || {
+            *client.get()._thread.lock().unwrap() = Some(Arc::new(crate::api::client::Joiner::new(thread::spawn(move || {
                 while let Ok(cmd) = rx.recv() {
                     let stop = matches!(cmd, ControlCommand::Shutdown);
                     heard_here.lock().unwrap().push(cmd);
                     if stop { break; }
                 }
                 drop(reconnect_provider);
-            }));
+            }))));
             drop(app);
             drop(client);
             crate::python::collect_weakref(py, &weak_app).unwrap();
@@ -3721,21 +3943,13 @@ w.openOrder = preview
         Python::initialize();
         Python::attach(|py| {
             let (client, rx, shared, w) = wired_client(py);
-            shared.market.set_instrument_count(1);
-            let engine = thread::spawn(move || {
-                while let Ok(cmd) = rx.recv() {
-                    if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = cmd {
-                        let _ = reply.send(Ok(0));
-                        return rx;
-                    }
-                }
-                panic!("the stock subscription must reach the engine");
-            });
+            let engine = crate::api::client::tests::Engine::new(rx, &shared);
             client.get().req_mkt_data(py, 7, &Contract {
                 con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
                 exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
             }, "", false, false, None).unwrap();
-            let rx = py.detach(|| engine.join().unwrap());
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
             assert_eq!(client.get().core.watching(7), Some(0));
 
             // Stated by description: no id to compare the request's own slot
@@ -3754,44 +3968,45 @@ w.error = lambda *a: errors.append(a)
 
             client.call_method1(py, "calculate_option_price", (7, &option, 1.0, 100.0))
                 .expect("the refusal is reported to the caller, not raised");
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
+            // The watch refused under the caller's number, and the question
+            // with it: nothing is watching a model for it.
             let codes: Vec<i32> = py.eval(c"[e[2] for e in errors]", Some(&g), None).unwrap().extract().unwrap();
-            assert_eq!(codes, [crate::error_codes::DUPLICATE_TICKER_ID]);
+            assert_eq!(codes, [crate::error_codes::DUPLICATE_TICKER_ID], "{codes:?}");
             assert!(
-                client.get().pending_option_calcs.lock().unwrap().is_empty(),
+                (client.get().shared_state().unwrap().market.kept_calculation_count() == 0),
                 "a refused calculation was kept against a watch it never opened",
             );
 
             client.call_method1(py, "cancel_calculate_option_price", (7,)).unwrap();
+            engine.pump();
+            client.call_method0(py, "poll").unwrap();
             assert_eq!(
                 client.get().core.watching(7), Some(0),
                 "cancelling the refused calculation withdrew the caller's own subscription",
             );
-            assert!(rx.try_recv().is_err(), "and sent its unsubscribe to the engine");
+            assert!(engine.engine().farm.holds_market_data(0), "and its subscription is still up at the venue");
         });
     }
 
+    /// A calculation refused because its model watch could not open is said
+    /// by the read, where it stands in the session's order; an interrupt its
+    /// handler raises leaves that read, and the refusal is said once.
     #[test]
-    fn option_calculations_propagate_interrupts_from_opening_the_model_watch() {
+    fn option_calculation_refusals_propagate_interrupts_from_the_read_that_says_them() {
         Python::initialize();
         Python::attach(|py| {
             for method in ["calculate_implied_volatility", "calculate_option_price"] {
                 for exception in ["KeyboardInterrupt", "SystemExit"] {
                     let (client, rx, shared, w) = wired_client(py);
-                    shared.market.set_instrument_count(1);
-                    let engine = thread::spawn(move || {
-                        while let Ok(cmd) = rx.recv() {
-                            if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = cmd {
-                                let _ = reply.send(Ok(0));
-                                return rx;
-                            }
-                        }
-                        panic!("the stock subscription must reach the engine");
-                    });
+                    let engine = crate::api::client::tests::Engine::new(rx, &shared);
                     client.get().req_mkt_data(py, 7, &Contract {
                         con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
                         exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
                     }, "", false, false, None).unwrap();
-                    let rx = py.detach(|| engine.join().unwrap());
+                    engine.pump();
+                    client.call_method0(py, "poll").unwrap();
                     assert_eq!(client.get().core.watching(7), Some(0));
                     let option = Py::new(py, Contract {
                         con_id: 100, symbol: "SPY".into(), sec_type: "OPT".into(),
@@ -3810,18 +4025,124 @@ def error(*args):
     raise getattr(builtins, exception)('stop option calculation')
 w.error = error
 ", Some(&g), None).unwrap();
-                    let err = client.call_method1(py, method, (7, &option, 1.0, 100.0))
-                        .expect_err("the model subscription's interrupt must leave the calculation");
+                    client.call_method1(py, method, (7, &option, 1.0, 100.0))
+                        .expect("the refusal is queued, not raised at the call");
+                    engine.pump();
+                    let err = client.call_method0(py, "poll")
+                        .expect_err("the handler's interrupt must leave the read");
                     assert_eq!(err.get_type(py).name().unwrap(), exception);
+                    // What that read had taken is handed over by the next, and
+                    // the refusal the interrupt left is not said again.
+                    py.run(c"w.error = lambda *args: errors.append(args)", Some(&g), None).unwrap();
+                    client.call_method0(py, "poll").unwrap();
                     let codes: Vec<i32> = py.eval(c"[e[2] for e in errors]", Some(&g), None).unwrap().extract().unwrap();
-                    assert_eq!(codes, [crate::error_codes::DUPLICATE_TICKER_ID]);
+                    assert_eq!(codes, [crate::error_codes::DUPLICATE_TICKER_ID], "said once: {codes:?}");
                     assert!(shared.reference.drain_historical_errors_for_dispatch(|_| false).is_empty(),
                         "the interrupt must not queue another refusal");
-                    assert!(client.get().pending_option_calcs.lock().unwrap().is_empty());
+                    assert!((client.get().shared_state().unwrap().market.kept_calculation_count() == 0));
                     assert_eq!(client.get().core.watching(7), Some(0));
-                    assert!(rx.try_recv().is_err());
+                    assert!(engine.engine().md_requests.contains_key(&7), "the watch it held stays");
                 }
             }
+        });
+    }
+
+    /// An answer built at a call, and a refusal made at one, stand after what
+    /// the engine had pushed before the call.
+    ///
+    /// Handed over ahead of every engine record of the next read, a call's
+    /// answer went before a report the venue had sent first.
+    // Drives the client through the methods that push state into it, which
+    // a wheel does not carry: see the `test-helpers` feature.
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn a_calls_answer_follows_what_the_engine_pushed_before_it() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, _shared, w) = wired_client(py);
+            for order_id in [40u64, 41] {
+                client.call_method1(py, "_test_push_order_update",
+                    (order_id, 0u32, "Submitted", 0.0f64, 1.0f64)).unwrap();
+            }
+            client.call_method0(py, "req_managed_accts").unwrap();
+            client.call_method1(py, "_test_push_order_update",
+                (42u64, 0u32, "Submitted", 0.0f64, 1.0f64)).unwrap();
+            client.call_method1(py, "set_server_log_level", (9,)).unwrap();
+            client.call_method0(py, "_test_dispatch_once").unwrap();
+
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            let said: Vec<String> = py.eval(
+                c"[c[0] if c[0] not in ('orderStatus', 'order_status') else 'status %d' % c[1] \
+                   for c in w.calls if c[0] in ('orderStatus', 'order_status', 'managedAccounts', \
+                   'managed_accounts', 'error')]",
+                Some(&g), None,
+            ).unwrap().extract().unwrap();
+            assert_eq!(said, ["status 40", "status 41", "managedAccounts", "status 42", "error"]);
+        });
+    }
+
+    /// Two threads reading one session at once each take their own records:
+    /// every record is delivered once, in the order it was pushed.
+    ///
+    /// With no turn held, two reads on the free-threaded interpreter each
+    /// took part of the queues and delivered them side by side.
+    #[test]
+    fn two_readers_deliver_each_record_once_in_order() {
+        Python::initialize();
+        let (client, shared, w) = Python::attach(|py| {
+            let (client, _rx, shared, w) = wired_client(py);
+            // A callback that takes a moment, as a caller's does, so two reads
+            // that overlap overlap in their deliveries.
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            py.run(c"
+import time
+def status(*args):
+    w.calls.append(('orderStatus',) + args)
+    time.sleep(0.0001)
+w.orderStatus = status
+", Some(&g), None).unwrap();
+            (client, shared, w)
+        });
+        const N: u64 = 300;
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers: Vec<_> = (0..2)
+            .map(|_| {
+                let (client, shared, done) =
+                    (Python::attach(|py| client.clone_ref(py)), shared.clone(), done.clone());
+                thread::spawn(move || {
+                    while !done.load(Ordering::Acquire) {
+                        Python::attach(|py| client.get().dispatch_once(py, &shared).unwrap());
+                    }
+                    Python::attach(|py| client.get().dispatch_once(py, &shared).unwrap());
+                })
+            })
+            .collect();
+        for order_id in 1..=N {
+            shared.orders.push_order_update(crate::types::OrderUpdate {
+                order_id, instrument: 0, status: crate::types::OrderStatus::Submitted,
+                filled_qty: 0.0, remaining_qty: 1.0, avg_price: 0, perm_id: 0, parent_id: 0,
+                timestamp_ns: 0,
+            });
+            // In bursts, so each read takes a few and the next is already
+            // under way.
+            if order_id % 3 == 0 {
+                thread::sleep(std::time::Duration::from_micros(300));
+            }
+        }
+        done.store(true, Ordering::Release);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        Python::attach(|py| {
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("w", &w).unwrap();
+            let said: Vec<u64> = py.eval(
+                c"[c[1] for c in w.calls if c[0] in ('orderStatus', 'order_status')]",
+                Some(&g), None,
+            ).unwrap().extract().unwrap();
+            assert_eq!(said, (1..=N).collect::<Vec<_>>());
         });
     }
 }

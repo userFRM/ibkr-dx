@@ -11,6 +11,8 @@ that report is the one place a handler runs inside a request that has nothing to
 hand an error back through. It has one now.
 """
 
+import time
+
 import pytest
 
 import ibkr_dx
@@ -77,9 +79,14 @@ def test_the_answers_behind_an_interrupt_are_delivered_on_the_next_pass():
     heard = InterruptsOnTheFirstPosition()
     client = ibkr_dx.EClient(heard)
     client._test_connect("DU111111", True)
+    # The account has stated itself.
+    client._test_finish_account_download()
     client._test_set_position(111, 10.0, 5.0)
     client._test_set_position(222, 20.0, 6.0)
     client.req_positions()
+    # The engine gives the holdings' contracts a moment to be named before it
+    # answers.
+    time.sleep(2.1)
 
     with pytest.raises(KeyboardInterrupt):
         client.poll()

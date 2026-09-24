@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1) Resolve TSLA.
     println!("resolving TSLA...");
-    client.req_contract_details(1, &contract)?;
+    client.req_contract_details(1, &contract);
     if !pump_until(&client, &mut w, &state, Duration::from_secs(15), |s| s.con_id != 0) {
         return Err("no contract details for TSLA within 15s".into());
     }
@@ -134,13 +134,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2) Reference price → a non-marketable BUY limit 5% below market.
     println!("requesting quote...");
-    client.req_mkt_data(2, &contract, "", true, false)?;
+    client.req_mkt_data(2, &contract, "", true, false);
     pump_until(&client, &mut w, &state, Duration::from_secs(10), |s| s.last > 0.0 || s.ask > 0.0);
     let (last, close, ask) = {
         let s = state.lock().unwrap();
         (s.last, s.close, s.ask)
     };
-    client.cancel_mkt_data(2).ok();
+    client.cancel_mkt_data(2);
     let reference = if last > 0.0 { last } else if ask > 0.0 { ask } else { close };
     if reference <= 0.0 {
         return Err("no reference price for TSLA — market data unavailable".into());
@@ -154,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: limit, tif: "DAY".into(), what_if: true, ..Default::default()
     };
-    client.place_order(probe_oid, &contract, &probe)?;
+    client.place_order(probe_oid, &contract, &probe);
     if !pump_until(&client, &mut w, &state, Duration::from_secs(20), |s| s.preview.is_some()) {
         return Err("no what-if margin response within 20s".into());
     }
@@ -178,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lmt_price: limit, tif: "DAY".into(), ..Default::default()
     };
     println!("submitting BUY {qty} TSLA LMT {limit} oid={oid}");
-    client.place_order(oid, &contract, &order)?;
+    client.place_order(oid, &contract, &order);
 
     let resolved = pump_until(&client, &mut w, &state, Duration::from_secs(20), |s| {
         s.errors.iter().any(|(id, _, _)| *id == oid)
@@ -197,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if live {
         // Should not happen given the sizing, but never leave an oversized order resting.
         eprintln!("RESULT: order was accepted (unexpected) — cancelling to stay flat.");
-        client.cancel_order(oid, "").ok();
+        client.cancel_order(oid, "");
         pump_until(&client, &mut w, &state, Duration::from_secs(10), |s| {
             s.statuses.iter().any(|(id, st)| *id == oid && st == "Cancelled")
         });

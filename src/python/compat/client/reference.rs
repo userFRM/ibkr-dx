@@ -55,13 +55,11 @@ impl EClient {
         {
             return self.report_refusal(py, req_id, why.into());
         }
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let Some(by_venue) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-        let contract = &*by_venue;
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
-            if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHistoricalSchedule {
+            if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistoricalSchedule {
                     contract: contract.into(),
                     req_id: wire_req_id(req_id)?,
                     end_date_time: end_date_time.to_string(),
@@ -72,7 +70,7 @@ impl EClient {
                 return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
             }
         } else {
-            if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHistorical {
+            if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistorical {
                     contract: contract.into(),
                     req_id: wire_req_id(req_id)?,
                     end_date_time: end_date_time.to_string(),
@@ -96,7 +94,7 @@ impl EClient {
         let wire = wire_req_id(req_id)?;
         // A withdrawn stream leaves nothing running under this id.
         self.core.historical_request_is_new(wire);
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelHistorical { req_id: wire }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelHistorical { req_id: wire }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -114,16 +112,14 @@ impl EClient {
         format_date: i32,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let Some(by_venue) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-        let contract = &*by_venue;
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
         // Noted before the request goes out, as on the other surface: an
         // answer dispatched between the send and the note was written in the
         // wrong form.
         self.core.note_date_format(req_id, format_date);
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHeadTimestamp {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchHeadTimestamp {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
                 what_to_show: what_to_show.to_string(),
@@ -139,7 +135,7 @@ impl EClient {
     /// Cancel head timestamp request.
     fn cancel_head_time_stamp(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -148,7 +144,7 @@ impl EClient {
     /// Request contract details.
     pub(crate) fn req_contract_details(&self, py: Python<'_>, req_id: i64, contract: &Contract) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchContractDetails {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchContractDetails {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
                 include_expired: contract.include_expired,
@@ -174,9 +170,10 @@ impl EClient {
 
     /// Request available exchanges for market depth.
     fn req_mkt_depth_exchanges(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchMktDepthExchanges) {
-            return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::MktDepthExchanges, ends: true };
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchMktDepthExchanges) {
+            return self.report_refusal_as(py, refused, Refusal::not_connected(why.to_string()));
         }
         Ok(())
     }
@@ -191,7 +188,7 @@ impl EClient {
         let pattern = crate::api::client::reference::matching_symbols_pattern(pattern)
             .map_err(|refusal| pyo3::exceptions::PyRuntimeError::new_err(refusal.message))?;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchMatchingSymbols {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchMatchingSymbols {
                 req_id: wire_req_id(req_id)?,
                 pattern,
             }) {
@@ -217,7 +214,7 @@ impl EClient {
         underlying_con_id: i64,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchOptionParams {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchOptionParams {
                 req_id: wire_req_id(req_id)?,
                 symbol: underlying_symbol.to_string(),
                 fut_fop_exchange: fut_fop_exchange.to_string(),
@@ -287,16 +284,16 @@ impl EClient {
             if let Some(why) = self.options_refused(py, &crate::client_core::SCANNER_OPTIONS, scanner_subscription_options)? {
                 return self.report_refusal(py, req_id, why);
             }
-            Self::send_control(py, &tx, ControlCommand::SubscribeScanner {
+            self.send_control(&tx, ControlCommand::SubscribeScanner {
                 req_id: wire_req_id(req_id)?, instrument, location_code, scan_code, max_items, filters,
-            })
+            }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, super::request_origin(req_id), crate::error_codes::Refusal::not_connected(why.to_string()))))
         })
     }
 
     /// Cancel scanner subscription.
     fn cancel_scanner_subscription(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelScanner { req_id: wire_req_id(req_id)? }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelScanner { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -304,9 +301,10 @@ impl EClient {
 
     /// Request scanner parameters XML.
     fn req_scanner_parameters(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchScannerParams) {
-            return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::ScannerParameters, ends: true };
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchScannerParams) {
+            return self.report_refusal_as(py, refused, Refusal::not_connected(why.to_string()));
         }
         Ok(())
     }
@@ -332,7 +330,7 @@ impl EClient {
         if let Some(why) = self.options_refused(py, &crate::client_core::NEWS_ARTICLE_OPTIONS, news_article_options)? {
             return self.report_refusal(py, req_id, why);
         }
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchNewsArticle {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchNewsArticle {
                 req_id: wire_req_id(req_id)?,
                 provider_code: provider_code.to_string(),
                 article_id: article_id.to_string(),
@@ -375,15 +373,15 @@ impl EClient {
         ) {
             return self.report_refusal(py, req_id, why.into());
         }
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHistoricalNews {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistoricalNews {
                 req_id: wire_req_id(req_id)?,
                 con_id: super::wire_con_id("a request for headlines", con_id)?,
                 provider_codes: provider_codes.to_string(),
                 start_time: start_date_time.to_string(),
                 end_time: end_date_time.to_string(),
-                // No more than the reference client asks for, whatever was wanted.
-                max_results: super::wire_u32("total_results", total_results as i64)?
-                    .min(crate::control::news::MOST_HEADLINES_ASKED_FOR),
+                // No more than a gateway asks for, whatever was wanted, and a
+                // smaller number passed on as stated, below nought included.
+                max_results: total_results.min(crate::control::news::MOST_HEADLINES_ASKED_FOR),
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -398,7 +396,7 @@ impl EClient {
     /// not the query has been answered: the venue serves it past the reply.
     fn cancel_historical_news(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelHistoricalNews {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelHistoricalNews {
                 req_id: wire_req_id(req_id)?,
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
@@ -452,12 +450,10 @@ impl EClient {
             ))
         })?;
         let wire = wire_req_id(req_id)?;
-        // Said before the request goes out, so an answer that arrives has
-        // somewhere to be put, and given back where the request does not go
-        // out, since nothing will ever answer it.
-        let shared = self.shared_state()?;
-        shared.reference.expect_adjustments(wire);
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchAdjustments {
+        // Where its answer is put is said by the engine, in the step that
+        // sends it, so a withdrawal and a request again under one number are
+        // taken in the order they were asked.
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchAdjustments {
                 req_id: wire,
                 con_id,
                 sec_type: sec_type.to_string(),
@@ -465,7 +461,6 @@ impl EClient {
                 start_date: start_date.to_string(),
                 end_date: end_date.to_string(),
             }) {
-            shared.reference.stop_waiting_for_adjustments(wire);
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -502,14 +497,11 @@ impl EClient {
     #[pyo3(signature = (req_id))]
     fn cancel_adjustments(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let wire = wire_req_id(req_id)?;
-        // Let go of before anything can return, as the other surface does
-        // before it sends: a session the engine gave up on still holds it.
-        if let Ok(shared) = self.shared_state() {
-            shared.reference.stop_waiting_for_adjustments(wire);
-        }
+        // What it held is let go of in the engine's step, in its place after
+        // the request it withdraws.
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(
-            py, &tx, ControlCommand::CancelCorporateActions { req_id: wire },
+        if let Err(why) = self.send_control(
+            &tx, ControlCommand::CancelCorporateActions { req_id: wire },
         ) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -532,7 +524,7 @@ impl EClient {
     ) -> PyResult<()> {
         let _ = fundamental_data_options;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchFundamentalData {
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchFundamentalData {
                 req_id: wire_req_id(req_id)?,
                 con_id: super::wire_con_id("a request for a fundamental report", contract.con_id)?,
                 report_type: report_type.to_string(),
@@ -545,7 +537,7 @@ impl EClient {
     /// Cancel fundamental data.
     fn cancel_fundamental_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelFundamentalData { req_id: wire_req_id(req_id)? }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelFundamentalData { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -589,12 +581,10 @@ impl EClient {
         {
             return self.report_refusal(py, req_id, why.into());
         }
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let Some(by_venue) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-        let contract = &*by_venue;
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHistoricalTicks {
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistoricalTicks {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
                 start_date_time: start_date_time.to_string(),
@@ -626,7 +616,8 @@ impl EClient {
 
     /// Request market rule details.
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
-        let Some(_connected) = self.tx_or_report(market_rule_id as i64)? else { return Ok(()) };
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::MarketRule(market_rule_id), ends: true };
+        let Some(_connected) = self.tx_or_report_as(refused)? else { return Ok(()) };
         // Released before the callback below — see the note in
         // req_completed_orders.
         let shared = self.shared.lock().unwrap().clone();
@@ -655,9 +646,9 @@ impl EClient {
         // malformed request, so neither the id nor the validation code the
         // refusals above carry is the one a caller branching on the pair
         // reads there.
-        self.report_refusal(
+        self.report_refusal_as(
             py,
-            -1,
+            refused,
             crate::error_codes::Refusal::stated(322, format!(
                 "market rule {market_rule_id} has not been seen on this session. Rules \
                  arrive with the details of a contract that uses them, so ask for such a \
@@ -670,12 +661,10 @@ impl EClient {
     #[pyo3(signature = (req_id, contract, use_rth, time_period))]
     pub(crate) fn req_histogram_data(&self, py: Python<'_>, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let Some(by_venue) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-        let contract = &*by_venue;
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHistogramData {
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistogramData {
                 req_id: wire_req_id(req_id)?,
                 con_id: super::wire_con_id("a request for a histogram", contract.con_id)?,
                 sec_type: contract.sec_type.clone(),
@@ -691,7 +680,7 @@ impl EClient {
     /// Cancel histogram data.
     fn cancel_histogram_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelHistogramData { req_id: wire_req_id(req_id)? }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelHistogramData { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -704,12 +693,10 @@ impl EClient {
         end_date_time: &str, duration_str: &str, use_rth: bool,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        // Named by the venue where the caller named it by id alone: a
-        // request states the contract's type and its exchange, and both
-        // are the venue's to say.
-        let Some(by_venue) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-        let contract = &*by_venue;
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::FetchHistoricalSchedule {
+        // A contract given by id alone is named by the engine before the
+        // request goes: a request states the contract's type and its
+        // exchange, and both are the venue's to say.
+        if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistoricalSchedule {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
                 end_date_time: end_date_time.into(),
@@ -824,20 +811,16 @@ fn scanner_filters(py: Python<'_>, sub: &Py<PyAny>, filter_options: &[Py<PyAny>]
         }
     }
 
-    // The pairs a caller sets the scan's own controls with — the sort column
-    // and its direction among them. This protocol's scan carries a filter list
-    // and no free-form settings field, so a pair stated here cannot be sent.
-    // Dropped in silence, a scan asked for sorted one way came back sorted
-    // another and the caller had nothing to tell them apart by.
+    // The pairs a caller sets the scan's own controls with. A gateway reads
+    // them and keeps them as the scan's settings, so they are taken rather
+    // than refused. Where they go from there is not established, and this
+    // protocol's scan carries a filter list and no settings field, so they are
+    // not carried: said once, and the scan goes as the rest of it states.
     match sub.getattr(py, "scannerSettingPairs") {
         Err(_) => {}
         Ok(v) if v.is_none(py) => {}
         Ok(v) => match v.extract::<String>(py) {
-            Ok(pairs) if pairs.is_empty() => {}
-            Ok(pairs) => return Err(crate::error_codes::Refusal::validation(format!(
-                "the scan states settings {pairs:?}, which this request cannot carry: a scan \
-                 run without them is not the scan that was asked for",
-            ))),
+            Ok(pairs) => crate::control::scanner::note_setting_pairs(&pairs),
             Err(_) => return Err(unreadable_filter("scannerSettingPairs")),
         },
     }
@@ -885,7 +868,7 @@ mod tests {
                 None, None,
             ).unwrap().unbind();
             client.__init__(wrapper.clone_ref(py)).unwrap();
-            let (tx, rx) = std::sync::mpsc::sync_channel(16);
+            let (tx, rx) = std::sync::mpsc::channel();
             *client.control_tx.lock().unwrap() = Some(tx);
             *client.shared.lock().unwrap() = Some(std::sync::Arc::new(crate::bridge::SharedState::new()));
             client.connected.store(true, std::sync::atomic::Ordering::Release);
@@ -964,7 +947,7 @@ mod tests {
                 None, None,
             ).unwrap().unbind();
             client.__init__(wrapper).unwrap();
-            let (tx, rx) = std::sync::mpsc::sync_channel(16);
+            let (tx, rx) = std::sync::mpsc::channel();
             let shared = std::sync::Arc::new(crate::bridge::SharedState::new());
             *client.control_tx.lock().unwrap() = Some(tx);
             *client.shared.lock().unwrap() = Some(shared.clone());
@@ -978,6 +961,9 @@ mod tests {
             client.req_adjustments(py, 41, 4815747, "STK", "SMART", "20240101", "20241231").unwrap();
             assert!(matches!(rx.try_recv(), Ok(ControlCommand::FetchAdjustments { req_id: 41, .. })));
             assert_eq!(client.adjustments_for(41), None, "nothing has arrived");
+            // The engine's step says where the answer goes, and there is no
+            // engine behind this client.
+            shared.reference.expect_adjustments(41);
             shared.reference.note_adjustments(nvda(), split(), 41);
             let taken = client.adjustments_for(41).expect("the answer to request 41");
             assert_eq!(taken.len(), 1);
@@ -1005,24 +991,18 @@ mod tests {
         });
     }
 
-    /// A setting this request cannot carry is refused, not dropped.
-    ///
-    /// The pairs set the scan's own controls — the sort column and its
-    /// direction among them. Dropped in silence, a scan asked for sorted one
-    /// way came back sorted another, with nothing to tell the two apart by.
+    /// A scan's settings pairs are taken, not refused: a gateway reads them
+    /// and keeps them. They are not carried, which is said once at WARN, and
+    /// the scan goes with the filters it states.
     #[test]
-    fn a_scanner_setting_that_cannot_be_sent_refuses_the_scan() {
+    fn a_scanner_setting_is_taken_and_the_scan_goes() {
         Python::initialize();
         Python::attach(|py| {
-            let sub = namespace(py, "scannerSettingPairs='Annual,true'");
-            let why = scanner_filters(py, &sub, &[])
-                .expect_err("a stated setting is not dropped");
-            assert!(why.message.contains("Annual,true"), "{}", why.message);
-
-            // What the reference client's own subscription holds when nobody
-            // set it, which states nothing and is no refusal.
+            let sub = namespace(py, "scannerSettingPairs='Annual,true', abovePrice=5.0");
+            let filters = scanner_filters(py, &sub, &[]).expect("a stated setting is taken");
+            assert_eq!(filters, [("priceAbove".to_string(), "5".to_string())], "the scan's filters go");
             let sub = namespace(py, "scannerSettingPairs=''");
-            assert!(scanner_filters(py, &sub, &[]).is_ok(), "an unset setting is not a refusal");
+            assert!(scanner_filters(py, &sub, &[]).is_ok(), "an unset setting is no refusal");
         });
     }
 
@@ -1061,7 +1041,7 @@ mod tests {
             ).unwrap();
             let wrapper = ns.get_item("w").unwrap().unwrap().unbind();
             client.__init__(wrapper).unwrap();
-            let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+            let (tx, _rx) = std::sync::mpsc::channel();
             *client.control_tx.lock().unwrap() = Some(tx);
 
             let err = client
@@ -1109,7 +1089,7 @@ mod tests {
                 None, None,
             ).unwrap().unbind();
             client.__init__(wrapper).unwrap();
-            let (tx, rx) = std::sync::mpsc::sync_channel(16);
+            let (tx, rx) = std::sync::mpsc::channel();
             *client.control_tx.lock().unwrap() = Some(tx);
             *client.shared.lock().unwrap() = Some(std::sync::Arc::new(crate::bridge::SharedState::new()));
             client.connected.store(true, std::sync::atomic::Ordering::Release);
@@ -1143,7 +1123,7 @@ mod tests {
                 None, None,
             ).unwrap().unbind();
             client.__init__(wrapper.clone_ref(py)).unwrap();
-            let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+            let (tx, _rx) = std::sync::mpsc::channel();
             *client.control_tx.lock().unwrap() = Some(tx);
 
             client.req_market_rule(py, 26).unwrap();

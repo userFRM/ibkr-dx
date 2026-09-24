@@ -150,11 +150,7 @@ def steps(suites):
         # of them were broken and building, because `cargo doc` renders an
         # example without compiling it and no suite collects them.
         (["cargo", "test", "--doc"], {}),
-        # The registration timeout is overridden for the same reason the
-        # workflow overrides it: without it every call with no engine to answer
-        # waits the full timeout, which is minutes across these.
-        (["cargo", "test", *sum([["--test", s] for s in suites], [])],
-         {"IBKR_DX_REGISTRATION_TIMEOUT_MS": "20"}),
+        (["cargo", "test", *sum([["--test", s] for s in suites], [])], {}),
         # The workflow builds the documentation and fails on a warning. Run
         # locally only as clippy was: a broken doc link is invisible to every
         # step above it, and three of them reached main because this line was

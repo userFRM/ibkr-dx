@@ -788,6 +788,7 @@ fn gateway_config_fields() {
         ib_key_timeout_secs: session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
+        cancel: None,
         resume: None,
     };
     assert_eq!(config.username, "user");
@@ -1744,7 +1745,7 @@ fn a_handshake_that_will_not_finish_ends_when_the_attempt_does() {
     let err = super::shake_hands_by(
         &connector,
         "localhost",
-        tcp,
+        LogonSocket::new(tcp, None).unwrap(),
         Instant::now() + Duration::from_millis(600),
     )
     .expect_err("a handshake that never completes is given up on");
@@ -1831,4 +1832,114 @@ fn a_socket_let_go_at_the_logon_is_not_closed_by_a_stop() {
     let mut said = [0u8; 1];
     peer.read_exact(&mut said).expect("and reaches the venue");
     assert_eq!(&said, b"5");
+}
+
+/// A logon is taken back wherever it is: before its dial, it dials nothing;
+/// inside its handshake, on a venue that accepted the socket and says
+/// nothing, it ends within a poll of the flag, as taken back.
+///
+/// One test for both, because the port a logon dials is one for the process.
+#[test]
+fn a_logon_is_taken_back_before_its_dial_and_inside_its_handshake() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    LOGON_PORT.store(listener.local_addr().unwrap().port(), Ordering::Relaxed);
+    let cancel = Arc::new(AtomicBool::new(true));
+    let config = || GatewayConfig {
+        settings: Default::default(),
+        username: "u".into(),
+        password: zeroize::Zeroizing::new("p".into()),
+        host: "127.0.0.1".into(),
+        paper: true,
+        accept_invalid_certs: true,
+        ib_key_timeout_secs: 1,
+        ib_key_token_sub_type: String::new(),
+        resume: None,
+        code_provider: None,
+        cancel: Some(Arc::clone(&cancel)),
+    };
+
+    let Err(err) = Gateway::connect(&config()) else { panic!("a logon taken back opened a session") };
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted, "{err}");
+    listener.set_nonblocking(true).unwrap();
+    assert!(listener.accept().is_err(), "it dialled after it was taken back");
+    listener.set_nonblocking(false).unwrap();
+
+    cancel.store(false, Ordering::Relaxed);
+    let worker = {
+        let config = config();
+        std::thread::spawn(move || Gateway::connect(&config).map(|_| ()))
+    };
+    let (_silent, _) = listener.accept().expect("the logon's connection");
+    std::thread::sleep(Duration::from_millis(300));
+    let taking_back = std::time::Instant::now();
+    cancel.store(true, Ordering::Relaxed);
+    let Err(err) = worker.join().unwrap() else { panic!("a venue that said nothing opened a session") };
+    assert!(
+        taking_back.elapsed() < Duration::from_millis(1200),
+        "the take-back waited {:?} on a handshake", taking_back.elapsed(),
+    );
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted, "said as the caller's doing: {err}");
+    assert!(err.to_string().contains("cancelled by the client"), "{err}");
+    LOGON_PORT.store(AUTH_PORT, Ordering::Relaxed);
+}
+
+/// A dial taken back before it starts opens no connection.
+#[test]
+fn a_dial_taken_back_opens_no_connection() {
+    use std::sync::atomic::AtomicBool;
+    let cancel = AtomicBool::new(true);
+    let take_back = TakeBack::new(Some(&cancel));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let result = take_back.dial(&listener.local_addr().unwrap(), Duration::from_secs(30), "logon");
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    assert!(listener.accept().is_err());
+}
+
+#[test]
+fn a_taken_back_logon_keeps_the_write_half_for_its_logout() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancel = AtomicBool::new(false);
+    let take_back = TakeBack::new(Some(&cancel));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut venue, _) = listener.accept().unwrap();
+    venue.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let stream = LogonSocket::new(tcp, Some(&cancel)).unwrap();
+    let checking = stream.cancellation_check();
+    let mut session = OpeningSession { stream: Some(stream), take_back: &take_back, seq: 1, checking };
+    session.write_all(&fix::fix_build(&[(35, "A")], 1)).unwrap();
+    cancel.store(true, Ordering::Release);
+    let mut buf = [0u8; 1];
+    assert_eq!(session.read(&mut buf).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+    drop(session);
+    // Read the logon and its logout, in order.
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 512];
+    while !bytes.windows(5).any(|w| w == b"35=5\x01") {
+        let n = venue.read(&mut buf).unwrap();
+        assert!(n > 0);
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let frames = String::from_utf8_lossy(&bytes);
+    assert!(frames.contains("35=A\x01"));
+    assert!(frames.contains("35=5\x01"));
+    assert!(frames.contains("34=000002\x01"));
+}
+
+#[test]
+fn a_session_taken_back_while_its_farms_open_is_logged_out() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancel = AtomicBool::new(false);
+    let take_back = TakeBack::new(Some(&cancel));
+    let (conn, mut venue) = Connection::for_test();
+    let session = LogonConnection { conn: Some(conn), take_back: &take_back };
+    cancel.store(true, Ordering::Release);
+    drop(session);
+    venue.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let mut bytes = String::new();
+    venue.read_to_string(&mut bytes).unwrap();
+    assert!(bytes.contains("35=5\x01"));
 }

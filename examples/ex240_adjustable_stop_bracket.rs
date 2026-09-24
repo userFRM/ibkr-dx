@@ -119,9 +119,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("\n== Placing parent={} stop={} tp={} oca={}", parent_id, stop_id, tp_id, oca);
-    client.place_order(parent_id, &aapl(), &parent)?;
-    client.place_order(stop_id, &aapl(), &stop)?;
-    client.place_order(tp_id, &aapl(), &tp)?;
+    client.place_order(parent_id, &aapl(), &parent);
+    client.place_order(stop_id, &aapl(), &stop);
+    client.place_order(tp_id, &aapl(), &tp);
 
     let ids = [parent_id, stop_id, tp_id];
     let working = |id: i64| matches!(last_status(&state, id).as_deref(), Some("PreSubmitted" | "Submitted"));
@@ -138,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if pass {
         println!("\n== Cancelling ONLY the parent {}", parent_id);
-        client.cancel_order(parent_id, "")?;
+        client.cancel_order(parent_id, "");
         let is_cancelled = |id: i64| last_status(&state, id).as_deref() == Some("Cancelled");
         let cascaded = pump(&client, &mut wrapper, 20, || ids.iter().all(|&id| is_cancelled(id)));
         for &id in &ids {
@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &id in &ids {
         if working(id) {
             println!("  cleanup: cancelling {}", id);
-            let _ = client.cancel_order(id, "");
+            client.cancel_order(id, "");
         }
     }
     pump(&client, &mut wrapper, 5, || false);

@@ -36,6 +36,7 @@
 
 # Reference
 
+- [Moving to 0.2](./reference/migration-0.2.md)
 - [Venue behaviour](./reference/venue-behaviour.md)
 - [Limits](./reference/limits.md)
 - [Endpoint coverage](./reference/coverage.md)

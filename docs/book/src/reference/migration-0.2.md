@@ -1,0 +1,163 @@
+# Moving to 0.2
+
+Requests and cancels return after admission. The engine holds work while it
+waits for contract naming, order replay, account download, an option's model,
+or an earlier exchange to finish. A cancel withdraws its own kind of request,
+including one still waiting. Cancelling a question that is ready follows its
+answer; cancelling one still waiting prevents that answer.
+
+## Requests and callbacks
+
+Rust request and cancel methods return `()`. Remove `?` and result checks from
+those calls, and handle refusals on `Wrapper::error_from` or `Wrapper::error`.
+The request methods that previously took a wrapper no longer do: pass the
+wrapper to `process_msgs` to receive their answers. The answering conveniences,
+such as `historical_data`, `contract_details` and `qualify_contract`, still wait
+and return their results.
+
+Records are delivered in session order. Refusals, immediate answers, connection
+notices, registrations and order reports share that order. Quotes, positions,
+account figures and other conflated state follow the records of a read. A
+record arriving during a read waits for the next read. A fill and its status
+from one report are delivered as `order_status`, then `exec_details`; the
+commission report follows where the venue states it.
+
+Python request refusals also wait for `poll()` or `run()`. A 504 about a feed or
+trading connection that ended within an admitted session follows the earlier
+records. With no session, “not connected” is reported inside the call, as in
+the reference client. Python `disconnect()` finishes the engine's wire work,
+calls `connectionClosed` before returning, and discards queued callbacks.
+
+Rust `disconnect()` returns `Shutdown { logout_sent, engine }`. The engine
+result is `EngineEnd::Ended` or `EngineEnd::Panicked`; either confirms that the
+engine thread ended. Concurrent callers wait for the same end. Call
+`process_msgs` afterwards to receive the remaining records and final state,
+followed by `connection_closed`. Nothing from that session follows the close.
+Orders already admitted finish before logout or are refused under their order
+numbers. Orders kept with `transmit = false` remain unsent.
+
+A Rust answering convenience with `keep_record` delivers a whole read through
+that record and its answer collector. Without a kept record, it takes only its
+own answers and leaves other callbacks for `process_msgs`.
+
+## Error origins
+
+Every error reaches `error_from`. Its default forwards to the existing `error`
+callback, so wrappers that implement only `error` continue to work. Rust
+`ErrorOrigin` distinguishes:
+
+| Origin | Meaning |
+| --- | --- |
+| `Request { id, ends }` | A numbered request; `ends` distinguishes a refusal from a notice followed by more answers |
+| `Order { id, op }` | An order's placement, modification, cancellation, exercise, or a venue report |
+| `Question { q, ends }` | A request without an id, such as positions, open orders or scanner parameters |
+| `Session` | A connection notice or another session-wide outcome |
+| `Internal(id)` | An engine lookup |
+
+Python `ErrorOrigin` exposes `kind`, `id`, `ends`, `op` and `question`.
+`ends` is `None` for origins other than requests and questions; `op` and
+`question` are `None` when inapplicable. Ordinary ibapi wrappers still receive
+`error` with the original number and code.
+
+Rust `refuse(origin, code, message)` adds a caller-side refusal to the same
+stream. `question_retired(Question)` marks the ordered cancellation of positions
+or account updates; its default does nothing. Python delivers no cancellation
+callback for these questions.
+
+## Admission, shutdown and wakeups
+
+`backlog()` counts admitted commands that have not finished, including held
+work and unsent orders. Work kept for `transmit = false` or a model value stays
+counted. A global cancellation is one command even when it covers many
+contracts. Admission uses an unbounded channel; released work and new commands
+share a limit of 64 commands per engine lap. A caller that limits admission
+must still allow the transmitting order or cancellation that releases its
+staged orders.
+
+Rust `order_id_floor()` reads one above the largest request-compatible order id
+the venue has named, without waiting. `next_shared_id_within(timeout)` adds a
+bound to the replay wait and observes `EClientConfig.cancel`.
+`next_order_id()` and `reserve_order_ids()` remain answering calls; an exercise
+that asks the engine to assign its number returns immediately and is numbered
+after replay.
+
+`EClientConfig.cancel` can take back a connect during socket operations,
+second-factor polling and client construction. Name resolution and a supplied
+code provider must return before cancellation completes. Shutdown waits for
+recovery workers to finish, including those calls, and logs out a session that
+opened while cancellation was underway.
+
+Rust `on_data(Some(hook))` installs a wake hook; `None` removes it. The hook runs
+on the engine thread, outside engine locks, after a record or state change, at
+most once until the next `process_msgs` begins. It must return immediately and
+must not call `disconnect` or drop the last client owner. A panicking hook is
+logged and removed. Continue to bound an idle wait when relying on completions
+whose deadlines are evaluated by `process_msgs`, such as snapshots and smart
+components.
+
+Both surfaces expose `traffic()`: `bytes_sent`, `bytes_received`,
+`messages_sent` and `messages_received` for the session. Bytes are protocol
+frames before TLS encryption and after decryption. Complete frames count as
+messages, including one message per compressed outer frame. Initial
+authentication is outside these counts; replacement connections preserve them.
+
+## Settings and request values
+
+`registration_timeout_ms` is removed from Rust settings, Python `configure`
+and the environment settings. Registration no longer waits on a caller thread.
+Remove this key and `IBKR_DX_REGISTRATION_TIMEOUT_MS` from configuration. There
+are 16 carried settings and 15 settings recorded as inapplicable here.
+
+Historical news takes signed `total_results: i32`. Values above 300 are sent as
+300; zero and negative values pass through. Historical ticks carry
+`ignore_size`. Order-condition margin percentages and price trigger methods
+are signed `i32` and are sent unchanged.
+
+Rust `req_scanner_subscription` takes a final `scanner_setting_pairs: &str`;
+pass `""` when none are stated. Both surfaces accept these pairs and warn once
+that they are not carried to the venue.
+
+## Accounts, exercises and snapshots
+
+Named-account updates, positions, profit and multi requests keep the account
+they name. An `All` summary includes every account held by the login.
+Concurrent profit requests have separate subscriptions. Multi answers echo
+the requested model label on the initial and subsequent rows. Model selection,
+`AllNonProp` membership and advisor groups remain unapplied and produce a
+warning once per selection and session.
+
+An exercise requires a positive position in the selected account. It requests
+tick 493 and waits for its in-the-money figure when necessary, even with
+`override`. Without override it applies the exercise/lapse check. Its quantity
+is limited to the whole-contract position captured before waiting. Shutdown
+refuses an exercise still waiting for that figure. The alternate exercise
+transport remains unimplemented.
+
+Snapshot registration follows contract naming, including options given only
+by contract id. Its eleven-second bound starts when the engine takes the named
+subscription. The snapshot waits for bid, ask, last, open and close; OPT, FOP,
+IOPT, WAR and EC also wait for model computation 13, or 83 for delayed data.
+Delayed snapshots also wait for tick string 88. Bid, ask and last option
+greeks remain unset; this completion mask does not wait for them.
+
+## Lower-level Rust users
+
+`from_parts`, engine constructors and core command senders use
+`std::sync::mpsc::Sender<ControlCommand>`. Order, market-data and question
+commands carry their inputs to the engine; registration reply channels and the
+moved-subscription handshake are removed. `MarketDataTaken` carries the slot
+generation and registration time. Order records share immutable cached reports.
+`Ask` and `Answer` multi-account variants carry the account and model label.
+A global cancellation remains one order-buffer request. An automatically
+numbered exercise carries its caller's shared allocator until replay completes.
+
+`SharedState.portfolio` is an `Arc`, and named accounts have separate stores.
+Profit request and cancellation commands distinguish account and single-position
+subscriptions. `Connection::new` takes `TlsStream<LogonSocket>`; explicit socket
+construction wraps the TCP stream with `LogonSocket::new`. Established
+connections retain their ordinary timeouts.
+
+Per-client order views, outcomes for children of refused placements and changes
+behind a refused or withdrawn placement, complete option greeks, account-group
+and model application, alternate exercise transport and scanner settings-pair
+carriage remain subject to the limitations described on [Limits](./limits.md).

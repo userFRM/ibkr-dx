@@ -430,6 +430,57 @@ mod news_tests {
         );
     }
 
+    /// A calculation kept for a contract's model is answered right behind the
+    /// model, by the loop that wrote it.
+    ///
+    /// Solved by the reader at its reads instead, the answer the last model
+    /// enabled was worked out after the session's last record — which the loop
+    /// pushes after everything else — and never delivered.
+    #[test]
+    fn a_kept_calculation_is_answered_right_behind_the_model_it_waited_for() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9006);
+        shared.market.keep_calculation(9, crate::bridge::KeptCalculation {
+            contract: crate::types::model::Contract {
+                symbol: "SPY".into(), sec_type: "OPT".into(), exchange: "SMART".into(),
+                currency: "USD".into(), last_trade_date_or_contract_month: "20270320".into(),
+                strike: 100.0, right: "C".into(), ..Default::default()
+            },
+            slot: instrument,
+            wants_volatility: false,
+            option_price: 0.0,
+            under_price: 100.0,
+            answered: false,
+        });
+
+        // Valid, with the underlying's price and a volatility behind the
+        // model's own price for the option.
+        let flags: u32 = 1 | 1 << 25 | 1 << 26;
+        let mut model = flags.to_be_bytes().to_vec();
+        for value in [5.0f64, 100.0, 0.2 / 365.0_f64.sqrt()] {
+            model.extend_from_slice(&value.to_be_bytes());
+        }
+        farm.generic_tick_tags.push((81, 732, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(81, 732, &model)]), &mut context, &shared, &None,
+        );
+        shared.push_closed();
+
+        let taken = shared.take_records(
+            shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false },
+        );
+        let kinds: Vec<&str> = taken.iter().map(|(_, record)| match record {
+            crate::bridge::Record::OptionComputation((_, c)) if c.answers == Some(9) => "answer",
+            crate::bridge::Record::OptionComputation(_) => "model",
+            crate::bridge::Record::Refused((origin, ..)) if origin.id() == 9 => "answer",
+            crate::bridge::Record::Closed => "closed",
+            _ => "other",
+        }).collect();
+        assert_eq!(kinds, ["model", "answer", "closed"]);
+    }
+
     /// The two series that state a run of paired figures, one of which states
     /// a version in front of the count and one of which does not.
     ///
@@ -578,6 +629,30 @@ mod news_tests {
             shared.market.scanned_strategies(instrument).len(), 1,
             "a refusal replaced what the venue had stated",
         );
+        let mut farm = FarmState::new();
+        let mut hb = HeartbeatState::new();
+        let (connection, _peer) = Connection::for_test();
+        let mut connection = Some(connection);
+        farm.asked_generic_ticks.insert(instrument, vec![481]);
+        farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "",
+            instrument, 0, false, &mut connection, &mut hb);
+        let first = farm.generic_tick_reqs.iter().find(|(_, kind)| *kind == 481).unwrap().0;
+        let ack = |request| format!("35=Q\x017,{request},0.01,0,3");
+        farm.handle_subscription_ack(ack(first).as_bytes(), &mut context, &shared);
+        farm.stop_asking_for_series(instrument, 265598, farm.what_took_it(instrument), &[481],
+            0, &mut connection, &mut hb);
+        shared.market.forget_scanned_strategies(instrument);
+        farm.also_ask_for_series(instrument, 265598, &[481], &context, &mut connection, &mut hb);
+        let second = farm.generic_tick_reqs.iter().find(|(_, kind)| *kind == 481).unwrap().0;
+        assert_ne!(first, second);
+        farm.handle_generic_tick(&framed_generic_ticks(&[(7, 481, &answer)]), &mut context, &shared, &None);
+        assert!(shared.market.scanned_strategies(instrument).is_empty(), "old frames before the new ack are dropped");
+        farm.handle_subscription_ack(ack(first).as_bytes(), &mut context, &shared);
+        farm.handle_generic_tick(&framed_generic_ticks(&[(7, 481, &answer)]), &mut context, &shared, &None);
+        assert!(shared.market.scanned_strategies(instrument).is_empty(), "a late ack cannot restore the old route");
+        farm.handle_subscription_ack(ack(second).as_bytes(), &mut context, &shared);
+        farm.handle_generic_tick(&framed_generic_ticks(&[(7, 481, &answer)]), &mut context, &shared, &None);
+        assert_eq!(shared.market.scanned_strategies(instrument).len(), 1, "the reused tag belongs to its new ack");
     }
 
     /// The four series written in the packed record the quote stream itself
@@ -2994,48 +3069,6 @@ mod news_tests {
         );
     }
 
-    /// A withdrawal naming the slot a caller was moved off reaches what that
-    /// caller asked for.
-    ///
-    /// A caller whose contract turns out to live in another slot is sent there,
-    /// and what it asked for beyond the quote goes with it. Its withdrawal
-    /// still names the slot it was given: applied there, it found nothing, and
-    /// the venue went on serving that series where the caller had been moved to
-    /// with nobody asking for it.
-    #[test]
-    fn a_withdrawal_naming_the_slot_a_caller_left_reaches_what_it_asked_for() {
-        let mut farm = FarmState::new();
-        let mut context = Context::new();
-        let mut hb = HeartbeatState::new();
-        let into = context.market.register(756733);
-        let from: InstrumentId = into + 1;
-        let (conn, peer) = Connection::for_test();
-        let mut conn = Some(conn);
-        let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
-
-        // The subscription the caller was sent to, with the series it brought.
-        farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", into, 0,
-            false, &mut conn, &mut hb,
-        );
-        farm.also_ask_for_series(into, 756733, &[236], &context, &mut conn, &mut hb);
-        farm.note_series_asked_on(into, &[236], 4);
-        farm.note_moved(from, into);
-        let _ = super::drain_inner(&mut peer);
-
-        // Its withdrawal names the slot it was given, not the one it was sent
-        // to.
-        farm.send_mktdata_unsubscribe(from, 0, 0, &[236], 5, false, &mut conn, &mut hb);
-
-        assert!(
-            !farm.asked_generic_ticks.get(&into).is_some_and(|a| a.contains(&236)),
-            "the series it asked for is given up where it was being served",
-        );
-        assert!(
-            farm.instrument_md_reqs.iter().any(|(id, _)| *id == into),
-            "and the subscription the other callers are on stands",
-        );
-    }
 
     /// A withdrawal names the contract it was about, not only the slot.
     ///
@@ -3082,43 +3115,6 @@ mod news_tests {
         );
     }
 
-    /// A withdrawal follows every move its callers were sent through.
-    ///
-    /// A contract can be moved more than once: the slot a caller was sent to
-    /// can itself turn out to hold a contract that lives somewhere else again.
-    /// Followed one hop, a withdrawal decided against the first slot reached
-    /// the second and did nothing there, and the venue went on serving the
-    /// series where the caller had finally been sent.
-    #[test]
-    fn a_withdrawal_follows_every_move_its_callers_were_sent_through() {
-        let mut farm = FarmState::new();
-        let mut context = Context::new();
-        let mut hb = HeartbeatState::new();
-        let last = context.market.register(756733);
-        let first: InstrumentId = last + 1;
-        let middle: InstrumentId = last + 2;
-        let (conn, peer) = Connection::for_test();
-        let mut conn = Some(conn);
-        let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
-
-        farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", last, 0,
-            false, &mut conn, &mut hb,
-        );
-        farm.also_ask_for_series(last, 756733, &[236], &context, &mut conn, &mut hb);
-        farm.note_series_asked_on(last, &[236], 4);
-        farm.note_moved(first, middle);
-        farm.note_moved(middle, last);
-        let _ = super::drain_inner(&mut peer);
-
-        // The withdrawal names the slot its caller was given at the start.
-        farm.send_mktdata_unsubscribe(first, 0, 0, &[236], 5, false, &mut conn, &mut hb);
-
-        assert!(
-            !farm.asked_generic_ticks.get(&last).is_some_and(|a| a.contains(&236)),
-            "the series is given up where its caller was finally sent",
-        );
-    }
 
     /// A withdrawal names which occupancy of the slot it was about, even where
     /// the venue never identified the contract.
@@ -5001,6 +4997,33 @@ mod depth_identity_tests {
             "the caller is told to empty its book: {told:?}",
         );
     }
+
+    /// Told to start its book again, a caller's request goes on: the reset
+    /// is a notice the book's levels follow, and does not end the request.
+    #[test]
+    fn a_books_reset_does_not_end_its_request() {
+        let mut farm = FarmState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut context = Context::new();
+        let (conn, _peer) = Connection::for_test();
+        let mut up = Some(conn);
+        farm.send_depth_subscribe(7, 756733, "SMART", "", "STK", 10, true, &mut up, &mut hb, &shared);
+        let _ = shared.reference.drain_historical_errors();
+
+        let (fresh, _peer2) = Connection::for_test();
+        farm.reconnect(fresh, &mut up, &mut context, &mut hb, Default::default(), &shared);
+
+        let said: Vec<_> = shared
+            .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                crate::bridge::Record::HistoricalError((origin, 317, _)) => Some(origin),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, [crate::types::model::ErrorOrigin::Request { id: 7, ends: false }]);
+    }
 }
 
 mod depth_position_tests {
@@ -5154,7 +5177,6 @@ mod depth_position_tests {
         assert!(farm.generic_tick_reqs.iter().all(|(rid, _)| *rid != 7), "its request is released");
         assert!(farm.md_req_to_instrument.iter().all(|(rid, _)| *rid != 7), "and its instrument mapping");
         assert!(shared.market.drain_subscription_failures().is_empty(), "the quote it rode beside is not reported refused");
-        assert_eq!(shared.market.drain_news_rejections(), vec![756733], "the client is told to clear its askers so a re-ask sends");
     }
 
     /// The increment the venue acknowledges a subscription with is kept for

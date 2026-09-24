@@ -13,10 +13,16 @@ use crate::types::*;
 /// copy of the struct, so the concurrent read and write are both defined
 /// operations — a version counter can discard a torn snapshot but cannot make
 /// the racing access that produced it legal.
+///
+/// Beside the quote it holds the occupancy of the slot the quote was written
+/// under, written inside the same window, so a reader takes the two together:
+/// a quote of the contract that left a slot cannot be read as one of the
+/// contract that took it.
 #[repr(align(64))]
 pub struct SeqQuote {
     version: AtomicU64,
     data: [AtomicI64; QUOTE_WORDS],
+    generation: AtomicU64,
 }
 
 impl Default for SeqQuote {
@@ -31,12 +37,14 @@ impl SeqQuote {
         Self {
             version: AtomicU64::new(0),
             data: std::array::from_fn(|_| AtomicI64::new(0)),
+            generation: AtomicU64::new(0),
         }
     }
 
-    /// Write a quote (hot loop side). Never blocks.
+    /// Write a quote (hot loop side), under the occupancy of the slot it is
+    /// written for. Never blocks.
     #[inline]
-    pub fn write(&self, quote: &Quote) {
+    pub fn write(&self, quote: &Quote, generation: u64) {
         // AcqRel, not Release: the payload writes below must not be reordered
         // above this store. Release alone only fences what precedes it; the
         // Acquire half is what pins *following* accesses inside the odd window.
@@ -53,12 +61,19 @@ impl SeqQuote {
         for (slot, word) in self.data.iter().zip(quote_to_words(quote)) {
             slot.store(word, Ordering::Relaxed);
         }
+        self.generation.store(generation, Ordering::Relaxed);
         self.version.fetch_add(1, Ordering::Release); // even = stable
     }
 
     /// Read a consistent quote snapshot (reader side). Spins on conflict.
     #[inline]
     pub fn read(&self) -> Quote {
+        self.read_with_generation().0
+    }
+
+    /// The same, with the occupancy it was written under, from the same write.
+    #[inline]
+    pub fn read_with_generation(&self) -> (Quote, u64) {
         loop {
             let v1 = self.version.load(Ordering::Acquire);
             if v1 & 1 != 0 { continue; } // writer active
@@ -66,13 +81,14 @@ impl SeqQuote {
             for (word, slot) in words.iter_mut().zip(self.data.iter()) {
                 *word = slot.load(Ordering::Relaxed);
             }
+            let generation = self.generation.load(Ordering::Relaxed);
             // The fence is what makes the check mean anything: an Acquire
             // load constrains what comes after it, so without this the payload
             // reads above may be satisfied after the version read below and a
             // torn snapshot would pass a counter that never moved.
             std::sync::atomic::fence(Ordering::Acquire);
             let v2 = self.version.load(Ordering::Relaxed);
-            if v1 == v2 { return quote_from_words(words); }
+            if v1 == v2 { return (quote_from_words(words), generation); }
         }
     }
 }

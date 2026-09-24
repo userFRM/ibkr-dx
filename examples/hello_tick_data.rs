@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let req_id = 1;
     println!("streaming SPY for 5s…");
-    client.req_mkt_data(req_id, &spy, "", false, false)?;
+    client.req_mkt_data(req_id, &spy, "", false, false);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    client.cancel_mkt_data(req_id)?;
+    client.cancel_mkt_data(req_id);
 
     let s = state.lock().unwrap();
     println!("ticks: {}  bid={:.2}  ask={:.2}  last={:.2}", s.ticks, s.bid, s.ask, s.last);

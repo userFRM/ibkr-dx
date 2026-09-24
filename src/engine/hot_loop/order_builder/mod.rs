@@ -158,10 +158,11 @@ pub(crate) fn drain_and_send_orders(
     // Whether a reconnect's recovery is still settling what the broker holds.
     recovery_pending: bool,
     event_tx: &Option<crate::engine::hot_loop::EventSink>,
+    left: &mut usize,
 ) {
     // If CCP is disconnected, leave orders in the pending buffer for retry after
     // reconnect.
-    if disconnected {
+    if disconnected || *left == 0 {
         return;
     }
 
@@ -179,7 +180,7 @@ pub(crate) fn drain_and_send_orders(
         // wire. Those are not in doubt the way the failed one is: they were
         // never sent, so they go back to wait for the reconnect rather than
         // being reported as orders of unknown state.
-        if conn.write_failed() {
+        if *left == 0 || conn.write_failed() {
             unsent.push(order_req);
             continue;
         }
@@ -204,12 +205,15 @@ pub(crate) fn drain_and_send_orders(
                     .uncertain_orders()
                     .iter()
                     .any(|o| o.instrument == instrument),
+                OrderRequest::GlobalCancel { ref instruments, .. } => context.uncertain_orders()
+                    .iter().any(|o| instruments.contains(&o.instrument)),
                 _ => false,
             };
         if waits_for_recovery {
             unsent.push(order_req);
             continue;
         }
+        *left -= 1;
         // The one request that names a slot and puts nothing in the book. It
         // is out of the buffer from here and the loop reconsiders the slot
         // later in this same lap. Said for every request that names one
@@ -221,6 +225,16 @@ pub(crate) fn drain_and_send_orders(
         if let OrderRequest::CancelAll { instrument, .. } = &order_req {
             context.slots_to_reconsider.push(*instrument);
         }
+        if let OrderRequest::GlobalCancel { instruments, .. } = &order_req {
+            context.slots_to_reconsider.extend(instruments.iter().copied());
+        }
+        let cancel_ids = match &order_req {
+            OrderRequest::CancelAll { instrument, .. } => Some(context.open_orders_for(*instrument)
+                .iter().map(|o| o.order_id).collect::<Vec<_>>()),
+            OrderRequest::GlobalCancel { instruments, .. } => Some(instruments.iter()
+                .flat_map(|instrument| context.open_orders_for(*instrument).iter().map(|o| o.order_id).collect::<Vec<_>>()).collect()),
+            _ => None,
+        };
         let oid = order_req.order_id();
         // Every leg this request writes. A bracket sends three and reports one
         // outcome, so a failure names the whole set rather than the first id.
@@ -247,7 +261,7 @@ pub(crate) fn drain_and_send_orders(
             } => {
                 if let Some(refusal) = the_slot_is_not_that_contract(context, instrument, con_id) {
                     shared.orders.push_order_inactive(
-                        order_id, ORDER_NOT_FOUND_ERROR_CODE, refusal,
+                        order_id, crate::types::model::OrderOp::Place, ORDER_NOT_FOUND_ERROR_CODE, refusal,
                     );
                     report_uncertain(context, shared, event_tx, order_id);
                     continue;
@@ -272,7 +286,7 @@ pub(crate) fn drain_and_send_orders(
                 if let Some(refusal) = the_slot_is_not_that_contract(context, instrument, con_id) {
                     for id in [parent_id, tp_id, sl_id] {
                         shared.orders.push_order_inactive(
-                            id, ORDER_NOT_FOUND_ERROR_CODE, refusal.clone(),
+                            id, crate::types::model::OrderOp::Place, ORDER_NOT_FOUND_ERROR_CODE, refusal.clone(),
                         );
                         report_uncertain(context, shared, event_tx, id);
                     }
@@ -472,9 +486,8 @@ pub(crate) fn drain_and_send_orders(
                 }
                 result
             }
-            OrderRequest::CancelAll { instrument, stated } => {
-                let open_ids: Vec<u64> =
-                    context.open_orders_for(instrument).iter().map(|o| o.order_id).collect();
+            OrderRequest::CancelAll { stated, .. } | OrderRequest::GlobalCancel { stated, .. } => {
+                let open_ids = cancel_ids.unwrap_or_default();
                 // One outcome per order. `CancelAll` carries no order id of
                 // its own, so a single result for the set cannot name the order
                 // whose cancel failed.
@@ -521,6 +534,7 @@ pub(crate) fn drain_and_send_orders(
                     );
                     shared.orders.push_order_inactive(
                         order_id,
+                        crate::types::model::OrderOp::Modify,
                         ORDER_NOT_FOUND_ERROR_CODE,
                         format!("no order {order_id} is tracked here, so it cannot be replaced"),
                     );
@@ -559,6 +573,7 @@ pub(crate) fn drain_and_send_orders(
                 if spec.is_none() && replace_needs_the_placed_record(orig.ord_type) {
                     shared.orders.push_order_inactive(
                         order_id,
+                        crate::types::model::OrderOp::Modify,
                         ORDER_NOT_FOUND_ERROR_CODE,
                         format!(
                             "order {order_id} was not placed by this session, so the offset \
@@ -653,6 +668,7 @@ pub(crate) fn drain_and_send_orders(
                 let Some(new_ver) = prev_ver.checked_add(1) else {
                     shared.orders.push_order_inactive(
                         order_id,
+                        crate::types::model::OrderOp::Modify,
                         ORDER_MESSAGE_ERROR_CODE,
                         format!(
                             "order {order_id} has been replaced as many times as it can be \
@@ -1143,13 +1159,14 @@ pub(crate) fn refuse_what_is_left(
         // they act ON — one that is working at the venue — so reporting that
         // id as never placed states a live order is dead. What did not happen
         // is the instruction, and that is what is said.
-        let (ids, what): (Vec<crate::types::OrderId>, String) = match &req {
+        let (ids, what, op): (Vec<crate::types::OrderId>, String, crate::types::model::OrderOp) = match &req {
             OrderRequest::Cancel { .. } => (
                 req.order_ids(),
                 format!(
                     "{why} before this order's cancellation reached the venue, so \
                      the order stands as it was",
                 ),
+                crate::types::model::OrderOp::Cancel,
             ),
             OrderRequest::Modify { .. } => (
                 req.order_ids(),
@@ -1157,8 +1174,9 @@ pub(crate) fn refuse_what_is_left(
                     "{why} before this order's change reached the venue, so the \
                      order stands as it was",
                 ),
+                crate::types::model::OrderOp::Modify,
             ),
-            OrderRequest::CancelAll { .. } => {
+            OrderRequest::CancelAll { .. } | OrderRequest::GlobalCancel { .. } => {
                 // Names no order at all, so there is no order to report it
                 // against. Said below under no request, which is how both
                 // surfaces deliver what belongs to none of a caller's own.
@@ -1176,6 +1194,7 @@ pub(crate) fn refuse_what_is_left(
             OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. } => (
                 req.order_ids(),
                 format!("{why} before this order reached the venue, so it was never placed"),
+                crate::types::model::OrderOp::Place,
             ),
             // Names nothing to the venue, so there is nothing to report.
         };
@@ -1185,6 +1204,7 @@ pub(crate) fn refuse_what_is_left(
             }
             shared.orders.push_order_inactive(
                 id,
+                op,
                 crate::error_codes::Refusal::NOT_CONNECTED,
                 what.clone(),
             );

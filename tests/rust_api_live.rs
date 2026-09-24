@@ -692,9 +692,9 @@ fn the_calls_no_other_live_test_names() {
     wrapper.drain();
 
     // Answered from what the logon stated, at once.
-    client.req_soft_dollar_tiers(901, &mut wrapper);
-    client.req_family_codes(&mut wrapper);
-    client.req_user_info(902, &mut wrapper);
+    client.req_soft_dollar_tiers(901); client.process_msgs(&mut wrapper);
+    client.req_family_codes(); client.process_msgs(&mut wrapper);
+    client.req_user_info(902); client.process_msgs(&mut wrapper);
     let cbs = wrapper.drain();
     assert!(
         cbs.iter().any(|c| matches!(c, Cb::SoftDollarTiers { req_id: 901, count } if *count > 0)),
@@ -708,7 +708,7 @@ fn the_calls_no_other_live_test_names() {
 
     // The venues behind a quote's exchange mask, named by the BBO exchange the
     // subscription's acknowledgement states, so a quote is asked for first.
-    client.req_mkt_data(903, &spy(), "", false, false).unwrap();
+    client.req_mkt_data(903, &spy(), "", false, false);
     poll_until(
         &client,
         &mut wrapper,
@@ -719,7 +719,7 @@ fn the_calls_no_other_live_test_names() {
         },
         Duration::from_secs(15),
     );
-    client.cancel_mkt_data(903).unwrap();
+    client.cancel_mkt_data(903);
     let cbs = wrapper.drain();
     let bbo = cbs.iter().find_map(|c| match c {
         Cb::TickReqParams { bbo_exchange } if !bbo_exchange.is_empty() => {
@@ -729,7 +729,7 @@ fn the_calls_no_other_live_test_names() {
     });
     match (bbo, refused_under(&cbs, 903)) {
         (Some(bbo), _) => {
-            client.req_smart_components(900, &bbo, &mut wrapper);
+            client.req_smart_components(900, &bbo); client.process_msgs(&mut wrapper);
             // A map that has not arrived is answered from the dispatch loop
             // once it does, within the two seconds a gateway waits.
             poll_until(
@@ -755,7 +755,7 @@ fn the_calls_no_other_live_test_names() {
 
     // When a contract trades: a historical-service question, answered at any
     // hour.
-    client.req_historical_schedule(450, &spy(), "", "1 M", true).unwrap();
+    client.req_historical_schedule(450, &spy(), "", "1 M", true);
     poll_until(
         &client,
         &mut wrapper,
@@ -778,8 +778,7 @@ fn the_calls_no_other_live_test_names() {
 
     // Past trades from a moment: history, answered at any hour.
     client
-        .req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true, false)
-        .unwrap();
+        .req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true, false);
     poll_until(
         &client,
         &mut wrapper,
@@ -802,7 +801,7 @@ fn the_calls_no_other_live_test_names() {
     // A fundamental report is asked for by the venue's id for the contract, so
     // the contract is named first: asked for one this session has not named,
     // the request is refused here before the venue hears of it.
-    client.req_contract_details(469, &aapl()).unwrap();
+    client.req_contract_details(469, &aapl());
     poll_until(
         &client,
         &mut wrapper,
@@ -818,7 +817,7 @@ fn the_calls_no_other_live_test_names() {
         cbs.iter().any(|c| matches!(c, Cb::ContractDetails { req_id: 469, .. })),
         "the venue names a contract at any hour: {cbs:?}",
     );
-    client.req_fundamental_data(470, &aapl(), "ReportSnapshot").unwrap();
+    client.req_fundamental_data(470, &aapl(), "ReportSnapshot");
     poll_until(
         &client,
         &mut wrapper,
@@ -841,8 +840,8 @@ fn the_calls_no_other_live_test_names() {
         }
     }
     // And one withdrawn as soon as it is asked for.
-    client.req_fundamental_data(471, &aapl(), "ReportSnapshot").unwrap();
-    client.cancel_fundamental_data(471).unwrap();
+    client.req_fundamental_data(471, &aapl(), "ReportSnapshot");
+    client.cancel_fundamental_data(471);
     poll(&client, &mut wrapper, Duration::from_secs(2));
 
     client.disconnect();
@@ -929,12 +928,12 @@ fn reference_and_account_calls_live() {
     client.cancel_account_updates_multi(1);
     client.cancel_positions_multi(1);
 
-    client.req_managed_accts(&mut w);
+    client.req_managed_accts(); client.process_msgs(&mut w);
     // A rule this session cannot have seen, so the refusal is the answer.
-    client.req_market_rule(999_777, &mut w);
-    client.req_positions_multi(9101, "", "", &mut w);
-    client.req_account_updates_multi(9102, "", "", true, &mut w);
-    let _ = client.req_mkt_depth_exchanges();
+    client.req_market_rule(999_777); client.process_msgs(&mut w);
+    client.req_positions_multi(9101, "", ""); client.process_msgs(&mut w);
+    client.req_account_updates_multi(9102, "", "", true); client.process_msgs(&mut w);
+    client.req_mkt_depth_exchanges();
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -988,15 +987,15 @@ fn the_venue_sends_nothing_this_client_does_not_read() {
     // Everything a caller can ask for, so the venue has reason to send
     // everything it would ever send.
     let spy = spy();
-    client.req_mkt_data(1, &spy, "", false, false).unwrap();
-    let _ = client.req_mkt_depth(2, &spy, 5, false);
-    client.req_contract_details(3, &spy).unwrap();
-    client.req_positions(&mut w);
+    client.req_mkt_data(1, &spy, "", false, false);
+    client.req_mkt_depth(2, &spy, 5, false);
+    client.req_contract_details(3, &spy);
+    client.req_positions(); client.process_msgs(&mut w);
     client.req_account_summary(4, "All", "NetLiquidation,BuyingPower");
-    client.req_open_orders(&mut w);
-    client.req_executions(5, &Default::default(), &mut w);
-    let _ = client.req_historical_data(6, &spy, "", "1 D", "1 hour", "TRADES", true, 1, false);
-    let _ = client.req_sec_def_opt_params(7, "SPY", "", "STK", 756733);
+    client.req_open_orders(); client.process_msgs(&mut w);
+    client.req_executions(5, &Default::default()); client.process_msgs(&mut w);
+    client.req_historical_data(6, &spy, "", "1 D", "1 hour", "TRADES", true, 1, false);
+    client.req_sec_def_opt_params(7, "SPY", "", "STK", 756733);
     client.req_news_bulletins(true);
 
     // An order through its whole life, which is when the venue says most.
@@ -1010,11 +1009,11 @@ fn the_venue_sends_nothing_this_client_does_not_read() {
         outside_rth: true,
         ..Default::default()
     };
-    let _ = client.place_order(order_id, &spy, &resting);
+    client.place_order(order_id, &spy, &resting);
     poll(&client, &mut w, Duration::from_secs(20));
-    let _ = client.place_order(order_id, &spy, &Order { lmt_price: 2.0, ..resting });
+    client.place_order(order_id, &spy, &Order { lmt_price: 2.0, ..resting });
     poll(&client, &mut w, Duration::from_secs(10));
-    let _ = client.cancel_order(order_id, "");
+    client.cancel_order(order_id, "");
     poll(&client, &mut w, Duration::from_secs(20));
 
     let unread = client.unread_wire();

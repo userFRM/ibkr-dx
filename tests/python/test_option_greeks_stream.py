@@ -247,8 +247,8 @@ class TestOptionsGreeks:
             assert not self.wrapper.said_under(req_id), self.wrapper.said_under(req_id)
 
     def test_an_option_not_held_is_neither_exercised_nor_lapsed(self):
-        """The venue answers an instruction on an option the account does not
-        hold with its own refusal, under the instruction's number."""
+        """An instruction on an option the account does not hold is refused
+        under its number, as a gateway refuses it, before anything is sent."""
         call, _ = self._options()
         account = self.client.get_account_id()
         # Stated with override, so held it would really be exercised: the
@@ -260,6 +260,7 @@ class TestOptionsGreeks:
         self.client.exercise_options(lapsed, call, 2, 1, account, 1)
         for req_id in (exercised, lapsed):
             assert wait_for(lambda: self.wrapper.said_under(req_id), 20), (
-                f"the venue said nothing to instruction {req_id} within 20s"
+                f"nothing was said to instruction {req_id} within 20s"
             )
-            assert self.wrapper.said_under(req_id)[0][0] == 399, self.wrapper.said_under(req_id)
+            code, text = self.wrapper.said_under(req_id)[0][:2]
+            assert code == 322 and "No unlapsed position" in text, self.wrapper.said_under(req_id)

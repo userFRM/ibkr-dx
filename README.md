@@ -190,8 +190,10 @@ Callbacks arrive on the thread that runs `client.run()`, or on the one that
 calls `client.poll()`. The three that
 `connect()` announces — `connect_ack`, `managed_accounts` and `next_valid_id` —
 are fired on the calling thread before it returns. In Rust, `process_msgs`
-delivers callbacks on the thread that calls it, and a call that takes the
-wrapper as an argument answers on it before returning.
+delivers callbacks on the thread that calls it. Requests and cancels return
+after admission; their answers and refusals arrive in session order. See
+[Moving to 0.2](https://userfrm.github.io/ibkr-dx/reference/migration-0.2.html)
+for the request, shutdown and settings changes.
 
 In Rust:
 
@@ -224,7 +226,7 @@ let preview = client.what_if_order(&spy, &Order {
 })?;
 println!("{} bars, preview {}", bars.len(), preview.status);
 
-client.req_mkt_data(1, &spy, "", false, false)?;
+client.req_mkt_data(1, &spy, "", false, false);
 std::thread::sleep(std::time::Duration::from_secs(2));
 if let Some(quote) = client.quote(1) {
     // Prices are held as integers scaled by `PRICE_SCALE`.
@@ -348,7 +350,7 @@ let scan = ibkr_dx::types::SpreadScan {
     account: "DU1234567".into(), min_delta: Some(0.25),
     ..Default::default()
 };
-client.req_spread_scan(1, &aapl, &scan)?;
+client.req_spread_scan(1, &aapl, &scan);
 for s in client.scanned_strategies(1) {
     println!("{:?} {:?} {:?}", s.legs, s.figures, s.break_evens);
 }
@@ -391,7 +393,7 @@ One row per capability, one column per client — every one of the 87 calls and 
 
 **Every call and callback on that list is present on both surfaces.** 2 callbacks are declared and not fired: a gateway reroutes a request to another contract for a contract for difference whose definition asks for it, and this client does not read a definition's flags for that before subscribing: the request goes to the venue as asked. Each says so where it is declared, so a program that implements one still compiles and runs. 7 more are declared by the TWS API and never fire on a gateway — the four steps of the verification handshake, the exchange-for-physical quote, the delta-neutral validation, which a gateway never sends, and `win_error`, which no message on the wire carries — so they fire here exactly as often as there: never.
 
-**And 76 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
+**And 84 more beyond that list.** The venue states more on a session than the documented calls ask for — what it permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and this client answers for those too, beside helpers and instrumentation of its own. The table under *Beyond the canonical list* says which each is, and which a reference client also names.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
@@ -649,6 +651,7 @@ ib_async's transport, has a method by that name.
 | `algorithms` | venue | · | · | · | ● | ● |
 | `algorithmsFor` | venue | · | · | · | ● | ● |
 | `await_order` | venue | · | · | · | ● | — |
+| `backlog` | this client | · | · | · | ● | ● |
 | `calendarEvents` | venue | · | · | · | ● | ● |
 | `calendarSchema` | venue | · | · | · | ● | ● |
 | `cancelAdjustments` | venue | · | · | · | ● | ● |
@@ -666,6 +669,7 @@ ib_async's transport, has a method by that name.
 | `contractFiguresByInstrument` | venue | · | · | · | ● | ● |
 | `corporateActions` | venue | · | · | · | ● | ● |
 | `enabledFeatures` | venue | · | · | · | ● | ● |
+| `error_from` | this client | · | · | · | ● | ● |
 | `eventsLost` | this client | · | · | · | ● | ● |
 | `instrumentOf` | this client | · | · | · | ● | ● |
 | `last_rtt` / `last_rtt_ms` | this client | · | · | · | ● | ● |
@@ -674,11 +678,14 @@ ib_async's transport, has a method by that name.
 | `newsHeadlines` | venue | · | · | · | ● | ● |
 | `nextOrderId` | this client | · | · | · | ● | ● |
 | `nextSharedId` | this client | · | · | · | ● | ● |
+| `next_shared_id_within` | venue | · | · | · | ● | · |
 | `numberedFigures` | venue | · | · | · | ● | ● |
 | `numberedFiguresSeries` | venue | · | · | · | ● | ● |
+| `on_data` | venue | · | · | · | ● | · |
 | `option_chain` / `option_chains` | venue | · | · | · | ● | ● |
 | `optionModel` | venue | · | · | · | ● | ● |
 | `optionModelByInstrument` | venue | · | · | · | ● | ● |
+| `order_id_floor` | venue | · | · | · | ● | · |
 | `orderPermissions` | venue | · | · | · | ● | ● |
 | `orderPresets` | venue | · | · | · | ● | ● |
 | `pairedFigures` | venue | · | · | · | ● | ● |
@@ -690,8 +697,10 @@ ib_async's transport, has a method by that name.
 | `positionsElsewhere` | venue | · | · | · | ● | ● |
 | `qualifyContract` | venue | · | · | · | ● | ● |
 | `qualifyContracts` | venue | · | · | ● | ● | ● |
+| `question_retired` | this client | · | · | · | ● | — |
 | `quote` | venue | · | · | · | ● | ● |
 | `quoteByInstrument` | venue | · | · | · | ● | ● |
+| `refuse` | this client | · | · | · | ● | — |
 | `reqAdjustments` | venue | · | · | · | ● | ● |
 | `req_config` / `req_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `reqMktDataEx` | venue | · | · | · | ● | ● |
@@ -712,6 +721,7 @@ ib_async's transport, has a method by that name.
 | `statedFiguresSeries` | venue | · | · | · | ● | ● |
 | `statedRows` | venue | · | · | · | ● | ● |
 | `statedRowsSeries` | venue | · | · | · | ● | ● |
+| `traffic` | venue | · | · | · | ● | ● |
 | `twsConnectionTime` | venue | ● | ● | · | ● | ● |
 | `unreadWire` | this client | · | · | · | ● | ● |
 | `update_config` / `update_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
@@ -850,7 +860,7 @@ factor included. Offering the saved session (`EClientConfig::resume`, or
 ## Configuration
 
 The gateway's configuration file is replaced by settings on the client:
-announced build, time zone, execution-report scope, and others — 17 in total,
+announced build, time zone, execution-report scope, and others — 16 in total,
 readable at runtime. Fifteen gateway settings are not settings here, and each says
 why or names what stands in for it (no window geometry, no local listening socket,
 no JVM heap, and no message pacing: a gateway paces requests at the rate its logon
@@ -858,6 +868,8 @@ states (fifty a second where it states none) unless it is set to reject them
 instead, and nothing here does either).
 
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
+`registration_timeout_ms` has been removed: registration is held by the engine
+and no longer waits at the call.
 
 Configuration read and update requests through `reqConfigProtoBuf` and
 `updateConfigProtoBuf` (Rust: `req_config` and `update_config`) report 10357
@@ -964,8 +976,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 2,820 | No |
-| Python | 949 | No |
+| Rust, unit and integration | 3,002 | No |
+| Python | 1,103 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

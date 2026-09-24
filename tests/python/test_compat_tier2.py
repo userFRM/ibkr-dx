@@ -237,6 +237,7 @@ def test_exercise_options_refuses_an_action_it_cannot_serve():
     c._test_connect()
     contract = make_contract(con_id=265598, symbol="AAPL")
     c.exercise_options(1, contract, 3, 100, "TEST123", 0)
+    c.poll()
     req_id, code, message = w.errors[-1]
     assert (req_id, code) == (1, 321)
     assert "exercise_action 3" in message
@@ -249,6 +250,7 @@ def test_exercise_options_answers_an_account_the_login_does_not_hold():
     c._test_connect()
     contract = make_contract(con_id=265598, symbol="AAPL")
     c.exercise_options(1, contract, 1, 100, "DU12345", 0)
+    c.poll()
     assert w.errors[-1] == (
         1, 322,
         "Error processing request:No unlapsed position exists in this option in account DU12345.",

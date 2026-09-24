@@ -23,6 +23,8 @@ pub use reference::*;
 mod portfolio;
 pub use portfolio::*;
 mod slot_table;
+mod record;
+pub use record::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use std::sync::{Condvar, Mutex};
@@ -86,7 +88,7 @@ mod seq_quote_tests {
                         timestamp_ns: i as u64,
                         bid_exch_mask: i, ask_exch_mask: i, last_exch_mask: i,
                         halted: i,
-                    });
+                    }, i as u64);
                 }
             })
         };
@@ -200,7 +202,11 @@ pub struct SharedState {
     /// Everything that is not a price: contracts, history, news, scans.
     pub reference: ReferenceState,
     /// What the account holds and what it is worth.
-    pub portfolio: PortfolioState,
+    pub portfolio: std::sync::Arc<PortfolioState>,
+    session_account: Mutex<String>,
+    portfolios: Mutex<std::collections::HashMap<String, std::sync::Arc<PortfolioState>>>,
+    account_requests: Mutex<std::collections::HashMap<String, String>>,
+    account_selections_said: Mutex<std::collections::HashSet<String>>,
     /// Last measured auth-connection round-trip time in nanoseconds
     /// (0 = never measured). Sampled from the test-request/echo cycle —
     /// see `HotLoop` liveness and `ControlCommand::Ping`.
@@ -208,26 +214,51 @@ pub struct SharedState {
     ///
 
     ccp_rtt_ns: AtomicU64,
-    /// Set by the hot loop when the session is over (connection lost, engine
-    /// stopped, or reconnect exhausted). Read-and-clear by the client so the
-    /// `connection_closed` callback can fire without an event channel. The
-    /// `Event::Disconnected` channel path is optional; this
-    /// flag is always populated.
-    connection_lost: AtomicBool,
-    /// Whether the loss above was deliberate. Recorded at the moment of loss,
+    /// What the session has sent and received on the venue's connections.
+    traffic: std::sync::Arc<crate::protocol::connection::TrafficCounts>,
+    /// The counter every record of this session is stamped from.
+    stamps: Stamps,
+    /// The session's own records: the connection going and coming back, the
+    /// venue's data connections doing the same, the slots taken and given
+    /// back, and the last record of all.
+    session_records: Queue<Record>,
+    /// What a call pushes: its refusals, the answers composed where they are
+    /// delivered, and the answers given at the call.
+    calls: Queue<Record>,
+    /// Whether the connection is up, as the engine last said. A loss and a
+    /// recovery are each said once, as this flips.
+    link_up: AtomicBool,
+    /// Whether the last loss was deliberate. Recorded at the moment of loss,
     /// not derived later.
     connection_lost_by_design: AtomicBool,
-    /// Set when a reconnect recovered a loss that was announced. Read-and-clear
-    /// like `connection_lost`, so a client with no event channel still learns
-    /// it is back.
-    connection_restored: AtomicBool,
-    /// The venue's data connections going away and coming back, in order,
-    /// for a client with no event channel to read.
-    venue_data_notices: std::sync::Mutex<Vec<(crate::bridge::VenueDataConnection, bool)>>,
+    /// Whether the session's last record has been pushed.
+    closed: AtomicBool,
+    /// No new caller work is accepted once the session starts closing.
+    admission_closed: AtomicBool,
+    /// Serialize a send with closing admission.
+    admission: Mutex<()>,
+    pub(crate) logout_sent: AtomicBool,
+    pub(crate) engine_panicked: AtomicBool,
+    /// Every command admitted to the engine, raised before its send.
+    admitted: AtomicU64,
+    /// Every command the engine's loop has finished with, published once per
+    /// lap: those it has taken so far, less those it still holds.
+    finished: AtomicU64,
     /// Notifier for waking consumers (e.g. Python event loop) when data arrives.
     notify_mutex: Mutex<bool>,
     notify_condvar: Condvar,
+    /// What the owner of this session is woken by, besides the condvar above.
+    wake_hook: Mutex<Option<WakeHook>>,
+    /// Whether the hook may be called: cleared as it is, and set again as a
+    /// read begins, so it is called at most once per read.
+    wake_armed: AtomicBool,
+    /// The stamp counter as the last notification found it, so the next one
+    /// can tell whether a record was pushed since.
+    wake_cut: AtomicU64,
 }
+
+/// A hook the engine calls on its own thread when something is there to read.
+pub type WakeHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 
 impl Default for SharedState {
     fn default() -> Self {
@@ -236,6 +267,69 @@ impl Default for SharedState {
 }
 
 impl SharedState {
+    /// Name the account whose figures the opening download states.
+    #[doc(hidden)]
+    pub fn set_session_account(&self, account: &str) {
+        *self.session_account.lock().unwrap() = account.to_string();
+    }
+
+    /// The account named, or the opening account where no name was given.
+    pub(crate) fn account_name(&self, account: &str) -> String {
+        if account.is_empty() { self.session_account.lock().unwrap().clone() } else { account.to_string() }
+    }
+
+    /// Figures and holdings kept separately for every account the venue names.
+    #[doc(hidden)]
+    pub fn portfolio_for(&self, account: &str) -> std::sync::Arc<PortfolioState> {
+        if account.is_empty() || *self.session_account.lock().unwrap() == account {
+            return self.portfolio.clone();
+        }
+        self.portfolios.lock().unwrap().entry(account.to_string())
+            .or_insert_with(|| std::sync::Arc::new(PortfolioState::stamping(&self.stamps))).clone()
+    }
+
+    /// Bind an account response key before its request goes out.
+    pub(crate) fn name_account_request(&self, key: &str, account: &str) {
+        self.account_requests.lock().unwrap().insert(key.to_string(), self.account_name(account));
+    }
+
+    /// The account named by an account response's request key.
+    pub(crate) fn portfolio_for_request(&self, key: &str) -> Option<std::sync::Arc<PortfolioState>> {
+        if key.is_empty() { return Some(self.portfolio.clone()); }
+        let account = self.account_requests.lock().unwrap().get(key).cloned()?;
+        Some(self.portfolio_for(&account))
+    }
+
+    pub(crate) fn portfolio_for_message(&self, msg: &[u8]) -> Option<std::sync::Arc<PortfolioState>> {
+        let parsed = crate::protocol::fix::fix_parse(msg);
+        let key = parsed.get(&8292).filter(|key| !key.is_empty())
+            .or_else(|| parsed.get(&6529)).map(String::as_str).unwrap_or("");
+        if !key.is_empty() { return self.portfolio_for_request(key); }
+        let mut field = "";
+        let mut account = "";
+        for part in std::str::from_utf8(msg).unwrap_or("").split('\x01') {
+            if let Some(value) = part.strip_prefix("8001=") { field = value; }
+            if let Some(value) = part.strip_prefix("8004=") {
+                if matches!(field, "AccountCode" | "AddAccountCode") { account = value; }
+                field = "";
+            }
+        }
+        Some(self.portfolio_for(account))
+    }
+
+    pub(crate) fn note_unapplied_account_selection(&self, name: &str) {
+        if self.account_selections_said.lock().unwrap().insert(name.to_string()) {
+            log::warn!("account selection {name} is taken and not applied");
+        }
+    }
+
+    /// The accounts whose figures this session has requested or received.
+    pub(crate) fn account_portfolios(&self) -> Vec<(String, std::sync::Arc<PortfolioState>)> {
+        let mut all = vec![(self.account_name(""), self.portfolio.clone())];
+        all.extend(self.portfolios.lock().unwrap().iter().map(|(a, p)| (a.clone(), p.clone())));
+        all
+    }
+
     /// What this session runs under.
     pub fn settings(&self) -> std::sync::Arc<crate::settings::SessionSettings> {
         self.settings.lock().unwrap().clone()
@@ -259,107 +353,135 @@ impl SharedState {
 
     /// An empty one.
     pub fn new() -> Self {
+        let stamps = Stamps::default();
         Self {
             settings: std::sync::Mutex::new(std::sync::Arc::new(Default::default())),
-            market: MarketDataState::new(),
-            orders: OrderState::new(),
-            reference: ReferenceState::new(),
-            portfolio: PortfolioState::new(),
+            market: MarketDataState::stamping(&stamps),
+            orders: OrderState::stamping(&stamps),
+            reference: ReferenceState::stamping(&stamps),
+            portfolio: std::sync::Arc::new(PortfolioState::stamping(&stamps)),
+            session_account: Mutex::new(String::new()),
+            portfolios: Mutex::new(std::collections::HashMap::new()),
+            account_requests: Mutex::new([("AR.1".to_string(), String::new()), ("PLR.1".to_string(), String::new())].into_iter().collect()),
+            account_selections_said: Mutex::new(std::collections::HashSet::new()),
             ccp_rtt_ns: AtomicU64::new(0),
-            connection_lost: AtomicBool::new(false),
+            traffic: Default::default(),
+            session_records: Queue::new(&stamps),
+            calls: Queue::new(&stamps),
+            stamps,
+            link_up: AtomicBool::new(true),
             connection_lost_by_design: AtomicBool::new(false),
-            connection_restored: AtomicBool::new(false),
-            venue_data_notices: std::sync::Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
+            admission_closed: AtomicBool::new(false),
+            admission: Mutex::new(()),
+            logout_sent: AtomicBool::new(false),
+            engine_panicked: AtomicBool::new(false),
+            admitted: AtomicU64::new(0),
+            finished: AtomicU64::new(0),
             notify_mutex: Mutex::new(false),
             notify_condvar: Condvar::new(),
+            wake_hook: Mutex::new(None),
+            wake_armed: AtomicBool::new(true),
+            wake_cut: AtomicU64::new(0),
         }
     }
 
-    /// Signal that the session is over. Hot-loop side.
+    /// The connection went. Hot-loop side.
+    ///
+    /// Said once, as the connected flag flips: a halt after a loss already
+    /// said, or a second transport going with the first, says nothing more.
+    /// The record carries whether the loss was asked for, which is decided
+    /// here rather than by a later reader. A shutdown records its own reason
+    /// and records it after any venue-side drop, so deriving this afterwards
+    /// reports a caller-requested stop for a session the venue ended, and
+    /// every absence after it reads as tidying.
     #[doc(hidden)]
     #[inline]
     pub fn set_connection_lost(&self) {
-        // The two flags are one fact between them: which way the connection
-        // last went. Both raised, the reader cannot tell which came first and
-        // applies them in its own order — so a session that came back and went
-        // again reads as connected, with nothing left to say it is not.
-        self.connection_restored.store(false, Ordering::Release);
-        // Decided here rather than by a later reader. A shutdown records its
-        // own reason and records it after any venue-side drop, so deriving
-        // this afterwards reports a caller-requested stop for a session the
-        // venue ended, and every absence after it reads as tidying.
-        self.connection_lost_by_design.store(
-            self.reference.session_over()
-                == Some(crate::reliability::retry::DisconnectReason::ByDesign.as_str()),
-            Ordering::Release,
-        );
-        self.connection_lost.store(true, Ordering::Release);
+        let by_design = self.reference.session_over()
+            == Some(crate::reliability::retry::DisconnectReason::ByDesign.as_str());
+        self.connection_lost_by_design.store(by_design, Ordering::Release);
+        if self.link_up.swap(false, Ordering::AcqRel) {
+            self.session_records.push(Record::ConnectionLost { by_design });
+        }
         self.notify();
     }
 
     /// Whether the last recorded loss was one this process asked for.
-    ///
-    /// Read beside [`take_connection_lost`](Self::take_connection_lost): the
-    /// two together say the connection went away and whether that was the
-    /// intention.
     #[inline]
     pub fn connection_lost_by_design(&self) -> bool {
         self.connection_lost_by_design.load(Ordering::Acquire)
     }
 
-    /// Read and clear the connection-lost flag. Returns `true` at most once per
-    /// signal, so the caller can fire `connection_closed` exactly once.
-    #[inline]
-    pub fn take_connection_lost(&self) -> bool {
-        self.connection_lost.swap(false, Ordering::AcqRel)
-    }
-
-    /// Signal that an announced loss has been recovered. Hot-loop side.
+    /// The connection came back after a loss. Hot-loop side. Said once, as
+    /// the connected flag flips back.
     #[doc(hidden)]
     #[inline]
     pub fn set_connection_restored(&self) {
-        // The later transition is the one that stands, as in
-        // [`set_connection_lost`](Self::set_connection_lost).
-        self.connection_lost.store(false, Ordering::Release);
-        self.connection_restored.store(true, Ordering::Release);
+        if !self.link_up.swap(true, Ordering::AcqRel) {
+            self.session_records.push(Record::ConnectionRestored);
+        }
         self.notify();
     }
 
-    /// Read the connection-restored flag without clearing it.
-    pub fn peek_connection_restored(&self) -> bool {
-        self.connection_restored.load(Ordering::Acquire)
+    /// Whether the connection is up, as the engine last said.
+    pub fn link_up(&self) -> bool {
+        self.link_up.load(Ordering::Acquire)
     }
 
-    /// Read and clear the connection-restored flag.
-    #[inline]
-    pub fn take_connection_restored(&self) -> bool {
-        self.connection_restored.swap(false, Ordering::AcqRel)
-    }
-
-    /// Both transitions raised at once, as a reader observes them when the
-    /// recovery lands between its two reads.
-    ///
-    /// The setters clear one another, so this state is not reachable through
-    /// them and a reader that mishandles it cannot be shown to. It is the
-    /// interleaving itself: the loss is taken, the engine recovers, and the
-    /// recovery is taken on the same pass.
+    /// Take the notices that the connection went, and say whether there was
+    /// one. For a reader of the engine's own, which reads no other record.
     #[doc(hidden)]
-    pub fn raise_a_loss_a_recovery_landed_behind_for_test(&self) {
-        self.connection_lost.store(true, Ordering::Release);
-        self.connection_restored.store(true, Ordering::Release);
+    pub fn take_connection_lost(&self) -> bool {
+        !self.session_records.take_if(|r| matches!(r, Record::ConnectionLost { .. })).is_empty()
+    }
+
+    /// The same for the notices that it came back.
+    #[doc(hidden)]
+    pub fn take_connection_restored(&self) -> bool {
+        !self.session_records.take_if(|r| matches!(r, Record::ConnectionRestored)).is_empty()
     }
 
     /// One of the connections the venue keeps data on went away or came back.
-    /// Hot-loop side; kept here so a client with no event channel hears it.
+    /// Hot-loop side; a record, so it is heard in its place.
     #[doc(hidden)]
     pub fn push_venue_data_notice(&self, which: crate::bridge::VenueDataConnection, up: bool) {
-        self.venue_data_notices.lock().unwrap().push((which, up));
+        self.session_records.push(Record::VenueData((which, up)));
         self.notify();
     }
 
     /// Take the data-connection notices, in the order they came.
     pub fn drain_venue_data_notices(&self) -> Vec<(crate::bridge::VenueDataConnection, bool)> {
-        self.venue_data_notices.lock().unwrap().drain(..).collect()
+        self.session_records
+            .take_if(|r| matches!(r, Record::VenueData(_)))
+            .into_iter()
+            .filter_map(|r| match r {
+                Record::VenueData(notice) => Some(notice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A slot is held from here under `generation`, or given back under it.
+    /// Hot-loop side, where the occupancy is named: a record, so a reader
+    /// applies it in its place, before anything pushed under the slot after it.
+    #[doc(hidden)]
+    pub fn push_slot_record(&self, record: Record) {
+        debug_assert!(matches!(record, Record::SlotTaken { .. } | Record::SlotReleased { .. }));
+        self.session_records.push(record);
+    }
+
+    /// Where the session's connections count what they read and write.
+    /// Hot-loop side, which hands it to each connection it takes.
+    #[doc(hidden)]
+    pub fn traffic_counts(&self) -> &std::sync::Arc<crate::protocol::connection::TrafficCounts> {
+        &self.traffic
+    }
+
+    /// What the session has sent and received on the venue's connections since
+    /// it opened: bytes and messages, each way.
+    pub fn traffic(&self) -> crate::protocol::connection::Traffic {
+        self.traffic.read()
     }
 
     /// Record an auth-connection RTT sample. Hot-loop side.
@@ -380,23 +502,144 @@ impl SharedState {
         }
     }
 
+    /// Hand the engine a command without waiting, counted until the engine
+    /// has finished with it.
+    ///
+    /// The count is raised before the send, so every command the loop takes
+    /// has been counted by then; a send the engine is no longer there for
+    /// takes its count back. A TWS call returns once its message is written,
+    /// and this is that write: the channel is unbounded, and nothing here
+    /// waits for the loop to make room.
+    pub fn admit(
+        &self,
+        tx: &std::sync::mpsc::Sender<ControlCommand>,
+        cmd: ControlCommand,
+    ) -> Result<(), crate::error_codes::Refusal> {
+        let _admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.closed_pushed() || (self.admission_closed() && !matches!(cmd, ControlCommand::Logout | ControlCommand::Shutdown)) {
+            return Err(crate::error_codes::Refusal::not_connected("Engine stopped"));
+        }
+        self.admitted.fetch_add(1, Ordering::AcqRel);
+        tx.send(cmd).map_err(|gone| {
+            self.admitted.fetch_sub(1, Ordering::AcqRel);
+            crate::error_codes::Refusal::not_connected(format!("Engine stopped: {gone}"))
+        })
+    }
+
+    /// Close the session to new caller work before starting its finalizer.
+    pub(crate) fn close_admission(&self) {
+        let _admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.admission_closed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn admission_closed(&self) -> bool {
+        self.admission_closed.load(Ordering::Acquire)
+    }
+
+    /// How many commands have been admitted and not finished: waiting in the
+    /// channel, or taken and held by the loop for naming, for the order
+    /// buffer or for an exchange it must wait behind.
+    ///
+    /// `finished` is read first. Every command it counts was admitted before
+    /// the loop took it, so the difference is never negative; and a command
+    /// the loop has taken still counts until the lap that took it publishes,
+    /// so the count never drops between the take and the hold.
+    pub fn backlog(&self) -> usize {
+        let finished = self.finished.load(Ordering::Acquire);
+        let admitted = self.admitted.load(Ordering::Acquire);
+        usize::try_from(admitted.saturating_sub(finished)).unwrap_or(usize::MAX)
+    }
+
+    /// Hot-loop side: how many commands the loop has finished with, once its
+    /// lap has taken its commands and updated its holds.
+    #[doc(hidden)]
+    pub fn publish_finished(&self, finished: u64) {
+        self.finished.store(finished, Ordering::Release);
+    }
+
     /// Signal that new data is available. Called by hot loop after pushing data.
+    ///
+    /// Then calls the wake hook, if one is set, with this signal's lock
+    /// released and no other lock of the engine's held: only when a record has
+    /// been pushed or conflated state written since the last notification, and
+    /// at most once until the next read begins.
     #[inline]
     pub fn notify(&self) {
-        let mut pending = self.notify_mutex.lock().unwrap();
-        *pending = true;
-        self.notify_condvar.notify_one();
+        {
+            let mut pending = self.notify_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *pending = true;
+            self.notify_condvar.notify_one();
+        }
+        self.wake();
+    }
+
+    /// Call the wake hook, if anything has changed and a read has begun since
+    /// it was last called.
+    ///
+    /// The engine notifies at the end of every lap, and a connected loop laps
+    /// as fast as it can: a hook called on every notification would wake its
+    /// owner at that rate, whether or not there was anything to read.
+    fn wake(&self) {
+        let cut = self.stamps.cut();
+        let pushed = self.wake_cut.swap(cut, Ordering::SeqCst) != cut;
+        let written = self.stamps.take_written();
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if !(pushed || written) || !self.wake_armed.load(Ordering::SeqCst) {
+            return;
+        }
+        // Taken out of the lock before it is called, so a hook that sets a
+        // hook, or reads this session, waits on nothing this holds.
+        let hook = self.wake_hook.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let Some(hook) = hook else { return };
+        if !self.wake_armed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook())) {
+            // A caller can panic with a payload whose destructor also panics.
+            // Dropping it would let that second panic escape this boundary.
+            std::mem::forget(payload);
+            log::error!("the hook set to be woken by this session panicked, and is removed");
+            let mut held = self.wake_hook.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if held.as_ref().is_some_and(|set| std::sync::Arc::ptr_eq(set, &hook)) {
+                *held = None;
+            }
+            drop(held);
+            // Removing the last reference also drops anything the hook kept.
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(hook))) {
+                std::mem::forget(payload);
+            }
+        }
+    }
+
+    /// Set the hook [`notify`](Self::notify) calls, replacing the one before
+    /// it; `None` removes it. Replacing it does not begin another read.
+    pub fn set_wake_hook(&self, hook: Option<WakeHook>) {
+        let previous = {
+            let mut held = self.wake_hook.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(&mut *held, hook)
+        };
+        drop(previous);
+    }
+
+    /// A read has begun: the hook may be called again for what changes after
+    /// this.
+    pub fn arm_wake(&self) {
+        self.wake_armed.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
     }
 
     /// Wait for data notification with a timeout. Returns true if notified, false if
     /// timed out.
     pub fn wait_for_data(&self, timeout: std::time::Duration) -> bool {
-        let mut pending = self.notify_mutex.lock().unwrap();
+        let mut pending = self.notify_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if *pending {
             *pending = false;
             return true;
         }
-        let (mut flag, result) = self.notify_condvar.wait_timeout(pending, timeout).unwrap();
+        let (mut flag, result) = self
+            .notify_condvar
+            .wait_timeout(pending, timeout)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let had_data = *flag;
         // Taken back through the guard the wait returns. Letting go of it to
         // take it again left a gap an announcement could land in, and the
@@ -434,6 +677,20 @@ mod tests {
         assert_eq!(held[held.len() - 1].msg_id, NEWS_BULLETIN_LIMIT as i32 + 9);
     }
 
+    /// The connection notices a read takes, as (lost, by design) and
+    /// restored, in order.
+    fn connection_records(shared: &SharedState) -> Vec<Option<bool>> {
+        shared
+            .take_records(shared.next_seq(), Take::Dispatch { bulletins: false })
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                Record::ConnectionLost { by_design } => Some(Some(by_design)),
+                Record::ConnectionRestored => Some(None),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether a loss was asked for is decided as it is recorded.
     ///
     /// Shutting down records its own reason. Derived from that reason after
@@ -448,22 +705,59 @@ mod tests {
         shared.set_connection_lost();
         // The tidying that follows records one, as a shutdown does.
         shared.reference.set_session_over(DisconnectReason::ByDesign.as_str());
-        assert!(shared.take_connection_lost());
-        assert!(!shared.connection_lost_by_design(), "nobody asked for this one");
+        assert_eq!(connection_records(&shared), [Some(false)], "nobody asked for this one");
 
         // And a shutdown, which records its reason before the loss.
         let asked = SharedState::new();
         asked.reference.set_session_over(DisconnectReason::ByDesign.as_str());
         asked.set_connection_lost();
-        assert!(asked.take_connection_lost());
-        assert!(asked.connection_lost_by_design());
+        assert_eq!(connection_records(&asked), [Some(true)]);
+    }
+
+    /// A loss is said once and its recovery once, as the connected flag flips:
+    /// a second transport going with the first, or a halt after a loss already
+    /// said, says nothing more, and a recovery with no loss before it is no
+    /// recovery.
+    #[test]
+    fn a_loss_and_its_recovery_are_each_one_record() {
+        let shared = SharedState::new();
+        shared.set_connection_restored();
+        assert!(connection_records(&shared).is_empty(), "a recovery from nothing says nothing");
+
+        shared.set_connection_lost();
+        shared.set_connection_lost();
+        shared.set_connection_restored();
+        shared.set_connection_restored();
+        shared.set_connection_lost();
+        assert_eq!(
+            connection_records(&shared),
+            [Some(false), None, Some(false)],
+            "one 1100, one 1102, and the loss that followed",
+        );
+        assert!(!shared.link_up());
+    }
+
+    /// A quote is read with the occupancy it was written under, from the same
+    /// write, so a reader cannot pair one contract's quote with the next
+    /// contract's name for the slot.
+    #[test]
+    fn a_quote_is_read_with_the_occupancy_it_was_written_under() {
+        let shared = SharedState::new();
+        shared.market.set_generation(3, 7);
+        shared.market.push_quote(3, &Quote { bid: 5, ..Default::default() });
+        let (quote, generation) = shared.market.quote_with_generation(3);
+        assert_eq!((quote.bid, generation), (5, 7));
+        // Renamed, the quote standing is written again under the new name.
+        shared.market.set_generation(3, 8);
+        let (quote, generation) = shared.market.quote_with_generation(3);
+        assert_eq!((quote.bid, generation), (5, 8));
     }
 
     #[test]
     fn seqquote_write_read_roundtrip() {
         let sq = SeqQuote::new();
         let q = Quote { bid: 150 * PRICE_SCALE, ask: 151 * PRICE_SCALE, ..Default::default() };
-        sq.write(&q);
+        sq.write(&q, 0);
         let read = sq.read();
         assert_eq!(read.bid, 150 * PRICE_SCALE);
         assert_eq!(read.ask, 151 * PRICE_SCALE);
@@ -607,7 +901,7 @@ mod tests {
         let writer = thread::spawn(move || {
             for i in 0..1000 {
                 let q = Quote { bid: i * PRICE_SCALE, ask: (i + 1) * PRICE_SCALE, ..Default::default() };
-                sq_writer.write(&q);
+                sq_writer.write(&q, 0);
             }
         });
 
@@ -1028,7 +1322,7 @@ mod tests {
             let sq = sq.clone();
             thread::spawn(move || {
                 for i in 1..=20_000i64 {
-                    sq.write(&quote_of(i));
+                    sq.write(&quote_of(i), 0);
                 }
             })
         };

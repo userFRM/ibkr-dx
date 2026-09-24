@@ -1,12 +1,13 @@
 //! What has been submitted, filled, and refused.
 
 use super::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use crate::types::*;
 use crate::types::model as api;
+use super::record::{FillRecord, Queue, Stamps, UpdateRecord};
 
 /// How long a caller waits for the venue to finish naming the working orders.
 ///
@@ -14,6 +15,15 @@ use crate::types::model as api;
 /// has finished for the same replay and must not invent a second answer to
 /// "how long could that take".
 pub(crate) const REPLAY_WAIT: Duration = Duration::from_secs(3);
+
+/// What the venue has said about the numbers orders were placed under.
+#[derive(Default)]
+struct Numbers {
+    /// Finished: filled, cancelled or refused.
+    finished: std::collections::HashSet<u64>,
+    /// Named in a refusal of a cancel as an order the venue does not know.
+    unknown: std::collections::HashSet<u64>,
+}
 
 /// What a connection has said about the orders it already had working.
 ///
@@ -40,6 +50,17 @@ struct Replay {
     deadline: Option<Instant>,
 }
 
+/// How a bounded wait for the naming of what the account is working ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayWait {
+    /// The naming finished (`true`), or its own bound passed first (`false`).
+    Settled(bool),
+    /// The caller's own bound passed first.
+    TimedOut,
+    /// The caller took the wait back.
+    TakenBack,
+}
+
 /// Fills, order status updates, cancel rejects, what-if responses, order
 /// cache, and inactive-order reasons.
 pub struct OrderState {
@@ -50,8 +71,14 @@ pub struct OrderState {
     /// earlier one was reported under the later one's execution id, time,
     /// running quantity and average — and the charge that named that id was
     /// then attached to both.
-    fills: Mutex<Vec<(Fill, Option<RichOrderInfo>)>>,
-    order_updates: Mutex<Vec<OrderUpdate>>,
+    ///
+    /// Each carries the status the same report stated, so one execution
+    /// report is one record and nothing about it is paired up again at the
+    /// read.
+    pub(super) fills: Queue<FillRecord>,
+    /// Status changes with no fill on the same report, each with the order's
+    /// state as that report stated it.
+    pub(super) order_updates: Queue<UpdateRecord>,
     /// Every order whose message this client put on the wire.
     ///
     /// What the venue then said about it is a separate question, and the two
@@ -65,27 +92,19 @@ pub struct OrderState {
     /// the only thing that does. A caller asking for the API orders alone is
     /// answered with these.
     api_numbered: Mutex<std::collections::HashSet<u64>>,
-    cancel_rejects: Mutex<Vec<CancelReject>>,
+    pub(super) cancel_rejects: Queue<CancelReject>,
     /// What each fill cost, as the venue states it on a record of its own.
-    charges: Mutex<Vec<crate::types::model::CommissionAndFeesReport>>,
+    pub(super) charges: Queue<crate::types::model::CommissionAndFeesReport>,
     /// Executions the venue restated rather than announced: replayed at logon
     /// for quantity the book already holds, or for an order this session never
     /// tracked. Nothing is booked from them, so none became a fill; they are
     /// kept so a caller asking for the day's executions is answered.
-    restated_executions: Mutex<Vec<(api::Contract, api::Execution)>>,
-    what_if_responses: Mutex<Vec<WhatIfResponse>>,
+    pub(super) restated_executions: Queue<(api::Contract, api::Execution)>,
+    pub(super) what_if_responses: Queue<WhatIfResponse>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Whether the venue has said it has stated every finished order it holds.
     completed_orders_ended: std::sync::atomic::AtomicU64,
     completed_orders_asked: std::sync::atomic::AtomicU64,
-    /// Whether a caller is already waiting on that question.
-    completed_orders_in_flight: std::sync::atomic::AtomicBool,
-    /// Which turn of that question the session is on.
-    ///
-    /// A caller that gives up leaves its own answer on its way, so the next
-    /// caller reads the turn it took the question on and is released only by
-    /// what arrives on or after it.
-    completed_orders_turn: std::sync::atomic::AtomicU64,
     /// The latest turn the venue has finished answering.
     completed_orders_ended_on: std::sync::atomic::AtomicU64,
     /// Orders the venue has taken back after reporting them finished.
@@ -97,12 +116,23 @@ pub struct OrderState {
     /// completion did, and whoever holds the archive drops it.
     order_corrections: Mutex<Vec<u64>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
-    order_cache: Mutex<HashMap<u64, RichOrderInfo>>,
+    order_cache: Mutex<HashMap<u64, Arc<RichOrderInfo>>>,
     /// Orders that reached a terminal state, and when. The cache row is evicted
     /// when an order completes, so the cached status alone cannot say an order
     /// is done — a replayed frame would find nothing to refuse and insert it as
     /// open.
     pub(super) completed: Mutex<HashMap<u64, Instant>>,
+    /// Every number the venue has finished an order under this session, and
+    /// every number it has said names no order it holds.
+    ///
+    /// Read by the engine as it takes an order: a number the venue has
+    /// finished an order under is spent — the venue refuses a repeated number
+    /// only while it is still working one, so after a fill it would take a
+    /// second order under it — and a number the venue says it does not know
+    /// names nothing this session placed.
+    numbers: Mutex<Numbers>,
+    /// Whether an order left the book since the engine last removed stale terms.
+    numbers_changed: AtomicBool,
     /// What this connection has said about the orders it already has working.
     replay: Mutex<Replay>,
     /// The highest id the venue has named an order working under, from any
@@ -119,13 +149,13 @@ pub struct OrderState {
     /// carry.
     narrow_id_watermark: AtomicU64,
     /// Reason for a genuinely-Inactive (39=I) transition: (order_id, ibapi
-    /// error code, message). ibapi has no callback dedicated to "order
-    /// parked with reason", so this is drained into `Wrapper::error` the
-    /// same way a cancel/modify reject is.
-    order_inactive: Mutex<Vec<(u64, i32, String)>>,
+    /// error code, message, the operation it answers). ibapi has no callback
+    /// dedicated to "order parked with reason", so this is drained into
+    /// `Wrapper::error_from` the same way a cancel/modify reject is.
+    pub(super) order_inactive: Queue<(u64, i32, String, api::OrderOp)>,
     /// What the caller is told about an order that goes anyway, as
-    /// (order_id, code, message).
-    order_notices: Mutex<Vec<(u64, i32, String)>>,
+    /// (order_id, code, message, the operation it answers).
+    pub(super) order_notices: Queue<(u64, i32, String, api::OrderOp)>,
     /// Orders whose outstanding replacement the venue has taken.
     ///
     /// The surfaces hold the terms an order had before a replacement, to put
@@ -133,7 +163,7 @@ pub struct OrderState {
     /// taking the replacement, and nothing but the venue's own word says so:
     /// read off a status instead, a fill landing between the attempt and the
     /// answer hid it, and the copy outlived the replacement it belonged to.
-    replacements_taken: Mutex<Vec<u64>>,
+    pub(super) replacements_taken: Queue<u64>,
 }
 
 /// The highest id an order can be given.
@@ -167,63 +197,54 @@ pub fn say_if_past_a_request_id(order_id: u64) {
 }
 
 impl OrderState {
+    /// An empty one, stamping from its own counter.
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::stamping(&Stamps::default())
+    }
+
+    /// An empty one, stamping from the session's counter.
+    pub(super) fn stamping(stamps: &Stamps) -> Self {
         Self {
-            fills: Mutex::new(Vec::with_capacity(64)),
+            fills: Queue::with_capacity(stamps, 64),
             orders_sent: Mutex::new(std::collections::HashSet::new()),
             api_numbered: Mutex::new(std::collections::HashSet::new()),
-            order_updates: Mutex::new(Vec::with_capacity(64)),
-            cancel_rejects: Mutex::new(Vec::with_capacity(16)),
-            charges: Mutex::new(Vec::with_capacity(16)),
-            restated_executions: Mutex::new(Vec::new()),
-            what_if_responses: Mutex::new(Vec::with_capacity(8)),
+            order_updates: Queue::with_capacity(stamps, 64),
+            cancel_rejects: Queue::with_capacity(stamps, 16),
+            charges: Queue::with_capacity(stamps, 16),
+            restated_executions: Queue::new(stamps),
+            what_if_responses: Queue::with_capacity(stamps, 8),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             completed_orders_ended: std::sync::atomic::AtomicU64::new(0),
             completed_orders_asked: std::sync::atomic::AtomicU64::new(0),
-            completed_orders_in_flight: std::sync::atomic::AtomicBool::new(false),
-            completed_orders_turn: std::sync::atomic::AtomicU64::new(0),
             completed_orders_ended_on: std::sync::atomic::AtomicU64::new(0),
             order_corrections: Mutex::new(Vec::new()),
             order_cache: Mutex::new(HashMap::new()),
             completed: Mutex::new(HashMap::new()),
+            numbers: Mutex::new(Numbers::default()),
+            numbers_changed: AtomicBool::new(false),
             replay: Mutex::new(Replay::default()),
             working_id_watermark: AtomicU64::new(0),
             narrow_id_watermark: AtomicU64::new(0),
-            order_inactive: Mutex::new(Vec::with_capacity(8)),
-            order_notices: Mutex::new(Vec::new()),
-            replacements_taken: Mutex::new(Vec::with_capacity(4)),
+            order_inactive: Queue::with_capacity(stamps, 8),
+            order_notices: Queue::new(stamps),
+            replacements_taken: Queue::with_capacity(stamps, 4),
         }
     }
 
     /// Take every fills waiting, leaving none.
     pub fn drain_fills(&self) -> Vec<(Fill, Option<RichOrderInfo>)> {
-        self.fills.lock().unwrap().drain(..).collect()
+        self.fills.drain().into_iter().map(|f| (f.fill, f.report.map(|r| (*r).clone()))).collect()
     }
 
-    /// Take the queued statuses, dropping any that the order has already moved
-    /// past.
-    ///
-    /// A working status queued a moment before the fill is still in here when
-    /// the fill is delivered, and the fill is delivered first — so handing this
-    /// queue over untouched reported a filled order as working with nothing
-    /// filled. Seen on every market order against a paper account. The check
-    /// belongs here rather than on the way in, because on the way in the order
-    /// genuinely had not finished yet.
+    /// Take the queued statuses, leaving none.
     pub fn drain_order_updates(&self) -> Vec<OrderUpdate> {
-        let queued: Vec<OrderUpdate> = self.order_updates.lock().unwrap().drain(..).collect();
-        queued
-            .into_iter()
-            .filter(|u| {
-                u.status.is_terminal()
-                    || u.status == crate::types::OrderStatus::Uncertain
-                    || !self.recently_completed(u.order_id)
-            })
-            .collect()
+        self.order_updates.drain().into_iter().map(|u| u.update).collect()
     }
 
     /// Take every cancel rejects waiting, leaving none.
     pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
-        self.cancel_rejects.lock().unwrap().drain(..).collect()
+        self.cancel_rejects.drain()
     }
 
     /// Take what the venue has said its fills cost, leaving none.
@@ -233,98 +254,54 @@ impl OrderState {
     /// naming the execution it belongs to. A caller reads it the same way:
     /// the fill first, then what it cost.
     pub fn drain_charges(&self) -> Vec<crate::types::model::CommissionAndFeesReport> {
-        self.charges.lock().unwrap().drain(..).collect()
+        self.charges.drain()
     }
 
     #[doc(hidden)] pub fn push_charge(&self, charge: crate::types::model::CommissionAndFeesReport) {
-        self.charges.lock().unwrap().push(charge);
+        self.charges.push(charge);
     }
 
     /// Take the executions the venue restated, leaving none.
     pub fn drain_restated_executions(&self) -> Vec<(api::Contract, api::Execution)> {
-        self.restated_executions.lock().unwrap().drain(..).collect()
+        self.restated_executions.drain()
     }
 
     #[doc(hidden)] pub fn push_restated_execution(&self, contract: api::Contract, execution: api::Execution) {
-        self.restated_executions.lock().unwrap().push((contract, execution));
+        self.restated_executions.push((contract, execution));
     }
 
     /// Drain reasons for genuinely-Inactive (39=I) transitions, each as
     /// (order_id, ibapi error code, message) — see `order_inactive`.
     pub fn drain_order_inactive(&self) -> Vec<(u64, i32, String)> {
-        self.order_inactive.lock().unwrap().drain(..).collect()
+        self.order_inactive.drain().into_iter().map(|(id, code, msg, _)| (id, code, msg)).collect()
     }
 
     /// Take every what if responses waiting, leaving none.
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
-        self.what_if_responses.lock().unwrap().drain(..).collect()
+        self.what_if_responses.drain()
     }
 
     /// The refusals and previews a dispatch loop should deliver, leaving
     /// those a call that answers is waiting on under its own number.
     pub fn drain_order_inactive_for_dispatch(&self, mine: impl Fn(u64) -> bool) -> Vec<(u64, i32, String)> {
-        let mut held = self.order_inactive.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held).into_iter().partition(|e| !mine(e.0));
-        *held = kept;
-        out
+        self.order_inactive
+            .take_if(|e| !mine(e.0))
+            .into_iter()
+            .map(|(id, code, msg, _)| (id, code, msg))
+            .collect()
     }
 
-    /// As [`drain_order_inactive_for_dispatch`](Self::drain_order_inactive_for_dispatch),
-    /// for the previews.
-    pub fn drain_what_if_responses_for_dispatch(&self, mine: impl Fn(u64) -> bool) -> Vec<WhatIfResponse> {
-        let mut held = self.what_if_responses.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held).into_iter().partition(|w| !mine(w.order_id));
-        *held = kept;
-        out
-    }
+
 
     /// The preview answering one order, if it has arrived, leaving the rest.
     pub fn take_what_if_for(&self, order_id: u64) -> Option<WhatIfResponse> {
-        let mut held = self.what_if_responses.lock().unwrap();
-        let at = held.iter().position(|w| w.order_id == order_id)?;
-        Some(held.remove(at))
+        self.what_if_responses.take_first(|w| w.order_id == order_id)
     }
 
     /// The refusal of one order, if it has arrived, leaving the rest.
     pub fn take_order_inactive_for(&self, order_id: u64) -> Option<(i32, String)> {
-        let mut held = self.order_inactive.lock().unwrap();
-        let at = held.iter().position(|(id, _, _)| *id == order_id)?;
-        let (_, code, message) = held.remove(at);
+        let (_, code, message, _) = self.order_inactive.take_first(|(id, ..)| *id == order_id)?;
         Some((code, message))
-    }
-
-    /// Take the one question of what the account has finished that this
-    /// session may have outstanding, if it is free.
-    ///
-    /// The venue answers this question with a run of ordinary reports and one
-    /// sentinel, and nothing in the run says which question it answers. Two
-    /// callers waiting at once both read the same sentinel and both take the
-    /// first answer as their own; the client this replaces refuses the second
-    /// outright, logging that another request is pending. Refused here too,
-    /// and told so, rather than handed somebody else's answer.
-    /// Answered with the turn this caller holds the question under, so what
-    /// the venue then says can be told from what it said for the caller
-    /// before: a caller that gave up leaves its own answer still coming, and
-    /// the next caller must not be released by it.
-    #[doc(hidden)] pub fn claim_the_completed_orders_question(&self) -> Option<u64> {
-        self.completed_orders_in_flight
-            .compare_exchange(
-                false, true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .ok()?;
-        Some(self.completed_orders_turn.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1)
-    }
-
-    /// Which turn the question is on, for a caller that holds it.
-    pub fn completed_orders_turn(&self) -> u64 {
-        self.completed_orders_turn.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// And give it back, answered or not.
-    #[doc(hidden)] pub fn the_completed_orders_question_is_over(&self) {
-        self.completed_orders_in_flight.store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Say that the venue has finished stating what it has finished.
@@ -411,7 +388,7 @@ impl OrderState {
         lock.iter()
             .filter(|(_, v)| crate::types::order_status::is_open_or_reactivatable(
                 &v.order_state.status, &v.order_state.completed_status))
-            .map(|(&k, v)| (k, v.clone()))
+            .map(|(&k, v)| (k, (**v).clone()))
             .collect()
     }
 
@@ -432,7 +409,7 @@ impl OrderState {
 
     /// Get enriched order info by order_id.
     pub fn get_order_info(&self, order_id: u64) -> Option<RichOrderInfo> {
-        self.order_cache.lock().unwrap().get(&order_id).cloned()
+        self.order_cache.lock().unwrap().get(&order_id).map(|info| (**info).clone())
     }
 
     /// Whether a fill for this order is still waiting to be read.
@@ -440,7 +417,7 @@ impl OrderState {
     /// A fill is read against the order's record, so the record outlives the
     /// fill rather than the other way round.
     pub fn has_pending_fill(&self, order_id: u64) -> bool {
-        self.fills.lock().unwrap().iter().any(|(f, _)| f.order_id == order_id)
+        self.fills.any(|f| f.fill.order_id == order_id)
     }
 
     /// Remove an enriched entry when the venue says the order is unknown.
@@ -481,6 +458,7 @@ impl OrderState {
         &self, order_id: u64, status: &str, completed_status: &str,
     ) {
         if let Some(info) = self.order_cache.lock().unwrap().get_mut(&order_id) {
+            let info = Arc::make_mut(info);
             info.order_state.status = status.into();
             // A refusal and an order the venue merely holds are the same word
             // here, and this is what tells them apart. Left as it was, a
@@ -494,60 +472,160 @@ impl OrderState {
 
     // ── Hot-loop-side writers ──
 
+    /// A fill with no report behind it. What the order's record states at
+    /// the push is what the fill is read against, and it rides the record:
+    /// read again at the read, a second print of the same order in the
+    /// meantime left both reading the later one.
     #[doc(hidden)] pub fn push_fill(&self, fill: Fill) {
-        self.fills.lock().unwrap().push((fill, None));
+        if fill.remaining == 0 {
+            self.numbers.lock().unwrap().finished.insert(fill.order_id);
+            self.numbers_changed.store(true, Ordering::Release);
+        }
+        let report = self.order_cache.lock().unwrap().get(&fill.order_id).cloned();
+        self.fills.push(FillRecord { fill, report, status: None });
     }
 
     /// A fill and the report it was booked off, which is the one that states
     /// its execution.
     #[doc(hidden)] pub fn push_fill_reported(&self, fill: Fill, report: RichOrderInfo) {
-        self.fills.lock().unwrap().push((fill, Some(report)));
+        if fill.remaining == 0 {
+            self.numbers.lock().unwrap().finished.insert(fill.order_id);
+            self.numbers_changed.store(true, Ordering::Release);
+        }
+        self.fills.push(FillRecord { fill, report: Some(Arc::new(report)), status: None });
     }
 
+    /// A fill and the status the same report stated, as one record.
+    ///
+    /// The venue states both on one execution report. Queued apart and paired
+    /// up again at the read by their quantities, an acknowledgement and a fill
+    /// read together lost their order, and a status that did not match the
+    /// fill's quantities went out on its own after it.
+    #[doc(hidden)] pub fn push_fill_and_status(
+        &self, fill: Fill, report: Option<RichOrderInfo>, status: OrderUpdate,
+    ) {
+        let report = report.map(Arc::new).or_else(|| self.order_cache.lock().unwrap().get(&fill.order_id).cloned());
+        self.note_what_the_status_says(&status);
+        if fill.remaining == 0 {
+            self.numbers.lock().unwrap().finished.insert(fill.order_id);
+            self.numbers_changed.store(true, Ordering::Release);
+        }
+        // A working status on an order already finished is the echo
+        // `push_order_update` drops; the fill beside it still goes.
+        let status = self.states_news(&status).then_some(status);
+        self.fills.push(FillRecord { fill, report, status });
+    }
+
+    /// Note what a status says about the number it is under: a finish spends
+    /// the number, as a caller's own record of the order spends it.
+    fn note_what_the_status_says(&self, update: &OrderUpdate) {
+        use crate::types::OrderStatus;
+        if matches!(update.status, OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected) {
+            self.numbers.lock().unwrap().finished.insert(update.order_id);
+            self.numbers_changed.store(true, Ordering::Release);
+        }
+    }
+
+    /// Take the notice that finished or unknown numbers need their held terms removed.
+    pub(crate) fn take_numbers_changed(&self) -> bool {
+        self.numbers_changed.load(Ordering::Relaxed)
+            && self.numbers_changed.swap(false, Ordering::AcqRel)
+    }
+
+    /// Whether the venue has finished an order under this number this
+    /// session.
+    pub fn number_finished(&self, order_id: u64) -> bool {
+        self.numbers.lock().unwrap().finished.contains(&order_id)
+    }
+
+    /// Whether the venue last said it knows no order under this number.
+    pub fn number_unknown_to_the_venue(&self, order_id: u64) -> bool {
+        self.numbers.lock().unwrap().unknown.contains(&order_id)
+    }
+
+    /// A number is being placed under again: what the venue said it did not
+    /// know is about the order before.
+    #[doc(hidden)] pub fn number_placed_again(&self, order_id: u64) {
+        self.numbers.lock().unwrap().unknown.remove(&order_id);
+    }
+
+    /// Whether a status is news: a finish, an uncertain order, or a working
+    /// status of an order that has not finished.
+    fn states_news(&self, update: &OrderUpdate) -> bool {
+        update.status.is_terminal()
+            || update.status == crate::types::OrderStatus::Uncertain
+            || !self.recently_completed(update.order_id)
+    }
+
+    /// A status change, with the order's state as it stands at the push.
+    ///
+    /// A working status for an order that has already finished is dropped
+    /// here: the venue echoes one behind a fill, and delivered after the fill
+    /// it reported a filled order as working with nothing filled. Checked as
+    /// it is pushed rather than as it is read, so an acknowledgement pushed
+    /// before the fill that finished the order is still delivered — read
+    /// together, the fill had finished the order by then and took the
+    /// acknowledgement with it.
     #[doc(hidden)] pub fn push_order_update(&self, update: OrderUpdate) {
-        self.order_updates.lock().unwrap().push(update);
+        if !self.states_news(&update) {
+            return;
+        }
+        self.note_what_the_status_says(&update);
+        // Keep the report at this status without copying its order on the loop.
+        let (state, client_id) = self.order_cache.lock().unwrap().get(&update.order_id)
+            .map(|info| (Some(Arc::clone(info)), info.order.client_id))
+            .unwrap_or_default();
+        self.order_updates.push(UpdateRecord { update, state, client_id });
     }
 
     #[doc(hidden)] pub fn push_cancel_reject(&self, reject: CancelReject) {
-        self.cancel_rejects.lock().unwrap().push(reject);
+        // Reason 1: the venue says the order does not exist.
+        if reject.reason_code == 1 {
+            self.numbers.lock().unwrap().unknown.insert(reject.order_id);
+            self.numbers_changed.store(true, Ordering::Release);
+        }
+        self.cancel_rejects.push(reject);
     }
 
     /// The venue has taken the replacement outstanding on this order.
     #[doc(hidden)] pub fn note_replacement_taken(&self, order_id: u64) {
-        self.replacements_taken.lock().unwrap().push(order_id);
+        self.replacements_taken.push(order_id);
     }
 
     /// The orders whose replacement the venue has taken since this was asked.
     pub fn drain_replacements_taken(&self) -> Vec<u64> {
-        self.replacements_taken.lock().unwrap().drain(..).collect()
+        self.replacements_taken.drain()
     }
 
-    #[doc(hidden)] pub fn push_order_inactive(&self, order_id: u64, code: i32, message: String) {
-        self.order_inactive.lock().unwrap().push((order_id, code, message));
+    /// Say why an order was refused or stopped working, under its number and
+    /// with the operation on it the word answers.
+    #[doc(hidden)] pub fn push_order_inactive(&self, order_id: u64, op: api::OrderOp, code: i32, message: String) {
+        self.order_inactive.push((order_id, code, message, op));
     }
 
     /// Say something about an order that goes anyway, on its own number: a
     /// warning, and not the end of the order.
-    #[doc(hidden)] pub fn push_order_notice(&self, order_id: u64, code: i32, message: String) {
-        self.order_notices.lock().unwrap().push((order_id, code, message));
+    #[doc(hidden)] pub fn push_order_notice(&self, order_id: u64, op: api::OrderOp, code: i32, message: String) {
+        self.order_notices.push((order_id, code, message, op));
     }
 
     /// Take every notice waiting, leaving none.
     pub fn drain_order_notices(&self) -> Vec<(u64, i32, String)> {
-        self.order_notices.lock().unwrap().drain(..).collect()
+        self.order_notices.drain().into_iter().map(|(id, code, msg, _)| (id, code, msg)).collect()
     }
 
     /// As [`drain_order_inactive_for_dispatch`](Self::drain_order_inactive_for_dispatch),
     /// for the notices.
     pub fn drain_order_notices_for_dispatch(&self, mine: impl Fn(u64) -> bool) -> Vec<(u64, i32, String)> {
-        let mut held = self.order_notices.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *held).into_iter().partition(|e| !mine(e.0));
-        *held = kept;
-        out
+        self.order_notices
+            .take_if(|e| !mine(e.0))
+            .into_iter()
+            .map(|(id, code, msg, _)| (id, code, msg))
+            .collect()
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
-        self.what_if_responses.lock().unwrap().push(response);
+        self.what_if_responses.push(response);
     }
 
     /// The server has finished naming what is already working.
@@ -588,6 +666,17 @@ impl OrderState {
     /// out does not spend a later caller's wait, and once it has passed
     /// nobody waits again until a reconnect.
     pub fn wait_for_replay(&self) -> bool {
+        self.wait_for_replay_until(None, None) == ReplayWait::Settled(true)
+    }
+
+    /// [`wait_for_replay`](Self::wait_for_replay), also bounded by `until` and
+    /// by `cancel`, both read at each 10 ms step: the wait ends at whichever
+    /// comes first of the naming, its own bound, `until` and the cancel.
+    pub fn wait_for_replay_until(
+        &self,
+        until: Option<Instant>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> ReplayWait {
         let (done, deadline) = {
             let mut replay = self.replay.lock().unwrap();
             // Read as a pair, because they are written as one: the bound
@@ -601,13 +690,33 @@ impl OrderState {
                 .get_or_insert_with(|| Instant::now() + REPLAY_WAIT);
             (replay.done, deadline)
         };
-        if done {
-            return true;
-        }
-        while !self.replay_done() && Instant::now() < deadline {
+        loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return ReplayWait::TakenBack;
+            }
+            if done || self.replay_done() || Instant::now() >= deadline {
+                return ReplayWait::Settled(done || self.replay_done());
+            }
+            if until.is_some_and(|until| Instant::now() >= until) {
+                return ReplayWait::TimedOut;
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
-        self.replay_done()
+    }
+
+    /// Where the naming of what the account is working stands, read without
+    /// waiting: `Some(true)` once the venue has finished it, `Some(false)` once
+    /// its bound has passed without that, and `None` while it may still come.
+    ///
+    /// The engine holds what depends on the naming against this, in its own
+    /// laps, rather than a caller waiting on it.
+    pub fn replay_settled(&self) -> Option<bool> {
+        let mut replay = self.replay.lock().unwrap();
+        if replay.done {
+            return Some(true);
+        }
+        let deadline = *replay.deadline.get_or_insert_with(|| Instant::now() + REPLAY_WAIT);
+        (Instant::now() >= deadline).then_some(false)
     }
 
     /// The highest id the venue has named an order under, or zero where it has
@@ -833,10 +942,10 @@ impl OrderState {
             }) {
                 return;
             }
-            cache.insert(order_id, info);
+            cache.insert(order_id, Arc::new(info));
             return;
         }
-        self.order_cache.lock().unwrap().insert(order_id, info);
+        self.order_cache.lock().unwrap().insert(order_id, Arc::new(info));
     }
 
     /// Cache a view that supersedes a completed one.
@@ -858,51 +967,38 @@ impl OrderState {
         // read is held on the far side of it and went on being reported as
         // this order's outcome after the venue had withdrawn it.
         self.order_corrections.lock().unwrap().push(order_id);
-        self.order_cache.lock().unwrap().insert(order_id, info);
+        self.order_cache.lock().unwrap().insert(order_id, Arc::new(info));
     }
 }
 
-/// The one question of what the account has finished, held by one caller.
-///
-/// Given back when this is dropped, whichever way the caller leaves — a
-/// refusal, an early return, or an interpreter unwinding out of a callback.
-/// Depending on reaching a line at the end, the claim was left standing by a
-/// caller that did not, and every later request was refused as though that
-/// caller were still waiting.
-#[doc(hidden)]
-pub struct TheCompletedOrdersQuestion {
-    session: std::sync::Arc<super::SharedState>,
-    /// Which turn of the question this caller holds.
-    pub turn: u64,
-    held: bool,
-}
+#[cfg(test)]
+mod report_tests {
+    use super::*;
 
-impl TheCompletedOrdersQuestion {
-    /// Give the question back now, rather than when this is dropped.
-    ///
-    /// What a caller does after its answer is in hand — the callbacks — can
-    /// take a while, and the next caller need not wait for them.
-    pub fn give_it_back(&mut self) {
-        if self.held {
-            self.session.orders.the_completed_orders_question_is_over();
-            self.held = false;
+    #[test]
+    fn cached_reports_are_shared_until_the_order_changes() {
+        let orders = OrderState::new();
+        orders.push_order_info(7, RichOrderInfo {
+            contract: api::Contract { symbol: "SPY".into(), ..Default::default() },
+            order: api::Order::default(),
+            order_state: api::OrderState { status: "Submitted".into(), warning_text: "held".into(), ..Default::default() },
+            last_exec: api::Execution::default(),
+        });
+        let cached = orders.order_cache.lock().unwrap()[&7].clone();
+        let status = OrderUpdate { order_id: 7, instrument: 0, status: OrderStatus::Submitted,
+            filled_qty: 0.0, remaining_qty: 1.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0 };
+        let fill = Fill { order_id: 7, instrument: 0, side: Side::Buy, price: 100,
+            qty: 1, remaining: 1, timestamp_ns: 0, cum_qty: 1, avg_price: 100 };
+        orders.push_order_update(status);
+        orders.push_fill(fill);
+        orders.push_fill_and_status(fill, None, status);
+        let updates = orders.order_updates.drain();
+        assert!(Arc::ptr_eq(updates[0].state.as_ref().unwrap(), &cached));
+        for fill in orders.fills.drain() {
+            assert!(Arc::ptr_eq(fill.report.as_ref().unwrap(), &cached));
         }
-    }
-}
-
-impl Drop for TheCompletedOrdersQuestion {
-    fn drop(&mut self) {
-        self.give_it_back();
-    }
-}
-
-impl super::SharedState {
-    /// Take the question, if it is free.
-    #[doc(hidden)]
-    pub fn claim_the_completed_orders_question(
-        self: &std::sync::Arc<Self>,
-    ) -> Option<TheCompletedOrdersQuestion> {
-        let turn = self.orders.claim_the_completed_orders_question()?;
-        Some(TheCompletedOrdersQuestion { session: self.clone(), turn, held: true })
+        orders.note_order_finished(7, "Filled", "Filled");
+        assert_eq!(cached.order_state.status, "Submitted");
+        assert_eq!(orders.get_order_info(7).unwrap().order_state.status, "Filled");
     }
 }

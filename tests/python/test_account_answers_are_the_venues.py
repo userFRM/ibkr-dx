@@ -42,6 +42,8 @@ def _connected():
     w = Recording()
     c = ibkr_dx.EClient(w)
     c._test_connect("DU1")
+    # The account has stated itself, as a session's does once it opens.
+    c._test_finish_account_download()
     return w, c
 
 

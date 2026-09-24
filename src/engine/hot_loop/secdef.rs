@@ -22,11 +22,35 @@ use crate::protocol::fix;
 
 use super::HeartbeatState;
 
+/// A calendar request held behind the one on the wire.
+enum QueuedCalendar {
+    /// The event types.
+    MetaData(u32),
+    /// Events, under a filter or for one contract.
+    Events(u32, Box<crate::types::CalendarQuery>),
+}
+
+impl QueuedCalendar {
+    fn req_id(&self) -> u32 {
+        match self {
+            Self::MetaData(req_id) | Self::Events(req_id, _) => *req_id,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SecDefState {
-    /// Calendar requests waiting on an answer: the name this client gave the
-    /// request, which the answer echoes, and which of the two it was.
+    /// The calendar request on the wire: the name this client gave it, which
+    /// the answer echoes, and which of the two it was. One at a time, because
+    /// the venue's refusal names no request: with one on the wire it has one
+    /// owner.
     pending: Vec<(String, u32, bool)>,
+    /// Requests waiting for the one on the wire, in the order they were asked.
+    queued: std::collections::VecDeque<QueuedCalendar>,
+    /// A request on the wire whose caller withdrew it. Its answer goes to
+    /// nobody, and it holds the wire until that answer, a refusal or the end
+    /// of the connection.
+    withdrawn: std::collections::HashSet<u32>,
     /// Message types this connection has sent that nothing here reads, named
     /// once each. Reported where somebody looks, rather than dropped.
     unread: std::collections::HashSet<String>,
@@ -44,10 +68,67 @@ impl SecDefState {
     /// otherwise be delivered to a caller who has said they are done with it.
     /// Answers whether there was one to withdraw, so a cancel naming nothing
     /// can say so rather than look like it acted.
+    ///
+    /// One still waiting its turn is taken out, and nothing is sent for it.
+    /// The one on the wire stays there until the venue answers it, refuses it
+    /// or the connection ends, and its answer then goes to nobody: its
+    /// refusal would otherwise be taken for the next request's.
     pub(crate) fn withdraw_calendar_request(&mut self, req_id: u32) -> bool {
-        let before = self.pending.len();
-        self.pending.retain(|(_, waiting, ..)| *waiting != req_id);
-        self.pending.len() != before
+        let before = self.queued.len();
+        self.queued.retain(|q| q.req_id() != req_id);
+        if self.queued.len() != before {
+            return true;
+        }
+        if self.pending.iter().any(|(_, waiting, ..)| *waiting == req_id)
+            && !self.withdrawn.contains(&req_id)
+        {
+            self.withdrawn.insert(req_id);
+            return true;
+        }
+        false
+    }
+
+    /// How many requests are waiting for the one on the wire.
+    pub(crate) fn calendar_requests_held(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// Whether this number is already waiting on the calendar, on the wire
+    /// or behind it. A withdrawn one on the wire is not: its caller is done
+    /// with it.
+    fn waiting(&self, req_id: u32) -> bool {
+        self.pending.iter().any(|(_, waiting, ..)| *waiting == req_id && !self.withdrawn.contains(waiting))
+            || self.queued.iter().any(|q| q.req_id() == req_id)
+    }
+
+    /// Whether a request is on the wire, or waiting behind one.
+    fn busy(&self) -> bool {
+        !self.pending.is_empty() || !self.queued.is_empty()
+    }
+
+    /// The one on the wire is over: send what waits behind it, until one is
+    /// on the wire again.
+    pub(crate) fn send_next(&mut self, conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, left: &mut usize) {
+        while *left > 0 && self.pending.is_empty() && !self.queued.is_empty() {
+            *left -= 1;
+            match self.queued.pop_front() {
+                None => return,
+                Some(QueuedCalendar::MetaData(req_id)) => {
+                    self.send_meta_data(req_id, conn, hb, shared);
+                }
+                Some(QueuedCalendar::Events(req_id, query)) => {
+                    self.send_events(req_id, &query, conn, hb, shared);
+                }
+            }
+        }
+    }
+
+    /// The request on the wire has had its answer, its refusal or its reject:
+    /// take it off the wire, and say whether its caller still wants it.
+    fn settle(&mut self, at: usize) -> (u32, bool, bool) {
+        let (_, req_id, is_meta) = self.pending.remove(at);
+        let wanted = !self.withdrawn.remove(&req_id);
+        (req_id, is_meta, wanted)
     }
 
     /// Ask what event types the calendar carries.
@@ -67,7 +148,7 @@ impl SecDefState {
         // ask for and then told the calendar never answered. And a withdrawal
         // names a number and no kind, so a caller running both kinds under one
         // number cancelled one and silently lost the other.
-        if self.pending.iter().any(|(_, waiting, ..)| *waiting == req_id) {
+        if self.waiting(req_id) {
             shared.reference.push_historical_error(
                 req_id,
                 DUPLICATE_TICKER_ID,
@@ -78,6 +159,31 @@ impl SecDefState {
             );
             return;
         }
+        if conn.is_none() {
+            shared.reference.push_historical_error(
+                req_id,
+                crate::error_codes::Refusal::NOT_CONNECTED,
+                "the calendar is carried on a connection this session does not have"
+                    .to_string(),
+            );
+            return;
+        }
+        // One on the wire at a time: the venue's refusal names no request.
+        if self.busy() {
+            self.queued.push_back(QueuedCalendar::MetaData(req_id));
+            return;
+        }
+        self.send_meta_data(req_id, conn, hb, shared);
+    }
+
+    /// Put an event-types request on the wire.
+    fn send_meta_data(
+        &mut self,
+        req_id: u32,
+        conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
         let Some(conn) = conn.as_mut() else {
             shared.reference.push_historical_error(
                 req_id,
@@ -124,7 +230,7 @@ impl SecDefState {
         // ask for and then told the calendar never answered. And a withdrawal
         // names a number and no kind, so a caller running both kinds under one
         // number cancelled one and silently lost the other.
-        if self.pending.iter().any(|(_, waiting, ..)| *waiting == req_id) {
+        if self.waiting(req_id) {
             shared.reference.push_historical_error(
                 req_id,
                 DUPLICATE_TICKER_ID,
@@ -135,6 +241,35 @@ impl SecDefState {
             );
             return;
         }
+        if let Err(why) = cal::event_data_request(query) {
+            shared.reference.push_historical_error(req_id, 321, why);
+            return;
+        }
+        if conn.is_none() {
+            shared.reference.push_historical_error(
+                req_id,
+                crate::error_codes::Refusal::NOT_CONNECTED,
+                "the calendar is carried on a connection this session does not have"
+                    .to_string(),
+            );
+            return;
+        }
+        if self.busy() {
+            self.queued.push_back(QueuedCalendar::Events(req_id, Box::new(query.clone())));
+            return;
+        }
+        self.send_events(req_id, query, conn, hb, shared);
+    }
+
+    /// Put an events request on the wire.
+    fn send_events(
+        &mut self,
+        req_id: u32,
+        query: &crate::types::CalendarQuery,
+        conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
         let json = match cal::event_data_request(query) {
             Ok(json) => json,
             Err(why) => {
@@ -206,7 +341,13 @@ impl SecDefState {
         crate::engine::hot_loop::announce_venue_data(
             shared, event_tx, crate::bridge::VenueDataConnection::SecurityDefinition, false,
         );
-        for (_, req_id, ..) in self.pending.drain(..) {
+        let on_the_wire: Vec<u32> = self.pending.drain(..)
+            .map(|(_, req_id, ..)| req_id)
+            .filter(|req_id| !self.withdrawn.contains(req_id))
+            .collect();
+        self.withdrawn.clear();
+        let behind: Vec<u32> = self.queued.drain(..).map(|q| q.req_id()).collect();
+        for req_id in on_the_wire.into_iter().chain(behind) {
             shared.reference.push_historical_error(
                 req_id,
                 504,
@@ -294,8 +435,12 @@ impl SecDefState {
                 }
             }
             "U" => match parsed.get(&6040).map(String::as_str) {
-                Some(cal::CALENDAR_ANSWER) => self.deliver(&parsed, false, shared, event_tx),
-                Some(cal::CALENDAR_REFUSAL) => self.deliver(&parsed, true, shared, event_tx),
+                Some(cal::CALENDAR_ANSWER) => {
+                    self.deliver(&parsed, false, shared, event_tx);
+                }
+                Some(cal::CALENDAR_REFUSAL) => {
+                    self.deliver(&parsed, true, shared, event_tx);
+                }
                 Some(other) if self.unread.insert(other.to_string()) => {
                     log::info!("Unread on the security definition farm: sub-protocol {other}");
                 }
@@ -303,20 +448,19 @@ impl SecDefState {
                 None => {}
             },
             // A rejection carries no request id, so it belongs to whatever is
-            // outstanding. With one request in flight that is unambiguous.
+            // outstanding. With one request in flight that is unambiguous,
+            // which is why only one is ever on the wire.
             "3" => {
                 let said = parsed.get(&58).cloned().unwrap_or_else(|| "refused".to_string());
-                // A reject carries no request id, so it belongs to whatever is
-                // outstanding. Answering only when exactly one thing was
-                // waiting left every other caller waiting indefinitely for a
-                // refusal the venue had already given — and the calendar is
-                // asked in twos, the event types and then the events.
                 if self.pending.is_empty() {
                     log::warn!("Security definition farm refused something: {said}");
                     return;
                 }
-                for (_, req_id, ..) in self.pending.drain(..) {
-                    shared.reference.push_historical_error(req_id, 321, said.clone());
+                while !self.pending.is_empty() {
+                    let (req_id, _, wanted) = self.settle(0);
+                    if wanted {
+                        shared.reference.push_historical_error(req_id, 321, said.clone());
+                    }
                 }
             }
             other => {
@@ -343,7 +487,12 @@ impl SecDefState {
             log::warn!("A calendar answer named '{key}', which nothing here asked for");
             return;
         };
-        let (_, req_id, is_meta) = self.pending.remove(at);
+        let (req_id, is_meta, wanted) = self.settle(at);
+        // Withdrawn while it was on the wire: the answer goes to nobody.
+        if !wanted {
+            log::debug!("calendar answer for req_id={req_id}, which was withdrawn: dropped");
+            return;
+        }
         if refused {
             let said = parsed.get(&58).cloned().unwrap_or_else(|| "refused".to_string());
             shared.reference.push_historical_error(req_id, 321, said);
@@ -450,40 +599,6 @@ mod tests {
         assert_eq!(answered[0].0, 7);
     }
 
-    /// A refusal reaches every caller waiting, not just one. Answering only
-    /// where exactly one request is outstanding leaves the rest waiting for a
-    /// refusal the venue has already given.
-    #[test]
-    fn a_refusal_reaches_everyone_waiting() {
-        let shared = SharedState::new();
-        let mut state = SecDefState::new();
-        let (socket, _peer) = Connection::for_test();
-        let mut conn = Some(socket);
-        state.send_calendar_meta_data_request(7, &mut conn, &mut HeartbeatState::new(), &shared);
-        let soh = '\u{1}';
-        let answer = format!(
-            "35=U{soh}6040={}{soh}{}=MetaDataRequest7{soh}96=[]{soh}",
-            cal::CALENDAR_ANSWER,
-            cal::TAG_CALENDAR_KEY,
-        );
-        state.handle(answer.as_bytes(), &mut conn, &shared, &None, &mut HeartbeatState::new());
-        let query = crate::types::CalendarQuery { con_id: Some(1), ..Default::default() };
-        state.send_calendar_events_request(8, &query, &mut conn, &mut HeartbeatState::new(), &shared);
-        state.send_calendar_events_request(9, &query, &mut conn, &mut HeartbeatState::new(), &shared);
-        assert_eq!(
-            state.pending.len(), 2,
-            "both requests are outstanding; errors so far: {:?}",
-            shared.reference.drain_historical_errors(),
-        );
-
-        let reject = b"35=3\x0158=Request not supported  #155\x01";
-        state.handle(reject, &mut conn, &shared, &None, &mut HeartbeatState::new());
-
-        let told = shared.reference.drain_historical_errors();
-        assert_eq!(told.len(), 2, "somebody was left waiting");
-        assert!(state.pending.is_empty());
-    }
-
     /// A connection that has gone is put down rather than kept and written
     /// to. Kept, every later request went into a socket that would never
     /// answer and waited indefinitely.
@@ -528,7 +643,10 @@ mod tests {
             assert!(conn.is_some(), "the connection is still answering");
             let told = shared.reference.drain_historical_errors();
             assert!(told.is_empty(), "the venue has not refused either query: {told:?}");
-            assert_eq!(state.pending.len(), 2, "both callers are still waiting");
+            assert_eq!(
+                state.pending.len() + state.calendar_requests_held(), 2,
+                "both callers are still waiting, one on the wire and one behind it",
+            );
         }
 
         let metadata = r#"{"meta_data":{"event_types":[]}}"#;
@@ -540,10 +658,12 @@ mod tests {
                 (cal::TAG_CALENDAR_KEY, key),
                 (96, json),
             ]).unwrap();
-        }
-        for _ in 0..100 {
-            state.poll(&mut conn, &shared, &None, &mut hb);
-            if state.pending.is_empty() { break; }
+            for _ in 0..100 {
+                state.poll(&mut conn, &shared, &None, &mut hb);
+                if state.pending.is_empty() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            state.send_next(&mut conn, &mut hb, &shared, &mut 64);
         }
         assert_eq!(shared.reference.drain_calendar_meta_data_for_dispatch(), vec![(7, metadata.to_string())]);
         assert_eq!(shared.reference.drain_calendar_events_for_dispatch(), vec![(9, events.to_string())]);
@@ -641,5 +761,66 @@ mod tests {
         let told = shared.reference.drain_historical_errors();
         assert_eq!(told.len(), 1, "the caller is told: {told:?}");
         assert_eq!((told[0].0, told[0].1), (7, 102), "under the number that names it");
+    }
+}
+
+#[cfg(test)]
+mod one_on_the_wire_tests {
+    use super::*;
+    use std::io::Read;
+
+    /// Two calendar requests: the second is sent once the first is over, and
+    /// a reject, which names no request, refuses only the one on the wire.
+    #[test]
+    fn a_reject_between_two_calendar_requests_refuses_only_the_first() {
+        let (conn, mut peer) = Connection::for_test();
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+        let mut conn = Some(conn);
+        let mut hb = HeartbeatState::new();
+        let shared = SharedState::new();
+        let mut state = SecDefState::new();
+        let asked = |peer: &mut std::net::TcpStream| {
+            let mut buf = [0u8; 8192];
+            let n = peer.read(&mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).matches("6556=").count()
+        };
+
+        state.send_calendar_meta_data_request(7, &mut conn, &mut hb, &shared);
+        state.send_calendar_meta_data_request(8, &mut conn, &mut hb, &shared);
+        assert_eq!(asked(&mut peer), 1, "one on the wire");
+        assert_eq!(state.calendar_requests_held(), 1, "the second waits, counted");
+
+        let reject = fix::fix_build(&[(fix::TAG_MSG_TYPE, "3"), (58, "refused")], 1);
+        state.handle(&reject, &mut conn, &shared, &None, &mut hb);
+        state.send_next(&mut conn, &mut hb, &shared, &mut 64);
+        let refused: Vec<u32> = shared.reference.drain_historical_errors().iter().map(|e| e.0).collect();
+        assert_eq!(refused, [7], "the reject has one owner");
+        assert_eq!(asked(&mut peer), 1, "and the second goes after it");
+        assert_eq!(state.calendar_requests_held(), 0);
+    }
+
+    /// A withdrawal of the request on the wire keeps it there until its
+    /// answer, which goes to nobody; a reject meanwhile refuses nothing.
+    #[test]
+    fn a_withdrawn_request_holds_the_wire_and_its_answer_goes_to_nobody() {
+        let (conn, _peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut hb = HeartbeatState::new();
+        let shared = SharedState::new();
+        let mut state = SecDefState::new();
+        state.send_calendar_meta_data_request(7, &mut conn, &mut hb, &shared);
+        state.send_calendar_meta_data_request(8, &mut conn, &mut hb, &shared);
+
+        assert!(state.withdraw_calendar_request(7), "the withdrawal acted");
+        assert_eq!(state.calendar_requests_held(), 1, "and the second still waits for the wire");
+
+        let reject = fix::fix_build(&[(fix::TAG_MSG_TYPE, "3"), (58, "refused")], 1);
+        state.handle(&reject, &mut conn, &shared, &None, &mut hb);
+        state.send_next(&mut conn, &mut hb, &shared, &mut 64);
+        assert!(
+            shared.reference.drain_historical_errors().is_empty(),
+            "the withdrawn request's reject is owed to nobody",
+        );
+        assert_eq!(state.calendar_requests_held(), 0, "and the second is on the wire now");
     }
 }

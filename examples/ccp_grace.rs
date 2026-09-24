@@ -78,8 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     let req_id: i64 = 1;
-    client.req_contract_details(req_id, &aapl)
-        .map_err(|e| format!("req_contract_details failed: {e}"))?;
+    client.req_contract_details(req_id, &aapl);
 
     let probe_deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < probe_deadline {

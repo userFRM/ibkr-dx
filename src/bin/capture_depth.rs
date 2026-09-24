@@ -38,8 +38,8 @@ fn main() {
     let client = EClient::connect(&config).expect("no session");
 
     // The aggregate and one named venue, so the two shapes can be compared.
-    client.req_mkt_depth(1, &spy("SMART"), 10, true).expect("aggregate");
-    client.req_mkt_depth(2, &spy("IEX"), 10, false).expect("named venue");
+    client.req_mkt_depth(1, &spy("SMART"), 10, true);
+    client.req_mkt_depth(2, &spy("IEX"), 10, false);
 
     for _ in 0..60 {
         std::thread::sleep(Duration::from_millis(500));
@@ -52,6 +52,6 @@ fn main() {
         println!("{kind} {} bytes", hex.len() / 2);
         println!("  {hex}");
     }
-    let _ = client.cancel_mkt_depth(1);
-    let _ = client.cancel_mkt_depth(2);
+    client.cancel_mkt_depth(1);
+    client.cancel_mkt_depth(2);
 }

@@ -11,6 +11,7 @@ pub mod wrapper;
 pub use crate::types::model as types;
 pub use crate::{error_codes, reliability, settings};
 
-pub use client::{EClient, EClientConfig};
+pub use client::{EClient, EClientConfig, EngineEnd, Shutdown};
+pub use crate::types::Traffic;
 pub use crate::types::model::*;
 pub use wrapper::Wrapper;

@@ -1,13 +1,20 @@
-//! Event dispatch: drains SharedState queues and fires Wrapper callbacks.
+//! Event dispatch: one read of the session, in the session's one order.
+//!
+//! A read takes the conflated state, then a cut of the session's stamp
+//! counter, then every record stamped below the cut; it delivers the records
+//! in stamp order and the state after them. A gateway writes everything to one
+//! socket and a TWS client reads it in that one order: here the order is the
+//! order the engine took each record in, whatever queue it waited in.
 
 use std::sync::atomic::Ordering;
 use crate::types::qty_to_f64;
 use crate::types::model::{
-    BarData, CommissionAndFeesReport, ContractDetails, ContractDescription, Execution,
+    BarData, CommissionAndFeesReport, ContractDetails, ContractDescription, ErrorOrigin, Execution,
     Order as ApiOrder, OrderState, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;
-use crate::bridge::RecordKind;
+use crate::bridge::{Answer, FillRecord, Record, Reply, Take, UpdateRecord};
+use crate::client_core::Polled;
 use crate::types::order_status::order_status_str;
 const QTY_SCALE_F: f64 = crate::types::QTY_SCALE as f64;
 
@@ -60,8 +67,15 @@ pub(crate) const DEPTH_NOT_SERVED: i64 = 354;
 impl EClient {
     // ── Message Processing ──
 
-    /// Drain all SharedState queues and dispatch to the Wrapper.
-    /// Call this in a loop — it is the Rust equivalent of C++ `EReader::processMsgs()`.
+    /// Deliver everything the session holds, in the order the engine took it
+    /// in. Call this in a loop — it is the Rust equivalent of C++
+    /// `EReader::processMsgs()`.
+    ///
+    /// One read takes the quotes and the figures this client compares with
+    /// what the caller was last told, then every record the engine had pushed
+    /// by then, and delivers the records in the order they were pushed and the
+    /// quotes and figures after them. A record pushed during the read is left
+    /// for the next one, so nothing arrives ahead of anything pushed before it.
     ///
     /// Reading takes the session's turn, because the queues empty as they are
     /// read. The calls that answer pump this loop themselves and keep what
@@ -71,6 +85,8 @@ impl EClient {
     /// turn is released before this returns, so a loop calling it holds
     /// nothing between reads.
     pub fn process_msgs(&self, wrapper: &mut impl Wrapper) {
+        // The wake hook may be called again for whatever changes from here.
+        self.shared.arm_wake();
         // A read from inside a read is served by the one it is inside. The
         // turn this thread holds is not re-entrant, so waiting for it here
         // ends the program; and what this would drain is the outer read's to
@@ -79,209 +95,65 @@ impl EClient {
             return;
         }
         let _turn = self.asking.lock().unwrap_or_else(|e| e.into_inner());
-        self.read_the_session(wrapper, true);
+        let bulletins = self.core.bulletins_subscribed();
+        self.read_the_session(wrapper, Take::Dispatch { bulletins });
     }
 
-    /// The same read, for a caller that already holds the turn.
+    /// One read, for a caller that already holds the turn.
     ///
     /// The turn is not re-entrant, and a question that took it before sending
-    /// pumps this loop while it waits.
-    /// `durable` is false for the pump an answering call runs into a
-    /// collector with no session record behind it: the venue-data notices
-    /// are left queued for the caller's own loop rather than drained into a
-    /// collector that drops them and the quote baseline forgotten with
-    /// nothing said.
-    pub(crate) fn read_the_session(&self, wrapper: &mut impl Wrapper, durable: bool) {
+    /// pumps this loop while it waits. `take` says which records the read
+    /// takes: everything not held by a call that answers, a whole read for a
+    /// call that answers with a record kept, or a call's own records alone.
+    pub(crate) fn read_the_session(&self, wrapper: &mut impl Wrapper, take: Take<'_>) {
+        // The session's last record has been delivered, and nothing after it
+        // is this session's to deliver.
+        if self.ended.load(Ordering::Acquire) {
+            return;
+        }
         // Said for the length of the read, so a question asked from inside one
         // of the callbacks below is told why it cannot be answered rather than
         // left waiting on this thread's own turn.
         let _reading = super::Reading::begin(self.which_session());
-        self.dispatch_venue_data(wrapper, durable);
-        self.dispatch_positions(wrapper);
-        self.dispatch_orders(wrapper);
-        self.dispatch_quotes(wrapper);
-        self.dispatch_data(wrapper);
-        self.dispatch_connection(wrapper);
-    }
-
-    // ── Connection Dispatch ──
-
-    /// Surface the end of the session: `connection_closed`, once, with no error
-    /// callback. Covers both an engine-side loss and an explicit
-    /// [`disconnect()`](EClient::disconnect).
-    ///
-    /// Queued data is dispatched before this fires, so a caller that stops
-    /// polling on `connection_closed` still sees everything the engine had
-    /// already produced.
-    fn dispatch_connection(&self, wrapper: &mut impl Wrapper) {
-        use std::sync::atomic::Ordering;
-        let went = self.shared.take_connection_lost();
-        let came_back = self.shared.take_connection_restored();
-        // Applied in the order they were read, which is the order they
-        // happened in: each setter clears the other, so both in hand means the
-        // recovery landed between the two reads above and the loss is the
-        // older of the two. Applied the other way round, the loss went on last
-        // and a session that had come back read as disconnected for the rest
-        // of its life, with the caller told it recovered before it was told it
-        // had gone. The other surface reads and applies them in this order.
-        if went {
-            self.connected.store(false, Ordering::Release);
-            // A loss the engine is still working to recover is said under
-            // 1100, as the other surface says it and as this surface's own
-            // contract states; `connection_closed` answered it instead, and a
-            // program that stands down on that stood down on an outage the
-            // engine recovered from. A stop the caller asked for says nothing
-            // here: the reference client answers `disconnect()` with
-            // `connection_closed` alone.
-            if !self.shared.connection_lost_by_design() && !self.stopped_by_caller.load(Ordering::Acquire) {
-                wrapper.error(-1, 1100, "Connectivity between client and server has been lost", "");
+        self.free_what_the_fills_held_back();
+        // (a) The conflated state, before the cut: a change that followed a
+        // record's push is then delivered no earlier than that record. A call
+        // taking only its own records takes none of it.
+        let mut polled = (!matches!(take, Take::Own(_))).then(|| self.poll_the_state());
+        #[cfg(test)]
+        crate::bridge::hooks::run(&crate::bridge::hooks::BEFORE_THE_CUT);
+        // (b) and (c): the cut, and every record stamped below it.
+        let cut = self.shared.next_seq();
+        let records = self.shared.take_records(cut, take);
+        // (d) In the order the engine took them in.
+        for (_, record) in records {
+            if let Record::Closed = record {
+                // A barrier. Every writer has stopped by now, so the state
+                // taken again is final, and delivered in place of what was
+                // taken before the cut — a quote or a figure written between
+                // the two is not lost behind the older value.
+                let last = self.poll_the_state();
+                let state = match polled.take() {
+                    Some(earlier) => earlier.then(last),
+                    None => last,
+                };
+                self.deliver_state(state, wrapper);
+                self.deliver_the_close(wrapper);
+                return;
             }
+            self.deliver_record(record, wrapper, &mut polled);
         }
-        // A recovered session is connected again, and `close_notified` has to
-        // come back with it: left latched, the next loss would pass without
-        // firing `connection_closed` at all.
-        if came_back {
-            let was_connected = self.connected.swap(true, Ordering::AcqRel);
-            self.close_notified.store(false, Ordering::Release);
-            // 1102 pairs with a 1100: it is a recovery from a loss the caller
-            // was told about. Where a poll spanned a whole outage and recovery
-            // the two flags collapse to the restore alone, and a 1102 with no
-            // 1100 before it reads as a recovery from nothing — so it is said
-            // only where this surface believed it was disconnected. 1102 rather
-            // than 1101 because the reconnect re-establishes the subscriptions.
-            if !was_connected {
-                wrapper.error(-1, 1102, "Connectivity between client and server has been restored - data maintained", "");
-            }
-        }
-        // The session over — ended by the caller, or given up on — is what
-        // `connection_closed` says, once.
-        let over = self.shared.reference.session_over().is_some()
-            || self.shared.connection_lost_by_design()
-            || self.stopped_by_caller.load(Ordering::Acquire);
-        if over
-            && !self.connected.load(Ordering::Acquire)
-            && !self.close_notified.swap(true, Ordering::AcqRel)
-        {
-            wrapper.connection_closed();
+        // (e) The state taken in (a), under the mapping the records left.
+        if let Some(state) = polled {
+            self.deliver_state(state, wrapper);
         }
     }
 
-    /// One of the connections the venue keeps data on went away or came back,
-    /// said under the number the venue reports it under, and said first: a
-    /// caller reading quotes has nothing else to tell it that the last price
-    /// it holds stopped being a price. A market-data loss also forgets what
-    /// each caller was last told of every quote — the engine zeroes the
-    /// quotes at the drop, and diffed against what the caller had heard those
-    /// noughts went out as prices; diffed against nothing, only what the venue
-    /// restates goes out.
-    fn dispatch_venue_data(&self, wrapper: &mut impl Wrapper, durable: bool) {
-        // No session record behind the collector: leave the notices queued
-        // so the caller's own loop delivers them, rather than drain them
-        // into a collector that drops them and forget the quote baseline
-        // with nothing said.
-        if !durable {
-            return;
-        }
-        for (which, up) in self.shared.drain_venue_data_notices() {
-            if matches!(which, crate::bridge::VenueDataConnection::MarketData) && !up {
-                self.core.forget_last_quotes();
-            }
-            let (broken, ok) = which.codes();
-            wrapper.error(-1, if up { ok } else { broken }, which.says(up), "");
-        }
-    }
-
-    // ── Order / Fill Dispatch ──
-
-    /// A holding that has moved since the caller last heard, where the caller
-    /// asked for positions and has not withdrawn the ask.
-    ///
-    /// The feed is real-time: a fill that changes what the account holds is
-    /// followed by the holding it changed. Nothing is drained while no ask
-    /// stands — [`EClient::req_positions`] clears what accumulated before it,
-    /// and draining here as well discarded the moves that landed while it was
-    /// still assembling its answer, which no later report would repeat.
-    fn dispatch_positions(&self, wrapper: &mut impl Wrapper) {
-        let on_position = self.positions_requested.load(Ordering::Acquire);
-        let per_request: Vec<i64> = {
-            let watching = self.positions_multi_requested.lock().unwrap();
-            let mut ids: Vec<i64> = watching.iter().copied().collect();
-            ids.sort_unstable();
-            ids
-        };
-        if !on_position && per_request.is_empty() {
-            return;
-        }
-        // Drained once and given to everyone watching. Drained per watcher,
-        // the first would take the move and the rest would never hear of it.
-        let moved = self.shared.portfolio.drain_position_changes();
-        for pi in &moved {
-            let contract = self.position_contract(pi);
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            if on_position {
-                wrapper.position(&self.account_id, &contract, pi.position, avg_cost);
-            }
-            // The account this session opened under, whatever the request
-            // named, as the answer to the request itself states.
-            for req_id in &per_request {
-                wrapper.position_multi(
-                    *req_id, &self.account_id, "", &contract, pi.position, avg_cost,
-                );
-            }
-        }
-    }
-
-    /// Answer the calculations that were waiting on the venue to state a
-    /// model, and forget them.
-    ///
-    /// A question the venue still cannot answer is kept: the watch is open, so
-    /// the model may yet arrive. It is dropped when the caller withdraws it.
-    fn answer_kept_option_calcs(&self) {
-        let kept: Vec<(i64, crate::api::client::PendingOptionCalc)> = self
-            .pending_option_calcs.lock().unwrap()
-            .iter().map(|(k, v)| (*k, v.clone())).collect();
-        for (req_id, calc) in kept {
-            if calc.answered {
-                continue;
-            }
-            let answered = if calc.wants_volatility {
-                self.solve_and_push_volatility(req_id, &calc)
-            } else {
-                self.solve_and_push_price(req_id, &calc)
-            };
-            if answered {
-                // Marked, not dropped. The watch this client opened to obtain
-                // the model comes down where the caller withdraws the
-                // calculation, and a question that has been dropped cannot be
-                // withdrawn — the withdrawal finds nothing and cancels nothing,
-                // leaving a subscription the caller cannot take down. Nothing
-                // is sent here; the mark only stops it being solved again.
-                if let Some(kept) = self.pending_option_calcs.lock().unwrap().get_mut(&req_id) {
-                    kept.answered = true;
-                }
-            }
-        }
-    }
-
-    fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
-        // What was said about an order that went anyway: a warning on its
-        // number, and nothing else about it changes. First, as a gateway says
-        // it before the order goes out, so it comes ahead of anything the
-        // venue says about the order.
-        for (order_id, code, msg) in self.shared.orders.drain_order_notices() {
-            wrapper.error(order_id as i64, code as i64, &msg, "");
-        }
-        // Fills → order_status + exec_details + commission_and_fees_report
-        // One `order_status` per execution report: a report carrying both a fill
-        // and a status emits them together.
-        //
-        // Held as a list in arrival order. Each status change is a separate
-        // report, so two changes to one order in a single pass are two
-        // callbacks.
-        // Records held back while a fill for them was queued, freed once that
-        // fill has been read. Freed here and nowhere else: this is the side
-        // that reads the fills, so a record cannot be freed between a fill
-        // being taken off the queue and the report that is built from it.
+    /// Records kept back because a fill for them was still queued, freed once
+    /// that fill has been read. Freed here and nowhere else: this is the side
+    /// that reads the fills, so a record cannot be freed between a fill being
+    /// taken off the queue and the report that is built from it.
+    fn free_what_the_fills_held_back(&self) {
         if !self.deferred_evictions.lock().unwrap().is_empty() {
             self.deferred_evictions.lock().unwrap().retain(|oid| {
                 if self.shared.orders.has_pending_fill(*oid) {
@@ -291,283 +163,989 @@ impl EClient {
                 false
             });
         }
-        let mut paired: Vec<crate::types::OrderUpdate> =
-            self.shared.orders.drain_order_updates();
-        // Taken before the fills below, and reported after them.
-        //
-        // The engine pushes a fill and then, off a message of its own, the
-        // charge that names it. Taken after the fills, a charge whose fill was
-        // pushed between the two drains arrives with nothing stored under its
-        // execution: the charge is dropped by a caller that reads its fills
-        // first, and the fill is filed for a replay with its cost unknown for
-        // ever. Taken first, every charge in hand has its fill either already
-        // stored by an earlier pass or in the batch below.
-        let charges = self.shared.orders.drain_charges();
-        for (fill, booked_off) in self.shared.orders.drain_fills() {
-            let price_f = fill.price as f64 / PRICE_SCALE_F;
-            // Paired on the report, not the order: one pass can carry both an
-            // acknowledgement and a fill for the same order. The matching report
-            // is the one whose filled and remaining quantities equal the fill's.
-            let with_it = paired
-                .iter()
-                .position(|u| {
-                    u.order_id == fill.order_id
-                        && u.remaining_qty == qty_to_f64(fill.remaining)
-                        && u.filled_qty == qty_to_f64(fill.cum_qty)
-                })
-                .map(|at| paired.remove(at));
-            // Status as the report states it, derived from `remaining` only when
-            // the report carries none.
-            let status = with_it
-                .map(|u| order_status_str(u.status))
-                .unwrap_or(if fill.remaining == 0 { "Filled" } else { "Submitted" });
-            if let Some(u) = with_it {
-                self.core.update_order_status(
-                    &self.shared, u.order_id, u.status, u.filled_qty, u.remaining_qty,
-                    u.instrument,
-                );
-            }
-            let (perm_id, parent_id) = self.core.perm_and_parent(&self.shared, fill.order_id);
-            // `filled` and `avgFillPrice` describe the order so far;
-            // `lastFillPrice` describes this print.
-            let avg_price_f = fill.avg_price as f64 / PRICE_SCALE_F;
+    }
 
-            let side_str = match fill.side {
-                Side::Buy => "BOT",
-                Side::Sell => "SLD",
-                Side::ShortSell => "SLD",
-            };
-            // The report this fill was booked off, not whatever the order's
-            // record says now: one pass can carry two prints of one order, and
-            // the record holds only the later.
-            let booked_off = booked_off.or_else(|| self.shared.orders.get_order_info(fill.order_id));
-            let (c, exec) = if let Some(info) = booked_off {
-                let mut ex = info.last_exec;
-                ex.side = side_str.into();
-                ex.shares = qty_to_f64(fill.qty);
-                ex.price = price_f;
-                ex.order_id = fill.order_id as i64;
-                // The client that placed it, where the report names none. The
-                // record knows which client the order went out under and the
-                // venue's report may carry no client at all; taken as stated,
-                // it filed this session's own fill under client zero while the
-                // status above was announced under the placing client.
-                if ex.client_id == 0 {
-                    ex.client_id = i64::from(self.core.placing_client(&self.shared, fill.order_id));
+    /// Take the conflated state, as a read's first step.
+    fn poll_the_state(&self) -> Polled {
+        let multi = self.core.multi_watchers();
+        let positions_watched = self.positions_requested.load(Ordering::Acquire)
+            || !self.core.positions_watchers().is_empty();
+        self.core.poll_conflated(&self.shared, positions_watched, &multi)
+    }
+
+    /// The summaries due under the numbers a call that answers holds, for a
+    /// call reading only its own: a summary is kept per request and compared
+    /// with what that request was last told, so it is the call's own.
+    pub(crate) fn deliver_own_summaries(
+        &self, wrapper: &mut impl Wrapper, own: &[crate::bridge::Owner],
+    ) {
+        for owner in own {
+            if let crate::bridge::Owner::Request(req_id) = owner
+                && let Some(batch) = self.core.prepare_account_summary_for(&self.shared, *req_id)
+            {
+                for entry in &batch.entries {
+                    wrapper.account_summary(batch.req_id, &entry.account, &entry.tag, &entry.value, &entry.currency);
                 }
-                let contract = if info.contract.con_id != 0 {
-                    self.core.get_contract(info.contract.con_id, &self.shared).unwrap_or(info.contract)
-                } else {
-                    info.contract
-                };
-                (contract, ex)
-            } else {
-                (Contract::default(), Execution {
-                    side: side_str.into(),
-                    shares: qty_to_f64(fill.qty),
-                    price: price_f,
-                    order_id: fill.order_id as i64,
-                    // The venue stated nothing about this one, so the client
-                    // that placed the order is what names it. Left at nought,
-                    // a request filtered by client matched none of them.
-                    client_id: i64::from(
-                        self.core.placing_client(&self.shared, fill.order_id),
-                    ),
-                    ..Default::default()
-                })
-            };
-            // Unsolicited executions carry request id -1. A market-data
-            // subscription id does not identify a `reqExecutions` request.
-            let req_id = NO_REQUEST;
-            // Stored before either callback about the print. A caller that
-            // asks for its executions from inside the status callback or this
-            // one -- which is ordinary -- was answered without the fill it was
-            // being told about.
-            //
-            // What it cost is not stated here. It arrives on a record of its
-            // own and is reported from the drain below. Stored unstated so a
-            // replay of this execution says the charge is unknown rather than
-            // that it was nothing.
-            self.core.push_execution(c.clone(), exec.clone(), CommissionAndFeesReport::default());
-            wrapper.order_status(
-                fill.order_id as i64, status, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
-                avg_price_f, perm_id, parent_id, price_f,
-                self.core.placing_client(&self.shared, fill.order_id) as i64, "", 0.0,
-            );
-            wrapper.exec_details(req_id, &c, &exec);
-
-            // Update open order tracking
-            self.core.update_order_fill(fill.order_id, status, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining));
-        }
-
-        // Executions the venue restated rather than announced. Filed for
-        // `req_executions` and reported to nobody: a caller that asks is
-        // answered, and one that did not hears nothing.
-        self.core.record_restated_executions(&self.shared);
-
-        // What the venue says its fills cost, each naming the execution it
-        // belongs to. Reported after the executions above, which is the order
-        // they arrive in and the order a caller reads them in.
-        for charge in charges {
-            self.core.record_charge(&charge);
-            wrapper.commission_and_fees_report(&charge);
-        }
-
-        // What is left: a status change with no fill on the same report.
-        for update in paired {
-            let status = order_status_str(update.status);
-            // The engine reads no parent from the report, but this client
-            // placed the order and was told. Prefer what it recorded; an order
-            // it did not place keeps the engine's answer of none.
-            let parent_id = self.core.tracked_parent_id(update.order_id)
-                .unwrap_or(update.parent_id);
-            // What the order has paid, as the report that changed its status
-            // stated it. Reported as zero, a status arriving just after a fill
-            // told the caller the order had filled at no price at all.
-            let avg = update.avg_price as f64 / crate::types::PRICE_SCALE as f64;
-            // The order as this client sent it, beside the status it is now
-            // in. The reference client answers an order's every change with
-            // both, from the order it holds — its own method for it sends the
-            // pair — and a program that waits for the order to confirm what it
-            // asked for waited on a callback that only arrived if it asked for
-            // its open orders. The other surface sends the pair here too.
-            //
-            // Copied out before the callback rather than read across it: a
-            // guard built in the scrutinee is held for the whole body, and the
-            // body calls the caller's own code. A wrapper that reaches the
-            // order cache from there would wait on a lock its own caller holds.
-            let tracked = self.core.open_orders.lock().unwrap().get(&update.order_id).cloned();
-            // Not for a preview. What the venue would do with an order is
-            // asked for by placing one, so a preview is a tracked order like
-            // any other and its statuses arrive here — but the answer to a
-            // preview is the margin the venue states, and that arrives on its
-            // own reply further down. The question waits on the first of these
-            // carrying its number, so a pair sent from the status alone
-            // answered it: no margin figures, and a cost of nought rather than
-            // the number that means unstated, on the one call whose whole
-            // purpose is to say what an order would cost.
-            if let Some(tracked) = tracked.filter(|t| !t.order.what_if) {
-                // What the venue said about the order, under the status this
-                // client names it by. Built from the status alone, everything
-                // beside it — what the order would cost, the margin figures and
-                // the warning — came back at nought on every change, to the
-                // caller this pair exists for.
-                let state = OrderState {
-                    status: status.to_string(),
-                    ..self.shared.orders.get_order_info(update.order_id)
-                        .map(|i| i.order_state)
-                        .unwrap_or_default()
-                };
-                wrapper.open_order(
-                    update.order_id as i64, &tracked.contract, &tracked.order, &state,
-                );
+                wrapper.account_summary_end(batch.req_id);
             }
-            wrapper.order_status(
-                update.order_id as i64, status, update.filled_qty,
-                update.remaining_qty, avg, update.perm_id, parent_id, 0.0,
-                self.core.placing_client(&self.shared, update.order_id) as i64, "", 0.0,
-            );
-            self.core.update_order_status(&self.shared, update.order_id, update.status, update.filled_qty, update.remaining_qty, update.instrument);
-        }
-
-        // A replacement the venue has taken spends the terms kept against a
-        // refusal of it. Before the refusals below, so an acceptance and a
-        // stale refusal arriving in one pass leave the record on what the
-        // venue holds.
-        for order_id in self.shared.orders.drain_replacements_taken() {
-            self.core.settle_replacement(order_id);
-        }
-
-        // Cancel rejects → error
-        for reject in self.shared.orders.drain_cancel_rejects() {
-            let (code, msg) = self.core.retire_rejected(&reject);
-            wrapper.error(reject.order_id as i64, code, &msg, "");
-        }
-
-        // Inactive (39=I) order reasons → error. order_status above
-        // already reported the "Inactive" string; this carries why.
-        for (order_id, code, msg) in self.shared.orders.drain_order_inactive() {
-            // A refusal is the end of a preview: it states what an order
-            // would have cost, and nothing reached the book. Left
-            // standing, the record read as a working order and its number
-            // as spent.
-            if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
-                self.core.untrack_order(order_id);
-            }
-            wrapper.error(order_id as i64, code as i64, &msg, "");
-        }
-
-        // A preview and nothing else, as the other surface already answers it.
-        // The venue answers what an order would cost, on the order itself: it
-        // states no status for it, nothing filled, no permanent number and no
-        // client, so a status beside it was eleven fields composed here about
-        // an order that was never placed. The reference client's own decode of
-        // an open order calls one callback and this is it.
-        for wi in self.shared.orders.drain_what_if_responses() {
-            let state = OrderState::from(&wi);
-            // Taken before the callback rather than after it. A preview is
-            // finished the moment it is answered, and left recorded while its
-            // own callback runs an order placed from inside that callback under
-            // the same number read as a change to the preview and was refused
-            // for being one. A callback that ends the read another way left it
-            // recorded for the rest of the session, under a number nothing
-            // could place again.
-            let tracked = self.core.open_orders.lock().unwrap().remove(&wi.order_id);
-            let (contract, order) = tracked
-                .map(|t| (t.contract, t.order))
-                .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
-            wrapper.open_order(wi.order_id as i64, &contract, &order, &state);
         }
     }
 
-    // ── Quote Dispatch ──
+    /// The session's last record: `connection_closed`, after everything
+    /// before it and after the final state, then nothing more.
+    ///
+    /// What this side keeps about the session's requests is kept until here,
+    /// so the final quotes, callbacks and holdings above reach the requests
+    /// they belong to, and reset once they have.
+    fn deliver_the_close(&self, wrapper: &mut impl Wrapper) {
+        self.connected.store(false, Ordering::Release);
+        self.ended.store(true, Ordering::Release);
+        wrapper.connection_closed();
+        self.core.reset();
+    }
 
-    fn dispatch_quotes(&self, wrapper: &mut impl Wrapper) {
-        // The contract's latest increment, exchange and permission number,
-        // once per request ahead of its first tick. Each acknowledgement
-        // replaces them, so delivery reads the stored values at that moment.
-        for (req_id, _) in self.shared.market.drain_tick_req_params_direct() {
-            if let Some(p) = self.core.watching(req_id)
-                .and_then(|instrument| self.shared.market.tick_req_params_for_follower(instrument))
-                && self.core.should_send_tick_req_params(req_id)
-            {
-                wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
+    // ── Records ──
+
+    fn deliver_record(&self, record: Record, wrapper: &mut impl Wrapper, polled: &mut Option<Polled>) {
+        match record {
+            Record::Closed => {}
+            // The connection going, said under 1100 unless it was asked for:
+            // a stop's end is the session's last record, and the reference
+            // client answers `disconnect()` with `connection_closed` alone.
+            Record::ConnectionLost { by_design } => {
+                self.connected.store(false, Ordering::Release);
+                if !by_design {
+                    wrapper.error_from(ErrorOrigin::Session, 1100, "Connectivity between client and server has been lost", "");
+                }
             }
-        }
-        // A request that joined a contract the venue had already refused. The
-        // refusal it joined was drained and told once, to whoever held the
-        // contract then, so this one heard nothing and had nothing coming.
-        for (req_id, reason) in self.shared.market.drain_subscription_failures_direct() {
-            wrapper.error(req_id, NO_SECURITY_DEFINITION, &reason, "");
-        }
-        for (instrument, _) in self.shared.market.drain_tick_req_params() {
-            for req_id in self.core.watchers_of(instrument) {
-                if let Some(p) = self.shared.market.tick_req_params_for_follower(instrument)
+            // 1102 rather than 1101: the reconnect re-establishes the
+            // subscriptions itself. Pushed only as the connection comes back
+            // after a loss that was pushed, so it always follows its 1100.
+            Record::ConnectionRestored => {
+                self.connected.store(true, Ordering::Release);
+                wrapper.error_from(ErrorOrigin::Session, 1102, "Connectivity between client and server has been restored - data maintained", "");
+            }
+            // One of the connections the venue keeps data on went away or came
+            // back, said under the number the venue reports it under. A
+            // market-data loss also forgets what each caller was last told of
+            // every quote — the engine zeroes the quotes at the drop, and
+            // diffed against what the caller had heard those noughts went out
+            // as prices; diffed against nothing, only what the venue restates
+            // goes out.
+            Record::VenueData((which, up)) => {
+                if matches!(which, crate::bridge::VenueDataConnection::MarketData) && !up {
+                    self.core.forget_last_quotes();
+                }
+                let (broken, ok) = which.codes();
+                wrapper.error_from(ErrorOrigin::Session, if up { ok } else { broken }, which.says(up), "");
+            }
+            Record::Retired(what) => {
+                if matches!(what, crate::types::Retirement::Question(crate::types::model::Question::AccountUpdates))
+                    && let Some(state) = polled {
+                    state.account = None;
+                    state.portfolio.clear();
+                }
+                self.retire(what, wrapper);
+            },
+            Record::OrderBook(entry) => self.core.keep_the_book(&self.shared, entry),
+            Record::SlotTaken { slot, generation } => self.core.note_slot_taken(slot, generation),
+            Record::SlotReleased { slot, generation } => self.core.note_slot_released(slot, generation),
+
+            // What was said about an order that went anyway: a warning on its
+            // number, and nothing else about it changes.
+            Record::OrderNotice((order_id, code, msg, op)) => {
+                wrapper.error_from(ErrorOrigin::Order { id: order_id as i64, op }, code as i64, &msg, "");
+            }
+            Record::Fill(fill) => self.deliver_fill(fill, wrapper),
+            Record::OrderUpdate(update) => self.deliver_update(update, wrapper),
+            // What the venue says a fill cost, naming the execution it belongs
+            // to. Pushed after the fill, so the fill is stored by now.
+            Record::Charge(charge) => {
+                self.core.record_charge(&charge);
+                wrapper.commission_and_fees_report(&charge);
+            }
+            // An execution the venue restated rather than announced. Filed for
+            // `req_executions` and reported to nobody: a caller that asks is
+            // answered, and one that did not hears nothing.
+            Record::RestatedExecution(restated) => {
+                let (contract, execution) = *restated;
+                self.core.push_execution(contract, execution, CommissionAndFeesReport::default());
+            }
+            // A replacement the venue has taken spends the terms kept against
+            // a refusal of it, in its place: an acceptance and a stale refusal
+            // leave the record on what the venue holds.
+            Record::ReplacementTaken(order_id) => self.core.settle_replacement(order_id),
+            Record::CancelReject(reject) => {
+                let (code, msg) = self.core.retire_rejected(&reject);
+                let origin = ErrorOrigin::Order { id: reject.order_id as i64, op: reject.refuses() };
+                wrapper.error_from(origin, code, &msg, "");
+            }
+            // Why an order stopped working. The status already said Inactive;
+            // this says why.
+            Record::OrderInactive((order_id, code, msg, op)) => {
+                // A refusal is the end of a preview: it states what an order
+                // would have cost, and nothing reached the book. Left
+                // standing, the record read as a working order and its number
+                // as spent.
+                if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
+                    self.core.untrack_order(order_id);
+                }
+                wrapper.error_from(ErrorOrigin::Order { id: order_id as i64, op }, code as i64, &msg, "");
+            }
+            // A preview and nothing else. The venue answers what an order
+            // would cost on the order itself: it states no status for it,
+            // nothing filled, no permanent number and no client. The reference
+            // client's own decode of an open order calls one callback and this
+            // is it.
+            Record::WhatIf(wi) => {
+                let state = OrderState::from(&wi);
+                // Taken before the callback rather than after it. A preview is
+                // finished the moment it is answered, and left recorded while
+                // its own callback runs an order placed from inside that
+                // callback under the same number read as a change to the
+                // preview and was refused for being one.
+                let tracked = self.core.open_orders.lock().unwrap().remove(&wi.order_id);
+                let (contract, order) = tracked
+                    .map(|t| (t.contract, t.order))
+                    .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
+                wrapper.open_order(wi.order_id as i64, &contract, &order, &state);
+            }
+
+            // What a joined subscription was acknowledged with, to the request
+            // that joined, as the reference client delivers it on
+            // `tick_req_params` ahead of the first tick.
+            Record::TickReqParamsFor((req_id, _)) => {
+                if let Some(p) = self.core.watching(req_id)
+                    .and_then(|instrument| self.shared.market.tick_req_params_for_follower(instrument))
                     && self.core.should_send_tick_req_params(req_id)
                 {
                     wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
                 }
             }
+            Record::SubscriptionFailureFor((req_id, reason)) => {
+                    wrapper.error_from(ErrorOrigin::Request { id: req_id, ends: true }, NO_SECURITY_DEFINITION, &reason, "");
+            }
+            Record::TickReqParams((instrument, generation, _)) => {
+                if generation == self.core.generation_held(instrument) {
+                    for req_id in self.core.watchers_of(instrument) {
+                        if let Some(p) = self.shared.market.tick_req_params_for_follower(instrument)
+                            && self.core.should_send_tick_req_params(req_id)
+                        {
+                            wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
+                        }
+                    }
+                }
+            }
+            Record::TbtTrade(trade) => {
+                // As the caller numbered it, from the record itself: a
+                // contract can carry several streams and the contract alone
+                // does not say which one this came from.
+                let req_id = trade.req_id;
+                // Tick type names the stream the request asked for: 1 = Last,
+                // 2 = AllLast, as the record carries it from its stream.
+                let kind = match trade.kind {
+                    TbtType::AllLast => 2,
+                    _ => 1,
+                };
+                // What the venue said about this print, not what a default says.
+                let attrib_last = TickAttribLast {
+                    past_limit: trade.past_limit,
+                    unreported: trade.unreported,
+                };
+                wrapper.tick_by_tick_all_last(
+                    req_id, kind, trade.timestamp as i64,
+                    trade.price as f64 / PRICE_SCALE_F,
+                    trade.size as f64 / QTY_SCALE_F,
+                    &attrib_last, &trade.exchange, &trade.conditions,
+                );
+            }
+            Record::TbtQuote(quote) => {
+                let attrib_ba = TickAttribBidAsk {
+                    bid_past_low: quote.bid_past_low,
+                    ask_past_high: quote.ask_past_high,
+                };
+                wrapper.tick_by_tick_bid_ask(
+                    quote.req_id, quote.timestamp as i64,
+                    quote.bid as f64 / PRICE_SCALE_F, quote.ask as f64 / PRICE_SCALE_F,
+                    quote.bid_size as f64 / QTY_SCALE_F,
+                    quote.ask_size as f64 / QTY_SCALE_F,
+                    &attrib_ba,
+                );
+            }
+            // The point between the two, each time it moved.
+            Record::TbtMid(mid) => {
+                wrapper.tick_by_tick_mid_point(
+                    mid.req_id, mid.timestamp as i64, mid.price as f64 / PRICE_SCALE_F,
+                );
+            }
+            // A book this client could not keep whole, on the request that
+            // asked for it. Nothing further is kept for it, so a caller not
+            // told reads a subscription that is up and a book that has
+            // stopped moving.
+            Record::DepthDrop((req_id, reason)) => {
+                let origin = ErrorOrigin::Request { id: i64::from(req_id), ends: true };
+                wrapper.error_from(origin, DEPTH_NOT_SERVED, &reason, "");
+            }
+            Record::DepthUpdate(du) => {
+                if du.market_maker.is_empty() {
+                    wrapper.update_mkt_depth(du.req_id as i64, du.position, du.operation, du.side, du.price, du.size);
+                } else {
+                    wrapper.update_mkt_depth_l2(du.req_id as i64, du.position, &du.market_maker, du.operation, du.side, du.price, du.size, du.is_smart_depth);
+                }
+            }
+            // News goes to every subscriber of the contract, as its quotes do
+            // — of the contract that held the slot when it arrived.
+            Record::TickNews((generation, news)) => {
+                if generation == self.core.generation_held(news.instrument) {
+                    for id in self.core.watchers_of(news.instrument) {
+                        wrapper.tick_news(
+                            id, news.timestamp as i64,
+                            &news.provider_code, &news.article_id, &news.headline, "",
+                        );
+                    }
+                }
+            }
+            // The venue's option model to every subscriber of the contract,
+            // and a computation answering a request to that request alone.
+            Record::OptionComputation((generation, comp)) => {
+                let (to, tick_type): (Vec<i64>, i32) = match comp.answers {
+                    Some(asked) => (vec![asked], ASKED_OPTION_COMPUTATION),
+                    None if generation != self.core.generation_held(comp.instrument) => {
+                        (Vec::new(), MODEL_OPTION_COMPUTATION)
+                    }
+                    None => (
+                        self.core.watchers_of(comp.instrument),
+                        if self.core.feed_is_delayed(comp.instrument) {
+                            DELAYED_MODEL_OPTION_COMPUTATION
+                        } else {
+                            MODEL_OPTION_COMPUTATION
+                        },
+                    ),
+                };
+                for req_id in to {
+                    // The model is one of the kinds an option's snapshot
+                    // waits for.
+                    self.core.note_snapshot_tick(req_id, tick_type);
+                    wrapper.tick_option_computation(
+                        req_id, tick_type, 0,
+                        comp.implied_vol, comp.delta, comp.opt_price, comp.pv_dividend,
+                        comp.gamma, comp.vega, comp.theta, comp.und_price,
+                    );
+                }
+            }
+            // What the venue said went wrong. It attributes these to no
+            // request, so neither does this.
+            Record::VenueError(text) => wrapper.error_from(ErrorOrigin::Session, VENUE_MESSAGE, &text, ""),
+            // A lookup that named a contract another slot already holds. One
+            // subscription per contract exists on the wire, so the callers
+            // given the second slot read the first — otherwise their quotes
+            // arrive on a slot nothing is watching.
+            // A market-data request the engine has taken: from here its
+            // number is served on the slot the record names.
+            Record::MarketDataTaken(taken) => self.core.note_mkt_data_taken(&self.shared, &taken),
+            // And withdrawn: nothing more is delivered under its number.
+            Record::MarketDataWithdrawn(req_id) => self.core.unregister_mkt_data(req_id),
+            // Everyone watching the contract, not only whoever asked first. A
+            // refusal is a fact about the contract, and a caller sharing
+            // somebody else's subscription holds no request of its own for the
+            // venue to refuse. Where nobody holds it, there is nobody to tell.
+            Record::SubscriptionFailure((instrument, generation, reason)) => {
+                if generation == self.core.generation_held(instrument) {
+                    for req_id in self.core.watchers_of(instrument) {
+                        let origin = ErrorOrigin::Request { id: req_id, ends: true };
+                        wrapper.error_from(origin, NO_SECURITY_DEFINITION, &reason, "");
+                    }
+                }
+            }
+            // A request riding beside the quote that the venue refused. Told
+            // to everyone watching the contract, under the code that means the
+            // venue said something went wrong and stated none.
+            Record::CompanionRefusal((instrument, generation, _kind, reason)) => {
+                if generation == self.core.generation_held(instrument) {
+                    for req_id in self.core.watchers_of(instrument) {
+                        // The quote it rides beside goes on.
+                        let origin = ErrorOrigin::Request { id: req_id, ends: false };
+                        wrapper.error_from(origin, VENUE_REPORTED, &reason, "");
+                    }
+                }
+            }
+            // A news subscription the venue refused: the engine released its
+            // side, so the client forgets whoever asked, leaving a later ask
+            // free to send anew.
+            // Taken only where they were asked for; left queued otherwise, for
+            // a subscription asking for the day's.
+            Record::NewsBulletin(b) => {
+                wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
+            }
+            // Real-time bars, and the continued half of a keep-up-to-date
+            // request. The two arrive on one feed and are told apart by
+            // whether the request has already answered with its history.
+            Record::RealTimeBar((req_id, bar)) => {
+                if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
+                    // A forming bar is stamped at its open, in seconds since
+                    // the epoch; dated as the history before it was, in the
+                    // caller's format on the zone the series was stated on.
+                    let bd = BarData {
+                        date: self.core.bar_time_for_epoch(req_id as i64, i64::from(bar.timestamp)),
+                        open: bar.open,
+                        high: bar.high,
+                        low: bar.low,
+                        close: bar.close,
+                        volume: bar.volume as i64,
+                        wap: bar.wap,
+                        bar_count: bar.count,
+                        timezone: String::new(),
+                        // A forming bar has not ended, and the stream states
+                        // no end for one.
+                        end: String::new(),
+                    };
+                    wrapper.historical_data_update(req_id as i64, &bd);
+                } else {
+                    wrapper.real_time_bar(
+                        req_id as i64, bar.timestamp as i64,
+                        bar.open, bar.high, bar.low, bar.close,
+                        bar.volume, bar.wap, bar.count,
+                    );
+                }
+            }
+
+            // What the venue refused under a request, in its place: a book's
+            // reset ahead of the levels that follow it, a query error ahead
+            // of the empty end that follows it.
+            Record::HistoricalError((origin, code, msg)) => {
+                wrapper.error_from(origin, i64::from(code), &msg, "");
+            }
+            // Historical data → historical_data + historical_data_end, and
+            // after that end, historical_data_update. A keep-up-to-date
+            // request answers once with the history and then keeps speaking;
+            // the reference client separates the two.
+            Record::HistoricalData((req_id, response)) => {
+                let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
+                self.core.note_historical_zone(req_id as i64, &response.timezone);
+                for bar in &response.bars {
+                    let bd = BarData {
+                        date: self.core.bar_time_for(req_id as i64, &bar.time, &response.timezone),
+                        open: bar.open,
+                        high: bar.high,
+                        low: bar.low,
+                        close: bar.close,
+                        volume: bar.volume,
+                        wap: bar.wap,
+                        bar_count: bar.count,
+                        timezone: response.timezone.clone(),
+                        end: bar.end.clone(),
+                    };
+                    if is_update {
+                        wrapper.historical_data_update(req_id as i64, &bd);
+                    } else {
+                        wrapper.historical_data(req_id as i64, &bd);
+                    }
+                }
+                if response.is_complete && !is_update {
+                    self.core.hist_initial_complete.lock().unwrap().insert(req_id);
+                    // The range the request covered, which is what a caller
+                    // pages backwards with.
+                    let (from, to) =
+                        self.core.historical_range_for(req_id as i64, &response.timezone);
+                    wrapper.historical_data_end(req_id as i64, &from, &to);
+                }
+            }
+            // An order this session did not place, paired with the number a
+            // caller reaches it under here.
+            Record::OrderBound((perm_id, client_id, order_id)) => {
+                wrapper.order_bound(perm_id, client_id, order_id);
+            }
+            Record::HeadTimestamp((req_id, response)) => {
+                // Returned in the form `format_date` asked for. The wire
+                // carries one form; `bar_time_for` converts it.
+                let stated = self.core.bar_time_for(req_id as i64, &response.head_timestamp, "");
+                wrapper.head_timestamp(req_id as i64, &stated);
+            }
+            Record::ContractDetails((req_id, def)) => {
+                let details = ContractDetails::from_definition(&def);
+                // Fixed income answers on its own callback. A bond, a bill and
+                // the type the venue spells `FIXED` share it; every other type
+                // is answered on the ordinary one.
+                if def.sec_type.is_fixed_income() {
+                    wrapper.bond_contract_details(req_id as i64, &details);
+                } else {
+                    wrapper.contract_details(req_id as i64, &details);
+                }
+            }
+            Record::ContractDetailsEnd(req_id) => wrapper.contract_details_end(req_id as i64),
+            Record::DepthExchanges(depth_exchanges) => wrapper.mkt_depth_exchanges(&depth_exchanges),
+            // The calendar's answers, as the venue wrote them.
+            Record::CalendarMeta((req_id, json)) => wrapper.wsh_meta_data(req_id as i64, &json),
+            Record::CalendarEvents((req_id, json)) => wrapper.wsh_event_data(req_id as i64, &json),
+            Record::MatchingSymbols((req_id, matches)) => {
+                let descriptions: Vec<ContractDescription> =
+                    matches.iter().map(ContractDescription::from).collect();
+                wrapper.symbol_samples(req_id as i64, &descriptions);
+            }
+            Record::OptionParams((req_id, underlying_con_id, scopes)) => {
+                for scope in &scopes {
+                    wrapper.security_definition_option_parameter(
+                        req_id as i64, &scope.exchange, underlying_con_id, &scope.trading_class,
+                        &scope.multiplier, &scope.expirations, &scope.strikes,
+                    );
+                }
+                wrapper.security_definition_option_parameter_end(req_id as i64);
+            }
+            Record::ScannerParams(xml) => wrapper.scanner_parameters(&xml),
+            // The advisor's own configuration: a partition the caller asked
+            // for, the end of one they replaced, and the venue's account of a
+            // replacement it would not take.
+            Record::AdvisorConfig((fa_data_type, xml)) => wrapper.receive_fa(fa_data_type, &xml),
+            Record::AdvisorReplaced((req_id, text)) => wrapper.replace_fa_end(req_id, &text),
+            Record::AdvisorRefused((origin, code, text)) => {
+                wrapper.error_from(origin, i64::from(code), &text, "");
+            }
+            // Scanner data. The rows' contracts were resolved by the engine
+            // before the batch was released; the fallback covers a partial
+            // flushed at its deadline.
+            Record::ScannerData((req_id, result)) => {
+                // A refused scan arrives in the shape of a completed one and
+                // carries the reason, reported against the requesting id so a
+                // refusal is not delivered as an empty result.
+                if !result.error_text.is_empty() {
+                    let origin = ErrorOrigin::Request { id: i64::from(req_id), ends: true };
+                    wrapper.error_from(origin, VENUE_REPORTED, &result.error_text, "");
+                }
+                for (rank, entry) in result.entries.iter().enumerate() {
+                    let mut contract = Contract { con_id: entry.con_id as i64, ..Default::default() };
+                    if let Some(ac) = self.core.get_contract(entry.con_id as i64, &self.shared) {
+                        contract.symbol = ac.symbol;
+                        contract.sec_type = ac.sec_type;
+                        contract.exchange = ac.exchange;
+                        contract.currency = ac.currency;
+                        contract.local_symbol = ac.local_symbol;
+                        contract.primary_exchange = ac.primary_exchange;
+                        contract.trading_class = ac.trading_class;
+                    }
+                    let details = ContractDetails { contract, ..Default::default() };
+                    wrapper.scanner_data(req_id as i64, rank as i32, &details, "", "", "", "");
+                }
+                wrapper.scanner_data_end(req_id as i64);
+            }
+            Record::HistoricalNews((req_id, headlines, has_more)) => {
+                for h in &headlines {
+                    wrapper.historical_news(req_id as i64, &h.time, &h.provider_code, &h.article_id, &h.headline);
+                }
+                wrapper.historical_news_end(req_id as i64, has_more);
+            }
+            Record::NewsArticle((req_id, article_type, text)) => {
+                wrapper.news_article(req_id as i64, article_type, &text);
+            }
+            Record::FundamentalData((req_id, data)) => wrapper.fundamental_data(req_id as i64, &data),
+            Record::HistogramData((req_id, entries)) => {
+                let items: Vec<(f64, i64)> = entries.iter().map(|e| (e.price, e.count)).collect();
+                wrapper.histogram_data(req_id as i64, &items);
+            }
+            // Historical ticks route to the variant-specific callback, as in
+            // ibapi.
+            Record::HistoricalTicks((req_id, data, _, done)) => match &data {
+                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id as i64, &data, done),
+                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id as i64, &data, done),
+                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id as i64, &data, done),
+            },
+            Record::HistoricalSchedule((req_id, schedule)) => {
+                let sessions: Vec<(String, String, String)> = schedule.sessions.iter()
+                    .map(|s| (s.ref_date.clone(), s.open_time.clone(), s.close_time.clone()))
+                    .collect();
+                wrapper.historical_schedule(
+                    req_id as i64, &schedule.start_date_time, &schedule.end_date_time,
+                    &schedule.timezone, &sessions,
+                );
+            }
+
+            // A refusal made at a call, in its place: after everything pushed
+            // before the call, as a gateway's rejection arrives after
+            // everything it wrote before it.
+            Record::Refused((origin, code, msg)) => wrapper.error_from(origin, code, &msg, ""),
+            Record::Answer(answer) => self.deliver_answer(answer, wrapper, polled),
+            Record::Reply(reply) => deliver_reply(reply, wrapper),
         }
-        // Quote polling → tick_price / tick_size (via ClientCore)
+    }
+
+    /// A fill and the status stated on the same report: `order_status`, then
+    /// `exec_details`, each with what the report stated.
+    fn deliver_fill(&self, record: FillRecord, wrapper: &mut impl Wrapper) {
+        let FillRecord { fill, report, status } = record;
+        let price_f = fill.price as f64 / PRICE_SCALE_F;
+        // Status as the report states it, derived from `remaining` only when
+        // the report carries none.
+        let status_str = status
+            .as_ref()
+            .map(|u| order_status_str(u.status))
+            .unwrap_or(if fill.remaining == 0 { "Filled" } else { "Submitted" });
+        if let Some(u) = &status {
+            self.core.update_order_status(
+                &self.shared, u.order_id, u.status, u.filled_qty, u.remaining_qty,
+                u.instrument,
+            );
+        }
+        let (perm_id, parent_id) = self.core.perm_and_parent_stated(
+            fill.order_id, report.as_deref(), status.as_ref(),
+        );
+        let client = self.core.client_stated(fill.order_id, report.as_deref());
+        // `filled` and `avgFillPrice` describe the order so far;
+        // `lastFillPrice` describes this print.
+        let avg_price_f = fill.avg_price as f64 / PRICE_SCALE_F;
+
+        let side_str = match fill.side {
+            Side::Buy => "BOT",
+            Side::Sell => "SLD",
+            Side::ShortSell => "SLD",
+        };
+        // The report this fill was booked off, not whatever the order's
+        // record says now: one read can carry two prints of one order, and
+        // the record holds only the later.
+        let (c, exec) = if let Some(info) = report {
+            let mut ex = info.last_exec.clone();
+            ex.side = side_str.into();
+            ex.shares = qty_to_f64(fill.qty);
+            ex.price = price_f;
+            ex.order_id = fill.order_id as i64;
+            // The client that placed it, where the report names none. The
+            // record knows which client the order went out under and the
+            // venue's report may carry no client at all; taken as stated, it
+            // filed this session's own fill under client zero while the status
+            // above was announced under the placing client.
+            if ex.client_id == 0 {
+                ex.client_id = i64::from(client);
+            }
+            let contract = if info.contract.con_id != 0 {
+                self.core.get_contract(info.contract.con_id, &self.shared).unwrap_or_else(|| info.contract.clone())
+            } else {
+                info.contract.clone()
+            };
+            (contract, ex)
+        } else {
+            (Contract::default(), Execution {
+                side: side_str.into(),
+                shares: qty_to_f64(fill.qty),
+                price: price_f,
+                order_id: fill.order_id as i64,
+                // The venue stated nothing about this one, so the client that
+                // placed the order is what names it. Left at nought, a request
+                // filtered by client matched none of them.
+                client_id: i64::from(client),
+                ..Default::default()
+            })
+        };
+        // Stored before either callback about the print. A caller that asks
+        // for its executions from inside the status callback or this one --
+        // which is ordinary -- was answered without the fill it was being told
+        // about. What it cost arrives on a record of its own; stored unstated
+        // so a replay of this execution says the charge is unknown rather
+        // than that it was nothing.
+        self.core.push_execution(c.clone(), exec.clone(), CommissionAndFeesReport::default());
+        wrapper.order_status(
+            fill.order_id as i64, status_str, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
+            avg_price_f, perm_id, parent_id, price_f, i64::from(client), "", 0.0,
+        );
+        // Unsolicited executions carry request id -1. A market-data
+        // subscription id does not identify a `reqExecutions` request.
+        wrapper.exec_details(NO_REQUEST, &c, &exec);
+        self.core.update_order_fill(
+            fill.order_id, status_str, qty_to_f64(fill.cum_qty), qty_to_f64(fill.remaining),
+        );
+    }
+
+    /// A status change with no fill on the same report: `open_order` with the
+    /// order's state as the report stated it, then `order_status`.
+    fn deliver_update(&self, record: UpdateRecord, wrapper: &mut impl Wrapper) {
+        let UpdateRecord { update, state, client_id } = record;
+        let status = order_status_str(update.status);
+        // The engine reads no parent from the report, but this client placed
+        // the order and was told. Prefer what it recorded; an order it did not
+        // place keeps the engine's answer of none.
+        let parent_id = self.core.tracked_parent_id(update.order_id)
+            .unwrap_or(update.parent_id);
+        // What the order has paid, as the report that changed its status
+        // stated it.
+        let avg = update.avg_price as f64 / crate::types::PRICE_SCALE as f64;
+        // The order as this client sent it, beside the status it is now in.
+        // The reference client answers an order's every change with both, from
+        // the order it holds. Copied out before the callback rather than read
+        // across it: a wrapper that reaches the order cache from the callback
+        // would wait on a lock its own caller holds.
+        let tracked = self.core.open_orders.lock().unwrap().get(&update.order_id).cloned();
+        let client = tracked
+            .as_ref()
+            .map(|t| t.order.client_id)
+            .filter(|c| *c != 0)
+            .unwrap_or(client_id);
+        // Not for a preview: the answer to a preview is the margin the venue
+        // states on its own reply, and a pair sent from the status alone
+        // answered it with no margin figures.
+        if let Some(tracked) = tracked.filter(|t| !t.order.what_if) {
+            // What the venue said about the order, under the status this
+            // client names it by — as the report that changed the status
+            // stated it, not as the order's record stands at the read.
+            let state = OrderState {
+                status: status.to_string(),
+                ..state.map(|stated| stated.order_state.clone()).unwrap_or_default()
+            };
+            wrapper.open_order(
+                update.order_id as i64, &tracked.contract, &tracked.order, &state,
+            );
+        }
+        wrapper.order_status(
+            update.order_id as i64, status, update.filled_qty,
+            update.remaining_qty, avg, update.perm_id, parent_id, 0.0,
+            i64::from(client), "", 0.0,
+        );
+        self.core.update_order_status(
+            &self.shared, update.order_id, update.status, update.filled_qty,
+            update.remaining_qty, update.instrument,
+        );
+    }
+
+    // ── Answers composed where they stand ──
+
+    /// An answer this side composes, as its state stands at the marker's
+    /// place in the order.
+    fn deliver_answer(&self, answer: Answer, wrapper: &mut impl Wrapper, polled: &mut Option<Polled>) {
+        match answer {
+            Answer::Positions => {
+                // What moved before this answer is in it: the holdings are
+                // stated as they are now. Taken, and handed to the per-request
+                // watchers alone, so `position` does not say them twice.
+                let mut already_stated = self.shared.portfolio.drain_position_changes();
+                if let Some(state) = polled.as_mut() {
+                    already_stated.append(&mut state.positions);
+                }
+                // Watching from here, where the answer stands.
+                self.positions_requested.store(true, Ordering::Release);
+                for pi in &self.shared.portfolio.position_infos() {
+                    let c = self.position_contract(pi);
+                    let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+                    wrapper.position(&self.account_id, &c, pi.position, avg_cost);
+                }
+                wrapper.position_end();
+                let watching = self.multi_position_watchers();
+                for pi in &already_stated {
+                    let c = self.position_contract(pi);
+                    let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+                    for req_id in &watching {
+                        if self.core.positions_account(&self.shared, *req_id) != self.account_id { continue; }
+                        wrapper.position_multi(*req_id, &self.account_id, &self.core.positions_model(*req_id), &c, pi.position, avg_cost);
+                    }
+                }
+            }
+            Answer::PositionsMulti { req_id, account, model_code } => {
+                let account = self.shared.account_name(&account);
+                let portfolio = self.shared.portfolio_for(&account);
+                let mut moves = std::collections::BTreeMap::new();
+                if let Some(state) = polled.as_mut() {
+                    if account == self.account_id {
+                        moves.extend(state.positions.drain(..).map(|p| (p.con_id, p)));
+                    } else {
+                        state.named_positions.retain(|(a, p)| {
+                            if a != &account { return true; }
+                            moves.insert(p.con_id, p.clone());
+                            false
+                        });
+                    }
+                }
+                moves.extend(portfolio.drain_position_changes().into_iter().map(|p| (p.con_id, p)));
+                for pi in moves.values() {
+                    let contract = self.position_contract(pi);
+                    let cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+                    if account == self.account_id && self.positions_requested.load(Ordering::Acquire) {
+                        wrapper.position(&account, &contract, pi.position, cost);
+                    }
+                    for old in self.multi_position_watchers() {
+                        if old != req_id && self.core.positions_account(&self.shared, old) == account {
+                            wrapper.position_multi(old, &account, &self.core.positions_model(old), &contract, pi.position, cost);
+                        }
+                    }
+                }
+                self.core.select_positions_account(req_id, &account, &model_code);
+                // Labelled with the account they are on, not with the one
+                // that was asked about.
+                for pi in portfolio.position_infos().into_iter().filter(|pi| pi.position != 0.0) {
+                    let contract = self.position_contract(&pi);
+                    wrapper.position_multi(
+                        req_id, &account, &model_code, &contract, pi.position,
+                        pi.avg_cost as f64 / PRICE_SCALE_F,
+                    );
+                }
+                wrapper.position_multi_end(req_id);
+            }
+            Answer::AccountUpdatesMulti { req_id, account, model_code, ledger_and_nlv } => {
+                let account = self.shared.account_name(&account);
+                self.core.select_multi_account(req_id, &account, &model_code);
+                // Held open from here. A figure that moves after the batch
+                // below is reported again under the same number, and what the
+                // request asked for is stated before that.
+                self.core.ledger_only_for(req_id, ledger_and_nlv);
+                // Against this request's own record, which a fresh ask starts
+                // empty — so the batch is the account whole, and every batch
+                // after it is what has moved since this request last heard.
+                self.core.forget_account_figures_for(req_id);
+                if let Some(state) = polled.as_mut() {
+                    state.multi.retain(|(id, _)| *id != req_id);
+                }
+                for field in self.core.account_figures_that_moved(&self.shared, req_id) {
+                    wrapper.account_update_multi(
+                        req_id, &account, &model_code,
+                        &field.key, &field.value, &field.currency,
+                    );
+                }
+                wrapper.account_update_multi_end(req_id);
+            }
+            Answer::AccountUpdates { account } => {
+                self.core.select_account_updates(&account);
+                // Subscribed from here, where the answer stands: the account
+                // as it is stated now, and its end where it is stated whole.
+                self.core.subscribe_account_updates(true);
+                if let Some(state) = polled.as_mut() {
+                    state.account = None;
+                    state.portfolio.clear();
+                }
+                if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
+                    let portfolio = self.core.prepare_portfolio_updates(&self.shared);
+                    self.deliver_account_batch(batch, portfolio, wrapper);
+                }
+            }
+            Answer::OpenOrders => {
+                for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
+                    let state = OrderState { status: tracked.status, ..Default::default() };
+                    wrapper.open_order(order_id as i64, &tracked.contract, &tracked.order, &state);
+                }
+                wrapper.open_order_end();
+            }
+            Answer::CompletedOrders { api_only } => {
+                self.archive_completed_orders();
+                // Copied before anything is called back: a callback may ask
+                // for these again, and the lock is not re-entrant.
+                let completed = self.completed.lock().unwrap().clone();
+                for (contract, order, state) in &completed {
+                    // Kept whole in the archive and filtered on the way out,
+                    // so the same session can ask for all of them and for the
+                    // numbered ones and be answered correctly either way.
+                    if api_only && !self.shared.orders.was_entered_through_an_api(
+                        order.order_id.max(0) as u64, order.perm_id.max(0) as u64,
+                    ) {
+                        continue;
+                    }
+                    wrapper.completed_order(contract, order, state);
+                }
+                wrapper.completed_orders_end();
+            }
+            Answer::NextValidId => wrapper.next_valid_id(self.stated_next_id() as i64),
+            Answer::Executions { req_id, filter } => {
+                let answer = self.core.executions_for_request(
+                    &self.shared, &self.accounts, &filter, jiff::Timestamp::now(),
+                );
+                let (rows, unheld) = match answer {
+                    Ok(answer) => answer,
+                    Err(why) => {
+                        let origin = ErrorOrigin::Request { id: req_id, ends: true };
+                        return wrapper.error_from(origin, i64::from(why.code), &why.message, "");
+                    }
+                };
+                if let Some(why) = crate::client_core::ClientCore::unheld_days_notice(&unheld) {
+                    log::warn!("{why}");
+                    // A notice the executions and their end follow.
+                    let origin = ErrorOrigin::Request { id: req_id, ends: false };
+                    wrapper.error_from(origin, crate::error_codes::Refusal::VALIDATION as i64, &why, "");
+                }
+                for se in rows {
+                    wrapper.exec_details(req_id, &se.contract, &se.execution);
+                    // Only where the venue has said what it cost. An execution
+                    // is stored with its charge deliberately unstated, and an
+                    // empty name can only mean nobody has said.
+                    if !se.commission_and_fees.exec_id.is_empty() {
+                        wrapper.commission_and_fees_report(&se.commission_and_fees);
+                    }
+                }
+                wrapper.exec_details_end(req_id);
+            }
+        }
+    }
+
+    /// A withdrawal the engine confirmed, where it stands: what the
+    /// withdrawn exchange watched stops here, after everything it answered.
+    fn retire(&self, what: crate::types::Retirement, wrapper: &mut impl Wrapper) {
+        use crate::types::Retirement;
+        match what {
+            Retirement::Question(q) => {
+                match q {
+                    crate::types::model::Question::Positions => {
+                        self.positions_requested.store(false, Ordering::Release);
+                    }
+                    crate::types::model::Question::AccountUpdates => {
+                        self.core.subscribe_account_updates(false);
+                    }
+                    _ => {}
+                }
+                wrapper.question_retired(q);
+            }
+            Retirement::PositionsMulti(req_id) => {
+                self.core.forget_positions_account(req_id);
+            }
+            Retirement::AccountUpdatesMulti(req_id) => {
+                self.core.forget_account_figures_for(req_id);
+                self.core.forget_multi_account(req_id);
+                self.core.ledger_only_for(req_id, false);
+            }
+        }
+    }
+
+    /// The per-request position watchers, in order.
+    fn multi_position_watchers(&self) -> Vec<i64> {
+        self.core.positions_watchers()
+    }
+
+    /// One batch of the account's own figures, its holdings beside them, and
+    /// the end where the account has just been stated whole.
+    fn deliver_account_batch(
+        &self,
+        batch: crate::client_core::AccountUpdateBatch,
+        portfolio: Vec<crate::client_core::PortfolioUpdateEntry>,
+        wrapper: &mut impl Wrapper,
+    ) {
+        let account = self.core.updates_account(&self.shared);
+        for field in &batch.fields {
+            wrapper.update_account_value(&field.key, &field.value, &field.currency, &account);
+        }
+        // What the account holds, beside what it is worth. The reference
+        // client reports both on this subscription.
+        for entry in portfolio {
+            let contract = self.core
+                .get_contract(entry.con_id, &self.shared)
+                .unwrap_or_else(|| crate::types::model::Contract {
+                    con_id: entry.con_id,
+                    ..Default::default()
+                });
+            wrapper.update_portfolio(
+                &contract, entry.position, entry.market_price, entry.market_value,
+                entry.avg_cost, entry.unrealized_pnl, entry.realized_pnl, &account,
+            );
+        }
+        if batch.finished {
+            wrapper.update_account_time("");
+            wrapper.account_download_end(&account);
+        }
+    }
+
+    // ── State, after the records ──
+
+    /// The state a read took before its cut, under the mapping its records
+    /// left: holdings, quotes, the maps of venues answered, and the figures.
+    fn deliver_state(&self, polled: Polled, wrapper: &mut impl Wrapper) {
+        let Polled {
+            quotes, positions, named_positions, pnl, pnl_single, account, portfolio, multi, summaries,
+            smart_components,
+        } = polled;
+
+        // A holding that moved since the caller last heard, to whoever still
+        // watches. Drained once and given to everyone watching.
+        if !positions.is_empty() {
+            let on_position = self.positions_requested.load(Ordering::Acquire);
+            let per_request = self.multi_position_watchers();
+            for pi in &positions {
+                let contract = self.position_contract(pi);
+                let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+                if on_position {
+                    wrapper.position(&self.account_id, &contract, pi.position, avg_cost);
+                }
+                // The account this session opened under, whatever the request
+                // named, as the answer to the request itself states.
+                for req_id in &per_request {
+                    if self.core.positions_account(&self.shared, *req_id) != self.account_id { continue; }
+                    wrapper.position_multi(*req_id, &self.account_id, &self.core.positions_model(*req_id), &contract, pi.position, avg_cost);
+                }
+            }
+        }
+
+        for (account, pi) in named_positions {
+            let contract = self.position_contract(&pi);
+            for req_id in self.multi_position_watchers() {
+                if self.core.positions_account(&self.shared, req_id) == account {
+                    wrapper.position_multi(req_id, &account, &self.core.positions_model(req_id), &contract, pi.position, pi.avg_cost as f64 / PRICE_SCALE_F);
+                }
+            }
+        }
+
+        self.deliver_quotes(quotes, wrapper);
+
+        // Maps of venues asked for before they arrived: answered once they
+        // have, or refused once the wait a gateway allows has run out.
+        for (req_id, answer) in smart_components {
+            match answer {
+                Ok(components) => wrapper.smart_components(req_id, &components),
+                Err(why) => {
+                    let origin = ErrorOrigin::Request { id: req_id, ends: true };
+                    wrapper.error_from(origin, i64::from(why.code), &why.message, "");
+                }
+            }
+        }
+
+        // PnL → pnl callback (change-detected via ClientCore)
+        for update in pnl {
+            wrapper.pnl(update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl);
+        }
+        for update in pnl_single {
+            wrapper.pnl_single(update.req_id, update.pos, update.daily_pnl, update.unrealized_pnl, update.realized_pnl, update.value);
+        }
+
+        // The account's own figures, where it is subscribed.
+        if let Some(batch) = account {
+            self.deliver_account_batch(batch, portfolio, wrapper);
+        }
+
+        // The multi-account subscription, which is a live feed of its own:
+        // every figure that has moved since it last heard, under each request
+        // still watching.
+        let watching = self.core.multi_watchers();
+        for (req_id, fields) in multi {
+            if !watching.contains(&req_id) {
+                continue;
+            }
+            for field in fields {
+                wrapper.account_update_multi(
+                    req_id, &self.core.multi_account(&self.shared, req_id), &self.core.multi_model(req_id),
+                    &field.key, &field.value, &field.currency,
+                );
+            }
+        }
+
+        // Account summary → account_summary + account_summary_end.
+        for batch in summaries {
+            for entry in &batch.entries {
+                wrapper.account_summary(batch.req_id, &entry.account, &entry.tag, &entry.value, &entry.currency);
+            }
+            wrapper.account_summary_end(batch.req_id);
+        }
+    }
+
+    /// Each held slot's quote, as ticks against what its callers were last
+    /// told, to the requests watching it now.
+    fn deliver_quotes(&self, quotes: Vec<crate::client_core::PolledQuote>, wrapper: &mut impl Wrapper) {
         let instruments = self.core.snapshot_instruments();
-        // What the venue says about a price rather than what it is. It states
-        // both sides in one mask and a caller is owed an attribute beside each
-        // price, so the side is read off the tick the attribute goes out with.
         let mut snapshot_done: Vec<(i64, Option<u64>)> = Vec::new();
-        for (iid, req_id, watchers) in instruments {
-            let result = self.core.poll_instrument_ticks(&self.shared, iid, req_id);
-            // Ahead of everything this pass delivers, and to everyone it
+        for polled in quotes {
+            let iid = polled.iid;
+            let Some((_, req_id, watchers)) = instruments.iter().find(|(at, ..)| *at == iid).cloned() else {
+                continue;
+            };
+            // Only under the occupancy the slot is held under now. A quote of
+            // the contract that left the slot is not this one's, and what the
+            // caller was last told stays where it was, so the next read states
+            // the new contract's quote whole.
+            if polled.generation != self.core.generation_held(iid) {
+                self.close_finished_snapshots(req_id, &watchers, wrapper, &mut snapshot_done);
+                continue;
+            }
+            let result = self.core.ticks_from(&self.shared, polled, req_id);
+            // Ahead of everything this read delivers, and to everyone it
             // delivers to. The type a caller is served under is stated before
             // the data it applies to, which is the order the reference client
             // keeps.
-            //
-            // It was stated for the holder alone, and only where the pass
-            // carried a price or a size. A caller following the contract got
-            // it from inside the price loop, so one whose first event was a
-            // halt, an exchange letter or the last-trade time was handed data
-            // first — and a pass carrying only those counts as nothing
-            // delivered, so neither of them was told at all.
             let delivering = result.delivered
                 || !result.generic_ticks.is_empty()
                 || !result.string_ticks.is_empty()
@@ -609,10 +1187,13 @@ impl EClient {
             }
             if let Some(ts) = &result.timestamp {
                 let ts_secs = ts.timestamp_ns / 1_000_000_000;
-                // Tick type 45 goes to every subscriber of the contract, as the
-                // prices and strings above do.
+                let tick_type = if result.delayed { 88 } else { 45 };
+                // Tick type 45 goes to every subscriber of the contract, as
+                // the prices and strings above do. A delayed feed's time, 88,
+                // is one of the kinds its snapshot waits for.
                 for id in std::iter::once(ts.req_id).chain(watchers.iter().copied()) {
-                    wrapper.tick_string(id, if result.delayed { 88 } else { 45 }, &ts_secs.to_string());
+                    self.core.note_snapshot_tick(id, tick_type);
+                    wrapper.tick_string(id, tick_type, &ts_secs.to_string());
                 }
             }
             // The answer to a chargeable snapshot, to the snapshot's own
@@ -630,565 +1211,59 @@ impl EClient {
             for st in &result.snapshot_strings {
                 wrapper.tick_string(st.req_id, st.tick_type, &st.value);
             }
-            // The holder and everyone watching it. A caller that asked for a
-            // snapshot of a contract somebody was already watching is recorded
-            // as a follower, and only the holder was named here — so its
-            // snapshot was never completed, never withdrawn, and a caller
-            // waiting for the end of it waited for ever.
-            for id in std::iter::once(req_id).chain(watchers.iter().copied()) {
-                if self.core.check_snapshot_done(id) {
-                    // What it was watching when the snapshot finished, so
-                    // the withdrawal below can tell this subscription from
-                    // whatever the callback leaves under the same number. A
-                    // callback is free to withdraw what it has just been told
-                    // about and ask for something else — "the snapshot is in,
-                    // now stream it" is the obvious thing to write — and the
-                    // withdrawal that followed took the number alone, so it
-                    // cancelled the subscription the callback had just made.
-                    let was_watching = self.core.registration_of(id);
-                    wrapper.tick_snapshot_end(id);
-                    snapshot_done.push((id, was_watching));
-                }
-            }
+            self.close_finished_snapshots(req_id, &watchers, wrapper, &mut snapshot_done);
         }
+        // A snapshot on a slot this read did not poll still ends at its
+        // bound: the eleven seconds run from the request, not from a tick.
+        for (_, req_id, watchers) in &instruments {
+            self.close_finished_snapshots(*req_id, watchers, wrapper, &mut snapshot_done);
+        }
+        // Withdrawn by this client: a command, not a delivery. Only where the
+        // number still holds the subscription the snapshot was for — not
+        // merely the same contract, which a callback that re-asked would also
+        // show.
         for (req_id, was_watching) in snapshot_done {
-            // Only where the number still holds the subscription the
-            // snapshot was for — not merely the same contract, which a
-            // callback that re-asked would also show.
             if self.core.registration_of(req_id) == was_watching {
-                let _ = self.cancel_mkt_data(req_id);
-            }
-        }
-
-        // TBT trades → tick_by_tick_all_last
-        let trades = self.shared.market.drain_tbt_trades();
-        // Locked once per batch: this is the highest-rate feed here.
-        let kinds = (!trades.is_empty()).then(|| self.tbt_kinds.lock().unwrap().clone());
-        for trade in trades {
-            // As the caller numbered it, from the record itself: a contract
-            // can carry several streams and the contract alone does not say
-            // which one this came from.
-            let req_id = trade.req_id;
-            // Tick type names the stream the request asked for: 1 = Last,
-            // 2 = AllLast. The trade record does not carry it.
-            let kind = match kinds.as_ref().and_then(|k| k.get(&req_id)) {
-                Some(TbtType::AllLast) => 2,
-                _ => 1,
-            };
-            // What the venue said about this print, not what a default says.
-            let attrib_last = TickAttribLast {
-                past_limit: trade.past_limit,
-                unreported: trade.unreported,
-            };
-            wrapper.tick_by_tick_all_last(
-                req_id, kind, trade.timestamp as i64,
-                trade.price as f64 / PRICE_SCALE_F,
-                trade.size as f64 / QTY_SCALE_F,
-                &attrib_last, &trade.exchange, &trade.conditions,
-            );
-        }
-
-        // TBT quotes → tick_by_tick_bid_ask
-        for quote in self.shared.market.drain_tbt_quotes() {
-            let req_id = quote.req_id;
-            let attrib_ba = TickAttribBidAsk {
-                bid_past_low: quote.bid_past_low,
-                ask_past_high: quote.ask_past_high,
-            };
-            wrapper.tick_by_tick_bid_ask(
-                req_id, quote.timestamp as i64,
-                quote.bid as f64 / PRICE_SCALE_F, quote.ask as f64 / PRICE_SCALE_F,
-                quote.bid_size as f64 / QTY_SCALE_F,
-                quote.ask_size as f64 / QTY_SCALE_F,
-                &attrib_ba,
-            );
-        }
-
-        // The point between the two, each time it moved.
-        for mid in self.shared.market.drain_tbt_mids() {
-            wrapper.tick_by_tick_mid_point(
-                mid.req_id, mid.timestamp as i64, mid.price as f64 / PRICE_SCALE_F,
-            );
-        }
-
-        // The refusal queue, before the book levels below. A reset (317) is
-        // queued and then the venue's first new levels land; levels drained
-        // first, a pass that ran after both had arrived delivered the new book
-        // and then the order to empty it. Still before historical_data, so a
-        // QueryError that also queued an empty terminal HistoricalResponse
-        // fires wrapper.error first, then wrapper.historical_data_end.
-        for (req_id, code, msg) in self.shared.reference.drain_historical_errors_for_dispatch(
-            |id| self.shared.reference.left_for_its_reader(id),
-        ) {
-            wrapper.error(
-                crate::bridge::ReferenceState::request_id_reported(req_id),
-                code as i64, &msg, "",
-            );
-        }
-
-        // A book this client could not keep whole, on the request that asked
-        // for it. Nothing further is kept for it, so a caller not told reads a
-        // subscription that is up and a book that has stopped moving.
-        for (req_id, reason) in self.shared.market.drain_depth_drops_for_dispatch(
-            |id| self.shared.reference.is_ours(RecordKind::Depth, i64::from(id)),
-        ) {
-            wrapper.error(i64::from(req_id), DEPTH_NOT_SERVED, &reason, "");
-        }
-
-        // Depth updates → update_mkt_depth / update_mkt_depth_l2
-        for du in self.shared.market.drain_depth_updates_for_dispatch(
-            |id| self.shared.reference.is_ours(RecordKind::Depth, i64::from(id)),
-        ) {
-            if du.market_maker.is_empty() {
-                wrapper.update_mkt_depth(du.req_id as i64, du.position, du.operation, du.side, du.price, du.size);
-            } else {
-                wrapper.update_mkt_depth_l2(du.req_id as i64, du.position, &du.market_maker, du.operation, du.side, du.price, du.size, du.is_smart_depth);
+                let _ = self.try_cancel_mkt_data(req_id);
             }
         }
     }
 
-    // ── Historical / News / Account Dispatch ──
-
-    fn dispatch_data(&self, wrapper: &mut impl Wrapper) {
-        // News → tick_news
-        for news in self.shared.market.drain_tick_news() {
-            // News goes to every subscriber of the contract, as its quotes do.
-            for id in self.core.watchers_of(news.instrument) {
-                wrapper.tick_news(
-                    id, news.timestamp as i64,
-                    &news.provider_code, &news.article_id, &news.headline, "",
-                );
+    /// `tick_snapshot_end` for the holder and everyone watching whose
+    /// snapshot is whole, or whose bound has run out. A caller that asked for
+    /// a snapshot of a contract somebody was already watching is recorded as
+    /// a follower, and naming only the holder left its snapshot never ended.
+    fn close_finished_snapshots(
+        &self, req_id: i64, watchers: &[i64], wrapper: &mut impl Wrapper,
+        done: &mut Vec<(i64, Option<u64>)>,
+    ) {
+        for id in std::iter::once(req_id).chain(watchers.iter().copied()) {
+            if self.core.check_snapshot_done(id) {
+                // What it was watching when the snapshot finished, so the
+                // withdrawal can tell this subscription from whatever the
+                // callback leaves under the same number.
+                let was_watching = self.core.registration_of(id);
+                wrapper.tick_snapshot_end(id);
+                done.push((id, was_watching));
             }
         }
+    }
+}
 
-        // The venue's option model → tick_option_computation. Tick type 13 is
-        // the model computation, and the attribute says the model is the
-        // venue's rather than a price-based reading.
-        // A calculation asked for before the venue had stated a model waited
-        // on the watch that asking opened. The model has arrived, so answer
-        // the question that was kept rather than leaving the caller with the
-        // model it did not ask for.
-        if !self.pending_option_calcs.lock().unwrap().is_empty() {
-            self.answer_kept_option_calcs();
-        }
-
-        for comp in self.shared.market.drain_option_computations() {
-            // A computation answering a specific request goes to that request.
-            // One published for the contract goes to every subscriber of it.
-            let (to, tick_type): (Vec<i64>, i32) = match comp.answers {
-                Some(asked) => (vec![asked], ASKED_OPTION_COMPUTATION),
-                None => {
-                    (
-                        self.core.watchers_of(comp.instrument),
-                        if self.core.feed_is_delayed(comp.instrument) {
-                            DELAYED_MODEL_OPTION_COMPUTATION
-                        } else {
-                            MODEL_OPTION_COMPUTATION
-                        },
-                    )
-                }
-            };
-            for req_id in to {
-                wrapper.tick_option_computation(
-                    req_id, tick_type, 0,
-                    comp.implied_vol, comp.delta, comp.opt_price, comp.pv_dividend,
-                    comp.gamma, comp.vega, comp.theta, comp.und_price,
-                );
-            }
-        }
-
-        for event in self.core.drain_group_events() {
-            match event {
-                crate::client_core::GroupEvent::List(req_id, groups) => {
-                    wrapper.display_group_list(req_id, &groups);
-                }
-                crate::client_core::GroupEvent::Updated(req_id, info) => {
-                    wrapper.display_group_updated(req_id, &info);
-                }
-            }
-        }
-
-        // What the venue said went wrong. It attributes these to no request,
-        // so neither does this.
-        for text in self.shared.market.drain_venue_errors() {
-            wrapper.error(NO_REQUEST, VENUE_MESSAGE, &text, "");
-        }
-
-        // A subscription the venue could not be asked for, because it never
-        // named the contract. Reported on the request the caller holds.
-        // A lookup that named a contract another slot already holds. One
-        // subscription per contract exists on the wire, so the callers given
-        // the second slot read the first — otherwise their quotes arrive on a
-        // slot nothing is watching.
-        for (from, into, _) in self.shared.market.drain_subscription_moves() {
-            // Said on the engine's own queue once the move is installed: the
-            // subscription on the slot moved onto is held up until then, and a
-            // withdrawal already decided against the occupancy before this one
-            // is ordered against this rather than against a flag. Zero says
-            // nobody arrived — the caller this move was for withdrew on the
-            // way — and the subscription held up for them is withdrawn there.
-            let took_it = self.core.move_watchers(&self.shared, from, into);
-            let _ = self.send(ControlCommand::MoveInstalled { from, into, took_it });
-        }
-        // Everyone watching the contract, not only whoever asked first. A
-        // refusal is a fact about the contract, and a caller sharing somebody
-        // else's subscription holds no request of its own for the venue to
-        // refuse — so it was told nothing and waited for ticks that could not
-        // arrive. Where nobody holds it, there is nobody to tell.
-        for (instrument, reason) in self.shared.market.drain_subscription_failures() {
-            for req_id in self.core.watchers_of(instrument) {
-                wrapper.error(req_id, NO_SECURITY_DEFINITION, &reason, "");
-            }
-        }
-
-        // A request riding beside the quote that the venue refused. Told to
-        // everyone watching the contract, as the failures above are and for the
-        // same reason: a caller sharing somebody else's subscription holds no
-        // request of its own for the venue to refuse, and is exactly the caller
-        // left waiting on a series that cannot arrive. Under the code that
-        // means the venue said something went wrong and stated none — which is
-        // what it did — rather than the one that means the contract could not
-        // be named, because the contract is fine.
-        for (instrument, _kind, reason) in self.shared.market.drain_companion_refusals() {
-            for req_id in self.core.watchers_of(instrument) {
-                wrapper.error(req_id, VENUE_REPORTED, &reason, "");
-            }
-        }
-
-        // A news subscription the venue refused: the engine released its side,
-        // so the client forgets whoever asked, leaving a later ask free to
-        // send anew. The quote it rode beside is untouched and unreported.
-        for con_id in self.shared.market.drain_news_rejections() {
-            self.core.release_news_askers(con_id);
-        }
-
-        // News bulletins → update_news_bulletin (only when subscribed)
-        if self.core.bulletins_subscribed() {
-            for b in self.shared.market.drain_news_bulletins() {
-                wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
-            }
-        }
-
-        // Historical data → historical_data + historical_data_end, and after
-        // that end, historical_data_update. A keep-up-to-date request answers
-        // once with the history and then keeps speaking; the reference client
-        // separates the two, and a caller that overrode only the update
-        // callback heard nothing from this surface.
-        for (req_id, response) in self.shared.reference.drain_historical_data() {
-            let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
-            self.core.note_historical_zone(req_id as i64, &response.timezone);
-            for bar in &response.bars {
-                let bd = BarData {
-                    date: self.core.bar_time_for(req_id as i64, &bar.time, &response.timezone),
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
-                    volume: bar.volume,
-                    wap: bar.wap,
-                    bar_count: bar.count,
-                    timezone: response.timezone.clone(),
-                    end: bar.end.clone(),
-                };
-                if is_update {
-                    wrapper.historical_data_update(req_id as i64, &bd);
-                } else {
-                    wrapper.historical_data(req_id as i64, &bd);
-                }
-            }
-            if response.is_complete && !is_update {
-                self.core.hist_initial_complete.lock().unwrap().insert(req_id);
-                // As on the other surface: the range the request covered, which
-                // is what a caller pages backwards with.
-                let (from, to) =
-                    self.core.historical_range_for(req_id as i64, &response.timezone);
-                wrapper.historical_data_end(req_id as i64, &from, &to);
-            }
-        }
-
-        // Orders the venue replayed → order_bound. The pairing of the
-        // permanent id it keeps with the number a caller reaches the order
-        // under here, which this client worked out at connect and never said.
-        for (perm_id, client_id, order_id) in self.shared.reference.drain_orders_bound() {
-            wrapper.order_bound(perm_id, client_id, order_id);
-        }
-
-        // Head timestamps → head_timestamp
-        for (req_id, response) in self.shared.reference.drain_head_timestamps() {
-            // Returned in the form `format_date` asked for. The wire carries one
-            // form; `bar_time_for` converts it. 2 = seconds since the epoch.
-            let stated = self.core.bar_time_for(req_id as i64, &response.head_timestamp, "");
-            wrapper.head_timestamp(req_id as i64, &stated);
-        }
-
-        // Contract details → contract_details + contract_details_end. The
-        // ends are taken before the rows: a row and its end landing between
-        // the two drains then deliver the row now and the end next pass,
-        // where the other order delivered the end first and the row to a
-        // caller that had already stopped listening.
-        let ends = self.shared.reference.drain_contract_details_end();
-        for (req_id, def) in self.shared.reference.drain_contract_details() {
-            let details = ContractDetails::from_definition(&def);
-            // Fixed income answers on its own callback. A bond, a bill and the
-            // type the venue spells `FIXED` share it; every other type is
-            // answered on the ordinary one. Answered on the ordinary one too,
-            // a program written to wait for a bond waited through the answer.
-            if def.sec_type.is_fixed_income() {
-                wrapper.bond_contract_details(req_id as i64, &details);
-            } else {
-                wrapper.contract_details(req_id as i64, &details);
-            }
-        }
-        for req_id in ends {
-            wrapper.contract_details_end(req_id as i64);
-        }
-
-        // Depth exchanges → mkt_depth_exchanges
-        //
-        // The request was sent and the reply parsed, and then nothing carried
-        // it to the caller: this side never drained it, so the callback the
-        // Python surface fires had no counterpart here and the rows simply
-        // accumulated.
-        if let Some(depth_exchanges) = self.shared.reference.drain_depth_exchanges() {
-            wrapper.mkt_depth_exchanges(&depth_exchanges);
-        }
-
-        // Maps of venues asked for before they arrived: answered once they
-        // have, or refused once the wait a gateway allows has run out.
-        let now = std::time::Instant::now();
-        for (req_id, answer) in self.shared.reference.drain_smart_component_answers(now) {
-            match answer {
-                Ok(components) => wrapper.smart_components(req_id, &components),
-                Err(why) => wrapper.error(req_id, i64::from(why.code), &why.message, ""),
-            }
-        }
-
-        // The calendar's answers, as the venue wrote them.
-        for (req_id, json) in self.shared.reference.drain_calendar_meta_data() {
-            wrapper.wsh_meta_data(req_id as i64, &json);
-        }
-        for (req_id, json) in self.shared.reference.drain_calendar_events() {
-            wrapper.wsh_event_data(req_id as i64, &json);
-        }
-
-        // Matching symbols → symbol_samples
-        for (req_id, matches) in self.shared.reference.drain_matching_symbols() {
-            let descriptions: Vec<ContractDescription> =
-                matches.iter().map(ContractDescription::from).collect();
-            wrapper.symbol_samples(req_id as i64, &descriptions);
-        }
-
-        // Option chain → security_definition_option_parameter + _end
-        // The plain drain, not the one that holds back what an answering call
-        // is waiting for: on this client the answering calls receive *through*
-        // this loop, so withholding from it withholds from them. `option_chain`
-        // came back empty against a live venue while the Python client, whose
-        // answering calls take from the queue themselves, was answered.
-        for (req_id, underlying_con_id, scopes) in self.shared.reference.drain_option_params() {
-            for scope in &scopes {
-                wrapper.security_definition_option_parameter(
-                    req_id as i64, &scope.exchange, underlying_con_id, &scope.trading_class,
-                    &scope.multiplier, &scope.expirations, &scope.strikes,
-                );
-            }
-            wrapper.security_definition_option_parameter_end(req_id as i64);
-        }
-
-        // Scanner params
-        for xml in self.shared.reference.drain_scanner_params() {
-            wrapper.scanner_parameters(&xml);
-        }
-
-        // The advisor's own configuration: a partition the caller asked for,
-        // the end of one they replaced, and the venue's account of a
-        // replacement it would not take.
-        for (fa_data_type, xml) in self.shared.reference.drain_advisor_config() {
-            wrapper.receive_fa(fa_data_type, &xml);
-        }
-        for (req_id, text) in self.shared.reference.drain_advisor_replaced() {
-            wrapper.replace_fa_end(req_id, &text);
-        }
-        for (req_id, code, text) in self.shared.reference.drain_advisor_refused() {
-            wrapper.error(req_id, i64::from(code), &text, "");
-        }
-
-        // Scanner data. Cache is populated by the engine before dispatch
-        // (see `CcpState::start_scanner_enrichment`), so cold con_ids that
-        // arrived in `<ScanResponse>` have already been resolved via 35=d.
-        // The Some-arm fills the rich fields; the fallback covers deadline-
-        // flushed partials where a secdef reply never arrived.
-        for (req_id, result) in self.shared.reference.drain_scanner_data_for_dispatch(
-            |id| self.shared.reference.is_ours(RecordKind::Scanner, i64::from(id)),
-        ) {
-            // A refused scan arrives in the shape of a completed one and carries
-            // the reason. Reported against the requesting id, so a refusal is not
-            // delivered as an empty result.
-            if !result.error_text.is_empty() {
-                wrapper.error(req_id as i64, VENUE_REPORTED, &result.error_text, "");
-            }
-            for (rank, entry) in result.entries.iter().enumerate() {
-                let mut contract = Contract { con_id: entry.con_id as i64, ..Default::default() };
-                if let Some(ac) = self.core.get_contract(entry.con_id as i64, &self.shared) {
-                    contract.symbol = ac.symbol;
-                    contract.sec_type = ac.sec_type;
-                    contract.exchange = ac.exchange;
-                    contract.currency = ac.currency;
-                    contract.local_symbol = ac.local_symbol;
-                    contract.primary_exchange = ac.primary_exchange;
-                    contract.trading_class = ac.trading_class;
-                }
-                let details = ContractDetails { contract, ..Default::default() };
-                wrapper.scanner_data(req_id as i64, rank as i32, &details, "", "", "", "");
-            }
-            wrapper.scanner_data_end(req_id as i64);
-        }
-
-        // Historical news
-        for (req_id, headlines, has_more) in self.shared.reference.drain_historical_news() {
-            for h in &headlines {
-                wrapper.historical_news(req_id as i64, &h.time, &h.provider_code, &h.article_id, &h.headline);
-            }
-            wrapper.historical_news_end(req_id as i64, has_more);
-        }
-
-        // News articles
-        for (req_id, article_type, text) in self.shared.reference.drain_news_articles() {
-            wrapper.news_article(req_id as i64, article_type, &text);
-        }
-
-        // Fundamental data
-        for (req_id, data) in self.shared.reference.drain_fundamental_data() {
-            wrapper.fundamental_data(req_id as i64, &data);
-        }
-
-        // Histogram data
-        for (req_id, entries) in self.shared.reference.drain_histogram_data() {
-            let items: Vec<(f64, i64)> = entries.iter().map(|e| (e.price, e.count)).collect();
-            wrapper.histogram_data(req_id as i64, &items);
-        }
-
-        // Historical ticks route to the variant-specific callback, as in ibapi.
-        for (req_id, data, _query_id, done) in self.shared.reference.drain_historical_ticks() {
-            match &data {
-                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id as i64, &data, done),
-                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id as i64, &data, done),
-                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id as i64, &data, done),
-            }
-        }
-
-        // Real-time bars, and the continued half of a keep-up-to-date request.
-        // The two arrive on one feed and are told apart by whether the request
-        // has already answered with its history.
-        for (req_id, bar) in self.shared.market.drain_real_time_bars_for_dispatch(
-            |id| self.shared.reference.is_ours(RecordKind::Bars, i64::from(id)),
-        ) {
-            if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
-                // A forming bar is stamped at its open, in seconds since the
-                // epoch; dated as the history before it was, in the caller's
-                // format on the zone the series was stated on.
-                let bd = BarData {
-                    date: self.core.bar_time_for_epoch(req_id as i64, i64::from(bar.timestamp)),
-                    open: bar.open,
-                    high: bar.high,
-                    low: bar.low,
-                    close: bar.close,
-                    volume: bar.volume as i64,
-                    wap: bar.wap,
-                    bar_count: bar.count,
-                    timezone: String::new(),
-                    // A forming bar has not ended, and the stream states no
-                    // end for one.
-                    end: String::new(),
-                };
-                wrapper.historical_data_update(req_id as i64, &bd);
-            } else {
-                wrapper.real_time_bar(
-                    req_id as i64, bar.timestamp as i64,
-                    bar.open, bar.high, bar.low, bar.close,
-                    bar.volume, bar.wap, bar.count,
-                );
-            }
-        }
-
-        // Historical schedules
-        for (req_id, schedule) in self.shared.reference.drain_historical_schedules() {
-            let sessions: Vec<(String, String, String)> = schedule.sessions.iter()
-                .map(|s| (s.ref_date.clone(), s.open_time.clone(), s.close_time.clone()))
-                .collect();
-            wrapper.historical_schedule(
-                req_id as i64, &schedule.start_date_time, &schedule.end_date_time,
-                &schedule.timezone, &sessions,
-            );
-        }
-
-        // PnL → pnl callback (change-detected via ClientCore)
-        if let Some(update) = self.core.poll_pnl(&self.shared) {
-            wrapper.pnl(update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl);
-        }
-
-        // PnL single → pnl_single callback (via ClientCore)
-        for update in self.core.poll_pnl_single(&self.shared) {
-            wrapper.pnl_single(update.req_id, update.pos, update.daily_pnl, update.unrealized_pnl, update.realized_pnl, update.value);
-        }
-
-        // Account updates → update_account_value, update_portfolio and
-        // account_download_end (via ClientCore)
-        if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
-            for field in &batch.fields {
-                wrapper.update_account_value(&field.key, &field.value, &field.currency, &self.account_id);
-            }
-            // What the account holds, beside what it is worth. The reference
-            // client reports both on this subscription, and a caller watching
-            // its positions through it heard only the values.
-            for entry in self.core.prepare_portfolio_updates(&self.shared) {
-                let contract = self.core
-                    .get_contract(entry.con_id, &self.shared)
-                    .unwrap_or_else(|| crate::types::model::Contract {
-                        con_id: entry.con_id,
-                        ..Default::default()
-                    });
-                wrapper.update_portfolio(
-                    &contract, entry.position, entry.market_price, entry.market_value,
-                    entry.avg_cost, entry.unrealized_pnl, entry.realized_pnl, &self.account_id,
-                );
-            }
-            if batch.finished {
-                wrapper.update_account_time("");
-                wrapper.account_download_end(&self.account_id);
-            }
-        }
-
-        // The multi-account subscription, which is a live feed of its own:
-        // every figure that has moved since it last heard, under each request
-        // still watching. Answered with its first batch alone, a caller
-        // watching its balance sheet through this request watched a still
-        // picture.
-        let watching: Vec<i64> = {
-            let asked = self.account_updates_multi_requested.lock().unwrap();
-            let mut ids: Vec<i64> = asked.iter().copied().collect();
-            ids.sort_unstable();
-            ids
-        };
-        // Per watcher, against that watcher's own record: they are not in
-        // step, and one opened a minute after another has been told nothing
-        // the first was told.
-        for req_id in &watching {
-            for field in self.core.account_figures_that_moved(&self.shared, *req_id) {
-                wrapper.account_update_multi(
-                    *req_id, &self.account_id, "",
-                    &field.key, &field.value, &field.currency,
-                );
-            }
-        }
-
-        // Account summary → account_summary + account_summary_end (one-shot via
-        // ClientCore)
-        if let Some(batch) = self.core.prepare_account_summary(&self.shared, &self.account_id) {
-            for entry in &batch.entries {
-                wrapper.account_summary(batch.req_id, &self.account_id, &entry.tag, &entry.value, &entry.currency);
-            }
-            wrapper.account_summary_end(batch.req_id);
-        }
+/// An answer given at the call, delivered in its place.
+fn deliver_reply(reply: Reply, wrapper: &mut impl Wrapper) {
+    match reply {
+        Reply::NewsProviders(providers) => wrapper.news_providers(&providers),
+        Reply::CurrentTime(t) => wrapper.current_time(t),
+        Reply::CurrentTimeInMillis(t) => wrapper.current_time_in_millis(t),
+        Reply::SoftDollarTiers(req_id, tiers) => wrapper.soft_dollar_tiers(req_id, &tiers),
+        Reply::FamilyCodes(codes) => wrapper.family_codes(&codes),
+        Reply::UserInfo(req_id, id) => wrapper.user_info(req_id, &id),
+        Reply::ManagedAccounts(list) => wrapper.managed_accounts(&list),
+        Reply::MarketRule(rule, increments) => wrapper.market_rule(i64::from(rule), &increments),
+        Reply::SmartComponents(req_id, components) => wrapper.smart_components(req_id, &components),
+        Reply::DisplayGroupList(req_id, groups) => wrapper.display_group_list(req_id, &groups),
+        Reply::DisplayGroupUpdated(req_id, info) => wrapper.display_group_updated(req_id, &info),
     }
 }
 
@@ -1228,7 +1303,7 @@ mod fixed_income_tests {
             });
         }
         let mut heard = Heard::default();
-        client.dispatch_data(&mut heard);
+        client.process_msgs(&mut heard);
         assert_eq!(heard.fixed, ["T 4 05/15/30", "B 0 08/01/26", "F 3 01/01/28"]);
         assert_eq!(heard.plain, ["SPY"], "and nothing else moves");
     }
@@ -1239,6 +1314,68 @@ mod delivered_size_tests {
     use crate::api::wrapper::Wrapper;
     use crate::types::model::{TickAttribBidAsk, TickAttribLast};
     use crate::types::{PRICE_SCALE, QTY_SCALE, TbtQuote, TbtTrade};
+
+    /// A snapshot of an option ends, as a gateway ends one, only once the
+    /// venue's model has been delivered as well as the five kinds; and one on
+    /// a delayed feed only once the last trade's time, 88, has been. Both
+    /// reach the snapshot's check from where they are delivered: the model as
+    /// its record, the time as a string tick.
+    #[test]
+    fn a_snapshot_waits_for_the_model_on_an_option_and_the_time_on_a_delayed_feed() {
+        #[derive(Default)]
+        struct Heard { ended: Vec<i64>, times: Vec<(i64, i32)> }
+        impl Wrapper for Heard {
+            fn tick_snapshot_end(&mut self, req_id: i64) {
+                self.ended.push(req_id);
+            }
+            fn tick_string(&mut self, req_id: i64, tick_type: i32, _: &str) {
+                if matches!(tick_type, 45 | 88) {
+                    self.times.push((req_id, tick_type));
+                }
+            }
+        }
+        let five = crate::types::Quote {
+            bid: 100 * PRICE_SCALE, ask: 101 * PRICE_SCALE, last: 100 * PRICE_SCALE,
+            open: 99 * PRICE_SCALE, close: 98 * PRICE_SCALE,
+            ..Default::default()
+        };
+
+        let (client, rx, shared) = crate::api::client::tests::test_client();
+        let option = crate::api::client::Contract {
+            con_id: 700_001, symbol: "SPY".into(), sec_type: "OPT".into(),
+            exchange: "SMART".into(), currency: "USD".into(),
+            last_trade_date_or_contract_month: "20261218".into(), strike: 500.0,
+            right: "C".into(), multiplier: "100".into(),
+            ..Default::default()
+        };
+        client.try_req_mkt_data(1, &option, "", true, false).expect("taken");
+        crate::api::client::tests::settled(&client, &rx);
+        let slot = client.core.watching(1).expect("the engine took it");
+        shared.market.push_quote(slot, &five);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert!(heard.ended.is_empty(), "an option's snapshot ended without its model");
+        shared.market.push_option_computation(crate::types::OptionComputation {
+            instrument: slot, ..Default::default()
+        });
+        client.process_msgs(&mut heard);
+        assert_eq!(heard.ended, [1], "the model was the last of it");
+
+        let (client, rx, shared) = crate::api::client::tests::test_client();
+        client.try_req_mkt_data(2, &crate::api::client::tests::spy(), "", true, false)
+            .expect("taken");
+        crate::api::client::tests::settled(&client, &rx);
+        let slot = client.core.watching(2).expect("the engine took it");
+        client.core.mark_feed_delayed_for_test(slot);
+        shared.market.push_quote(slot, &five);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert!(heard.ended.is_empty(), "a delayed snapshot ended without the time");
+        shared.market.push_quote(slot, &crate::types::Quote { timestamp_ns: 1_700_000_000_000_000_000, ..five });
+        client.process_msgs(&mut heard);
+        assert_eq!(heard.times, [(2, 88)], "the time on a delayed feed is 88");
+        assert_eq!(heard.ended, [2], "and it was the last of it");
+    }
 
     /// News and model publications belong to whoever still watches the
     /// contract. An explicit calculation answer keeps its own request id.
@@ -1257,41 +1394,47 @@ mod delivered_size_tests {
                 self.models.push((id, kind));
             }
         }
-        let (client, _rx, shared) = crate::api::client::tests::test_client();
-        client.core.req_to_instrument.lock().unwrap().extend([(1, 0), (2, 0)]);
-        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-        client.core.instrument_followers.lock().unwrap().insert(0, vec![2]);
+        let (client, rx, shared) = crate::api::client::tests::test_client();
+        for req_id in [1, 2] {
+            client.try_req_mkt_data(req_id, &crate::api::client::tests::spy(), "", false, false)
+                .expect("taken");
+        }
+        crate::api::client::tests::settled(&client, &rx);
+        let slot = client.core.watching(1).expect("the engine took it");
         let publish = || {
             shared.market.push_tick_news(crate::types::TickNews {
-                instrument: 0, timestamp: 0, provider_code: "BRFG".into(),
+                instrument: slot, timestamp: 0, provider_code: "BRFG".into(),
                 article_id: "BRFG$1".into(), headline: "SPY headline".into(),
             });
             shared.market.push_option_computation(crate::types::OptionComputation {
-                instrument: 0, ..Default::default()
+                instrument: slot, ..Default::default()
             });
         };
         publish();
         let mut heard = Heard::default();
-        client.dispatch_data(&mut heard);
+        client.process_msgs(&mut heard);
         assert_eq!(heard.news, [1, 2]);
         assert_eq!(heard.models, [(1, 13), (2, 13)]);
 
         // On a delayed feed the reference client numbers the model apart, and
         // a program that asked for delayed data reads it there.
-        client.core.mark_feed_delayed_for_test(0);
+        client.core.mark_feed_delayed_for_test(slot);
         publish();
         let mut delayed_heard = Heard::default();
-        client.dispatch_data(&mut delayed_heard);
+        client.process_msgs(&mut delayed_heard);
         assert_eq!(delayed_heard.models, [(1, 83), (2, 83)], "the delayed model, not the live one");
 
+        // Withdrawn where the engine takes the cancels, so what the venue
+        // says of the contract after that is nobody's.
+        crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).unwrap();
+        crate::api::client::tests::reported(&client, || client.cancel_mkt_data(2)).unwrap();
+        crate::api::client::tests::settled(&client, &rx);
         publish();
-        client.cancel_mkt_data(1).unwrap();
-        client.cancel_mkt_data(2).unwrap();
         shared.market.push_option_computation(crate::types::OptionComputation {
-            instrument: 0, answers: Some(7), ..Default::default()
+            instrument: slot, answers: Some(7), ..Default::default()
         });
         let mut heard = Heard::default();
-        client.dispatch_data(&mut heard);
+        client.process_msgs(&mut heard);
         assert!(heard.news.is_empty(), "a withdrawn watch was sent news: {:?}", heard.news);
         assert_eq!(heard.models, [(7, 53)], "only the explicitly addressed answer is owed");
     }
@@ -1316,7 +1459,7 @@ mod delivered_size_tests {
         let (client, _rx, shared) = crate::api::client::tests::test_client();
         shared.market.push_venue_error("the venue is going down at 17:00".to_string());
         let mut heard = Heard::default();
-        client.dispatch_data(&mut heard);
+        client.process_msgs(&mut heard);
         assert_eq!(
             heard.0,
             [(-1, 2148, "the venue is going down at 17:00".to_string())],
@@ -1352,7 +1495,7 @@ mod delivered_size_tests {
     fn a_size_reaches_a_caller_as_itself() {
         let (client, _rx, shared) = crate::api::client::tests::test_client();
         shared.market.push_tbt_trade(TbtTrade {
-            instrument: 0, req_id: 1, price: PRICE_SCALE, size: 100 * QTY_SCALE,
+            instrument: 0, req_id: 1, kind: crate::types::TbtType::Last, price: PRICE_SCALE, size: 100 * QTY_SCALE,
             timestamp: 0, exchange: "NYSE".into(), conditions: String::new(),
             past_limit: false, unreported: false,
         });
@@ -1394,7 +1537,7 @@ mod delivered_size_tests {
             &report("2", "F", "fill-1", "100"), b"", &mut context, &shared, &None, "",
         );
         client.process_msgs(&mut wrapper);
-        client.req_completed_orders(false, &mut wrapper);
+        crate::api::client::tests::completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut wrapper);
         assert!(client.deferred_evictions.lock().unwrap().contains(&7));
 
         ccp.handle_exec_report(
@@ -1418,7 +1561,7 @@ mod delivered_size_tests {
             &report("2", "F", "fill-2", "100"), b"", &mut context, &shared, &None, "",
         );
         client.process_msgs(&mut wrapper);
-        client.req_completed_orders(false, &mut wrapper);
+        crate::api::client::tests::completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut wrapper);
         assert!(client.deferred_evictions.lock().unwrap().contains(&7));
         client.process_msgs(&mut wrapper);
         assert!(shared.orders.get_order_info(7).is_none(), "a terminal row is still reclaimed");

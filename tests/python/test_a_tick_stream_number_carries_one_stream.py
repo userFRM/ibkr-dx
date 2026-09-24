@@ -41,6 +41,7 @@ def test_a_second_stream_under_a_live_number_is_refused():
 
     c.reqTickByTickData(5, contract(320227571, "QQQ"), "BidAsk", 0, False)
 
+    c.poll()
     assert [(r, code) for r, code, _ in w.seen] == [(5, 102)], (
         f"the number is already carrying a stream: {w.seen}"
     )
@@ -53,6 +54,7 @@ def test_withdrawing_a_stream_that_is_not_held_says_so():
 
     c.cancelTickByTickData(999)
 
+    c.poll()
     assert [(r, code) for r, code, _ in w.seen] == [(999, 300)], (
         f"nothing is held under that number: {w.seen}"
     )

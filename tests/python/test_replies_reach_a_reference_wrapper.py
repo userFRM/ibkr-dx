@@ -8,6 +8,8 @@ supplies and the caller's own code never ran. Nothing said so, which is the
 whole of the fault.
 """
 
+import time
+
 from ibkr_dx import EClient, EWrapper
 
 
@@ -44,6 +46,8 @@ def _connected():
     w = ReferenceStyle()
     c = EClient(w)
     c._test_connect("T")
+    # The account has stated itself, as a session's does once it opens.
+    c._test_finish_account_download()
     return w, c
 
 
@@ -58,7 +62,8 @@ def test_open_orders_reach_a_reference_wrapper():
 
 def test_account_updates_multi_reach_a_reference_wrapper():
     w, c = _connected()
-    c._test_note_account_value("NetLiquidation", "1.00", "USD")
+    c._test_note_account_value("NetLiquidation", "1.00", "USD", account="DU1")
+    c._test_finish_account_download(account="DU1")
     c.req_account_updates_multi(3, "DU1", "", False)
     c._test_dispatch_once()
     keys = [key for name, key in w.seen if name == "accountUpdateMulti"]
@@ -67,8 +72,9 @@ def test_account_updates_multi_reach_a_reference_wrapper():
 
 def test_positions_multi_reach_a_reference_wrapper():
     w, c = _connected()
-    c._test_note_account_value("NetLiquidation", "1.00", "USD")
-    c._test_set_position(756733, 10.0, 100.0)
+    c._test_note_account_value("NetLiquidation", "1.00", "USD", account="DU1")
+    c._test_set_position(756733, 10.0, 100.0, account="DU1")
+    c._test_finish_account_download(account="DU1")
     c.req_positions_multi(4, "DU1", "")
     c._test_dispatch_once()
     assert ("positionMulti", 4) in w.seen, f"the holding reached nothing: {w.seen}"
@@ -103,5 +109,9 @@ def test_open_orders_wait_for_what_the_venue_is_still_naming():
 
     threading.Thread(target=name_it_late, daemon=True).start()
     c.req_open_orders()
-    c._test_dispatch_once()
+    # The engine holds the question until the venue has finished naming.
+    deadline = time.monotonic() + 5
+    while not w.seen and time.monotonic() < deadline:
+        c._test_dispatch_once()
+        time.sleep(0.02)
     assert ("openOrder", 7) in w.seen, f"answered before the venue had finished: {w.seen}"

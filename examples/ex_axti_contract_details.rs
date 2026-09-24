@@ -72,8 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let req_id: i64 = 1;
     println!("== reqContractDetails AXTI/SMART/STK/USD by symbol (req_id={req_id})");
     let t_req = Instant::now();
-    client.req_contract_details(req_id, &axti)
-        .map_err(|e| format!("req_contract_details failed: {e}"))?;
+    client.req_contract_details(req_id, &axti);
 
     let probe_deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < probe_deadline {

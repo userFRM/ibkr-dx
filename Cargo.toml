@@ -1,6 +1,6 @@
 [package]
 name = "ibkr-dx"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # The oldest compiler supported, and built on by a job of its own in CI so it
 # is checked rather than claimed. The sources use let-chains and fixed-size

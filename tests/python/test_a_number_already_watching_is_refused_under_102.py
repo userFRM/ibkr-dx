@@ -41,6 +41,7 @@ def test_a_second_contract_under_a_live_number_is_refused():
 
     c.reqMktData(5, contract(320227571, "QQQ"), "", False, False, [])
 
+    c.poll()
     assert [(r, code) for r, code, _ in w.seen] == [(5, 102)], (
         f"the number is already watching something: {w.seen}"
     )

@@ -40,6 +40,7 @@ def test_a_field_stated_and_unreadable_is_refused():
     sub = ib_async.ScannerSubscription()
     sub.scanCode = 42
     c.req_scanner_subscription(2, sub)
+    c.poll()
     assert [code for code, _ in w.errors] == [321], w.errors
     assert "scanCode" in w.errors[0][1]
 

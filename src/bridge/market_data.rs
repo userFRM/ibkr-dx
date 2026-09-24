@@ -1,6 +1,7 @@
 //! What is quoted, and what the venue has said about it.
 
 use super::*;
+use super::record::{Queue, Stamps};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use crate::types::*;
@@ -44,21 +45,31 @@ fn local_millis() -> i64 {
         .map_or(0, |since| since.as_millis() as i64)
 }
 
-/// Push onto a stream that nobody may be draining, oldest out first.
-pub(super) fn push_bounded<T>(queue: &Mutex<Vec<T>>, item: T, limit: usize, what: &str) {
-    let mut held = queue.lock().unwrap();
-    if held.len() >= limit {
-        // A tenth at a time rather than one at a time: dropping a single entry
-        // per push leaves every later push doing a full shift of the vector.
-        let drop_to = limit - limit / 10;
-        let shed = held.len() - drop_to;
-        held.drain(..shed);
-        log::warn!(
-            "{what} has gone past {limit} unread, so the oldest of them were dropped — \
-             nothing is draining this stream",
-        );
-    }
-    held.push(item);
+/// A calculation asked for before the venue had stated a model for its
+/// contract, kept until it does.
+///
+/// The calculation is answered from the venue's model for the contract, and a
+/// contract nobody is watching has no model stated for it. Asking opens the
+/// watch; the engine answers where it writes the model the watch brings, so
+/// the answer stands right behind the model in the session's order.
+#[derive(Clone, Debug)]
+pub struct KeptCalculation {
+    /// The contract it is on.
+    pub contract: crate::types::model::Contract,
+    /// The slot the watch holds the contract in.
+    pub slot: crate::types::InstrumentId,
+    /// Whether it inverts a price or prices a volatility.
+    pub wants_volatility: bool,
+    /// The option price or volatility the caller supplied.
+    pub option_price: f64,
+    /// The underlying price the caller supplied.
+    pub under_price: f64,
+    /// Whether it has been answered.
+    ///
+    /// Answered questions are kept rather than dropped, because the watch
+    /// opened to obtain the model is withdrawn where the caller withdraws the
+    /// calculation — and a question that is gone cannot be withdrawn.
+    pub answered: bool,
 }
 
 /// What each contract's numbered-figure tables hold: the slot, the series and
@@ -78,7 +89,14 @@ type PairedFiguresHeld =
 
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
+    /// The session's stamps, which a quote's write marks.
+    stamps: Stamps,
     quotes: super::slot_table::SlotTable<SeqQuote>,
+    /// Which occupancy each slot is held under, as the engine named it when
+    /// the slot was taken: written into the slot's quote with every quote, and
+    /// onto every record queued under the slot, so a reader can tell the
+    /// contract that left a slot from the one that took it.
+    generations: super::slot_table::SlotTable<AtomicU64>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
     instrument_count: AtomicU64,
     /// Slots that have been given back, for the surfaces to forget.
@@ -100,26 +118,12 @@ pub struct MarketDataState {
     /// that forgot the records of a contract that had just been given it —
     /// live on the wire, and reachable from nothing here.
     released_slots: Mutex<Vec<(crate::types::InstrumentId, u64)>>,
-    /// How many callers are on their way onto each slot and have not arrived.
-    ///
-    /// A caller whose contract turns out to live in another slot is moved onto
-    /// it, and is recorded as watching it only once the surface installs the
-    /// move. A withdrawal decided in between cannot see it, so the
-    /// subscription is held up while this says somebody is coming.
-    moves_unread: Mutex<std::collections::HashMap<crate::types::InstrumentId, u32>>,
-    /// And how many are on their way off each slot.
-    ///
-    /// The slot a caller is moving off cannot go back to the table until the
-    /// move is installed: the move is the only thing that says where that
-    /// caller went, and read off the queue the answer turned false the moment
-    /// the queue was emptied — before anything had been moved.
-    moves_unread_from: Mutex<std::collections::HashMap<crate::types::InstrumentId, u32>>,
-    tbt_trades: Mutex<Vec<TbtTrade>>,
-    tbt_quotes: Mutex<Vec<TbtQuote>>,
+    pub(super) tbt_trades: Queue<TbtTrade>,
+    pub(super) tbt_quotes: Queue<TbtQuote>,
     /// The point between the two, each time it moved.
-    tbt_mids: Mutex<Vec<TbtMid>>,
-    real_time_bars: Mutex<Vec<(u32, RealTimeBar)>>,
-    depth_updates: Mutex<Vec<DepthUpdate>>,
+    pub(super) tbt_mids: Queue<TbtMid>,
+    pub(super) real_time_bars: Queue<(u32, RealTimeBar)>,
+    pub(super) depth_updates: Queue<DepthUpdate>,
     /// Books that were dropped for running away unread, and have not been
     /// asked for again.
     ///
@@ -135,15 +139,23 @@ pub struct MarketDataState {
     /// A dropped book is the one failure here a caller cannot see: the
     /// subscription reads as healthy and the entries simply stop arriving,
     /// which is what a quiet market looks like. Said once per drop.
-    depth_drops_unsaid: Mutex<Vec<(u32, String)>>,
-    tick_news: Mutex<Vec<TickNews>>,
-    news_bulletins: Mutex<Vec<NewsBulletin>>,
-    option_computations: Mutex<Vec<crate::types::OptionComputation>>,
+    pub(super) depth_drops_unsaid: Queue<(u32, String)>,
+    /// Each headline with the occupancy of its slot when it arrived.
+    pub(super) tick_news: Queue<(u64, TickNews)>,
+    pub(super) news_bulletins: Queue<NewsBulletin>,
+    /// Each computation with the occupancy of its slot when it was pushed.
+    pub(super) option_computations: Queue<(u64, crate::types::OptionComputation)>,
+    /// Calculations asked for before the venue had stated a model for their
+    /// contract, by the number they were asked under: solved by the engine
+    /// where it writes the model, and answered right after it.
+    kept_calculations: Mutex<std::collections::HashMap<i64, KeptCalculation>>,
+    calculations_waiting: std::sync::atomic::AtomicUsize,
     /// The last statement the venue made of its own model, per contract, kept
     /// rather than only handed over.
     last_option_model: Mutex<std::collections::HashMap<crate::types::InstrumentId, crate::types::OptionComputation>>,
-    /// Subscriptions the venue was never able to be asked for, and why.
-    subscription_failures: Mutex<Vec<(crate::types::InstrumentId, String)>>,
+    /// Subscriptions the venue was never able to be asked for, the occupancy
+    /// of the slot, and why.
+    pub(super) subscription_failures: Queue<(crate::types::InstrumentId, u64, String)>,
     /// Refusals of the requests that ride beside a quote: the contract, which
     /// companion was refused, and the venue's own reason.
     ///
@@ -151,15 +163,10 @@ pub struct MarketDataState {
     /// refused. A companion is refused on its own and the quote goes on
     /// ticking, so a caller told on that channel withdrew a subscription that
     /// was working.
-    companion_refusals: Mutex<Vec<(crate::types::InstrumentId, u32, String)>>,
-    /// Contracts whose per-contract news the venue refused. The engine has
-    /// released its own side; the client clears its record of who asked, so a
-    /// fresh subscription is sent anew rather than deduped against a claim the
-    /// venue already declined. Keyed by con_id, as the client keys its askers.
-    news_rejections: Mutex<Vec<i64>>,
+    pub(super) companion_refusals: Queue<(crate::types::InstrumentId, u64, u32, String)>,
     /// What each subscription was acknowledged with, for whoever watches the
-    /// contract.
-    tick_req_params: Mutex<Vec<(crate::types::InstrumentId, TickReqParams)>>,
+    /// contract, with the occupancy of the slot it was acknowledged under.
+    pub(super) tick_req_params: Queue<(crate::types::InstrumentId, u64, TickReqParams)>,
     /// What the last acknowledgement for an instrument stated, so a request
     /// that follows an existing subscription can be told it too: the venue
     /// sends one tickReqParams per reqMktData, and a follower asked for none.
@@ -171,7 +178,7 @@ pub struct MarketDataState {
     /// had already been refused.
     last_subscription_failure: Mutex<std::collections::HashMap<crate::types::InstrumentId, String>>,
     /// A refusal owed to one request that joined a contract already refused.
-    subscription_failures_direct: Mutex<Vec<(i64, String)>>,
+    pub(super) subscription_failures_direct: Queue<(i64, String)>,
     /// Why the quote feed is done for the rest of this session, where it is.
     ///
     /// Set once the engine gives up on the feed, and never cleared: the feed
@@ -182,12 +189,9 @@ pub struct MarketDataState {
     market_data_over: Mutex<Option<&'static str>>,
     /// tickReqParams owed to a single request that followed a live
     /// subscription, delivered to that request alone rather than fanned.
-    tick_req_params_direct: Mutex<Vec<(i64, TickReqParams)>>,
-    /// Lookups that named a contract another slot already holds: the slot the
-    /// caller was given, and the one the contract lives in.
-    subscription_moves: Mutex<Vec<(crate::types::InstrumentId, crate::types::InstrumentId, u64)>>,
+    pub(super) tick_req_params_direct: Queue<(i64, TickReqParams)>,
     /// What the venue has said went wrong, in its own words.
-    venue_errors: Mutex<Vec<String>>,
+    pub(super) venue_errors: Queue<String>,
     series_ticks: Mutex<std::collections::HashMap<crate::types::InstrumentId, Vec<SeriesTick>>>,
     quote_attribute_masks: Mutex<std::collections::HashMap<crate::types::InstrumentId, (i64, i64)>>,
     /// What the venue last said about a contract itself, beside its prices.
@@ -255,35 +259,42 @@ pub struct MarketDataState {
 }
 
 impl MarketDataState {
+    /// An empty one, stamping from its own counter.
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::stamping(&Stamps::default())
+    }
+
+    /// An empty one, stamping from the session's counter.
+    pub(super) fn stamping(stamps: &Stamps) -> Self {
         Self {
+            stamps: stamps.clone(),
             quotes: super::slot_table::SlotTable::new(SeqQuote::new),
+            generations: super::slot_table::SlotTable::new(|| AtomicU64::new(0)),
             instrument_count: AtomicU64::new(0),
             released_slots: Mutex::new(Vec::new()),
-            moves_unread: Mutex::new(std::collections::HashMap::new()),
-            moves_unread_from: Mutex::new(std::collections::HashMap::new()),
-            tbt_trades: Mutex::new(Vec::with_capacity(256)),
-            tbt_quotes: Mutex::new(Vec::with_capacity(256)),
-            tbt_mids: Mutex::new(Vec::with_capacity(256)),
-            real_time_bars: Mutex::new(Vec::with_capacity(64)),
-            depth_updates: Mutex::new(Vec::with_capacity(64)),
+            tbt_trades: Queue::with_capacity(stamps, 256),
+            tbt_quotes: Queue::with_capacity(stamps, 256),
+            tbt_mids: Queue::with_capacity(stamps, 256),
+            real_time_bars: Queue::with_capacity(stamps, 64),
+            depth_updates: Queue::with_capacity(stamps, 64),
             depth_dropped: Mutex::new(std::collections::HashSet::new()),
-            depth_drops_unsaid: Mutex::new(Vec::new()),
-            tick_news: Mutex::new(Vec::with_capacity(32)),
-            news_bulletins: Mutex::new(Vec::with_capacity(16)),
-            option_computations: Mutex::new(Vec::with_capacity(16)),
+            depth_drops_unsaid: Queue::new(stamps),
+            tick_news: Queue::with_capacity(stamps, 32),
+            news_bulletins: Queue::with_capacity(stamps, 16),
+            option_computations: Queue::with_capacity(stamps, 16),
             last_option_model: Mutex::new(std::collections::HashMap::new()),
-            subscription_failures: Mutex::new(Vec::new()),
-            companion_refusals: Mutex::new(Vec::new()),
-            news_rejections: Mutex::new(Vec::new()),
-            tick_req_params: Mutex::new(Vec::new()),
+            kept_calculations: Mutex::new(std::collections::HashMap::new()),
+            calculations_waiting: std::sync::atomic::AtomicUsize::new(0),
+            subscription_failures: Queue::new(stamps),
+            companion_refusals: Queue::new(stamps),
+            tick_req_params: Queue::new(stamps),
             last_tick_req_params: Mutex::new(std::collections::HashMap::new()),
             last_subscription_failure: Mutex::new(std::collections::HashMap::new()),
-            subscription_failures_direct: Mutex::new(Vec::new()),
+            subscription_failures_direct: Queue::new(stamps),
             market_data_over: Mutex::new(None),
-            tick_req_params_direct: Mutex::new(Vec::new()),
-            subscription_moves: Mutex::new(Vec::new()),
-            venue_errors: Mutex::new(Vec::new()),
+            tick_req_params_direct: Queue::new(stamps),
+            venue_errors: Queue::new(stamps),
             series_ticks: Mutex::new(std::collections::HashMap::new()),
             quote_attribute_masks: Mutex::new(std::collections::HashMap::new()),
             contract_figures: Mutex::new(std::collections::HashMap::new()),
@@ -316,6 +327,34 @@ impl MarketDataState {
         self.quotes.get(id).map(SeqQuote::read)
     }
 
+    /// A quote snapshot and the occupancy of the slot it was written under,
+    /// read together: a reader can tell a quote of the contract that left a
+    /// slot from one of the contract that took it.
+    #[inline]
+    pub fn quote_with_generation(&self, id: InstrumentId) -> (Quote, u64) {
+        self.quotes.get(id).map(SeqQuote::read_with_generation).unwrap_or_default()
+    }
+
+    /// The occupancy a slot is held under now, as the engine named it.
+    #[inline]
+    pub fn generation_of(&self, id: InstrumentId) -> u64 {
+        self.generations.get(id).map_or(0, |g| g.load(Ordering::Acquire))
+    }
+
+    /// Name the occupancy a slot is held under. Engine side, where the slot is
+    /// taken or changes hands: the slot's quote is written again under the new
+    /// name, so a reader is not left holding a quote named for an occupancy
+    /// that has gone until the next tick arrives.
+    #[doc(hidden)]
+    pub fn set_generation(&self, id: InstrumentId, generation: u64) {
+        let held = self.generations.get_or_grow(id);
+        if held.swap(generation, Ordering::AcqRel) == generation {
+            return;
+        }
+        let slot = self.quotes.get_or_grow(id);
+        slot.write(&slot.read(), generation);
+    }
+
     /// Say that a slot has been given back, and what the client had asked for
     /// up to then.
     #[doc(hidden)] pub fn note_released_slot(
@@ -324,28 +363,16 @@ impl MarketDataState {
         self.released_slots.lock().unwrap().push((instrument, released_at));
         self.last_tick_req_params.lock().unwrap().remove(&instrument);
         self.last_subscription_failure.lock().unwrap().remove(&instrument);
-        // And what is still queued under it, not only what is cached. Both of
-        // these name a slot rather than a contract, so the next contract to
-        // take the slot is who they reach: an increment acknowledged for the
-        // contract that left arrives as the new one's, and a move recorded for
-        // the old one repoints the new one's watchers at a third contract and
-        // takes its own slot out of the polling. A reader stalled in a
-        // callback is all it takes for the release to land in between.
-        self.tick_req_params.lock().unwrap().retain(|(at, _)| *at != instrument);
-        let mut moves = self.subscription_moves.lock().unwrap();
-        let dropped: Vec<(crate::types::InstrumentId, crate::types::InstrumentId)> = moves
-            .iter()
-            .filter(|(from, to, _)| *from == instrument || *to == instrument)
-            .map(|(from, to, _)| (*from, *to))
-            .collect();
-        moves.retain(|(from, to, _)| *from != instrument && *to != instrument);
-        drop(moves);
-        // A move nobody will read is no longer on its way: counted still, it
-        // held the subscription on the slot it named up for the rest of the
-        // session, and the slot it moved off out of the table.
-        for (from, into) in dropped {
-            self.note_a_move_is_read(from, into);
-        }
+        // And what is still queued under it, not only what is cached. It names
+        // a slot rather than a contract, so the next contract to take the slot
+        // is who it reaches: an increment acknowledged for the contract that
+        // left arrives as the new one's. A reader stalled in a callback is all
+        // it takes for the release to land in between.
+        //
+        // A move is not among these. It stands ahead of the release in the
+        // session's order, and a reader moves the callers before it reads the
+        // slot as given back.
+        self.tick_req_params.retain(|(at, ..)| *at != instrument);
         // And the two streams that carry a slot of their own. A headline is
         // about the contract that was named when it arrived, and a model was
         // solved against that contract's volatility and price: delivered after
@@ -356,14 +383,14 @@ impl MarketDataState {
         //
         // An account-wide notice is not among these. It names no contract, so
         // no slot can carry it to the wrong one.
-        self.tick_news.lock().unwrap().retain(|n| n.instrument != instrument);
+        self.tick_news.retain(|(_, n)| n.instrument != instrument);
         // An answer worked out here is not one of these. It belongs to the
         // question that asked it and names no contract at all, so it is filed
         // under slot zero — which is a real slot, and dropping that one took
         // every answer waiting on it. The same rule the cache beside this
         // queue already keeps.
-        self.option_computations.lock().unwrap()
-            .retain(|c| c.answers.is_some() || c.instrument != instrument);
+        self.option_computations
+            .retain(|(_, c)| c.answers.is_some() || c.instrument != instrument);
     }
 
     /// The slots given back since this was last asked.
@@ -379,11 +406,11 @@ impl MarketDataState {
     /// last contract could not be subscribed was reported to whoever is
     /// watching this one.
     #[doc(hidden)] pub fn forget_subscription_failures(&self, id: crate::types::InstrumentId) {
-        self.subscription_failures.lock().unwrap().retain(|(at, _)| *at != id);
         // A refusal belongs to the contract that was in the slot, not to the
         // slot: left behind, the next contract to take it is answered with the
-        // last one's refusal.
-        self.companion_refusals.lock().unwrap().retain(|(at, ..)| *at != id);
+        // last one's refusal. One still queued is not dropped: it names the
+        // occupancy it was about, stands ahead of the release in the session's
+        // order, and is the only thing its caller will be told.
         self.last_subscription_failure.lock().unwrap().remove(&id);
     }
 
@@ -418,22 +445,22 @@ impl MarketDataState {
 
     /// Take every tbt trades waiting, leaving none.
     pub fn drain_tbt_trades(&self) -> Vec<TbtTrade> {
-        self.tbt_trades.lock().unwrap().drain(..).collect()
+        self.tbt_trades.drain()
     }
 
     /// Take every tbt quotes waiting, leaving none.
     pub fn drain_tbt_quotes(&self) -> Vec<TbtQuote> {
-        self.tbt_quotes.lock().unwrap().drain(..).collect()
+        self.tbt_quotes.drain()
     }
 
     /// Take every midpoint waiting, leaving none.
     pub fn drain_tbt_mids(&self) -> Vec<TbtMid> {
-        self.tbt_mids.lock().unwrap().drain(..).collect()
+        self.tbt_mids.drain()
     }
 
     /// Take every real time bars waiting, leaving none.
     pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
-        self.real_time_bars.lock().unwrap().drain(..).collect()
+        self.real_time_bars.drain()
     }
 
     /// Take the bars a dispatch loop should deliver, leaving behind those a
@@ -446,77 +473,39 @@ impl MarketDataState {
     pub fn drain_real_time_bars_for_dispatch(
         &self, mine: impl Fn(u32) -> bool,
     ) -> Vec<(u32, RealTimeBar)> {
-        // Partitioned rather than removed one at a time: each `remove` shifts
-        // the tail, so a pass over a queue that has grown costs the square of
-        // it — under the lock the hot loop pushes into, on exactly the path a
-        // stalled reader takes when it resumes. The `take_*_for` siblings were
-        // already changed for this; these were not.
-        let mut held = self.real_time_bars.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *held).into_iter().partition(|e| !(mine(e.0)));
-        *held = kept;
-        out
+        self.real_time_bars.take_if(|e| !mine(e.0))
     }
 
     /// Bars answering one request, leaving other requests' alone.
     pub fn take_real_time_bars_for(&self, req_id: u32) -> Vec<RealTimeBar> {
-        // Partitioned rather than removed one at a time: each `remove` shifts
-        // the tail, so draining a request that holds most of a full queue costs
-        // the square of it — on exactly the path a caller takes when its own
-        // stream has grown large.
-        let mut q = self.real_time_bars.lock().unwrap();
-        let (mine, rest): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *q).into_iter().partition(|b| b.0 == req_id);
-        *q = rest;
-        mine.into_iter().map(|b| b.1).collect()
+        self.real_time_bars.take_if(|b| b.0 == req_id).into_iter().map(|b| b.1).collect()
     }
 
     /// Book changes answering one request.
     pub fn take_depth_updates_for(&self, req_id: u32) -> Vec<DepthUpdate> {
-        // Partitioned, not removed one at a time: see the bars above.
-        let mut q = self.depth_updates.lock().unwrap();
-        let (mine, rest): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *q).into_iter().partition(|u| u.req_id == req_id);
-        *q = rest;
-        mine
+        self.depth_updates.take_if(|u| u.req_id == req_id)
     }
 
     /// Take every depth updates waiting, leaving none.
     pub fn drain_depth_updates(&self) -> Vec<DepthUpdate> {
-        self.depth_updates.lock().unwrap().drain(..).collect()
+        self.depth_updates.drain()
     }
 
-    /// Take the depth updates a dispatch loop should deliver, leaving behind
-    /// those a stream is going to read by id — see
-    /// [`drain_real_time_bars_for_dispatch`](Self::drain_real_time_bars_for_dispatch).
-    pub fn drain_depth_updates_for_dispatch(
-        &self, mine: impl Fn(u32) -> bool,
-    ) -> Vec<DepthUpdate> {
-        // Partitioned rather than removed one at a time: each `remove` shifts
-        // the tail, so a pass over a queue that has grown costs the square of
-        // it — under the lock the hot loop pushes into, on exactly the path a
-        // stalled reader takes when it resumes. The `take_*_for` siblings were
-        // already changed for this; these were not.
-        let mut held = self.depth_updates.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *held).into_iter().partition(|e| !(mine(e.req_id)));
-        *held = kept;
-        out
-    }
+
 
     /// Take every tick news waiting, leaving none.
     pub fn drain_tick_news(&self) -> Vec<TickNews> {
-        self.tick_news.lock().unwrap().drain(..).collect()
+        self.tick_news.drain().into_iter().map(|(_, n)| n).collect()
     }
 
     /// Take every news bulletins waiting, leaving none.
     pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
-        self.news_bulletins.lock().unwrap().drain(..).collect()
+        self.news_bulletins.drain()
     }
 
     /// Take every option computations waiting, leaving none.
     pub fn drain_option_computations(&self) -> Vec<crate::types::OptionComputation> {
-        self.option_computations.lock().unwrap().drain(..).collect()
+        self.option_computations.drain().into_iter().map(|(_, c)| c).collect()
     }
 
     /// Everything the venue has sent this session that nothing reads.
@@ -569,6 +558,7 @@ impl MarketDataState {
         // machine's is not representable, and wrapping it puts the session on
         // a clock neither side named.
         self.clock_skew_millis.store(venue_millis.saturating_sub(local_millis()), Ordering::Relaxed);
+        self.stamps.note_written();
     }
 
     /// What the venue's clock reads now: this machine's, shifted by what the
@@ -584,16 +574,16 @@ impl MarketDataState {
 
     /// Take every venue errors waiting, leaving none.
     pub fn drain_venue_errors(&self) -> Vec<String> {
-        self.venue_errors.lock().unwrap().drain(..).collect()
+        self.venue_errors.drain()
     }
 
     #[doc(hidden)] pub fn push_venue_error(&self, text: String) {
-        self.venue_errors.lock().unwrap().push(text);
+        self.venue_errors.push(text);
     }
 
     /// Take every subscription failures waiting, leaving none.
     pub fn drain_subscription_failures(&self) -> Vec<(crate::types::InstrumentId, String)> {
-        self.subscription_failures.lock().unwrap().drain(..).collect()
+        self.subscription_failures.drain().into_iter().map(|(at, _, why)| (at, why)).collect()
     }
 
     /// Take every companion refusal waiting, leaving none.
@@ -605,17 +595,7 @@ impl MarketDataState {
     /// a computation, and was told nothing while the venue had said why at
     /// once.
     pub fn drain_companion_refusals(&self) -> Vec<(crate::types::InstrumentId, u32, String)> {
-        self.companion_refusals.lock().unwrap().drain(..).collect()
-    }
-
-    /// Take every con_id whose news the venue refused, leaving none. The
-    /// client clears its askers for each, so a re-ask is sent anew.
-    pub fn drain_news_rejections(&self) -> Vec<i64> {
-        self.news_rejections.lock().unwrap().drain(..).collect()
-    }
-
-    #[doc(hidden)] pub fn push_news_rejection(&self, con_id: i64) {
-        self.news_rejections.lock().unwrap().push(con_id);
+        self.companion_refusals.drain().into_iter().map(|(at, _, kind, why)| (at, kind, why)).collect()
     }
 
     /// What a subscription was acknowledged with, kept for whoever watches
@@ -624,7 +604,7 @@ impl MarketDataState {
         // A follower joining after dispatch takes the acknowledgement reads
         // this cache, so it is ready before the acknowledgement can be read.
         self.last_tick_req_params.lock().unwrap().insert(instrument, params.clone());
-        self.tick_req_params.lock().unwrap().push((instrument, params));
+        self.tick_req_params.push((instrument, self.generation_of(instrument), params));
     }
 
     /// What a follower should be told, if the subscription it follows was
@@ -636,101 +616,30 @@ impl MarketDataState {
 
     /// tickReqParams owed to one request that followed a live subscription.
     #[doc(hidden)] pub fn push_tick_req_params_for(&self, req_id: i64, params: TickReqParams) {
-        self.tick_req_params_direct.lock().unwrap().push((req_id, params));
+        self.tick_req_params_direct.push((req_id, params));
     }
 
     /// Take those, in the order they came. Client side.
     pub fn drain_tick_req_params_direct(&self) -> Vec<(i64, TickReqParams)> {
-        self.tick_req_params_direct.lock().unwrap().drain(..).collect()
+        self.tick_req_params_direct.drain()
     }
 
     /// Take what the subscriptions were acknowledged with, in the order it
     /// came. Client side.
     pub fn drain_tick_req_params(&self) -> Vec<(crate::types::InstrumentId, TickReqParams)> {
-        self.tick_req_params.lock().unwrap().drain(..).collect()
+        self.tick_req_params.drain().into_iter().map(|(at, _, p)| (at, p)).collect()
     }
 
-    /// Whether a move away from this slot is still waiting to be read.
-    ///
-    /// The slot a move points away from cannot be given back while the move is
-    /// still queued: the release purges the moves that name it, and the move is
-    /// the only thing telling this slot's watchers where their contract went.
-    /// Given back afterwards, once the move has been read, both hold.
-    pub fn a_move_is_pending_from(&self, instrument: crate::types::InstrumentId) -> bool {
-        self.moves_unread_from.lock().unwrap().get(&instrument).is_some_and(|w| *w > 0)
-    }
 
-    /// Whether a reason this slot's subscription could not be made is still
-    /// waiting to be read. Asked for the same cause a pending move is: giving
-    /// the slot back drops it, and it is the only thing the caller who asked
-    /// will ever be told.
-    pub fn a_failure_is_pending_from(&self, instrument: crate::types::InstrumentId) -> bool {
-        self.subscription_failures.lock().unwrap().iter().any(|(at, _)| *at == instrument)
-    }
-
-    /// Where a caller's slot has to follow, because the contract it named is
-    /// already held by another. Read the way a refusal is.
-    pub fn drain_subscription_moves(
-        &self,
-    ) -> Vec<(crate::types::InstrumentId, crate::types::InstrumentId, u64)> {
-        self.subscription_moves.lock().unwrap().drain(..).collect()
-    }
-
-    #[doc(hidden)]
-    pub fn push_subscription_move(
-        &self,
-        from: crate::types::InstrumentId,
-        into: crate::types::InstrumentId,
-        took_it: u64,
-    ) {
-        // Both under one acquisition, the count first. Published apart, a
-        // surface could take the move off the queue and say it had been read
-        // before the count existed — and the count created afterwards was
-        // discharged by no move, so the subscription on the slot it named was
-        // held up for the rest of the session with nobody watching it.
-        let mut moves = self.subscription_moves.lock().unwrap();
-        *self.moves_unread.lock().unwrap().entry(into).or_insert(0) += 1;
-        *self.moves_unread_from.lock().unwrap().entry(from).or_insert(0) += 1;
-        moves.push((from, into, took_it));
-    }
-
-    /// Whether a caller is on its way onto this slot and has not arrived yet.
-    ///
-    /// Such a caller has asked for the contract and is not yet recorded as
-    /// watching the slot it holds, so a withdrawal decided in the meantime
-    /// cannot see it: the subscription went, and the caller arrived on a slot
-    /// with nothing on the wire.
-    ///
-    /// Counted rather than read off the queue, because the queue is emptied
-    /// before the move is installed: read there, the answer turned false in
-    /// exactly the window this is for.
-    #[doc(hidden)] pub fn a_move_is_on_its_way_into(
-        &self, instrument: crate::types::InstrumentId,
-    ) -> bool {
-        self.moves_unread.lock().unwrap().get(&instrument).is_some_and(|waiting| *waiting > 0)
-    }
-
-    /// Say that a move has been installed, whatever became of the requests it
-    /// named.
-    #[doc(hidden)] pub fn note_a_move_is_read(
-        &self, from: crate::types::InstrumentId, into: crate::types::InstrumentId,
-    ) {
-        for (map, slot) in [(&self.moves_unread, into), (&self.moves_unread_from, from)] {
-            let mut waiting = map.lock().unwrap();
-            if let Some(left) = waiting.get_mut(&slot) {
-                *left = left.saturating_sub(1);
-                if *left == 0 {
-                    waiting.remove(&slot);
-                }
-            }
-        }
-    }
 
     // ── Hot-loop-side writers ──
 
+    /// Write a slot's quote, under the occupancy the slot is held under.
     #[doc(hidden)]
     pub fn push_quote(&self, id: InstrumentId, quote: &Quote) {
-        self.quotes.get_or_grow(id).write(quote);
+        let generation = self.generation_of(id);
+        self.quotes.get_or_grow(id).write(quote, generation);
+        self.stamps.note_written();
     }
 
     /// Zero every quote a caller can read, as the engine zeroes its own copy at
@@ -745,25 +654,29 @@ impl MarketDataState {
     #[doc(hidden)] pub fn zero_all_quotes(&self) {
         let blank = Quote::default();
         for slot in self.quotes.iter() {
-            slot.write(&blank);
+            // Under the occupancy it was written under: zeroing a quote does
+            // not change whose it is.
+            let (_, generation) = slot.read_with_generation();
+            slot.write(&blank, generation);
         }
+        self.stamps.note_written();
     }
 
     #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
-        push_bounded(&self.tbt_trades, trade, STREAM_BACKLOG_LIMIT, "tbt_trades");
+        self.tbt_trades.push_bounded(trade, STREAM_BACKLOG_LIMIT, "tbt_trades");
     }
 
     #[doc(hidden)] pub fn push_tbt_quote(&self, quote: TbtQuote) {
-        push_bounded(&self.tbt_quotes, quote, STREAM_BACKLOG_LIMIT, "tbt_quotes");
+        self.tbt_quotes.push_bounded(quote, STREAM_BACKLOG_LIMIT, "tbt_quotes");
     }
 
     #[doc(hidden)] pub fn push_tbt_mid(&self, mid: TbtMid) {
-        push_bounded(&self.tbt_mids, mid, STREAM_BACKLOG_LIMIT, "tbt_mids");
+        self.tbt_mids.push_bounded(mid, STREAM_BACKLOG_LIMIT, "tbt_mids");
     }
 
 
     #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
-        push_bounded(&self.real_time_bars, (req_id, bar), STREAM_BACKLOG_LIMIT, "real_time_bars");
+        self.real_time_bars.push_bounded((req_id, bar), STREAM_BACKLOG_LIMIT, "real_time_bars");
     }
 
     #[doc(hidden)] pub fn push_depth_update(&self, update: DepthUpdate) {
@@ -794,22 +707,22 @@ impl MarketDataState {
             if self.depth_dropped.lock().unwrap().contains(&update.req_id) {
                 return;
             }
-            let mut held = self.depth_updates.lock().unwrap();
+            let mut held = self.depth_updates.lock();
             if held.len() >= STREAM_BACKLOG_LIMIT {
                 let mut per_book: std::collections::HashMap<u32, usize> =
                     std::collections::HashMap::new();
-                for u in held.iter() {
+                for (_, u) in held.iter() {
                     *per_book.entry(u.req_id).or_insert(0) += 1;
                 }
                 if let Some((&worst, &how_many)) = per_book.iter().max_by_key(|(_, n)| **n) {
-                    held.retain(|u| u.req_id != worst);
+                    held.retain(|(_, u)| u.req_id != worst);
                     self.depth_dropped.lock().unwrap().insert(worst);
                     // Told on the request that asked for it, once. The venue
                     // goes on sending this book and nothing further is kept,
                     // so a caller not told reads a subscription that is up and
                     // a book that has stopped moving — which is what a quiet
                     // market looks like.
-                    self.depth_drops_unsaid.lock().unwrap().push((
+                    self.depth_drops_unsaid.push((
                         worst,
                         format!(
                             "the book on this request went past the {STREAM_BACKLOG_LIMIT} \
@@ -838,7 +751,7 @@ impl MarketDataState {
                     );
                 }
             }
-            held.push(update);
+            self.depth_updates.push_held(&mut held, update);
         }
     }
 
@@ -848,29 +761,29 @@ impl MarketDataState {
     /// already arrived and nobody has read. Left there, the next request under
     /// the same number is served the previous stream's bars.
     #[doc(hidden)] pub fn purge_real_time_bars(&self, req_id: u32) {
-        self.real_time_bars.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.real_time_bars.retain(|(id, _)| *id != req_id);
     }
 
     /// Throw away tick-by-tick records still queued under a request.
     #[doc(hidden)] pub fn purge_tbt_for(&self, req_id: i64) {
-        self.tbt_trades.lock().unwrap().retain(|t| t.req_id != req_id);
-        self.tbt_quotes.lock().unwrap().retain(|q| q.req_id != req_id);
+        self.tbt_trades.retain(|t| t.req_id != req_id);
+        self.tbt_quotes.retain(|q| q.req_id != req_id);
         // The midpoints as well. Left queued, a stream reopened under the same
         // number before the next read was served the withdrawn stream's
         // midpoints, under its own number and about another contract.
-        self.tbt_mids.lock().unwrap().retain(|m| m.req_id != req_id);
+        self.tbt_mids.retain(|m| m.req_id != req_id);
     }
 
     /// Remove all buffered depth updates for a given req_id (called on cancel).
     #[doc(hidden)] pub fn purge_depth_updates(&self, req_id: u32) {
-        self.depth_updates.lock().unwrap().retain(|u| u.req_id != req_id);
+        self.depth_updates.retain(|u| u.req_id != req_id);
         // Withdrawing is how a caller starts again, so this is where a book
         // that was dropped stops being refused — and where the notice of that
         // drop goes with it. Left queued, a subscription started again under
         // the same number opened with the failure of the one before it: the
         // caller was told a healthy book had been given up on.
         self.depth_dropped.lock().unwrap().remove(&req_id);
-        self.depth_drops_unsaid.lock().unwrap().retain(|(id, _)| *id != req_id);
+        self.depth_drops_unsaid.retain(|(id, _)| *id != req_id);
     }
 
     /// Whether a book was dropped for running away and has not been asked for
@@ -879,43 +792,17 @@ impl MarketDataState {
         self.depth_dropped.lock().unwrap().contains(&req_id)
     }
 
-    /// Take the books given up on that the caller has not been told about,
-    /// leaving none.
-    pub fn drain_depth_drops(&self) -> Vec<(u32, String)> {
-        self.depth_drops_unsaid.lock().unwrap().drain(..).collect()
-    }
 
-    /// The same, leaving behind the books a stream is going to read by id.
-    ///
-    /// A dropped book is the one failure a stream cannot tell from a quiet
-    /// market, so it has to reach the stream that asked for the book. Drained
-    /// whole beside one, it was reported to a callback and the stream sat
-    /// through its idle span and ended saying nothing had gone wrong.
-    pub fn drain_depth_drops_for_dispatch(
-        &self, mine: impl Fn(u32) -> bool,
-    ) -> Vec<(u32, String)> {
-        // Partitioned rather than removed one at a time: each `remove` shifts
-        // the tail, so a pass over a queue that has grown costs the square of
-        // it — under the lock the hot loop pushes into, on exactly the path a
-        // stalled reader takes when it resumes. The `take_*_for` siblings were
-        // already changed for this; these were not.
-        let mut held = self.depth_drops_unsaid.lock().unwrap();
-        let (out, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *held).into_iter().partition(|e| !(mine(e.0)));
-        *held = kept;
-        out
-    }
 
     /// The book given up on under one request, if there is one, leaving the
     /// rest.
     pub fn take_depth_drop_for(&self, req_id: u32) -> Option<String> {
-        let mut held = self.depth_drops_unsaid.lock().unwrap();
-        let at = held.iter().position(|(id, _)| *id == req_id)?;
-        Some(held.remove(at).1)
+        self.depth_drops_unsaid.take_first(|(id, _)| *id == req_id).map(|(_, why)| why)
     }
 
     #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {
-        push_bounded(&self.tick_news, news, STREAM_BACKLOG_LIMIT, "tick_news");
+        let generation = self.generation_of(news.instrument);
+        self.tick_news.push_bounded((generation, news), STREAM_BACKLOG_LIMIT, "tick_news");
     }
 
     /// A series the caller asked for, decoded, waiting to be delivered.
@@ -951,6 +838,7 @@ impl MarketDataState {
             );
         }
         queued.push(tick);
+        self.stamps.note_written();
     }
 
     /// What this contract's extra series have stated since the last read.
@@ -966,6 +854,7 @@ impl MarketDataState {
         &self, instrument: crate::types::InstrumentId, answer: Vec<SeriesTick>,
     ) {
         self.snapshot_answers.lock().unwrap().insert(instrument, answer);
+        self.stamps.note_written();
     }
 
     /// The answer to this contract's chargeable snapshot, where the venue has
@@ -988,6 +877,7 @@ impl MarketDataState {
         &self, instrument: crate::types::InstrumentId, eligible: i64, state: i64,
     ) {
         self.quote_attribute_masks.lock().unwrap().insert(instrument, (eligible, state));
+        self.stamps.note_written();
     }
 
     /// The two masks as the venue last stated them, or nothing stated.
@@ -1011,14 +901,14 @@ impl MarketDataState {
     /// oldest are dropped, so a late subscriber is handed the most recent
     /// [`NEWS_BULLETIN_LIMIT`] rather than everything or nothing.
     #[doc(hidden)] pub fn push_news_bulletin(&self, bulletin: NewsBulletin) {
-        let mut held = self.news_bulletins.lock().unwrap();
+        let mut held = self.news_bulletins.lock();
         if held.len() >= NEWS_BULLETIN_LIMIT {
             // ponytail: O(n) shift on a queue of a thousand, on an event that
             // arrives a few times an hour. A VecDeque if bulletins ever became
             // a hot path.
             held.remove(0);
         }
-        held.push(bulletin);
+        self.news_bulletins.push_held(&mut held, bulletin);
     }
 
     /// Whether the venue is restricting short sales in this contract.
@@ -1048,6 +938,7 @@ impl MarketDataState {
         } else {
             held.remove(&instrument);
         }
+        self.stamps.note_written();
     }
 
     /// What the venue last said about a contract itself: how many shares are on
@@ -1174,6 +1065,7 @@ impl MarketDataState {
         &self, comp: crate::types::OptionComputation,
     ) {
         self.closing_option_model.lock().unwrap().insert(comp.instrument, comp);
+        self.stamps.note_written();
     }
 
     /// The rows of three figures one series stated for a contract, in the
@@ -1233,6 +1125,7 @@ impl MarketDataState {
         strategies: Vec<crate::types::ScannedStrategy>,
     ) {
         self.scanned_strategies.lock().unwrap().insert(instrument, strategies);
+        self.stamps.note_written();
     }
 
     /// What one of the option model's chain series last stated for an
@@ -1266,18 +1159,21 @@ impl MarketDataState {
         sets: Vec<crate::types::ChainModelParameters>,
     ) {
         self.chain_model_parameters.lock().unwrap().insert((instrument, series), sets);
+        self.stamps.note_written();
     }
 
     #[doc(hidden)] pub fn note_stated_rows(
         &self, instrument: crate::types::InstrumentId, series: u32, rows: Vec<(f64, f64, f64)>,
     ) {
         self.stated_rows.lock().unwrap().insert((instrument, series), rows);
+        self.stamps.note_written();
     }
 
     #[doc(hidden)] pub fn note_paired_figures(
         &self, instrument: crate::types::InstrumentId, series: u32, pairs: Vec<(f64, f64)>,
     ) {
         self.paired_figures.lock().unwrap().insert((instrument, series), pairs);
+        self.stamps.note_written();
     }
 
     #[doc(hidden)] pub fn note_numbered_figures(
@@ -1290,6 +1186,7 @@ impl MarketDataState {
         for (table, stated) in [(false, whole), (true, fractional)] {
             if !stated.is_empty() {
                 held.insert((instrument, series, table), stated.to_vec());
+                self.stamps.note_written();
             }
         }
     }
@@ -1298,6 +1195,7 @@ impl MarketDataState {
         &self, instrument: crate::types::InstrumentId, series: u32, figures: Vec<f64>,
     ) {
         self.stated_figures.lock().unwrap().insert((instrument, series), figures);
+        self.stamps.note_written();
     }
 
     /// Keep what the venue stated about a contract, merging with what it said
@@ -1316,6 +1214,71 @@ impl MarketDataState {
         }
         if let Some(v) = open_a_year_ago {
             entry.open_a_year_ago = v;
+        }
+        self.stamps.note_written();
+    }
+
+    /// Forget what a spread scan stated for a slot, once the scan is withdrawn:
+    /// the next scan of the contract states its own.
+    #[doc(hidden)] pub fn forget_scanned_strategies(&self, instrument: crate::types::InstrumentId) {
+        self.scanned_strategies.lock().unwrap().remove(&instrument);
+    }
+
+    /// Keep a calculation until the venue states the model it needs.
+    #[doc(hidden)] pub fn keep_calculation(&self, req_id: i64, calculation: KeptCalculation) {
+        let mut kept = self.kept_calculations.lock().unwrap();
+        let waiting = usize::from(!calculation.answered);
+        let previous = kept.insert(req_id, calculation).is_some_and(|c| !c.answered);
+        if previous { self.calculations_waiting.fetch_sub(1, Ordering::Relaxed); }
+        self.calculations_waiting.fetch_add(waiting, Ordering::Relaxed);
+    }
+
+    /// Stop keeping one, and say what it was.
+    #[doc(hidden)] pub fn forget_calculation(&self, req_id: i64) -> Option<KeptCalculation> {
+        let mut kept = self.kept_calculations.lock().unwrap();
+        let removed = kept.remove(&req_id);
+        if removed.as_ref().is_some_and(|c| !c.answered) {
+            self.calculations_waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    /// Whether a calculation is kept under this number.
+    pub fn holds_calculation(&self, req_id: i64) -> bool {
+        self.kept_calculations.lock().unwrap().contains_key(&req_id)
+    }
+
+    /// How many calculations are kept, answered or not.
+    pub fn kept_calculation_count(&self) -> usize {
+        self.kept_calculations.lock().unwrap().len()
+    }
+
+    /// Calculations waiting for the model after their contract was named.
+    pub(crate) fn calculations_waiting_for_model(&self) -> usize {
+        self.calculations_waiting.load(Ordering::Relaxed)
+    }
+
+    /// Work through the unanswered calculations `pick` names, under one
+    /// acquisition: each is answered by `answer`, which says whether it was,
+    /// so a model written while a caller is keeping one answers it once.
+    #[doc(hidden)] pub fn answer_kept_calculations(
+        &self,
+        pick: impl Fn(i64, &KeptCalculation) -> bool,
+        mut answer: impl FnMut(i64, &KeptCalculation) -> bool,
+    ) {
+        let mut kept = self.kept_calculations.lock().unwrap();
+        let mut ids: Vec<i64> = kept
+            .iter()
+            .filter(|(id, c)| !c.answered && pick(**id, c))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            let calculation = kept[&id].clone();
+            if answer(id, &calculation) {
+                kept.get_mut(&id).unwrap().answered = true;
+                self.calculations_waiting.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1340,19 +1303,24 @@ impl MarketDataState {
         if comp.answers.is_none() {
             self.last_option_model.lock().unwrap().insert(comp.instrument, comp);
         }
-        push_bounded(&self.option_computations, comp, STREAM_BACKLOG_LIMIT, "option_computations");
+        // An answer worked out here names no slot; the venue's own statement
+        // carries the occupancy of the slot it is about.
+        let generation = if comp.answers.is_none() { self.generation_of(comp.instrument) } else { 0 };
+        self.option_computations.push_bounded(
+            (generation, comp), STREAM_BACKLOG_LIMIT, "option_computations",
+        );
     }
 
     #[doc(hidden)] pub fn push_companion_refusal(
         &self, instrument: crate::types::InstrumentId, kind: u32, reason: String,
     ) {
-        self.companion_refusals.lock().unwrap().push((instrument, kind, reason));
+        self.companion_refusals.push((instrument, self.generation_of(instrument), kind, reason));
     }
 
     #[doc(hidden)] pub fn push_subscription_failure(&self, instrument: crate::types::InstrumentId, reason: String) {
         self.last_subscription_failure.lock().unwrap()
             .insert(instrument, reason.clone());
-        self.subscription_failures.lock().unwrap().push((instrument, reason));
+        self.subscription_failures.push((instrument, self.generation_of(instrument), reason));
     }
 
     /// Why a contract a request is about to join was refused, if it was.
@@ -1402,12 +1370,12 @@ impl MarketDataState {
 
     /// A refusal owed to one request that joined a contract already refused.
     #[doc(hidden)] pub fn push_subscription_failure_for(&self, req_id: i64, reason: String) {
-        self.subscription_failures_direct.lock().unwrap().push((req_id, reason));
+        self.subscription_failures_direct.push((req_id, reason));
     }
 
     /// Take every refusal owed to a single request, leaving none.
     pub fn drain_subscription_failures_direct(&self) -> Vec<(i64, String)> {
-        self.subscription_failures_direct.lock().unwrap().drain(..).collect()
+        self.subscription_failures_direct.drain()
     }
 
     /// Publish how many slots the engine has handed out. The quote table is
@@ -1456,7 +1424,7 @@ mod follower_tick_req_params_tests {
     #[test]
     fn the_followers_increment_is_ready_before_the_acknowledgement() {
         let market = MarketDataState::new();
-        let queued = market.tick_req_params.lock().unwrap();
+        let queued = market.tick_req_params.lock();
         std::thread::scope(|scope| {
             let writer = scope.spawn(|| market.push_tick_req_params(5, tick(0.025)));
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1589,7 +1557,7 @@ mod option_model_tests {
         }
         assert!(market.depth_was_dropped(4), "the book was given up on");
         assert!(
-            !market.depth_drops_unsaid.lock().unwrap().is_empty(),
+            !market.depth_drops_unsaid.is_empty(),
             "and the caller has not been told yet",
         );
 
@@ -1597,7 +1565,7 @@ mod option_model_tests {
 
         assert!(!market.depth_was_dropped(4), "asked for again, it is not refused");
         assert!(
-            market.depth_drops_unsaid.lock().unwrap().is_empty(),
+            market.depth_drops_unsaid.is_empty(),
             "and the notice of the last one does not open the next",
         );
     }

@@ -2,6 +2,15 @@
 
 use crate::protocol::fix;
 
+/// Take the scan's settings without refusing the scan. Their representation
+/// on this connection has not been established, so they are not carried.
+pub(crate) fn note_setting_pairs(pairs: &str) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !pairs.is_empty() && !SAID.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        log::warn!("scanner settings pairs are taken and not carried to the venue (said once)");
+    }
+}
+
 /// FIX tag 6040: the sub protocol.
 pub const TAG_SUB_PROTOCOL: u32 = 6040;
 

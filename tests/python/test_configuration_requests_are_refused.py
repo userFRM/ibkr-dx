@@ -39,6 +39,8 @@ def test_configuration_access_is_refused_under_its_request_id(name, keyword, req
     client = EClient(wrapper)
     client._test_connect("DU1")
     getattr(client, name)(**{keyword: Request(req_id)})
+    assert wrapper.seen == []
+    client.poll()
     unstated = 2**31 - 1 if name.startswith("update") else 0
     assert wrapper.seen == [(unstated if req_id is None else req_id, 10357, MESSAGE)]
     assert client._test_take_commands() == []

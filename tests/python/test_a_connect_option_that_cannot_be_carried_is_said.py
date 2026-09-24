@@ -29,6 +29,7 @@ def _client():
 def test_an_option_that_was_stated_is_said():
     w, c = _client()
     c.setConnectOptions("+PACEAPI")
+    c.poll()
     assert any("+PACEAPI" in msg for _, msg in w.seen), w.seen
 
 

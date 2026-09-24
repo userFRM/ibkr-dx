@@ -42,6 +42,7 @@ def test_a_read_only_session_refuses_to_change_a_position():
     ):
         w.seen.clear()
         call()
+        c.poll()
         assert [(r, code) for r, code, _ in w.seen] == [(under, 321)], w.seen
         assert "read-only" in w.seen[0][2]
         assert not c._test_take_commands(), "and nothing was sent"

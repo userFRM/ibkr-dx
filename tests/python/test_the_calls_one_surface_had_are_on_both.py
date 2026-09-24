@@ -168,6 +168,7 @@ def test_the_verification_requests_are_answered_as_the_reference_client_answers_
     c.verifyAndAuthMessage("data", "response")
     c.cancelContractData(5)
     c.cancelHistoricalTicks(6)
+    c.poll()
     assert w.seen == [(-1, 508, BAD_MESSAGE), (-1, 508, BAD_MESSAGE)]
     assert c._test_take_commands() == [], "nothing is sent for any of them"
 

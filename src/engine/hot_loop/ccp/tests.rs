@@ -636,6 +636,7 @@ fn a_pnl_body_that_reports_a_problem_states_no_seeds() {
 #[test]
 fn the_reference_id_names_the_request_the_seeds_answer() {
     let shared = SharedState::new();
+    shared.name_account_request("PLR.2", "");
     let both = ["6529=PLR.2", "8292=PLR.1", "6008=756733", "6064=1"].join("\x01");
     positions::handle_pnl_response(both.as_bytes(), &shared);
     assert_eq!(shared.portfolio.pnl_request_key(), "PLR.1");
@@ -1108,7 +1109,7 @@ fn a_finished_option_order_names_its_right_as_a_letter() {
     ]);
     frame.insert(11, "555".to_string());
     ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
-    ccp.deliver_finished_orders(&shared, super::Handover::Final);
+    ccp.deliver_finished_orders(&shared);
 
     let filed = shared.orders.drain_completed_orders();
     assert!(filed.iter().any(|o| o.order_id == 555), "the order is filed as finished");
@@ -2271,8 +2272,8 @@ fn a_chain_request_that_could_not_be_sent_is_refused_not_answered_empty() {
 fn a_chain_reply_answers_the_request_that_named_its_underlying() {
     let mut ccp = CcpState::new();
     let shared = SharedState::new();
-    ccp.pending_option_params.push((3, "SPY".into(), 756733, Instant::now() + OPTION_CHAIN_TIMEOUT));
-    ccp.pending_option_params.push((7, "AAPL".into(), 265598, Instant::now() + OPTION_CHAIN_TIMEOUT));
+    ccp.pending_option_params.push((3, "SPY".into(), 756733));
+    ccp.pending_option_params.push((7, "AAPL".into(), 265598));
     let msg = fix::fix_build(
         &[
             (fix::TAG_MSG_TYPE, "U"),
@@ -2288,7 +2289,7 @@ fn a_chain_reply_answers_the_request_that_named_its_underlying() {
         1,
     );
 
-    ccp.handle_option_chain(&msg, &shared);
+    ccp.handle_option_chain(&msg, &mut None, &mut HeartbeatState::new(), &shared);
 
     assert_eq!(ccp.pending_option_params.len(), 1, "only the request it answers is spent");
     assert_eq!(ccp.pending_option_params[0].0, 3);
@@ -2305,26 +2306,55 @@ fn a_chain_reply_answers_the_request_that_named_its_underlying() {
     assert_eq!(scopes[0].strikes, vec![140.0, 145.0]);
 }
 
-/// An entry left in the queue would both hang its caller and stand ready
-/// to absorb the answer to a later request for the same underlying.
+/// A chain reply names its underlying and no request, so two chains for one
+/// underlying cannot both be on the wire: the second waits for the first's
+/// reply, however late, and each reply answers its own request. Nothing gives
+/// the first up on a clock, so no late reply is taken for the second's.
 #[test]
-fn an_unanswered_chain_request_is_given_up_on() {
+fn a_second_chain_on_one_underlying_waits_for_the_first_reply() {
+    use std::io::Read;
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut conn = Some(conn);
+    let mut hb = HeartbeatState::new();
     let mut ccp = CcpState::new();
     let shared = SharedState::new();
-    ccp.pending_option_params.push((7, "AAPL".into(), 265598, Instant::now() - Duration::from_secs(1)));
-    ccp.pending_option_params.push((8, "SPY".into(), 756733, Instant::now() + OPTION_CHAIN_TIMEOUT));
+    let asked = |req_id| QueuedChain {
+        req_id, symbol: "AAPL".into(), fut_fop_exchange: String::new(),
+        underlying_sec_type: "STK".into(), underlying_con_id: 265598,
+    };
+    let chains_sent = |peer: &mut std::net::TcpStream| {
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).matches("6040=138").count()
+    };
+    let reply = fix::fix_build(
+        &[
+            (fix::TAG_MSG_TYPE, "U"), (6040, "139"), (55, "AAPL"),
+            (6775, "20260116"), (6346, "265598"), (100, "SMART"), (6058, "AAPL"),
+            (231, "100"), (6997, "140.0"),
+        ],
+        1,
+    );
 
-    ccp.sweep_pending_option_params(&shared);
+    ccp.ask_option_params(asked(7), &mut conn, &mut hb, &shared);
+    ccp.ask_option_params(asked(8), &mut conn, &mut hb, &shared);
+    assert_eq!(chains_sent(&mut peer), 1, "one request for the underlying on the wire");
+    assert_eq!(ccp.queued_option_params.len(), 1, "the second waits its turn");
 
-    assert_eq!(ccp.pending_option_params.len(), 1, "the expired one is dropped");
-    assert_eq!(ccp.pending_option_params[0].0, 8, "and the live one is kept");
-    // Told it is over, and told as a refusal: an empty chain is one the
-    // venue enumerated and found nothing in, and the venue never answered.
-    assert!(shared.reference.drain_option_params().is_empty());
-    let refused = shared.reference.drain_historical_errors();
-    assert_eq!(refused.len(), 1, "the caller of the expired one is told it is over");
-    assert_eq!(refused[0].0, 7);
-    assert_eq!(refused[0].1, -1, "as no answer, not as an empty chain");
+    // The first's reply, however late: nothing refused the first meanwhile.
+    assert!(shared.reference.drain_historical_errors().is_empty());
+    ccp.handle_option_chain(&reply, &mut conn, &mut hb, &shared);
+    ccp.send_next_option_params(&mut conn, &mut hb, &shared, &mut 64);
+    let answered = shared.reference.drain_option_params();
+    assert_eq!(answered.iter().map(|(r, ..)| *r).collect::<Vec<_>>(), vec![7], "the first's reply is its own");
+    assert_eq!(chains_sent(&mut peer), 1, "and only then is the second sent");
+    assert!(ccp.queued_option_params.is_empty());
+
+    ccp.handle_option_chain(&reply, &mut conn, &mut hb, &shared);
+    ccp.send_next_option_params(&mut conn, &mut hb, &shared, &mut 64);
+    let answered = shared.reference.drain_option_params();
+    assert_eq!(answered.iter().map(|(r, ..)| *r).collect::<Vec<_>>(), vec![8], "the second's reply is its own");
 }
 
 /// Nothing expired an unanswered request, so it stayed queued for the life
@@ -2650,8 +2680,22 @@ fn a_missing_leaves_qty_falls_back_to_what_is_unfilled() {
         (38, "100"), (14, "30"), (32, "30"), (31, "412.25"), (6, "412.25"),
     ]);
     ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
-    let updates = shared.orders.drain_order_updates();
+    let updates = statuses_stated(&shared);
     assert_eq!(updates[0].remaining_qty, 70.0, "100 ordered less 30 filled, not 0");
+}
+
+/// Every status the engine stated, in order: on a report of its own, or on
+/// the fill it rode beside.
+fn statuses_stated(shared: &crate::bridge::SharedState) -> Vec<crate::types::OrderUpdate> {
+    shared
+        .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+        .into_iter()
+        .filter_map(|(_, record)| match record {
+            crate::bridge::Record::OrderUpdate(u) => Some(u.update),
+            crate::bridge::Record::Fill(f) => f.status,
+            _ => None,
+        })
+        .collect()
 }
 
 /// A report is written down in full before any of it is announced.
@@ -2677,13 +2721,16 @@ fn a_finished_order_is_written_down_before_it_is_announced() {
     ccp.handle_exec_report(&frame, b"", &mut context, &shared, &sink, "");
 
     // Everything the report changed is readable.
-    assert_eq!(shared.orders.drain_fills().len(), 1, "the fill is recorded");
     assert_eq!(
         shared.orders.drain_completed_orders().len(),
         1,
         "and so is the order having finished",
     );
-    assert_eq!(shared.orders.drain_order_updates().len(), 1, "and the status it finished in");
+    let records = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+    assert!(
+        matches!(&records[..], [(_, crate::bridge::Record::Fill(f))] if f.status.is_some()),
+        "the fill is recorded, and the status it finished in rides it: {records:?}",
+    );
 
     // And the fill was announced before the status that followed from it.
     let announced: Vec<_> = rx.try_iter().collect();
@@ -2866,8 +2913,7 @@ fn a_replayed_pegs_replace_carries_the_shape_a_placements_does() {
         })),
     });
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let mut buf = [0u8; 8192];
     let n = peer.read(&mut buf).unwrap_or(0);
     let msg = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -3111,8 +3157,7 @@ fn a_recovered_order_without_a_time_in_force_states_none() {
 
     context.modify(78, 100 * PRICE_SCALE, 100, false);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared_arc, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared_arc, false, &None, &mut 64,);
 
     let mut buf = [0u8; 4096];
     let n = std::io::Read::read(&mut peer, &mut buf).unwrap();
@@ -3166,8 +3211,7 @@ fn a_naming_record_for_a_held_order_reaches_the_book_and_the_cancel() {
     let mut hb = crate::engine::hot_loop::HeartbeatState::new();
     let shared_arc = std::sync::Arc::new(SharedState::new());
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared_arc, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared_arc, false, &None, &mut 64,);
     let mut buf = [0u8; 4096];
     let n = std::io::Read::read(&mut peer, &mut buf).unwrap();
     let msg = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
@@ -3428,7 +3472,7 @@ fn a_schedule_that_comes_late_is_still_filed_against_its_contract() {
     // Asked, and given up on before the answer came.
     let mut conn = None;
     ccp.give_up_on_a_dividend_query("div_1", 756_733);
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     assert!(
         shared.reference.dividend_schedule(756_733).is_none(),
         "nothing has been filed yet",
@@ -3474,7 +3518,7 @@ fn the_question_waits_for_the_session_s_own_replay() {
     );
 
     // Nor on a later pass, while the replay is still running.
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     assert!(shared.orders.completed_orders_ended() == 0, "still waiting");
 
     // Nor while an earlier question is still being answered: two of them share
@@ -3482,14 +3526,14 @@ fn the_question_waits_for_the_session_s_own_replay() {
     // on both and only one caller would ever be released.
     shared.orders.set_replay_done();
     ccp.completed_orders_open = true;
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     assert!(shared.orders.completed_orders_ended() == 0, "one at a time");
     ccp.completed_orders_open = false;
 
     // Once the way is clear the question goes out. There is no connection here
     // to carry it, so what the caller is told is that it cannot be answered —
     // which is the path a held question joins, not a path of its own.
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     assert!(
         shared.orders.completed_orders_ended() > 0,
         "the held question was asked once the replay was over",
@@ -3515,7 +3559,7 @@ fn a_question_held_for_a_replay_that_names_nothing_is_asked_anyway() {
     // connection here to carry it, so what the caller is told is that it
     // cannot be answered — which is an answer, and is what was missing.
     ccp.give_up_waiting_for_the_replay();
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     assert!(
         shared.orders.completed_orders_ended() > 0,
         "the question went out rather than waiting on a replay that names nothing",
@@ -3544,7 +3588,7 @@ fn the_hold_and_the_window_fit_inside_the_wait_the_caller_keeps() {
     // The hold runs out and the question goes out. There is no connection, so
     // the answer is that it cannot be answered.
     ccp.give_up_waiting_for_the_replay();
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     let after_the_first = shared.orders.completed_orders_ended();
     assert!(after_the_first > 0, "the question was asked");
 
@@ -3557,33 +3601,63 @@ fn the_hold_and_the_window_fit_inside_the_wait_the_caller_keeps() {
     );
 }
 
-/// A caller who has waited long enough is told so, and the window is not shut
-/// with them.
+/// No clock ends a question the venue is answering, and a second question
+/// waits for the first one's sentinel.
 ///
-/// A clock here says when a caller has waited long enough. It says nothing
-/// about where the venue's answer ends, and that answer is a run of ordinary
-/// reports carrying no mark of which question they answer. Shut on the clock,
-/// the rest of the answer goes to the live path, where a report that states a
-/// fill is a fill and moves a position.
+/// The answer is a run of ordinary reports ending in a sentinel that names no
+/// question. Ended early, the rest of the first answer was read as the
+/// second's; asked beside it, the first sentinel shut the window on both. So
+/// the second goes out only once the first's sentinel is in, and each answer
+/// stands where its own sentinel does.
 #[test]
-fn a_caller_who_waited_long_enough_is_answered_without_shutting_the_window() {
-    let (mut ccp, _context, shared) = ord_status_test_state();
+fn a_second_question_waits_for_the_first_sentinel_however_late() {
+    use std::io::Read;
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut conn = Some(conn);
     let mut hb = HeartbeatState::new();
-    let mut conn = None;
-    ccp.completed_orders_open = true;
-    ccp.give_up_waiting_for_the_sentinel();
+    shared.orders.set_replay_done();
+    let questions_sent = |peer: &mut std::net::TcpStream| {
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).matches("35=H").count()
+    };
+    let answers = |shared: &SharedState| -> Vec<bool> {
+        shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                crate::bridge::Record::Answer(crate::bridge::Answer::CompletedOrders { api_only }) => Some(api_only),
+                _ => None,
+            })
+            .collect()
+    };
+    let sentinel = || {
+        let mut parsed = std::collections::HashMap::new();
+        parsed.insert(11u32, "*".to_string());
+        parsed.insert(35u32, "8".to_string());
+        parsed
+    };
 
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.ask_completed_orders(false, &mut conn, &mut hb, &shared);
+    assert_eq!(questions_sent(&mut peer), 1);
+    assert!(ccp.completed_orders_open);
+    // However long the sentinel takes, nothing answers the first question and
+    // nothing sends the second.
+    ccp.ask_completed_orders(true, &mut conn, &mut hb, &shared);
+    for _ in 0..3 {
+        ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
+    }
+    assert_eq!(questions_sent(&mut peer), 0, "the second waits for the first's sentinel");
+    assert!(answers(&shared).is_empty(), "and nothing answered the first on a clock");
 
-    assert!(
-        shared.orders.completed_orders_ended() > 0,
-        "the caller is answered with what arrived",
-    );
-    assert!(
-        ccp.completed_orders_open,
-        "and what is still coming is still read as history, because the venue has not \
-         said it has finished",
-    );
+    ccp.handle_exec_report(&sentinel(), b"", &mut context, &shared, &None, "");
+    assert_eq!(answers(&shared), [false], "the first answer stands at its sentinel");
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
+    assert_eq!(questions_sent(&mut peer), 1, "and only then is the second sent");
+
+    ccp.handle_exec_report(&sentinel(), b"", &mut context, &shared, &None, "");
+    assert_eq!(answers(&shared), [true], "the second answer is its own");
 }
 
 /// The question dies with the connection that carried it.
@@ -3623,7 +3697,7 @@ fn the_wait_for_the_replay_is_taken_again_on_the_next_connection() {
     // A question on this connection: held, then asked once the wait ran out.
     ccp.send_completed_orders_request(1, &mut conn, &mut hb, &shared);
     ccp.give_up_waiting_for_the_replay();
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared, &mut { super::super::COMMANDS_PER_LAP });
     let asked = shared.orders.completed_orders_ended();
     assert!(asked > 0, "the first question was asked");
     assert!(!ccp.completed_orders_open, "and nothing is outstanding when the connection goes");
@@ -3890,18 +3964,16 @@ fn a_later_report_naming_a_recovered_order_the_venues_way_finds_it() {
     );
 }
 
-/// A caller released early is handed the orders the venue has finished, and
-/// not the ones it is still describing.
+/// An answer is handed the orders the venue has finished, and not the ones it
+/// is still describing.
 ///
 /// A record still being built says the order is working, and a record saying
 /// that is one this client reads as an order the venue is holding. Handed over
 /// anyway, a question about finished orders answered with live ones, and a
 /// withdrawal could be aimed at one of them.
 #[test]
-fn a_caller_released_early_is_not_handed_a_half_described_order() {
+fn an_answer_is_not_handed_a_half_described_order() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
-    let mut hb = HeartbeatState::new();
-    let mut conn = None;
     ccp.completed_orders_open = true;
 
     // One the venue has finished describing, and one it has not.
@@ -3915,8 +3987,11 @@ fn a_caller_released_early_is_not_handed_a_half_described_order() {
         ccp.handle_exec_report(&report, b"", &mut context, &shared, &None, "");
     }
 
-    ccp.give_up_waiting_for_the_sentinel();
-    ccp.sweep_completed_orders_request(&mut conn, &mut hb, &shared);
+    // The sentinel that ends the answer.
+    let mut sentinel = std::collections::HashMap::new();
+    sentinel.insert(11u32, "*".to_string());
+    sentinel.insert(35u32, "8".to_string());
+    ccp.handle_exec_report(&sentinel, b"", &mut context, &shared, &None, "");
 
     let finished: Vec<u64> =
         shared.orders.drain_completed_orders().into_iter().map(|o| o.order_id).collect();
@@ -4683,7 +4758,9 @@ fn a_request_naming_a_contract_waits_to_be_given_its_id() {
     // The venue names it.
     let lookup = ccp.pending_named[0].0;
     let (_, mut held, _) = ccp.pending_named.remove(0);
-    name_the_contract(&mut held, 756_733);
+    name_the_contract(&mut held, &crate::control::contracts::ContractDefinition {
+        con_id: 756_733, ..Default::default()
+    });
     let _ = lookup;
     match ccp.hold_until_named(held, &mut None, &mut HeartbeatState::new(), &shared) {
         Some(crate::types::ControlCommand::FetchHistorical { contract: crate::types::ContractRef { con_id, .. }, req_id, .. }) => {
@@ -4703,80 +4780,104 @@ fn a_request_naming_a_contract_waits_to_be_given_its_id() {
     assert_eq!(errors[0].0, 8);
 }
 
-/// A lookup the venue never answers must not leave the subscription
-/// waiting in silence. That is the failure this whole path exists to
-/// remove, and it would have reappeared one level down.
+/// A request giving its contract by the venue's id alone waits for the venue
+/// to name it by that id, and goes out as the venue names it.
+///
+/// The request states the contract's type and its exchange, and the venue
+/// routes on both, so both are the venue's to say. Named at the call instead,
+/// the caller's thread waited on the lookup; stamped with a guess, a future
+/// went out as a smart-routed US stock.
 #[test]
-fn a_subscription_the_venue_never_names_is_reported() {
-    let (mut ccp, mut context, shared) = u186_test_state();
-    let parked = PendingSubscribe {
-        issued: 0,
-        filters: Default::default(),
-        con_id: 0,
-        instrument: 4,
-        symbol: "NOSUCH".into(),
-        exchange: "SMART".into(),
-        sec_type: "STK".into(),
-        currency: "USD".into(),
-        mode_9887: 0, regulatory_snapshot: false,
+fn a_request_giving_its_contract_by_id_alone_goes_out_as_the_venue_names_it() {
+    use crate::control::contracts::{ContractDefinition, SecurityType};
+    use crate::types::ControlCommand as C;
+
+    let (mut ccp, _context, shared) = u186_test_state();
+    let es = ContractDefinition {
+        con_id: 495_512_563, symbol: "ES".into(), sec_type: SecurityType::Future,
+        exchange: "CME".into(), currency: "USD".into(), ..Default::default()
     };
-    ccp.resolve_for_subscribe(parked, &mut None, &mut HeartbeatState::new(), &shared);
+    let by_id = |req_id| C::FetchHistorical {
+        contract: crate::types::ContractRef { con_id: 495_512_563, ..Default::default() },
+        req_id, end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
+        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false,
+        include_expired: false, filters: Default::default(),
+    };
 
-    ccp.sweep_pending_subscribes(&mut context, &shared);
-    assert_eq!(ccp.pending_md_subscribe.len(), 1, "still within its wait");
-    assert!(shared.market.drain_subscription_failures().is_empty());
+    assert!(ccp.hold_until_named(by_id(7), &mut None, &mut HeartbeatState::new(), &shared).is_none());
+    let (_, mut held, _) = ccp.pending_named.remove(0);
+    name_the_contract(&mut held, &es);
+    match ccp.hold_until_named(held, &mut None, &mut HeartbeatState::new(), &shared) {
+        Some(C::FetchHistorical { contract, req_id: 7, .. }) => {
+            assert_eq!(
+                (contract.con_id, contract.sec_type.as_str(), contract.exchange.as_str()),
+                (495_512_563, "FUT", "CME"),
+                "sent as the venue named it",
+            );
+        }
+        other => panic!("a named request is handled, not held again: {other:?}"),
+    }
 
-    // Wind the clock back past the wait.
-    let asked_at = &mut ccp.pending_md_subscribe[0].2;
-    *asked_at -= CcpState::NAMING_TIMEOUT + Duration::from_secs(1);
-    ccp.sweep_pending_subscribes(&mut context, &shared);
+    // A histogram states the two beside the id, and is named the same way.
+    let histogram = |req_id| C::FetchHistogramData {
+        req_id, con_id: 495_512_563, sec_type: String::new(), exchange: String::new(),
+        use_rth: true, period: "1 week".into(),
+    };
+    assert!(ccp.hold_until_named(histogram(9), &mut None, &mut HeartbeatState::new(), &shared).is_none());
+    let (_, mut held, _) = ccp.pending_named.remove(0);
+    name_the_contract(&mut held, &es);
+    assert!(
+        matches!(&held, C::FetchHistogramData { sec_type, exchange, .. } if sec_type == "FUT" && exchange == "CME"),
+        "{held:?}",
+    );
+    // And withdrawn by its own cancel while it waits.
+    ccp.hold_until_named(histogram(10), &mut None, &mut HeartbeatState::new(), &shared);
+    assert!(ccp.withdraw_named(10, |_| true), "the cancel finds the held request");
+    assert!(ccp.pending_named.is_empty());
 
-    assert!(ccp.pending_md_subscribe.is_empty(), "given up on");
-    let failures = shared.market.drain_subscription_failures();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].0, 4, "reported against the slot that asked");
-    assert!(failures[0].1.contains("NOSUCH"), "and names it: {}", failures[0].1);
+    // One the venue never names is refused under its number.
+    ccp.hold_until_named(by_id(8), &mut None, &mut HeartbeatState::new(), &shared);
+    ccp.pending_named[0].2 -= CcpState::NAMING_TIMEOUT + Duration::from_secs(1);
+    ccp.sweep_pending_named(&shared);
+    assert!(ccp.pending_named.is_empty());
+    let errors = shared.reference.drain_historical_errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, 8);
 }
 
-/// The venue answers a market data subscription only when it is named by
-/// contract id, so a subscription for a contract named by symbol waits on
-/// the lookup that names it. It is held until the definition arrives, and
-/// released with the id the definition carried.
+#[test]
+fn a_subscription_the_venue_never_names_is_reported() {
+    let (mut ccp, _context, shared) = u186_test_state();
+    let mut asked = spy_by_symbol(4);
+    if let crate::types::ControlCommand::Subscribe { contract, .. } = &mut asked { contract.symbol = "NOSUCH".into(); }
+    ccp.hold_until_named(asked, &mut None, &mut HeartbeatState::new(), &shared);
+    ccp.sweep_pending_named(&shared);
+    assert_eq!(ccp.pending_named.len(), 1);
+    assert!(shared.reference.drain_historical_errors().is_empty());
+    ccp.pending_named[0].2 -= CcpState::NAMING_TIMEOUT + Duration::from_secs(1);
+    ccp.sweep_pending_named(&shared);
+    assert!(ccp.pending_named.is_empty());
+    let failures = shared.reference.drain_historical_errors();
+    assert_eq!(failures.len(), 1);
+    assert_eq!((failures[0].0, failures[0].1), (4, 200));
+    assert!(failures[0].2.contains("NOSUCH"));
+}
+
 #[test]
 fn a_subscription_waits_for_the_lookup_that_names_its_contract() {
     let (mut ccp, mut context, shared) = u186_test_state();
-    let parked = PendingSubscribe {
-        issued: 0,
-        filters: Default::default(),
-        con_id: 0,
-        instrument: 3,
-        symbol: "SPY".into(),
-        exchange: "SMART".into(),
-        sec_type: "STK".into(),
-        currency: "USD".into(),
-        mode_9887: 0, regulatory_snapshot: false,
-    };
-    ccp.resolve_for_subscribe(parked, &mut None, &mut HeartbeatState::new(), &shared);
-    let req_id = ccp.pending_md_subscribe[0].0;
-    assert!(req_id >= 0xF000_0000, "asked for on the engine's own account, not a caller's");
-    assert!(ccp.resolved_md_subscribe.is_empty(), "nothing to send until it is named");
-
-    let named = crate::protocol::fix::fix_build(&[
-        (fix::TAG_MSG_TYPE, "d"),
-        (crate::control::contracts::TAG_SECURITY_REQ_ID, &req_id.to_string()),
-        (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
-        (55, "SPY"),
-        (crate::control::contracts::TAG_IB_CON_ID, "756733"),
-    ], 1);
-    ccp.process_ccp_message(&named, &mut None, &mut context, &shared,
-        &None, &mut HeartbeatState::new(), "DU1");
-
-    assert!(ccp.pending_md_subscribe.is_empty(), "no longer waiting");
-    assert_eq!(ccp.resolved_md_subscribe.len(), 1);
-    let (con_id, released) = &ccp.resolved_md_subscribe[0];
-    assert_eq!(*con_id, 756733, "the id the venue gave it");
-    assert_eq!(released.instrument, 3, "for the slot that asked");
-    assert_eq!(released.symbol, "SPY");
+    ccp.hold_until_named(spy_by_symbol(3), &mut None, &mut HeartbeatState::new(), &shared);
+    let req_id = ccp.pending_named[0].0;
+    assert!(req_id >= 0xF000_0000);
+    assert!(ccp.resolved_named.is_empty());
+    ccp.process_ccp_message(&named_by_id(&req_id.to_string()), &mut None, &mut context,
+        &shared, &None, &mut HeartbeatState::new(), "DU1");
+    assert!(ccp.pending_named.is_empty());
+    assert_eq!(ccp.resolved_named.len(), 1);
+    let crate::types::ControlCommand::Subscribe { req_id, contract, .. } = &ccp.resolved_named[0] else { panic!("subscription") };
+    assert_eq!(*req_id, 3);
+    assert_eq!(contract.con_id, 756733);
+    assert_eq!(contract.symbol, "SPY");
 }
 
 #[test]
@@ -7551,8 +7652,7 @@ fn a_refused_replace_puts_back_the_terms_the_venue_holds() {
     // The attempt states a new price, a new quantity and a new time-in-force.
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let attempt = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(attempt.contains("35=G"), "the replace went out: {attempt}");
@@ -7574,8 +7674,7 @@ fn a_refused_replace_puts_back_the_terms_the_venue_holds() {
     // A modify naming only a price carries the terms the venue holds.
     context.modify(42, 106 * PRICE_SCALE, 100, false);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let second = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(second.contains("35=G"), "a replace went out: {second}");
@@ -7600,8 +7699,7 @@ fn a_cancel_after_a_refused_replace_names_the_quantity_the_venue_holds() {
 
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"), "the replace went out");
 
@@ -7610,8 +7708,7 @@ fn a_cancel_after_a_refused_replace_names_the_quantity_the_venue_holds() {
 
     context.cancel(42);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let cancel = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(cancel.contains("35=F"), "a cancel went out: {cancel}");
@@ -7638,8 +7735,7 @@ fn a_replace_refused_on_the_reject_message_puts_back_the_prior_terms() {
 
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"), "the replace went out");
 
@@ -7680,8 +7776,7 @@ fn a_recovered_orders_replace_rejection_restores_its_terms_and_name() {
     let mut buf = [0u8; 4096];
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let attempt = fix::fix_parse(&buf[..n]);
     assert_eq!(attempt.get(&35).map(String::as_str), Some("G"));
@@ -7711,8 +7806,7 @@ fn a_recovered_orders_replace_rejection_restores_its_terms_and_name() {
 
     context.cancel(42);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let cancel = fix::fix_parse(&buf[..n]);
     assert_eq!(cancel.get(&35).map(String::as_str), Some("F"));
@@ -7757,8 +7851,7 @@ fn a_second_cancel_refusal_does_not_retire_an_unrelated_order() {
     let mut buf = [0u8; 4096];
     context.cancel(42);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let cancel = fix::fix_parse(&buf[..n]);
     assert_eq!(cancel.get(&41).map(String::as_str), Some("9000.0"));
@@ -7798,8 +7891,7 @@ fn a_refused_revision_puts_back_the_name_the_venue_holds() {
 
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let replace = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(
@@ -7818,8 +7910,7 @@ fn a_refused_revision_puts_back_the_name_the_venue_holds() {
 
     context.cancel(42);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     let cancel = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(cancel.contains("35=F"), "a cancel went out: {cancel}");
@@ -7844,8 +7935,7 @@ fn a_refusal_of_a_gone_order_resurrects_nothing() {
 
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"), "the replace went out");
 
@@ -7872,8 +7962,7 @@ fn an_acknowledged_replace_spends_the_fallback() {
 
     context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
     crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None,
-    );
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
     let n = peer.read(&mut buf).unwrap();
     assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"), "the replace went out");
 
@@ -8483,7 +8572,7 @@ fn a_connection_that_dies_takes_the_lookups_waiting_on_it_with_it() {
     });
     ccp.details_delivered.entry(8).or_default().insert(756_733);
     ccp.pending_matching_symbols.push((9, later));
-    ccp.pending_option_params.push((10, "AAPL".into(), 265_598, later));
+    ccp.pending_option_params.push((10, "AAPL".into(), 265_598));
     ccp.pending_schedule_pair.push(PendingSchedulePair {
         api_req_id: 11,
         join_key: "AAPL-NASDAQ".into(),
@@ -8505,13 +8594,7 @@ fn a_connection_that_dies_takes_the_lookups_waiting_on_it_with_it() {
         awaiting: [4_762i64].into_iter().collect(),
         deadline: later,
     });
-    ccp.resolve_for_subscribe(PendingSubscribe {
-        issued: 0,
-        filters: Default::default(),
-        con_id: 0, instrument: 4, symbol: "SPY".into(), exchange: "SMART".into(),
-        sec_type: "STK".into(), currency: "USD".into(),
-        mode_9887: 0, regulatory_snapshot: false,
-    }, &mut None, &mut HeartbeatState::new(), &shared);
+    ccp.hold_until_named(spy_by_symbol(4), &mut None, &mut HeartbeatState::new(), &shared);
     let bars = crate::types::ControlCommand::FetchHistorical {
         contract: crate::types::ContractRef { con_id: 0, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() },
         req_id: 12, end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
@@ -8519,14 +8602,14 @@ fn a_connection_that_dies_takes_the_lookups_waiting_on_it_with_it() {
         filters: Default::default(),
     };
     assert!(ccp.hold_until_named(bars, &mut None, &mut HeartbeatState::new(), &shared).is_none());
-    assert_eq!((ccp.pending_md_subscribe.len(), ccp.pending_named.len()), (1, 1));
+    assert_eq!(ccp.pending_named.len(), 2);
 
     ccp.handle_disconnect(&mut None, &mut context, &shared, &None);
 
     assert!(
         ccp.pending_secdef.is_empty() && ccp.pending_fanout.is_empty()
             && ccp.pending_matching_symbols.is_empty() && ccp.pending_option_params.is_empty()
-            && ccp.pending_schedule_pair.is_empty() && ccp.pending_md_subscribe.is_empty()
+            && ccp.pending_schedule_pair.is_empty()
             && ccp.pending_named.is_empty() && ccp.auto_fetched_conids.is_empty()
             && ccp.details_delivered.is_empty() && ccp.pending_scanner_enrichment.is_empty(),
         "nothing waits on a connection that is gone",
@@ -8537,7 +8620,7 @@ fn a_connection_that_dies_takes_the_lookups_waiting_on_it_with_it() {
         .map(|(rid, code, _)| (rid, code)).collect();
     told.sort_unstable();
     assert_eq!(
-        told, [(7, gone), (8, gone), (9, gone), (10, gone), (12, gone)],
+        told, [(4, gone), (7, gone), (8, gone), (9, gone), (10, gone), (12, gone)],
         "each caller told now, and the engine's own lookup told to nobody",
     );
     let mut ended = shared.reference.drain_contract_details_end();
@@ -8546,9 +8629,7 @@ fn a_connection_that_dies_takes_the_lookups_waiting_on_it_with_it() {
     let paired: Vec<_> = shared.reference.drain_contract_details().into_iter()
         .map(|(rid, d)| (rid, d.con_id, d.trading_hours.is_none())).collect();
     assert_eq!(paired, [(11, 265_598, true)], "a contract the venue did name is delivered, without the hours it did not");
-    let failed = shared.market.drain_subscription_failures();
-    assert!(failed.len() == 1 && failed[0].0 == 4 && failed[0].1.contains("trading connection"), "{failed:?}");
-    assert_eq!(context.slots_to_reconsider, [4], "and the slot goes back");
+    assert!(context.slots_to_reconsider.is_empty(), "no registration preceded naming");
 }
 
 /// The end that squares the account is the end of the request that was asked
@@ -8731,7 +8812,7 @@ fn a_request_waiting_to_be_named_is_withdrawn_with_the_rest() {
     // And one whose name already came back, waiting to be read this pass.
     ccp.resolved_named.push(named_by_symbol(7));
 
-    ccp.withdraw_named(7);
+    ccp.withdraw_named(7, |_| true);
 
     assert!(
         !ccp.pending_named.iter().any(|(_, cmd, _)| request_id(cmd) == Some(7)),
@@ -8813,27 +8894,18 @@ fn a_subscription_looks_up_the_listing_the_caller_named() {
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
     let mut conn = Some(conn);
-    ccp.resolve_for_subscribe(
-        PendingSubscribe {
-            issued: 0,
-            con_id: 0,
-            instrument: 5,
-            symbol: "ES".into(),
-            exchange: "CME".into(),
-            sec_type: "FOP".into(),
-            currency: "USD".into(),
-            filters: crate::types::SecDefFilters {
-                last_trade_date_or_contract_month: "202612".into(),
-                strike: 7700.0,
-                right: "C".into(),
-                trading_class: "ES".into(),
-                ..Default::default()
-            },
-            mode_9887: 0,
-            regulatory_snapshot: false,
+    ccp.hold_until_named(crate::types::ControlCommand::Subscribe {
+        req_id: 1, contract: crate::types::ContractRef {
+            symbol: "ES".into(), exchange: "CME".into(), sec_type: "FOP".into(), currency: "USD".into(),
+            ..Default::default()
         },
-        &mut conn, &mut hb, &shared,
-    );
+        filters: crate::types::SecDefFilters {
+            last_trade_date_or_contract_month: "202612".into(), strike: 7700.0,
+            right: "C".into(), trading_class: "ES".into(), ..Default::default()
+        },
+        mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+        generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
+    }, &mut conn, &mut hb, &shared);
 
     let mut buf = [0u8; 4096];
     let n = peer.read(&mut buf).unwrap();
@@ -8843,13 +8915,14 @@ fn a_subscription_looks_up_the_listing_the_caller_named() {
     assert!(msg.contains("|202=7700"), "and what it may be exercised at: {msg}");
 }
 
-fn spy_by_symbol(instrument: crate::types::InstrumentId) -> PendingSubscribe {
-    PendingSubscribe {
-        issued: 0,
-        filters: Default::default(),
-        con_id: 0, instrument,
-        symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(), currency: "USD".into(),
-        mode_9887: 0, regulatory_snapshot: false,
+fn spy_by_symbol(req_id: i64) -> crate::types::ControlCommand {
+    crate::types::ControlCommand::Subscribe {
+        req_id, contract: crate::types::ContractRef {
+            symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(), currency: "USD".into(),
+            ..Default::default()
+        },
+        filters: Default::default(), mode_9887: 0, regulatory_snapshot: false,
+        snapshot: false, generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }
 }
 
@@ -8911,17 +8984,17 @@ fn named_by_id(req_id: &str) -> Vec<u8> {
 fn a_naming_lookup_of_the_engines_own_neither_fans_out_nor_reaches_the_wrapper() {
     let (mut ccp, mut context, shared) = u186_test_state();
     let mut hb = HeartbeatState::new();
-    ccp.resolve_for_subscribe(spy_by_symbol(3), &mut None, &mut hb, &shared);
-    let many = ccp.pending_md_subscribe[0].0;
-    ccp.resolve_for_subscribe(spy_by_symbol(4), &mut None, &mut hb, &shared);
-    let one = ccp.pending_md_subscribe[1].0;
+    ccp.hold_until_named(spy_by_symbol(3), &mut None, &mut hb, &shared);
+    let many = ccp.pending_named[0].0;
+    ccp.hold_until_named(spy_by_symbol(4), &mut None, &mut hb, &shared);
+    let one = ccp.pending_named[1].0;
 
     ccp.process_ccp_message(&named_on_many_venues(&many.to_string()), &mut None, &mut context, &shared,
         &None, &mut hb, "DU1");
     ccp.process_ccp_message(&secdef_frame_by_symbol(&one.to_string()), &mut None, &mut context, &shared,
         &None, &mut hb, "DU1");
 
-    assert_eq!(ccp.resolved_md_subscribe.len(), 2, "both subscriptions are named");
+    assert_eq!(ccp.resolved_named.len(), 2, "both subscriptions are named");
     assert!(ccp.pending_fanout.is_empty(), "no venue is asked in turn on the engine's account");
     assert!(ccp.pending_secdef.is_empty(), "and both lookups are over");
     assert!(shared.reference.drain_contract_details().is_empty(), "no row reaches the wrapper");
@@ -8949,28 +9022,21 @@ fn a_naming_that_matches_several_listings_is_refused_rather_than_sent_for_the_la
     let (mut ccp, mut context, shared) = u186_test_state();
     let mut hb = HeartbeatState::new();
     let mut parked = spy_by_symbol(3);
-    parked.currency.clear();
-    ccp.resolve_for_subscribe(parked, &mut None, &mut hb, &shared);
-    let sub = ccp.pending_md_subscribe[0].0;
+    if let crate::types::ControlCommand::Subscribe { contract, .. } = &mut parked { contract.currency.clear(); }
+    ccp.hold_until_named(parked, &mut None, &mut hb, &shared);
+    let sub = ccp.pending_named[0].0;
     assert!(ccp.hold_until_named(head_timestamp_by_symbol(7), &mut None, &mut hb, &shared).is_none());
-    let held = ccp.pending_named[0].0;
+    let held = ccp.pending_named[1].0;
 
     ccp.process_ccp_message(&named_twice(&sub.to_string()), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
     ccp.process_ccp_message(&named_twice(&held.to_string()), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
 
-    assert!(ccp.pending_md_subscribe.is_empty() && ccp.resolved_md_subscribe.is_empty(),
-        "the subscription is neither waiting nor sent");
-    let failures = shared.market.drain_subscription_failures();
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_eq!(failures[0].0, 3);
-    assert!(failures[0].1.contains("2 contracts"), "told how many it named: {}", failures[0].1);
-    assert_eq!(context.slots_to_reconsider, [3], "and the slot goes back");
-
     assert!(ccp.pending_named.is_empty() && ccp.resolved_named.is_empty(),
-        "the request is neither waiting nor sent");
+        "the subscription is neither waiting nor sent");
     let told = shared.reference.drain_historical_errors();
-    assert_eq!(told.len(), 1, "{told:?}");
-    assert_eq!((told[0].0, told[0].1), (7, crate::error_codes::Refusal::NO_DEFINITION));
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert_eq!((told[0].0, told[0].1), (3, crate::error_codes::Refusal::NO_DEFINITION));
+    assert_eq!((told[1].0, told[1].1), (7, crate::error_codes::Refusal::NO_DEFINITION));
     assert!(told[0].2.contains("2 contracts"), "{}", told[0].2);
 }
 
@@ -9033,23 +9099,19 @@ fn a_lookup_repeated_under_its_number_is_ended_and_sent_afresh() {
 fn the_venues_no_definition_ends_what_waited_on_the_naming_now() {
     let (mut ccp, mut context, shared) = u186_test_state();
     let mut hb = HeartbeatState::new();
-    ccp.resolve_for_subscribe(spy_by_symbol(3), &mut None, &mut hb, &shared);
-    let sub = ccp.pending_md_subscribe[0].0;
+    ccp.hold_until_named(spy_by_symbol(3), &mut None, &mut hb, &shared);
+    let sub = ccp.pending_named[0].0;
     assert!(ccp.hold_until_named(head_timestamp_by_symbol(7), &mut None, &mut hb, &shared).is_none());
-    let held = ccp.pending_named[0].0;
+    let held = ccp.pending_named[1].0;
 
     ccp.process_ccp_message(&secdef_not_found(&sub.to_string()), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
     ccp.process_ccp_message(&secdef_not_found(&held.to_string()), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
 
-    assert!(ccp.pending_md_subscribe.is_empty(), "the subscription no longer waits");
-    let failures = shared.market.drain_subscription_failures();
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert_eq!(failures[0].0, 3);
-    assert_eq!(context.slots_to_reconsider, [3], "and its slot goes back");
-    assert!(ccp.pending_named.is_empty(), "the request no longer waits");
+    assert!(ccp.pending_named.is_empty(), "the subscription no longer waits");
     let told = shared.reference.drain_historical_errors();
-    assert_eq!(told.len(), 1, "{told:?}");
-    assert_eq!((told[0].0, told[0].1), (7, crate::error_codes::Refusal::NO_DEFINITION));
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert_eq!((told[0].0, told[0].1), (3, crate::error_codes::Refusal::NO_DEFINITION));
+    assert_eq!((told[1].0, told[1].1), (7, crate::error_codes::Refusal::NO_DEFINITION));
 }
 
 /// The venue's reject of a lookup the engine made for itself frees the
@@ -9130,7 +9192,7 @@ fn a_scans_batches_are_handed_over_in_the_order_they_arrived() {
 fn the_venues_reject_of_an_option_chain_request_reaches_its_caller_now() {
     let (mut ccp, mut context, shared) = u186_test_state();
     let mut hb = HeartbeatState::new();
-    ccp.pending_option_params.push((701, "SPY".into(), 0, Instant::now() + Duration::from_secs(12)));
+    ccp.pending_option_params.push((701, "SPY".into(), 0));
     let reject = crate::protocol::fix::fix_build(&[
         (fix::TAG_MSG_TYPE, "3"), (320, "701"), (58, "Unknown contract"),
     ], 1);
@@ -9208,11 +9270,11 @@ fn a_pnl_subscription_is_renewed_on_a_reconnect_unless_withdrawn() {
     let mut hb = HeartbeatState::new();
     let (first, mut first_peer) = crate::protocol::connection::Connection::for_test();
     let mut ccp_conn: Option<Connection> = Some(first);
-    ccp.send_pnl_subscribe(5, "DU1", &mut ccp_conn, &mut hb);
-    ccp.send_pnl_subscribe(6, "DU1", &mut ccp_conn, &mut hb);
+    ccp.send_pnl_subscribe(5, false, "DU1", &mut ccp_conn, &mut hb, &shared);
+    ccp.send_pnl_subscribe(6, false, "DU1", &mut ccp_conn, &mut hb, &shared);
     let mut buf = [0u8; 8192];
     let _ = first_peer.read(&mut buf);
-    ccp.withdraw_pnl_subscription(6);
+    ccp.withdraw_pnl_subscription(6, false);
     ccp_conn = None;
 
     let (second, mut second_peer) = crate::protocol::connection::Connection::for_test();
@@ -9224,8 +9286,8 @@ fn a_pnl_subscription_is_renewed_on_a_reconnect_unless_withdrawn() {
         sent.extend_from_slice(&buf[..n]);
     }
     let msg = String::from_utf8_lossy(&sent).replace('\u{1}', "|");
-    assert!(msg.contains("|6040=142|6529=PLR.5|1=DU1|"), "the standing subscription is asked for again: {msg}");
-    assert!(!msg.contains("PLR.6"), "and the withdrawn one is not: {msg}");
+    assert_eq!(msg.matches("|6040=142|").count(), 1, "only the standing request is renewed: {msg}");
+    assert!(msg.contains("|1=DU1|"));
 }
 
 /// A preview's answer, in each of its three shapes, spends no order id.
@@ -9320,7 +9382,7 @@ fn a_seeded_entry_does_not_keep_the_definition_from_being_fetched() {
 fn a_chain_asked_for_without_the_underlyings_id_is_answered_under_the_venues() {
     let mut ccp = CcpState::new();
     let shared = SharedState::new();
-    ccp.pending_option_params.push((9, "SPY".into(), 0, Instant::now() + OPTION_CHAIN_TIMEOUT));
+    ccp.pending_option_params.push((9, "SPY".into(), 0));
     let msg = fix::fix_build(
         &[
             (fix::TAG_MSG_TYPE, "U"), (6040, "139"), (55, "SPY"),
@@ -9329,7 +9391,7 @@ fn a_chain_asked_for_without_the_underlyings_id_is_answered_under_the_venues() {
         ],
         1,
     );
-    ccp.handle_option_chain(&msg, &shared);
+    ccp.handle_option_chain(&msg, &mut None, &mut HeartbeatState::new(), &shared);
     let answered = shared.reference.drain_option_params();
     assert_eq!(answered.len(), 1, "the request is answered");
     assert_eq!((answered[0].0, answered[0].1), (9, 756733), "under the underlying the venue names");
@@ -9804,7 +9866,7 @@ fn a_refusal_with_a_nonnumeric_name_leaves_unrelated_requests_waiting() {
         for name in ["ibxfan-5-1", "SchedSub.9", ""] {
             let (mut ccp, mut context, shared) = u186_test_state();
             if chain {
-                ccp.pending_option_params.push((701, "SPY".into(), 756733, Instant::now() + OPTION_CHAIN_TIMEOUT));
+                ccp.pending_option_params.push((701, "SPY".into(), 756733));
                 if name.starts_with("ibxfan") {
                     ccp.pending_fanout.push(PendingFanout {
                         api_req_id: 5, fanout_req_ids: vec![name.into()], answered: Vec::new(),
@@ -10124,16 +10186,11 @@ fn a_held_request_is_named_by_what_a_gateway_reads_of_it() {
         sec_id: "US78462F1030".into(), sec_id_type: "ISIN".into(), issuer_id: "e1".into(),
         ..Default::default()
     };
-    let asked = |cmd: Option<crate::types::ControlCommand>, pending: Option<PendingSubscribe>| {
+    let asked = |cmd: crate::types::ControlCommand| {
         let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
         let (mut ccp, _context, shared) = u186_test_state();
         let (mut conn, mut hb) = (Some(conn), HeartbeatState::new());
-        if let Some(cmd) = cmd {
-            assert!(ccp.hold_until_named(cmd, &mut conn, &mut hb, &shared).is_none());
-        }
-        if let Some(pending) = pending {
-            ccp.resolve_for_subscribe(pending, &mut conn, &mut hb, &shared);
-        }
+        assert!(ccp.hold_until_named(cmd, &mut conn, &mut hb, &shared).is_none());
         let mut buf = [0u8; 4096];
         let n = peer.read(&mut buf).unwrap();
         String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|")
@@ -10146,11 +10203,13 @@ fn a_held_request_is_named_by_what_a_gateway_reads_of_it() {
         }
         _ => unreachable!(),
     };
-    let msg = asked(Some(expired(true)), None);
+    let msg = asked(expired(true));
     assert!(msg.contains("|6320=1|") && msg.contains("|55=SPY|"), "{msg}");
     assert!(!msg.contains("|48=") && !msg.contains("|6454="), "{msg}");
-    assert!(!asked(Some(expired(false)), None).contains("|6320="));
-    let msg = asked(None, Some(PendingSubscribe { filters: named.clone(), ..spy_by_symbol(3) }));
+    assert!(!asked(expired(false)).contains("|6320="));
+    let mut subscription = spy_by_symbol(3);
+    if let crate::types::ControlCommand::Subscribe { filters, .. } = &mut subscription { *filters = named; }
+    let msg = asked(subscription);
     assert!(msg.contains("|55=SPY|") && !msg.contains("|48=") && !msg.contains("|6454="), "{msg}");
 }
 
@@ -10206,30 +10265,325 @@ fn an_account_code_is_a_value_only_after_the_frames_account_type() {
     let core = crate::client_core::ClientCore::new();
     core.subscribe_account_updates(true);
     super::positions::handle_account_update(
-        b"35=UT\x018001=AccountType\x018004=INDIVIDUAL\x018001=AccountCode\x018004=DU1\x01", &mut context, &shared,
+        b"35=UT\x018292=AR.1\x018001=AccountType\x018004=INDIVIDUAL\x018001=AccountCode\x018004=DU1\x01", &mut context, &shared,
     );
     let initial = core.account_figures_that_moved(&shared, 1);
     assert!(initial.iter().any(|row| row.key == "AccountCode" && row.value == "DU1"));
     core.prepare_account_updates(&shared).unwrap();
     for frame in [
-        &b"35=UT\x018001=AccountCode\x018004=\x01"[..],
-        &b"35=UT\x018001=AccountCode\x018004=DU2\x01"[..],
-        &b"35=UT\x018001=AccountCode\x018004=DU3\x018001=AccountType\x018004=INDIVIDUAL\x01"[..],
-        &b"35=UT\x018001=AccountType\x018004=INDIVIDUAL\x018001=AddAccountCode\x018004=DU4\x01"[..],
+        &b"35=UT\x018292=AR.1\x018001=AccountCode\x018004=\x01"[..],
+        &b"35=UT\x018292=AR.1\x018001=AccountCode\x018004=DU2\x01"[..],
+        &b"35=UT\x018292=AR.1\x018001=AccountCode\x018004=DU3\x018001=AccountType\x018004=INDIVIDUAL\x01"[..],
+        &b"35=UT\x018292=AR.1\x018001=AccountType\x018004=INDIVIDUAL\x018001=AddAccountCode\x018004=DU4\x01"[..],
     ] {
         super::positions::handle_account_update(frame, &mut context, &shared);
         assert!(core.account_figures_that_moved(&shared, 1).is_empty());
         assert!(core.prepare_account_updates(&shared).unwrap().fields.is_empty());
     }
     super::positions::handle_account_update(
-        b"35=UT\x018001=AccountType\x018004=INDIVIDUAL\x018001=AccountCode\x018004=DU5\x01", &mut context, &shared,
+        b"35=UT\x018292=AR.1\x018001=AccountType\x018004=INDIVIDUAL\x018001=AccountCode\x018004=DU5\x01", &mut context, &shared,
     );
     let changed = core.account_figures_that_moved(&shared, 1);
     assert_eq!(changed.len(), 1);
     assert_eq!((&*changed[0].key, &*changed[0].value), ("AccountCode", "DU5"));
     super::positions::handle_account_update(
-        b"35=UT\x018001=AccountType\x018004=\x018001=AccountCode\x018004=\x01", &mut context, &shared,
+        b"35=UT\x018292=AR.1\x018001=AccountType\x018004=\x018001=AccountCode\x018004=\x01", &mut context, &shared,
     );
     assert!(core.account_figures_that_moved(&shared, 1).iter()
         .any(|row| row.key == "AccountCode" && row.value.is_empty()), "a code in the account image is stated even when empty");
+}
+
+/// Which operation on which order each word the venue says about an order
+/// answers, as a read takes it.
+fn operations_answered(shared: &SharedState) -> Vec<(u64, crate::types::model::OrderOp)> {
+    shared
+        .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+        .into_iter()
+        .filter_map(|(_, record)| match record {
+            crate::bridge::Record::OrderInactive((id, _, _, op)) => Some((id, op)),
+            crate::bridge::Record::CancelReject(reject) => Some((reject.order_id, reject.refuses())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The venue refusing an order it never acknowledged answers its placement.
+#[test]
+fn a_refusal_of_an_order_never_acknowledged_answers_its_placement() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let frame = exec_report_frame(&[(39, "8"), (150, "8"), (58, "No valid bid/ask"), (103, "1")]);
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert_eq!(operations_answered(&shared), [(42, crate::types::model::OrderOp::Place)]);
+}
+
+/// Refusing one it had working, or parking one, is its own word on it.
+#[test]
+fn a_refusal_or_a_parking_of_a_working_order_is_the_venues_own_word_on_it() {
+    use crate::types::model::OrderOp::Venue;
+    for (status, reason) in [("8", "Rejected by the exchange"), ("I", "Order held pending margin check")] {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        assert!(context.update_order_status(42, crate::types::OrderStatus::Submitted, false));
+        let frame = exec_report_frame(&[(39, status), (150, status), (58, reason), (103, "0")]);
+        ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+        assert_eq!(operations_answered(&shared), [(42, Venue)], "39={status}");
+    }
+}
+
+/// A refused revision answers the modify, and a refused cancellation the
+/// cancel: the venue's reason and the refusal beside it both say which.
+#[test]
+fn a_refused_revision_answers_the_modify_and_a_refused_cancel_the_cancel() {
+    use crate::types::model::OrderOp::{Cancel, Modify};
+    for (refuses, op) in [("2", Modify), ("1", Cancel)] {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let mut frame = std::collections::HashMap::new();
+        frame.insert(41u32, "42".to_string());
+        frame.insert(434u32, refuses.to_string());
+        frame.insert(102u32, "0".to_string());
+        frame.insert(58u32, "Too late".to_string());
+        ccp.handle_cancel_reject(&frame, &mut context, &shared, &None);
+        assert_eq!(operations_answered(&shared), [(42, op), (42, op)], "434={refuses}");
+    }
+    for (restated, op) in [("102", Modify), ("103", Cancel)] {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy,
+            100 * crate::types::QTY_SCALE, 150 * crate::types::PRICE_SCALE,
+            b'2', b'0', 0,
+        ));
+        assert!(context.update_order_status(42, crate::types::OrderStatus::Submitted, false));
+        let refused = exec_report_frame(&[
+            (11, "42.1"), (150, "8"), (39, "0"), (378, restated), (58, "through the band"),
+        ]);
+        ccp.handle_exec_report(&refused, b"", &mut context, &shared, &None, "DU1");
+        assert_eq!(operations_answered(&shared), [(42, op), (42, op)], "378={restated}");
+    }
+}
+
+/// Rows of a reply listing several contracts go out only while their number
+/// is still waiting, as a single listing's row does. A reply arriving after
+/// the request was ended reached whatever request reused the number since.
+#[test]
+fn the_listings_of_a_reply_go_out_only_while_their_number_waits() {
+    let (mut ccp, mut context, shared) = u186_test_state();
+    // Nothing is waiting under 9: the request was ended before this arrived.
+    let msg = crate::protocol::fix::fix_build(&[
+        (fix::TAG_MSG_TYPE, "d"),
+        (crate::control::contracts::TAG_SECURITY_REQ_ID, "9"),
+        (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
+        (55, "SPY"), (167, "CS"), (crate::control::contracts::TAG_IB_CON_ID, "756733"), (15, "USD"),
+        (55, "SPY"), (167, "CS"), (crate::control::contracts::TAG_IB_CON_ID, "90016213"), (15, "MXN"),
+    ], 1);
+    ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+    assert!(
+        shared.reference.drain_contract_details().is_empty(),
+        "no listing reaches a number nothing is waiting on",
+    );
+}
+
+/// One matching-symbols search on the wire at a time: a reply may name no
+/// request, and the one on the wire is the only request it can answer. The
+/// second is sent once the first has its reply, and counted while it waits.
+#[test]
+fn a_second_search_waits_for_the_first_reply_and_each_reply_is_its_own() {
+    use std::io::Read;
+    let (mut ccp, mut context, shared) = u186_test_state();
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut conn = Some(conn);
+    let mut hb = HeartbeatState::new();
+    let searches_sent = |peer: &mut std::net::TcpStream| {
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).matches("6040=185").count()
+    };
+    // A reply that names no request.
+    let reply = |symbol: &str| {
+        crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "U"), (6040, "186"), (146, "1"),
+            (55, symbol), (167, "CS"), (15, "USD"), (6008, "756733"),
+        ], 1)
+    };
+
+    ccp.ask_matching_symbols(1, "SP", &mut conn, &mut hb, &shared);
+    ccp.ask_matching_symbols(2, "AAP", &mut conn, &mut hb, &shared);
+    assert_eq!(searches_sent(&mut peer), 1, "one search on the wire");
+    assert_eq!(ccp.queued_matching_symbols.len(), 1, "the second held, and counted");
+
+    ccp.process_ccp_message(&reply("SPY"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    ccp.send_next_matching_symbols(&mut conn, &mut hb, &shared, &mut 64);
+    let answered = shared.reference.drain_matching_symbols();
+    assert_eq!(answered.iter().map(|(r, _)| *r).collect::<Vec<_>>(), [1], "the first's own reply");
+    assert_eq!(searches_sent(&mut peer), 1, "and only then the second goes");
+
+    ccp.process_ccp_message(&reply("AAPL"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    let answered = shared.reference.drain_matching_symbols();
+    assert_eq!(answered.iter().map(|(r, _)| *r).collect::<Vec<_>>(), [2], "the second's own reply");
+}
+
+/// A search given up on is refused to its caller and kept on the wire until
+/// its reply: that reply names no request, so read as the next search's it
+/// answers the wrong caller. It is dropped, and only then is the next sent.
+#[test]
+fn a_search_given_up_on_holds_the_wire_until_its_reply_which_is_dropped() {
+    use std::io::Read;
+    let (mut ccp, mut context, shared) = u186_test_state();
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut conn = Some(conn);
+    let mut hb = HeartbeatState::new();
+    let searches_sent = |peer: &mut std::net::TcpStream| {
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).matches("6040=185").count()
+    };
+    let reply = |symbol: &str| {
+        crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "U"), (6040, "186"), (146, "1"),
+            (55, symbol), (167, "CS"), (15, "USD"), (6008, "756733"),
+        ], 1)
+    };
+
+    ccp.ask_matching_symbols(1, "SP", &mut conn, &mut hb, &shared);
+    assert_eq!(searches_sent(&mut peer), 1);
+    // Its deadline passes: the caller is told, and the search stays out.
+    ccp.pending_matching_symbols[0].1 = Instant::now() - Duration::from_secs(1);
+    ccp.sweep_pending_matching_symbols(&shared);
+    let refused = shared.reference.drain_historical_errors();
+    assert_eq!(refused.iter().map(|e| e.0).collect::<Vec<_>>(), [1], "its caller is told");
+
+    ccp.ask_matching_symbols(2, "AAP", &mut conn, &mut hb, &shared);
+    assert_eq!(searches_sent(&mut peer), 0, "the next waits for the first's reply");
+
+    ccp.process_ccp_message(&reply("SPY"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    ccp.send_next_matching_symbols(&mut conn, &mut hb, &shared, &mut 64);
+    assert!(shared.reference.drain_matching_symbols().is_empty(), "the late reply reaches nobody");
+    assert_eq!(searches_sent(&mut peer), 1, "and only then is the next sent");
+
+    ccp.process_ccp_message(&reply("AAPL"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+    let answered = shared.reference.drain_matching_symbols();
+    assert_eq!(answered.iter().map(|(r, _)| *r).collect::<Vec<_>>(), [2], "its reply is its own");
+}
+
+#[test]
+fn account_frames_and_their_ends_follow_the_request_key() {
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    shared.name_account_request("AR.1", "DU1");
+    shared.name_account_request("AR.2", "DU2");
+    shared.portfolio.holdings_restated_under("AR.1");
+    shared.portfolio_for("DU2").holdings_restated_under("AR.2");
+    let mut context = Context::new();
+    let mut hb = HeartbeatState::new();
+    for frame in [
+        b"35=UT\x016529=AR.1\x0115=USD\x018001=NetLiquidation\x018004=100\x01".as_slice(),
+        b"35=UT\x016529=AR.2\x0115=CHF\x018001=NetLiquidation\x018004=200\x01",
+        b"35=UP\x016529=AR.1\x016068=SPY\x016008=756733\x016064=3\x016101=20\x01",
+        b"35=UP\x016529=AR.2\x016068=SPY\x016008=756733\x016064=7\x016101=30\x01",
+        b"35=RL\x016529=AR.2\x018001=Currency\x0115=CHF\x019806=50\x01",
+        b"35=EB\x016529=AR.2\x01",
+    ] {
+        ccp.process_ccp_message(frame, &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+    }
+    assert_eq!(shared.portfolio.position_info(756733).unwrap().position, 3.0);
+    let second = shared.portfolio_for("DU2");
+    assert_eq!(second.position_info(756733).unwrap().position, 7.0);
+    assert_eq!(shared.portfolio.account().net_liquidation, 100 * PRICE_SCALE);
+    assert_eq!(second.account().net_liquidation, 200 * PRICE_SCALE);
+    assert_eq!(context.account.net_liquidation, 100 * PRICE_SCALE);
+    assert!(second.account_download_complete());
+    assert!(!shared.portfolio.account_download_complete());
+    assert!(second.stated_account_values().iter().any(|(_, k, v, c)| k == "CashBalance" && v == "50.00" && c == "CHF"));
+    assert!(shared.portfolio.stated_account_values().iter().all(|(_, _, _, c)| c == "USD"));
+}
+
+#[test]
+fn holdings_and_profit_seeds_stay_in_the_account_named() {
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    shared.name_account_request("PLR.2", "DU2");
+    let mut context = Context::new();
+    ccp.handle_position_feed(
+        b"35=U\x016040=75\x016008=756733\x016095=DU1\x016064=3\x016008=756733\x016095=DU2\x016064=7\x01",
+        &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(),
+    );
+    positions::handle_pnl_response(
+        b"35=U\x016040=143\x016529=PLR.2\x016008=756733\x016064=5\x016099=9\x01", &shared,
+    );
+    assert_eq!(shared.portfolio.position_info(756733).unwrap().position, 3.0);
+    let second = shared.portfolio_for("DU2");
+    assert_eq!(second.position_info(756733).unwrap().position, 7.0);
+    assert_eq!(second.midnight_seeds()[0].realized_pnl, 9.0);
+    assert!(shared.portfolio.midnight_seeds().is_empty());
+}
+
+#[test]
+fn an_unknown_account_key_changes_no_accounts_state() {
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    shared.name_account_request("AR.2", "DU2");
+    let mut context = Context::new();
+    for frame in [
+        b"35=UT\x016529=AR.unknown\x0115=USD\x018001=NetLiquidation\x018004=900\x01".as_slice(),
+        b"35=UP\x016529=AR.unknown\x016008=756733\x016064=9\x016101=30\x01",
+        b"35=U\x016040=143\x016529=PLR.unknown\x016008=756733\x016064=9\x016099=90\x01",
+        b"35=EB\x016529=AR.unknown\x01",
+    ] {
+        ccp.process_ccp_message(frame, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+    }
+    for (_, portfolio) in shared.account_portfolios() {
+        assert_eq!(portfolio.account().net_liquidation, 0);
+        assert!(portfolio.position_info(756733).is_none());
+        assert!(portfolio.midnight_seeds().is_empty());
+        assert!(!portfolio.account_download_complete());
+    }
+}
+
+#[test]
+fn an_unkeyed_account_statement_uses_the_account_it_names() {
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    let mut context = Context::new();
+    for account_field in ["AccountCode", "AddAccountCode"] {
+        let frame = format!("35=UT\x018001={account_field}\x018004=DU2\x0115=CHF\x018001=NetLiquidation\x018004=200\x01");
+        CcpState::new().process_ccp_message(frame.as_bytes(), &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+    }
+    assert_eq!(shared.portfolio_for("DU2").account().net_liquidation, 200 * PRICE_SCALE);
+    assert_eq!(shared.portfolio.account().net_liquidation, 0);
+}
+
+#[test]
+fn profit_requests_keep_distinct_wire_keys_and_independent_withdrawals() {
+    use std::io::Read;
+    let shared = SharedState::new();
+    shared.set_session_account("DU1");
+    let mut ccp = CcpState::new();
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(std::time::Duration::from_millis(20))).unwrap();
+    let mut connection = Some(conn);
+    for (single, account) in [(false, "DU2"), (true, "DU1")] {
+        ccp.send_pnl_subscribe(1, single, account, &mut connection, &mut HeartbeatState::new(), &shared);
+    }
+    let mut frames = String::new();
+    let mut bytes = [0; 8192];
+    while let Ok(n) = peer.read(&mut bytes) {
+        if n == 0 { break; }
+        frames.push_str(std::str::from_utf8(&bytes[..n]).unwrap());
+    }
+    let keys: Vec<_> = frames.split('\x01').filter_map(|part| part.strip_prefix("6529=")).collect();
+    assert_eq!(keys.len(), 2, "{frames}");
+    assert_ne!(keys[0], keys[1]);
+    assert!(keys.iter().all(|key| *key != "PLR.1"));
+    assert!(std::sync::Arc::ptr_eq(&shared.portfolio_for_request(keys[0]).unwrap(), &shared.portfolio_for("DU2")));
+    assert!(std::sync::Arc::ptr_eq(&shared.portfolio_for_request(keys[1]).unwrap(), &shared.portfolio));
+    assert!(std::sync::Arc::ptr_eq(&shared.portfolio_for_request("PLR.1").unwrap(), &shared.portfolio));
+    ccp.withdraw_pnl_subscription(1, false);
+    assert_eq!(ccp.pnl_subscriptions, [(1, true, "DU1".into())]);
+    assert!(std::sync::Arc::ptr_eq(&shared.portfolio_for_request(keys[0]).unwrap(), &shared.portfolio_for("DU2")), "a late reply keeps its original account");
 }

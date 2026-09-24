@@ -5,9 +5,11 @@ when a call cannot be served. A call that returns without telling the caller
 leaves them waiting on a callback that never arrives, which is
 indistinguishable from a slow venue.
 
-The two mechanisms: the request surface returns `Result<(), Refusal>`, the
-binding reports on the error callback. A method that only forwards to a sibling
-answers however that sibling does.
+The two mechanisms: the request surface pushes a refusal record at the call,
+which its read delivers on the error callback, and the binding does the same
+through its own reporting call. A method that only forwards to a sibling
+answers however that sibling does, and a sibling that returns
+`Result<(), Refusal>` is answered by the method that pushes its `Err`.
 """
 
 import pathlib
@@ -33,18 +35,11 @@ _ANSWERS_BY_RAISING = {
     "positions", "scan", "calendar_schema", "calendar_events",
 }
 
-#: Calls the request surface leaves quiet where the binding reports. Each takes
-#: a wrapper it could report on and returns after a log line. Listed as an open
-#: gap rather than an intended difference, so a new divergence still fails.
+#: Calls the request surface leaves quiet where the binding reports. Listed as
+#: an open gap rather than an intended difference, so a new divergence still
+#: fails.
 _ONE_SIDED_ON_THE_REQUEST_SURFACE = {
-    "req_positions",
-    "req_positions_multi",
-    "req_account_updates_multi",
     "req_ids",
-    "req_managed_accts",
-    "req_current_time",
-    "req_current_time_in_millis",
-    "req_executions",
     "req_auto_open_orders",
 }
 
@@ -53,6 +48,10 @@ def _methods(pattern: str, *globs: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for glob in globs:
         for path in sorted(ROOT.glob(glob)):
+            # A test module's wrappers answer under the callbacks' names, which
+            # are not the client's methods.
+            if path.name.endswith("tests.rs"):
+                continue
             text = path.read_text()
             for m in re.finditer(pattern, text):
                 start = m.end()
@@ -62,12 +61,14 @@ def _methods(pattern: str, *globs: str) -> dict[str, str]:
     return found
 
 
-#: How the binding reports a request it will not serve: on the error callback,
+#: How each surface reports a request it will not serve: on the error callback,
 #: returning normally, as the reference client does. `tx_or_report` and
-#: `report_refusal` are the current spellings; the rest predate them.
+#: `report_refusal` are the binding's current spellings, `self.refuse` and
+#: `self.notice_` the request surface's; the rest predate them.
 _REPORTS = (
     "report_refusal", "tx_or_report", "report_unserviceable",
     "wrapper.error", '"error"', "report_reason", "push_historical_error",
+    "self.refuse", "self.notice_",
 )
 
 

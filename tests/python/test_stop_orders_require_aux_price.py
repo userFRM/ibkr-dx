@@ -141,7 +141,8 @@ def local_client():
 
 
 def refusal(wrapper):
-    """The reason and number the client reported, or None."""
+    """The reason and number the client reported, or None: read after a pass
+    of the dispatch, which is where a refusal made at a call is delivered."""
     errors = wrapper._get_events("error")
     return (errors[-1][3], errors[-1][2]) if errors else None
 
@@ -159,6 +160,7 @@ class TestAuxPriceValidation:
         order.lmt_price = 145.0  # common mistake
         # aux_price deliberately not set (defaults to 0.0)
         client.place_order(1, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "aux_price" in reason
         assert code == 403, "the catalogue names a missing trigger price"
@@ -173,6 +175,7 @@ class TestAuxPriceValidation:
         order.lmt_price = 144.0
         # aux_price deliberately not set
         client.place_order(2, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "aux_price" in reason
         assert code == 403, "the catalogue names a missing trigger price"
@@ -186,6 +189,7 @@ class TestAuxPriceValidation:
         order.order_type = "TRAIL"
         # neither trailing_percent nor aux_price set
         client.place_order(3, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "trailing_percent" in reason
         assert code == 403, "the catalogue names a missing trigger price"
@@ -199,6 +203,7 @@ class TestAuxPriceValidation:
         order.order_type = "TRAIL LIMIT"
         order.lmt_price = 148.0
         client.place_order(4, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "aux_price" in reason
         assert code == 403, "the catalogue names a missing trigger price"
@@ -211,6 +216,7 @@ class TestAuxPriceValidation:
         order.total_quantity = 1
         order.order_type = "MIT"
         client.place_order(5, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "aux_price" in reason
         assert code == 403, "the catalogue names a missing trigger price"
@@ -224,6 +230,7 @@ class TestAuxPriceValidation:
         order.order_type = "LIT"
         order.lmt_price = 150.0
         client.place_order(6, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "aux_price" in reason
         assert code == 403, "the catalogue names a missing trigger price"
@@ -236,6 +243,7 @@ class TestAuxPriceValidation:
         order.total_quantity = 1
         order.order_type = "STP PRT"
         client.place_order(7, make_spy(), order)
+        client.poll()
         reason, code = refusal(wrapper)
         assert "aux_price" in reason
         assert code == 403, "the catalogue names a missing trigger price"

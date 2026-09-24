@@ -72,6 +72,7 @@ REQUESTS = [
 def test_a_key_the_request_does_not_take_is_refused_and_nothing_is_sent(name, call):
     w, c = _client()
     call(c, 1, [TagValue("foo", "1")])
+    c.poll()
     assert w.seen == [(1, 10337, f"Misc options key=foo is invalid in {name} request. Valid keys are: manual")]
     assert c._test_take_commands() == []
 
@@ -80,6 +81,7 @@ def test_a_key_the_request_does_not_take_is_refused_and_nothing_is_sent(name, ca
 def test_a_value_manual_does_not_take_is_refused(name, call):
     w, c = _client()
     call(c, 1, [TagValue("manual", "2")])
+    c.poll()
     assert w.seen == [(1, 10338, f"Misc options value=2 is invalid for key=manual in {name} request. "
                                  "Valid values are: 0, 1")]
     assert c._test_take_commands() == []
@@ -89,6 +91,7 @@ def test_a_value_manual_does_not_take_is_refused(name, call):
 def test_an_entry_that_is_not_key_value_cannot_be_read(name, call):
     w, c = _client()
     call(c, 1, [TagValue("manual", "")])
+    c.poll()
     assert w.seen == [(1, 320, "Error reading request:Please use 'Key=Value' format for Misc Options")]
 
 
@@ -118,6 +121,7 @@ CALCULATIONS = [
 def test_a_request_that_takes_no_key_refuses_every_one(name, call):
     w, c = _client()
     call(c, 5, [TagValue("manual", "1")])
+    c.poll()
     assert w.seen == [(5, 10337, f"Misc options key=manual is invalid in {name} request. Valid keys are: ")]
     assert c._test_take_commands() == []
 
@@ -135,6 +139,7 @@ def test_an_entry_without_a_tag_and_value_is_written_as_its_text():
     refused there as any entry it cannot read is."""
     w, c = _client()
     c.reqMktData(1, _spy(), "", False, False, [object()])
+    c.poll()
     assert [(r, code) for r, code, _ in w.seen] == [(1, 320)], w.seen
     assert c._test_take_commands() == []
 
@@ -170,5 +175,6 @@ def test_enabled_features_replace_the_session_list_and_change_option_checks():
     c._test_set_enabled_features([])
     assert c.enabled_features() == []
     c.req_mkt_data_ex(2, _spy(), mkt_data_options=[TagValue("foo", "1")])
+    c.poll()
     assert [(r, code) for r, code, _ in _refusals(w)] == [(2, 10337)]
     assert c._test_take_commands() == []

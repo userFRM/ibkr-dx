@@ -14,11 +14,6 @@ use std::time::{Duration, Instant};
 const MATCHING_SYMBOLS_TIMEOUT: Duration =
     Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 3);
 
-/// The same, for an option chain: a reply carrying every class of an
-/// underlying at once, and the same caller's wait behind it.
-const OPTION_CHAIN_TIMEOUT: Duration =
-    Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 3);
-
 /// The same, for a question or a replacement put to the advisor
 /// configuration.
 ///
@@ -29,21 +24,6 @@ const OPTION_CHAIN_TIMEOUT: Duration =
 /// taken.
 const ADVISOR_TIMEOUT: Duration =
     Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 3);
-
-/// Whether an answer being handed over is the whole of it.
-///
-/// The window can outlive the caller's patience: it is shut by the wire and
-/// the caller is released by a clock, so an answer may be handed over while
-/// the reports that finish it are still coming. Handed over and then dropped,
-/// the terminal report of an order already given to the caller would start a
-/// fresh record with none of its fields.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Handover {
-    /// Everything held, kept so later reports still merge onto it.
-    SoFar,
-    /// Everything held, and there is no more coming.
-    Final,
-}
 
 /// How many finished orders are assembled before the answer is handed over
 /// whether or not the venue has said it is done.
@@ -84,13 +64,12 @@ pub(crate) struct FinishedOrder {
 /// still be attributed. A second chance for the few most recent, not a record.
 const GIVEN_UP_ON_DIVIDEND_QUERIES: usize = 64;
 
-/// The same again, for the question of what the venue has finished — both
-/// halves of it. A question held for the session's own replay to end waits
-/// this long for that and then goes out anyway, because the replay of an
-/// account with nothing working ends without naming an order and there is
-/// nothing else to wait for. And a window that has been opened is shut after
-/// this long whether or not the sentinel that ends it ever comes, because the
-/// caller waiting on that sentinel is the one thing holding the answer.
+/// How long a question of what a contract pays out is waited on before it is
+/// given up on, and may be asked again.
+///
+/// The question of what the venue has finished is not on a clock: its answer
+/// names no question, so a window shut early handed the rest of the answer to
+/// the next one. It is over at its sentinel or with its connection.
 const COMPLETED_ORDERS_TIMEOUT: Duration =
     Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 6);
 
@@ -106,18 +85,11 @@ const COMPLETED_ORDERS_TIMEOUT: Duration =
 /// to ask.
 const COMPLETED_ORDERS_HOLD: Duration = crate::bridge::REPLAY_WAIT;
 
-/// Neither may outlive the wait the caller keeps. Stated here so a change to
-/// either constant, or to the caller's wait, stops the build rather than
-/// quietly making a whole request unanswerable again.
+/// A search's deadline may not outlive the wait the caller keeps. Stated here
+/// so a change to either, or to the caller's wait, stops the build rather than
+/// quietly making the request unanswerable again.
 const _: () = assert!(
-    MATCHING_SYMBOLS_TIMEOUT.as_secs() < crate::config::ANSWER_TIMEOUT_SECS
-        && OPTION_CHAIN_TIMEOUT.as_secs() < crate::config::ANSWER_TIMEOUT_SECS
-        && COMPLETED_ORDERS_TIMEOUT.as_secs() < crate::config::ANSWER_TIMEOUT_SECS
-        // And the two that run one behind the other, as their sum: the
-        // question is held for the replay and then its window is opened, and
-        // a caller waiting on the end of the second gave up during it.
-        && COMPLETED_ORDERS_HOLD.as_secs() + COMPLETED_ORDERS_TIMEOUT.as_secs()
-            < crate::config::ANSWER_TIMEOUT_SECS,
+    MATCHING_SYMBOLS_TIMEOUT.as_secs() < crate::config::ANSWER_TIMEOUT_SECS,
     "an engine deadline must be shorter than the wait the caller keeps",
 );
 
@@ -482,42 +454,51 @@ pub(crate) struct PendingAdvisor {
     pub(crate) deadline: Instant,
 }
 
-/// A market data subscription held back until the venue names its contract.
-///
-/// The venue answers a subscription only when it is named by contract id, and
-/// says nothing at all to one named any other way. A caller who names a
-/// contract the ordinary way — symbol, security type, exchange — is owed the
-/// lookup that turns it into an id.
+impl PendingAdvisor {
+    /// What an error about this request is about.
+    pub(crate) fn origin(&self) -> crate::types::model::ErrorOrigin {
+        Self::origin_of(self.req_id, self.replacing)
+    }
+
+    /// A replacement is a numbered request; a question about a partition has
+    /// no number of its own.
+    pub(crate) fn origin_of(req_id: i64, replacing: bool) -> crate::types::model::ErrorOrigin {
+        if replacing {
+            crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }
+        } else {
+            crate::types::model::ErrorOrigin::Question {
+                q: crate::types::model::Question::Fa,
+                ends: true,
+            }
+        }
+    }
+}
+
+/// What a lookup naming an order's contract came back with.
 #[derive(Debug, Clone)]
-pub(crate) struct PendingSubscribe {
-    pub(crate) instrument: crate::types::InstrumentId,
-    /// Where the caller's request falls in the order of everything the client
-    /// has asked for, carried through the lookup so the subscription that
-    /// follows is recorded under it.
-    pub(crate) issued: u64,
-    /// The contract's own id, where the caller gave one. A lookup by id names
-    /// the contract whatever else the caller left out; a lookup by symbol
-    /// needs the venue to be told where it is listed, which is one of the
-    /// things a caller who left it out does not have.
-    pub(crate) con_id: i64,
+pub(crate) enum OrderNamed {
+    /// The one contract the description names.
+    Contract(Box<crate::control::contracts::ContractDefinition>),
+    /// No contract, or several: how many the venue named.
+    Unnamed(usize),
+    /// Not answered, and why: the code and the words.
+    Refused(i32, String),
+}
+
+/// An option chain request held behind one on the wire for the same
+/// underlying: what it will be sent with.
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedChain {
+    pub(crate) req_id: u32,
     pub(crate) symbol: String,
-    pub(crate) exchange: String,
-    pub(crate) sec_type: String,
-    pub(crate) currency: String,
-    /// What narrows the lookup that names the contract: the month, the strike,
-    /// the right, the multiplier, and the class, the local name and the
-    /// listing venue that tell one listing of a symbol from another. Carried
-    /// whole rather than field by field, so that what a caller states is what
-    /// the lookup asks.
-    pub(crate) filters: crate::types::SecDefFilters,
-    pub(crate) mode_9887: i32,
-    /// Whether the caller asked for the venue's chargeable one-shot snapshot.
-    pub(crate) regulatory_snapshot: bool,
+    pub(crate) fut_fop_exchange: String,
+    pub(crate) underlying_sec_type: String,
+    pub(crate) underlying_con_id: i64,
 }
 
 /// Why a contract described by symbol is not served: the venue named none
 /// for the description, or several, and what could not be done for it.
-fn unnamed(sec_type: &str, symbol: &str, exchange: &str, listings: usize, so: &str) -> String {
+pub(crate) fn unnamed(sec_type: &str, symbol: &str, exchange: &str, listings: usize, so: &str) -> String {
     if listings > 1 {
         format!(
             "{sec_type} {symbol} on {exchange} matches {listings} contracts, so it names none and \
@@ -556,20 +537,49 @@ pub(crate) fn contract_named(cmd: &crate::types::ControlCommand) -> Option<&crat
 pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::types::ContractRef> {
     use crate::types::ControlCommand as C;
     match cmd {
+        C::Subscribe { contract, .. } => Some(contract),
         C::FetchHistorical { contract, .. }
         | C::FetchHeadTimestamp { contract, .. }
         | C::FetchHistoricalTicks { contract, .. }
         | C::FetchHistoricalSchedule { contract, .. }
         | C::SubscribeRealTimeBar { contract, .. }
-        | C::SubscribeDepth { contract, .. } => Some(contract),
+        | C::SubscribeDepth { contract, .. }
+        | C::SubscribeTbt { contract, .. } => Some(contract),
         _ => None,
     }
+}
+
+/// The venue's id for a contract a request gives by that id alone: no
+/// security type or no exchange stated beside it.
+///
+/// A request states both and the venue routes on both, so both are the
+/// venue's to say: asked for by id, it answers with them. Stamped with a guess
+/// instead, a future or an option went out as a smart-routed US stock. The
+/// requests a caller's call named this way before sending; a book and live
+/// bars never were, and a book with no exchange is refused before any lookup.
+pub(crate) fn named_by_id_alone(cmd: &crate::types::ControlCommand) -> Option<i64> {
+    use crate::types::ControlCommand as C;
+    let (con_id, sec_type, exchange) = match cmd {
+        C::Subscribe { contract, .. } =>
+            (contract.con_id, &contract.sec_type, &contract.exchange),
+        C::FetchHistogramData { con_id, sec_type, exchange, .. } => {
+            (i64::from(*con_id), sec_type, exchange)
+        }
+        C::FetchHistorical { contract, .. }
+        | C::FetchHeadTimestamp { contract, .. }
+        | C::FetchHistoricalTicks { contract, .. }
+        | C::FetchHistoricalSchedule { contract, .. }
+        | C::SubscribeTbt { contract, .. } => (contract.con_id, &contract.sec_type, &contract.exchange),
+        _ => return None,
+    };
+    (con_id != 0 && (sec_type.is_empty() || exchange.is_empty())).then_some(con_id)
 }
 
 /// The filters that go with that contract.
 fn filters_named(cmd: &crate::types::ControlCommand) -> crate::types::SecDefFilters {
     use crate::types::ControlCommand as C;
     match cmd {
+        C::Subscribe { filters, .. } => filters.clone(),
         C::FetchHistorical { filters, .. }
         | C::FetchHeadTimestamp { filters, .. }
         | C::FetchHistoricalTicks { filters, .. }
@@ -595,15 +605,49 @@ fn described(filters: crate::types::SecDefFilters) -> crate::types::SecDefFilter
 }
 
 /// Fill in the id the venue has given the contract a request named.
-fn name_the_contract(cmd: &mut crate::types::ControlCommand, id: i64) {
+///
+/// A request that gave the contract by id alone takes the contract whole as
+/// the venue names it — its type, its exchange and what narrows a lookup of
+/// it — as it did when the call named it before sending.
+fn name_the_contract(cmd: &mut crate::types::ControlCommand, def: &crate::control::contracts::ContractDefinition) {
     use crate::types::ControlCommand as C;
+    let by_id = named_by_id_alone(cmd).is_some();
+    let named = crate::types::model::ContractDetails::from_definition(def).contract;
     match cmd {
+        C::Subscribe { contract, filters, calculation, .. } => {
+            if let Some(asked) = calculation {
+                asked.contract = named.clone();
+            }
+            if by_id {
+                *contract = (&named).into();
+                *filters = named.lookup_filters();
+            } else {
+                contract.con_id = def.con_id as i64;
+                if contract.sec_type.is_empty() { contract.sec_type = named.sec_type; }
+                if contract.exchange.is_empty() { contract.exchange = named.exchange; }
+            }
+        }
+        C::FetchHistorical { contract, filters, .. }
+        | C::FetchHeadTimestamp { contract, filters, .. }
+        | C::FetchHistoricalTicks { contract, filters, .. }
+        | C::FetchHistoricalSchedule { contract, filters, .. }
+        | C::SubscribeRealTimeBar { contract, filters, .. }
+        | C::SubscribeDepth { contract, filters, .. } if by_id => {
+            *contract = (&named).into();
+            *filters = named.lookup_filters();
+        }
+        C::SubscribeTbt { contract, .. } if by_id => *contract = (&named).into(),
+        C::FetchHistogramData { sec_type, exchange, .. } if by_id => {
+            sec_type.clone_from(&named.sec_type);
+            exchange.clone_from(&named.exchange);
+        }
         C::FetchHistorical { contract, .. }
         | C::FetchHeadTimestamp { contract, .. }
         | C::FetchHistoricalTicks { contract, .. }
         | C::FetchHistoricalSchedule { contract, .. }
         | C::SubscribeRealTimeBar { contract, .. }
-        | C::SubscribeDepth { contract, .. } => contract.con_id = id,
+        | C::SubscribeDepth { contract, .. }
+        | C::SubscribeTbt { contract, .. } => contract.con_id = def.con_id as i64,
         _ => {}
     }
 }
@@ -611,12 +655,15 @@ fn name_the_contract(cmd: &mut crate::types::ControlCommand, id: i64) {
 /// Which request a caller is waiting on.
 pub(crate) fn request_id(cmd: &crate::types::ControlCommand) -> Option<u32> {
     match cmd {
+        crate::types::ControlCommand::Subscribe { req_id, .. } => u32::try_from(*req_id).ok(),
         crate::types::ControlCommand::FetchHistorical { req_id, .. }
         | crate::types::ControlCommand::FetchHeadTimestamp { req_id, .. }
         | crate::types::ControlCommand::FetchHistoricalTicks { req_id, .. }
         | crate::types::ControlCommand::FetchHistoricalSchedule { req_id, .. }
         | crate::types::ControlCommand::SubscribeRealTimeBar { req_id, .. }
         | crate::types::ControlCommand::SubscribeDepth { req_id, .. } => Some(*req_id),
+        crate::types::ControlCommand::SubscribeTbt { req_id, .. } => u32::try_from(*req_id).ok(),
+        crate::types::ControlCommand::FetchHistogramData { req_id, .. } => Some(*req_id),
         _ => None,
     }
 }
@@ -680,6 +727,16 @@ pub(crate) struct CcpState {
     /// which one is given up on. Recorded only for a request that actually went
     /// out, and expired so a stale head cannot absorb a later reply.
     pub(crate) pending_matching_symbols: Vec<(u32, Instant)>,
+    /// A search whose caller was told it went unanswered, still in flight.
+    ///
+    /// The venue may answer a search without naming it, so a reply names no
+    /// request but the one on the wire. Given up on and forgotten, the late
+    /// reply was read as the next search's answer. So the search stays in
+    /// flight until the venue replies to it, refuses it, or the connection
+    /// ends, and its reply is then dropped.
+    pub(crate) matching_symbols_abandoned: Option<u32>,
+    /// Searches waiting for the one on the wire, in the order they were asked.
+    pub(crate) queued_matching_symbols: VecDeque<(u32, String)>,
     /// Whether the venue is in the middle of stating what it has finished.
     ///
     /// The answer to that question is a run of ordinary execution reports for
@@ -718,15 +775,6 @@ pub(crate) struct CcpState {
     wire_name_to_order: std::collections::HashMap<u64, u64>,
     /// The order those names were learned in, so the oldest can go first.
     wire_names_learned: VecDeque<u64>,
-    /// Whether the caller waiting on this window has already been told the
-    /// answer is complete.
-    ///
-    /// The window outlives that: it is shut by the wire, and the caller is
-    /// released when it has waited long enough. Told twice — once on the wait
-    /// and once on the sentinel — the second signal was left standing for the
-    /// next caller, who read it as the answer to a question the venue had not
-    /// begun to answer.
-    completed_orders_answered: bool,
     /// Whether the answer being assembled has taken all the orders it can.
     ///
     /// Said once rather than per report: past the bound every report the venue
@@ -761,8 +809,16 @@ pub(crate) struct CcpState {
     /// question and comes back on its end: a caller that gave up leaves its
     /// answer on its way, and the next caller must not be released by it.
     completed_orders_asked_on: u64,
-    /// And the turn of a question held behind that window.
-    completed_orders_queued_on: Option<u64>,
+    /// The turns of the questions held behind that window, or behind the
+    /// replay, in the order they were asked. Each is sent once the one before
+    /// it is over: the answer names no question, and two on the wire share one
+    /// sentinel.
+    completed_orders_queued: VecDeque<u64>,
+    /// Which question each turn is, for the answer its end delivers: whether
+    /// only the orders an API placed were asked for.
+    completed_orders_api_only: HashMap<u64, bool>,
+    /// The turn the next question is asked on.
+    completed_orders_next_turn: u64,
     /// When the question stops waiting for the replay of the working orders.
     ///
     /// Held against the connection rather than against the question: the
@@ -770,19 +826,19 @@ pub(crate) struct CcpState {
     /// had its time is not held at all. Armed against each question instead,
     /// every call paid the hold again.
     replay_hold_until: Option<Instant>,
-    /// When an open window is shut whether or not its sentinel has come.
+    /// In-flight option chain requests: (req_id, symbol, underlying conId).
+    /// The request states no id of its own, so the symbol is what ties a reply
+    /// back to it, and the conId is held because the callback names the
+    /// underlying the caller asked about.
     ///
-    /// Nothing on the wire obliges the venue to send one, and a window with no
-    /// deadline stayed open for the life of a connection that never dropped:
-    /// the caller waited out its own clock for a sentinel nobody was sending,
-    /// every later question queued behind it for ever, and every report for an
-    /// order this session does not hold went on being filed as history.
-    completed_orders_deadline: Option<Instant>,
-    /// In-flight option chain requests: (req_id, symbol, underlying conId,
-    /// deadline). The request states no id of its own, so the symbol is what
-    /// ties a reply back to it, and the conId is held because the callback
-    /// names the underlying the caller asked about.
-    pub(crate) pending_option_params: Vec<(u32, String, i64, Instant)>,
+    /// One per symbol and underlying, and none given up on at a deadline: a
+    /// reply naming no request is the next request's for that underlying once
+    /// the one it answers has been let go of. A chain is over at its reply, a
+    /// refusal of it, or the end of the connection that carried it.
+    pub(crate) pending_option_params: Vec<(u32, String, i64)>,
+    /// Chain requests waiting for the one on the wire for the same symbol and
+    /// underlying, in the order they were asked.
+    pub(crate) queued_option_params: VecDeque<QueuedChain>,
     /// Dividend queries, as `(the id it went out under, the contract it is
     /// about, when to stop waiting)`.
     ///
@@ -826,7 +882,7 @@ pub(crate) struct CcpState {
     /// connection is asked for each again, as it is for the account and the
     /// positions. A subscription the caller withdrew is taken out of here and
     /// not renewed.
-    pub(crate) pnl_subscriptions: Vec<(i64, String)>,
+    pub(crate) pnl_subscriptions: Vec<(i64, bool, String)>,
     /// Counter for internal schedule subscribe req IDs.
     pub(crate) next_schedule_sub_id: u32,
     /// Fan-out state for by-symbol secdef requests. Each entry tracks the
@@ -865,28 +921,25 @@ pub(crate) struct CcpState {
     /// subscription or closes it; a session that only ever opens them holds one
     /// per loop for the life of the connection.
     pub(crate) account_request_key: Option<String>,
+    account_requests: Vec<(String, String)>,
     /// User-message subtypes the venue has sent that nothing here reads, so
     /// each is named once rather than on every arrival.
     unread_subtypes: std::collections::HashSet<String>,
     /// Message types the venue has sent that nothing here reads.
     unread_types: std::collections::HashSet<String>,
-    /// Market data subscriptions waiting on the lookup that will name their
-    /// contract, keyed by that lookup's request id.
-    pub(crate) pending_md_subscribe: Vec<(u32, PendingSubscribe, Instant)>,
-    /// Those whose contract the venue has now named.
-    pub(crate) resolved_md_subscribe: Vec<(i64, PendingSubscribe)>,
     /// Requests that named a contract the venue has not given an id to yet,
     /// keyed by the lookup asking for that id.
     ///
-    /// A subscription is sent by symbol and the venue resolves it. Everything
-    /// on the historical farm is asked for by id, so a caller passing the
-    /// contract it wrote down — which is what a program written against the
-    /// reference client does — sent a request under id zero, and the venue
-    /// answered a complete series with nothing in it.
+    /// Held whole until naming ends, before registration takes a slot.
     pub(crate) pending_named: Vec<(u32, crate::types::ControlCommand, Instant)>,
     /// Those the venue has now named, ready to be handled as though the id had
     /// been there all along.
     pub(crate) resolved_named: Vec<crate::types::ControlCommand>,
+    /// Lookups asked to name the contract an order described, and when each
+    /// was asked. The order waits in the engine for the answer.
+    pub(crate) order_naming: Vec<(u32, Instant)>,
+    /// What those lookups came back with, for the orders waiting on them.
+    pub(crate) orders_named: Vec<(u32, OrderNamed)>,
     /// conIds a secdef has been fetched for without a caller asking, and the
     /// request that fetched each. The request is kept so a fetch that is never
     /// answered can be forgotten; held indefinitely, one lost request leaves
@@ -1003,19 +1056,22 @@ impl CcpState {
             hydrated_any: false,
             pending_secdef: Vec::new(),
             pending_matching_symbols: Vec::new(),
+            matching_symbols_abandoned: None,
+            queued_matching_symbols: VecDeque::new(),
             completed_orders_open: false,
             finished_orders: Vec::new(),
             wire_name_to_order: std::collections::HashMap::new(),
             wire_names_learned: VecDeque::new(),
-            completed_orders_answered: false,
             the_answer_is_full: false,
             orders_in_this_answer: std::collections::HashSet::new(),
             completed_orders_wanted: None,
             replay_hold_until: None,
             completed_orders_asked_on: 0,
-            completed_orders_queued_on: None,
-            completed_orders_deadline: None,
+            completed_orders_queued: VecDeque::new(),
+            completed_orders_api_only: HashMap::new(),
+            completed_orders_next_turn: 0,
             pending_option_params: Vec::new(),
+            queued_option_params: VecDeque::new(),
             pending_dividends: Vec::new(),
             dividends_answered: std::collections::HashSet::new(),
             dividends_given_up_on: std::collections::VecDeque::new(),
@@ -1031,12 +1087,13 @@ impl CcpState {
             next_advisor_request: 1,
             pending_advisor: std::collections::HashMap::new(),
             account_request_key: None,
+            account_requests: Vec::new(),
             unread_subtypes: std::collections::HashSet::new(),
             unread_types: std::collections::HashSet::new(),
-            pending_md_subscribe: Vec::new(),
-            resolved_md_subscribe: Vec::new(),
             pending_named: Vec::new(),
             resolved_named: Vec::new(),
+            order_naming: Vec::new(),
+            orders_named: Vec::new(),
             auto_fetched_conids: HashMap::new(),
             pending_scanner_enrichment: Vec::new(),
         }
@@ -1198,7 +1255,7 @@ impl CcpState {
                         .then_some(0)
                     });
                 if let Some(at) = refused_chain {
-                    let (req_id, symbol, _, _) = self.pending_option_params.remove(at);
+                    let (req_id, symbol, _) = self.pending_option_params.remove(at);
                     log::warn!("Option chain request req_id={req_id} symbol={symbol} rejected: {reason}");
                     shared.reference.push_historical_error(
                         req_id, crate::error_codes::Refusal::NO_DEFINITION,
@@ -1223,6 +1280,14 @@ impl CcpState {
                         req_id, crate::error_codes::Refusal::NO_DEFINITION,
                         format!("matching symbols request rejected: {reason}"),
                     );
+                    return;
+                }
+                // The refusal of a search its caller was already told went
+                // unanswered: nothing more is owed, and the search it held
+                // back goes now.
+                if stated.is_some() && stated == self.matching_symbols_abandoned {
+                    log::info!("Matching symbols request req_id={stated:?} rejected after it was given up on: {reason}");
+                    self.matching_symbols_abandoned = None;
                     return;
                 }
                 // The venue names the request it is refusing, on tag 320 —
@@ -1328,7 +1393,18 @@ impl CcpState {
                                     // indefinitely and the stale queue head
                                     // misattributes every later reply.
                                     shared.reference.push_matching_symbols(req_id, matches);
-                                } else {
+                                                } else if self.matching_symbols_abandoned.is_some()
+                                    && (echoed.is_none() || echoed == self.matching_symbols_abandoned)
+                                {
+                                    // The reply to a search its caller was told
+                                    // went unanswered. Nobody is owed it; the
+                                    // search held back behind it goes now.
+                                    log::info!(
+                                        "matching-symbols reply for req_id={:?}, which was given up on: dropped",
+                                        self.matching_symbols_abandoned,
+                                    );
+                                    self.matching_symbols_abandoned = None;
+                                                } else {
                                     log::warn!(
                                         "matching-symbols reply not attributable: echoed={:?} pending={:?}",
                                         echoed, self.pending_matching_symbols,
@@ -1361,7 +1437,7 @@ impl CcpState {
                         "110" => self.handle_order_revision(&parsed, context, shared),
                         "210" => handle_account_config(&parsed, shared),
                         "117" => self.handle_advisor_config(&parsed, shared),
-                        "139" => self.handle_option_chain(msg, shared),
+                        "139" => self.handle_option_chain(msg, ccp_conn, hb, shared),
                         "107" => self.handle_schedule_reply(msg, ccp_conn, shared, event_tx, hb),
                         "18" => {
                             // The venue restating its own clock, unasked. It is
@@ -1443,20 +1519,22 @@ impl CcpState {
             "EB" => {
                 let ends = parsed.get(&6529).map(String::as_str).unwrap_or("");
                 if ends.starts_with("AR") {
+                    let Some(portfolio) = shared.portfolio_for_request(ends) else { return };
                     log::info!("Account request {ends} is complete");
                     // Only where this end is the outstanding request's. Any
                     // other request's end squares nothing, and declaring the
                     // download over on it lets a caller through to the answer
                     // the squaring exists to prevent.
-                    if let Some(unstated) = shared.portfolio.set_account_download_complete(ends) {
+                    if let Some(unstated) = portfolio.set_account_download_complete(ends) {
                         for con_id in unstated {
-                            let avg_cost = shared.portfolio.position_info(con_id)
+                            let avg_cost = portfolio.position_info(con_id)
                                 .map(|i| i.avg_cost).unwrap_or_default();
+                            if !std::sync::Arc::ptr_eq(&portfolio, &shared.portfolio) { continue; }
                             let Some(instrument) = context.market.instrument_by_con_id(con_id)
                             else { continue };
                             let standing = context.position(instrument);
                             if standing != 0.0 { context.update_position(instrument, -standing); }
-                            shared.portfolio.set_position(instrument, 0.0);
+                            portfolio.set_position(instrument, 0.0);
                             emit(event_tx, Event::PositionUpdate {
                                 instrument, con_id, position: 0.0, avg_cost,
                             });
@@ -1465,7 +1543,7 @@ impl CcpState {
                         // through to an account that has been squared with
                         // what the venue just said rather than to what it held
                         // before.
-                        shared.portfolio.account_download_is_settled();
+                        portfolio.account_download_is_settled();
                     }
                 }
             }
@@ -1529,9 +1607,15 @@ impl CcpState {
                     }
                     let all = crate::control::contracts::parse_secdef_responses(msg, shared.island_for_nasdaq());
                     let listings = all.len();
+                    // Only while the number is still waiting, as a single
+                    // listing's row goes out: the caller's own number is the
+                    // key, and a reply arriving after its deadline ended the
+                    // request is an answer nobody is owed — delivered, it
+                    // reached whatever request reused the number since.
                     if listings > 1
                         && let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
                         && rid < 0xF000_0000
+                        && self.pending_secdef.iter().any(|(pid, ..)| *pid == rid)
                     {
                         // The listing the flat parse below produces is that
                         // path's to deliver: it is the one paired with the
@@ -1648,28 +1732,7 @@ impl CcpState {
                         );
                         identify_position(shared, &def);
                         self.try_release_scanner_enrichments(def.con_id as i64, shared);
-                        // A subscription held back for want of an id. Answered
-                        // here rather than alongside the caller-facing rows: a
-                        // by-symbol lookup fans out and its rows do not all
-                        // take the same path, and this one only needs the first
-                        // definition that names the contract.
-                        if let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
-                            && let Some(at) = self.pending_md_subscribe.iter().position(|(pid, ..)| *pid == rid)
-                        {
-                            let (_, pending, _) = self.pending_md_subscribe.remove(at);
-                            // A symbol stated without a currency is answered
-                            // with every listing that carries it. Sent for the
-                            // one this reply happened to state last, the caller
-                            // was subscribed to a contract it did not name and
-                            // told nothing; a lookup of the same description is
-                            // refused as naming none.
-                            if listings > 1 {
-                                Self::abandon_subscribe(pending, listings, context, shared);
-                            } else {
-                                self.resolved_md_subscribe.push((def.con_id as i64, pending));
-                            }
-                        }
-                        // And a request held for the same reason.
+                        // A request held until this lookup names its contract.
                         if let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
                             && let Some(at) = self.pending_named.iter().position(|(pid, ..)| *pid == rid)
                         {
@@ -1677,9 +1740,22 @@ impl CcpState {
                             if listings > 1 {
                                 Self::abandon_named(&cmd, listings, shared);
                             } else {
-                                name_the_contract(&mut cmd, def.con_id as i64);
+                                name_the_contract(&mut cmd, &def);
                                 self.resolved_named.push(cmd);
                             }
+                        }
+                        // And an order, which is named whole: what the venue
+                        // names is the contract the order is placed on.
+                        if let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
+                            && let Some(at) = self.order_naming.iter().position(|(pid, _)| *pid == rid)
+                        {
+                            self.order_naming.remove(at);
+                            let named = if listings > 1 {
+                                OrderNamed::Unnamed(listings)
+                            } else {
+                                OrderNamed::Contract(Box::new(def.clone()))
+                            };
+                            self.orders_named.push((rid, named));
                         }
                     }
                     // Match the response to its originating pending_secdef entry
@@ -1757,7 +1833,7 @@ impl CcpState {
                                     ccp_conn, shared, event_tx, hb,
                                 );
                             } else {
-                                self.abandon_holders_of(req_id, context, shared);
+                                self.abandon_holders_of(req_id, shared);
                             }
                         } else if join_key.is_empty() {
                             // No join key — emit immediately without schedule data.
@@ -2003,57 +2079,23 @@ impl CcpState {
     /// internal id, and an internal id is dropped silently. Sitting past the
     /// caller's wait, as it did, meant the caller was told nothing arrived
     /// while the reason was still being held, and heard it never.
-    const NAMING_TIMEOUT: Duration =
+    pub(crate) const NAMING_TIMEOUT: Duration =
         Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 3);
-
-    /// A subscription whose contract the venue never named. Reported rather
-    /// than left waiting: silence is what this whole path exists to remove.
-    pub(crate) fn sweep_pending_subscribes(
-        &mut self, context: &mut Context, shared: &SharedState,
-    ) {
-        if self.pending_md_subscribe.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        let mut gave_up = Vec::new();
-        self.pending_md_subscribe.retain(|(_, pending, asked_at)| {
-            if now.duration_since(*asked_at) < Self::NAMING_TIMEOUT {
-                return true;
-            }
-            gave_up.push(pending.clone());
-            false
-        });
-        for p in gave_up {
-            Self::abandon_subscribe(p, 0, context, shared);
-        }
-    }
-
-    /// A subscription that cannot be made for the contract described, with
-    /// how many listings the venue named for it: the caller told why, and the
-    /// slot the registration took offered back. Nothing else will ask for it:
-    /// a caller told the venue knows no such contract has no reason to
-    /// withdraw a subscription that never opened, and until now a chain
-    /// naming a few dead strikes spent one slot on each until the table ran
-    /// out.
-    fn abandon_subscribe(p: PendingSubscribe, listings: usize, context: &mut Context, shared: &SharedState) {
-        let reason = unnamed(
-            &p.sec_type, &p.symbol, &p.exchange, listings,
-            "no market data subscription could be made for it",
-        );
-        log::warn!("Subscription abandoned: {reason}");
-        shared.market.push_subscription_failure(p.instrument, reason);
-        context.slots_to_reconsider.push(p.instrument);
-    }
 
     /// A held request that cannot be sent for the contract described, told to
     /// its caller under its own number. Nothing the venue holds matches the
     /// contract described, which is what the code says word for word.
     fn abandon_named(cmd: &crate::types::ControlCommand, listings: usize, shared: &SharedState) {
-        let Some(named) = contract_named(cmd) else { return };
-        let reason = unnamed(
-            &named.sec_type, &named.symbol, &named.exchange, listings,
-            "the request could not be sent",
-        );
+        // Given by id alone, the id is all it states to name it by.
+        let reason = if let Some(con_id) = named_by_id_alone(cmd) {
+            format!("no security definition has been found for contract {con_id}, so the request could not be sent")
+        } else {
+            let Some(named) = contract_named(cmd) else { return };
+            unnamed(
+                &named.sec_type, &named.symbol, &named.exchange, listings,
+                "the request could not be sent",
+            )
+        };
         log::warn!("Request abandoned: {reason}");
         if let Some(req_id) = request_id(cmd) {
             super::push_hmds_refusal(
@@ -2066,14 +2108,14 @@ impl CcpState {
     /// End what waited on a naming lookup of the engine's own that the venue
     /// answered with no definition. Dropped with the lookup alone, the
     /// subscription or request learnt of it only when its own wait ran out.
-    fn abandon_holders_of(&mut self, req_id: u32, context: &mut Context, shared: &SharedState) {
-        if let Some(at) = self.pending_md_subscribe.iter().position(|(pid, ..)| *pid == req_id) {
-            let (_, p, _) = self.pending_md_subscribe.remove(at);
-            Self::abandon_subscribe(p, 0, context, shared);
-        }
+    fn abandon_holders_of(&mut self, req_id: u32, shared: &SharedState) {
         if let Some(at) = self.pending_named.iter().position(|(pid, ..)| *pid == req_id) {
             let (_, cmd, _) = self.pending_named.remove(at);
             Self::abandon_named(&cmd, 0, shared);
+        }
+        if let Some(at) = self.order_naming.iter().position(|(pid, _)| *pid == req_id) {
+            self.order_naming.remove(at);
+            self.orders_named.push((req_id, OrderNamed::Unnamed(0)));
         }
     }
 
@@ -2272,7 +2314,7 @@ impl CcpState {
         if !trouble.is_empty() {
             log::warn!("The venue refused advisor request {key}: {trouble}");
             shared.reference.push_advisor_refused(
-                asked.req_id, ADVISOR_SAVE_REFUSED, trouble.to_string(),
+                asked.origin(), ADVISOR_SAVE_REFUSED, trouble.to_string(),
             );
             return;
         }
@@ -2317,7 +2359,7 @@ impl CcpState {
         let Some(conn) = ccp_conn.as_mut() else {
             log::warn!("Advisor configuration request req_id={req_id} not sent: no CCP transport");
             shared.reference.push_advisor_refused(
-                req_id, ADVISOR_SAVE_REFUSED,
+                PendingAdvisor::origin_of(req_id, document.is_some()), ADVISOR_SAVE_REFUSED,
                 "the advisor configuration request could not be sent: no connection to the \
                  venue".to_string(),
             );
@@ -2395,7 +2437,9 @@ impl CcpState {
         // connection has already seen and is not answered at all. The opening
         // sequence has used AR.1.
         let key = self.next_account_request_key();
-        shared.portfolio.holdings_restated_under(&key);
+        self.account_requests.push((key.clone(), account.to_string()));
+        shared.name_account_request(&key, account);
+        shared.portfolio_for(account).holdings_restated_under(&key);
         let _ = conn.send_fix(&[
             (fix::TAG_MSG_TYPE, "U"),
             (fix::TAG_SENDING_TIME, &ts),
@@ -2439,38 +2483,44 @@ impl CcpState {
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let Some(key) = self.account_request_key.take() else { return };
+        let last = self.account_request_key.take();
+        let mut requests = std::mem::take(&mut self.account_requests);
+        if let Some(key) = last && !requests.iter().any(|(k, _)| k == &key) {
+            requests.push((key, account.to_string()));
+        }
         let Some(conn) = ccp_conn.as_mut() else { return };
         let ts = chrono_free_timestamp();
-        let _ = conn.send_fix(&[
-            (fix::TAG_MSG_TYPE, "U"),
-            (fix::TAG_SENDING_TIME, &ts),
-            (6040, "6"),
-            (6036, "0"),
-            (6095, account),
-            (6529, &key),
-        ]);
+        for (key, account) in requests {
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "6"), (6036, "0"), (6095, &account), (6529, &key),
+            ]);
+        }
         hb.last_ccp_sent = Instant::now();
     }
 
     pub(crate) fn send_pnl_subscribe(
         &mut self,
         req_id: i64,
+        single: bool,
         account: &str,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
+        shared: &SharedState,
     ) {
         // Recorded whether or not the transport is up: a rebuilt connection
         // asks for every standing subscription again.
-        self.pnl_subscriptions.retain(|(id, _)| *id != req_id);
-        self.pnl_subscriptions.push((req_id, account.to_string()));
+        self.pnl_subscriptions.retain(|(id, one, _)| (*id, *one) != (req_id, single));
+        self.pnl_subscriptions.push((req_id, single, account.to_string()));
         if let Some(conn) = ccp_conn.as_mut() {
             // The key names the request; the account rides tag 1 beside it, as
             // the protocol defines it and as the opening sequence in
             // `logon::send_post_burst_grace` already wrote it. Written into the
             // key instead, the account rides as literal bytes inside a field
             // that names a request, and tag 1 is not sent at all.
-            let pnl_key = format!("PLR.{req_id}");
+            let pnl_key = Self::next_pnl_key();
+            shared.name_account_request(&pnl_key, account);
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, "U"),
@@ -2484,12 +2534,17 @@ impl CcpState {
         }
     }
 
+    fn next_pnl_key() -> String {
+        static NEXT_PNL_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(2);
+        format!("PLR.{}", NEXT_PNL_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Forget a profit-and-loss subscription, so a reconnect does not renew it.
     ///
     /// Nothing withdraws one at the venue on this wire; what stops is the
     /// renewal, and the reporting once the session ends.
-    pub(crate) fn withdraw_pnl_subscription(&mut self, req_id: i64) {
-        self.pnl_subscriptions.retain(|(id, _)| *id != req_id);
+    pub(crate) fn withdraw_pnl_subscription(&mut self, req_id: i64, single: bool) {
+        self.pnl_subscriptions.retain(|(id, one, _)| (*id, *one) != (req_id, single));
     }
 
     /// Say goodbye before going.
@@ -2502,10 +2557,13 @@ impl CcpState {
         &mut self,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
-    ) {
-        let Some(conn) = ccp_conn.as_mut() else { return };
+    ) -> bool {
+        let Some(conn) = ccp_conn.as_mut() else { return false };
         if say_goodbye(conn).is_ok() {
             hb.last_ccp_sent = Instant::now();
+            true
+        } else {
+            false
         }
     }
 
@@ -2701,32 +2759,6 @@ impl CcpState {
         emit(event_tx, Event::ContractDetailsEnd(req_id));
     }
 
-    /// Ask the venue to name a contract so a subscription can be sent for it.
-    pub(crate) fn resolve_for_subscribe(
-        &mut self,
-        pending: PendingSubscribe,
-        ccp_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-        shared: &SharedState,
-    ) {
-        let req_id = self.next_internal_secdef_id;
-        self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
-        let filters = described(pending.filters.clone());
-        let (symbol, sec_type, exchange, currency) = (
-            pending.symbol.clone(), pending.sec_type.clone(),
-            pending.exchange.clone(), pending.currency.clone(),
-        );
-        let con_id = pending.con_id;
-        if con_id != 0 {
-            self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
-        } else {
-            self.send_secdef_request_by_symbol(
-                req_id, &symbol, &sec_type, &exchange, &currency, &filters, false, ccp_conn, hb, shared, &None,
-            );
-        }
-        self.pending_md_subscribe.push((req_id, pending, Instant::now()));
-    }
-
     /// Ask the venue to name the contract a request wants, and hold the
     /// request until it does.
     ///
@@ -2739,6 +2771,14 @@ impl CcpState {
         hb: &mut HeartbeatState,
         shared: &SharedState,
     ) -> Option<crate::types::ControlCommand> {
+        // Given by id alone, it is asked for by that id.
+        if let Some(con_id) = named_by_id_alone(&cmd) {
+            let req_id = self.next_internal_secdef_id;
+            self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
+            self.send_secdef_request(req_id, con_id, ccp_conn, hb, shared, &None);
+            self.pending_named.push((req_id, cmd, Instant::now()));
+            return None;
+        }
         // Cloned rather than borrowed: the command is moved onto the pending
         // list below, and what it named has to outlive it.
         let named = match contract_named(&cmd) {
@@ -2764,6 +2804,33 @@ impl CcpState {
         None
     }
 
+    /// Ask the venue to name the contract an order describes. Answered on
+    /// [`orders_named`](Self::orders_named) under the number this returns;
+    /// `None` where there is no connection to ask on.
+    pub(crate) fn name_for_an_order(
+        &mut self,
+        contract: &crate::types::model::Contract,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) -> Option<u32> {
+        ccp_conn.as_ref()?;
+        let req_id = self.next_internal_secdef_id;
+        self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
+        if contract.con_id != 0 {
+            self.send_secdef_request(req_id, contract.con_id, ccp_conn, hb, shared, &None);
+        } else {
+            // The caller's description narrows the lookup, including an
+            // identifier where one was stated.
+            self.send_secdef_request_by_symbol(
+                req_id, &contract.symbol, &contract.sec_type, &contract.exchange, &contract.currency,
+                &contract.lookup_filters(), contract.include_expired, ccp_conn, hb, shared, &None,
+            );
+        }
+        self.order_naming.push((req_id, Instant::now()));
+        Some(req_id)
+    }
+
     /// Withdraw a request that is still waiting to be named.
     ///
     /// A request naming its contract by symbol is parked whole while the
@@ -2777,20 +2844,30 @@ impl CcpState {
     /// The second list covers a naming answer re-injected in a pass before the
     /// cancel was read; once the request has been sent it is in the in-flight
     /// record and the ordinary withdrawal reaches it.
-    pub(crate) fn withdraw_named(&mut self, req_id: u32) -> bool {
+    pub(crate) fn withdraw_named(&mut self, req_id: u32, kind: impl Fn(&crate::types::ControlCommand) -> bool) -> bool {
         let before = self.pending_named.len() + self.resolved_named.len();
-        self.pending_named.retain(|(_, cmd, _)| request_id(cmd) != Some(req_id));
-        self.resolved_named.retain(|cmd| request_id(cmd) != Some(req_id));
+        self.pending_named.retain(|(_, cmd, _)| !(request_id(cmd) == Some(req_id) && kind(cmd)));
+        self.resolved_named.retain(|cmd| !(request_id(cmd) == Some(req_id) && kind(cmd)));
         self.pending_named.len() + self.resolved_named.len() != before
     }
 
     /// A held request whose contract the venue never named. Told to the caller
     /// rather than left waiting.
     pub(crate) fn sweep_pending_named(&mut self, shared: &SharedState) {
+        // An order's, which the engine refuses once the lookup is given up on.
+        let now = Instant::now();
+        let mut given_up = Vec::new();
+        self.order_naming.retain(|(rid, asked_at)| {
+            let waiting = now.duration_since(*asked_at) < Self::NAMING_TIMEOUT;
+            if !waiting {
+                given_up.push(*rid);
+            }
+            waiting
+        });
+        self.orders_named.extend(given_up.into_iter().map(|rid| (rid, OrderNamed::Unnamed(0))));
         if self.pending_named.is_empty() {
             return;
         }
-        let now = Instant::now();
         let mut gave_up = Vec::new();
         self.pending_named.retain(|(_, cmd, asked_at)| {
             if now.duration_since(*asked_at) < Self::NAMING_TIMEOUT {
@@ -3017,6 +3094,36 @@ impl CcpState {
         }
     }
 
+    /// Ask the venue which contracts match a pattern, one search at a time.
+    ///
+    /// The venue may answer a search without naming it, and names none but
+    /// the one it is answering, so two on the wire at once cannot be told
+    /// apart. A search asked while another is on the wire waits for that one's
+    /// reply, its refusal, or the end of the connection.
+    pub(crate) fn ask_matching_symbols(&mut self, req_id: u32, pattern: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        if self.matching_symbols_in_flight() || !self.queued_matching_symbols.is_empty() {
+            self.queued_matching_symbols.push_back((req_id, pattern.to_string()));
+            return;
+        }
+        self.send_matching_symbols_request(req_id, pattern, ccp_conn, hb, shared);
+    }
+
+    /// Whether a search is on the wire, answered or not to its caller.
+    fn matching_symbols_in_flight(&self) -> bool {
+        !self.pending_matching_symbols.is_empty() || self.matching_symbols_abandoned.is_some()
+    }
+
+    /// Send the searches held back, now that the wire is free: each until one
+    /// is on it. One that cannot be sent is refused where it is sent, and the
+    /// next goes.
+    pub(crate) fn send_next_matching_symbols(&mut self, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState, left: &mut usize) {
+        while *left > 0 && !self.matching_symbols_in_flight() {
+            let Some((req_id, pattern)) = self.queued_matching_symbols.pop_front() else { return };
+            *left -= 1;
+            self.send_matching_symbols_request(req_id, &pattern, ccp_conn, hb, shared);
+        }
+    }
+
     pub(crate) fn send_matching_symbols_request(&mut self, req_id: u32, pattern: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // Recorded only where the request went out, so a request issued while
         // the transport is down is not queued as pending with nothing on the
@@ -3063,6 +3170,7 @@ impl CcpState {
             return;
         }
         let now = Instant::now();
+        let mut abandoned = None;
         self.pending_matching_symbols.retain(|(req_id, deadline)| {
             if now >= *deadline {
                 log::warn!("Matching symbols request req_id={req_id} unanswered after {MATCHING_SYMBOLS_TIMEOUT:?} — giving up");
@@ -3075,11 +3183,18 @@ impl CcpState {
                     *req_id, crate::error_codes::Refusal::NO_ANSWER,
                     "matching symbols request timed out — no reply from the gateway".to_string(),
                 );
+                abandoned = Some(*req_id);
                 false
             } else {
                 true
             }
         });
+        // Still on the wire. Its reply may name no request, and the next
+        // search is not sent until that reply, a refusal of it, or the end of
+        // the connection says the wire is free.
+        if abandoned.is_some() {
+            self.matching_symbols_abandoned = abandoned;
+        }
     }
 
     /// Give up on an advisor request the venue never answered.
@@ -3100,7 +3215,7 @@ impl CcpState {
                      — giving up",
                 );
                 shared.reference.push_advisor_refused(
-                    asked.req_id, crate::error_codes::Refusal::NO_ANSWER,
+                    asked.origin(), crate::error_codes::Refusal::NO_ANSWER,
                     "the advisor configuration request timed out — no reply from the venue"
                         .to_string(),
                 );
@@ -3243,11 +3358,75 @@ impl CcpState {
         shared.reference.set_dividend_schedule(con_id, schedule);
     }
 
+    /// Ask for an underlying's option chain, one request per symbol and
+    /// underlying on the wire at a time.
+    ///
+    /// A chain reply names its underlying and no request, so a second request
+    /// for the same underlying sent while the first is out is answered by
+    /// whichever reply comes first. It waits for the first's reply, a
+    /// refusal of it, or the end of the connection.
+    pub(crate) fn ask_option_params(
+        &mut self,
+        asked: QueuedChain,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
+        if self.chain_on_the_wire(&asked.symbol, asked.underlying_con_id)
+            || self.queued_option_params.iter().any(|q| {
+                q.symbol.eq_ignore_ascii_case(&asked.symbol) && q.underlying_con_id == asked.underlying_con_id
+            })
+        {
+            self.queued_option_params.push_back(asked);
+            return;
+        }
+        self.send_option_params_request(
+            asked.req_id, &asked.symbol, &asked.fut_fop_exchange, &asked.underlying_sec_type,
+            asked.underlying_con_id, ccp_conn, hb, shared,
+        );
+    }
+
+    /// Whether a chain for this symbol and underlying is on the wire.
+    fn chain_on_the_wire(&self, symbol: &str, underlying_con_id: i64) -> bool {
+        self.pending_option_params.iter().any(|(_, pending, con_id)| {
+            pending.eq_ignore_ascii_case(symbol) && *con_id == underlying_con_id
+        })
+    }
+
+    /// Send each chain request held back whose underlying the wire is now
+    /// free for, in the order they were asked.
+    pub(crate) fn send_next_option_params(
+        &mut self,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+        left: &mut usize,
+    ) {
+        let mut at = 0;
+        while *left > 0 && at < self.queued_option_params.len() {
+            let q = &self.queued_option_params[at];
+            let behind_an_earlier = self.queued_option_params.iter().take(at).any(|e| {
+                e.symbol.eq_ignore_ascii_case(&q.symbol) && e.underlying_con_id == q.underlying_con_id
+            });
+            if behind_an_earlier || self.chain_on_the_wire(&q.symbol, q.underlying_con_id) {
+                at += 1;
+                continue;
+            }
+            let Some(q) = self.queued_option_params.remove(at) else { return };
+            *left -= 1;
+            self.send_option_params_request(
+                q.req_id, &q.symbol, &q.fut_fop_exchange, &q.underlying_sec_type,
+                q.underlying_con_id, ccp_conn, hb, shared,
+            );
+        }
+    }
+
     /// Ask for the option chain of an underlying.
     ///
     /// A request that cannot go out is refused rather than left unanswered,
     /// because the caller is waiting on the end of a request nothing on the
     /// wire will ever end.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn send_option_params_request(
         &mut self,
         req_id: u32,
@@ -3314,12 +3493,18 @@ impl CcpState {
         }
         hb.last_ccp_sent = Instant::now();
         log::info!("Sent option chain request: req_id={req_id} symbol={symbol} con_id={underlying_con_id}");
-        self.pending_option_params.push((req_id, symbol, underlying_con_id, Instant::now() + OPTION_CHAIN_TIMEOUT));
+        self.pending_option_params.push((req_id, symbol, underlying_con_id));
     }
 
     /// A chain reply names its underlying by symbol and echoes no request id,
     /// so it answers the oldest request outstanding for that symbol.
-    fn handle_option_chain(&mut self, msg: &[u8], shared: &SharedState) {
+    fn handle_option_chain(
+        &mut self,
+        msg: &[u8],
+        _ccp_conn: &mut Option<Connection>,
+        _hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
         let Some(scopes) = crate::control::contracts::parse_option_chain_response(msg) else { return };
 
         // One reply can carry the venues of more than one underlying. Handing
@@ -3350,7 +3535,7 @@ impl CcpState {
             // ticker is all there is.
             let stated = scopes.iter().map(|s| s.underlying_con_id).find(|id| *id != 0);
             let Some(pos) = self.pending_option_params.iter()
-                .position(|(_, pending, con_id, _)| {
+                .position(|(_, pending, con_id)| {
                     pending.eq_ignore_ascii_case(&symbol)
                         && stated.is_none_or(|named| *con_id == 0 || named == *con_id)
                 })
@@ -3358,7 +3543,7 @@ impl CcpState {
                 log::warn!("Option chain reply for '{symbol}' matches no request");
                 continue;
             };
-            let (req_id, _, asked_under, _) = self.pending_option_params.remove(pos);
+            let (req_id, _, asked_under) = self.pending_option_params.remove(pos);
             // The underlying as the venue names it, where it names one; a
             // caller who asked without the id is answered with it.
             let con_id = stated.unwrap_or(asked_under);
@@ -3367,33 +3552,35 @@ impl CcpState {
         }
     }
 
-    /// Give up on chain requests the gateway never answered. The request is
-    /// ended so the caller stops waiting, and the entry goes with it so it
-    /// cannot absorb a later reply for the same underlying.
-    pub(crate) fn sweep_pending_option_params(&mut self, shared: &SharedState) {
-        if self.pending_option_params.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        let mut expired: Vec<u32> = Vec::new();
-        self.pending_option_params.retain(|(req_id, symbol, _con_id, deadline)| {
-            if now >= *deadline {
-                log::warn!("Option chain request req_id={req_id} symbol={symbol} unanswered after {OPTION_CHAIN_TIMEOUT:?} — giving up");
-                expired.push(*req_id);
-                false
-            } else {
-                true
-            }
-        });
-        // Refused rather than answered empty: an empty answer is a chain the
-        // venue enumerated and found nothing in, and the venue never answered
-        // these at all.
-        for req_id in expired {
-            shared.reference.push_historical_error(
-                req_id, crate::error_codes::Refusal::NO_ANSWER,
-                "option chain request timed out — no reply from the gateway".to_string(),
-            );
-        }
+    /// A caller's question of what the venue has finished: numbered with a
+    /// turn of its own, and sent in its turn.
+    pub(crate) fn ask_completed_orders(
+        &mut self,
+        api_only: bool,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
+        self.completed_orders_next_turn += 1;
+        let turn = self.completed_orders_next_turn;
+        self.completed_orders_api_only.insert(turn, api_only);
+        self.send_completed_orders_request(turn, ccp_conn, hb, shared);
+    }
+
+    /// The question asked on this turn is over: the venue said it had
+    /// finished, or the connection it was asked on went. Its answer is
+    /// pushed here, behind every finished order the window delivered.
+    fn end_completed_orders(&mut self, turn: u64, shared: &SharedState) {
+        shared.orders.note_completed_orders_end_on(turn);
+        let api_only = self.completed_orders_api_only.remove(&turn).unwrap_or(false);
+        shared.push_call_record(crate::bridge::Record::Answer(
+            crate::bridge::Answer::CompletedOrders { api_only },
+        ));
+    }
+
+    /// How many questions of what the venue has finished are held, unsent.
+    pub(crate) fn completed_orders_questions_held(&self) -> usize {
+        self.completed_orders_queued.len()
     }
 
     /// Ask the venue for the orders it has finished.
@@ -3441,26 +3628,31 @@ impl CcpState {
             .get_or_insert_with(|| Instant::now() + COMPLETED_ORDERS_HOLD);
         let the_replay_could_still_be_running =
             !shared.orders.replay_done() && Instant::now() < hold_until;
-        if the_replay_could_still_be_running || self.completed_orders_open {
-            self.completed_orders_wanted
-                .get_or_insert_with(|| Instant::now() + COMPLETED_ORDERS_TIMEOUT);
+        // And not ahead of a question asked before it that is still held.
+        let behind_an_earlier = self.completed_orders_queued.front().is_some_and(|first| *first != turn);
+        if the_replay_could_still_be_running || self.completed_orders_open || behind_an_earlier {
+            self.completed_orders_wanted.get_or_insert(hold_until);
             // Held under its own turn, not the open window's: the window that
-            // is open belongs to the caller before this one, and its end is
-            // that caller's answer. Written over it, this caller would have
-            // been released by the answer to the question it is queued behind.
-            self.completed_orders_queued_on = Some(turn);
+            // is open belongs to the question before this one, and its end is
+            // that question's answer.
+            if !self.completed_orders_queued.contains(&turn) {
+                self.completed_orders_queued.push_back(turn);
+            }
             log::debug!(
-                "holding the question of what the venue has finished until the one before it                  is answered",
+                "holding the question of what the venue has finished until the one before it \
+                 is answered",
             );
             return;
         }
-        // Past the hold, so whatever was waiting is no longer waiting.
-        self.completed_orders_wanted = None;
-        self.completed_orders_queued_on = None;
+        // Past the hold, so this question is no longer waiting.
+        self.completed_orders_queued.retain(|held| *held != turn);
+        if self.completed_orders_queued.is_empty() {
+            self.completed_orders_wanted = None;
+        }
         // Whose question this is, carried through to the end that answers it.
         self.completed_orders_asked_on = turn;
         let Some(conn) = ccp_conn.as_mut() else {
-            shared.orders.note_completed_orders_end_on(self.completed_orders_asked_on);
+            self.end_completed_orders(turn, shared);
             return;
         };
         let ts = chrono_free_timestamp();
@@ -3489,13 +3681,15 @@ impl CcpState {
                 // and are given up, oldest first, if it needs the room.
                 self.orders_in_this_answer.clear();
                 self.the_answer_is_full = false;
+                // Open until the wire shuts it: the sentinel, or the end of
+                // the connection. A clock here would hand the rest of the
+                // answer to the next question, and to the live path.
                 self.completed_orders_open = true;
-                self.completed_orders_deadline = Some(Instant::now() + COMPLETED_ORDERS_TIMEOUT);
                 log::info!("Asked the venue for what it has finished, {from} to {to}");
             }
             Err(e) => {
                 log::warn!("the request for finished orders could not be sent: {e}");
-                shared.orders.note_completed_orders_end_on(self.completed_orders_asked_on);
+                self.end_completed_orders(turn, shared);
             }
         }
     }
@@ -3542,32 +3736,18 @@ impl CcpState {
         // redirecting reports to orders long finished.
         self.wire_name_to_order.clear();
         self.wire_names_learned.clear();
-        if self.completed_orders_open || self.completed_orders_wanted.is_some() {
+        // The question on the wire is over with the connection that carried
+        // it, and answered with what the venue had stated: nothing after this
+        // can be told apart from the next connection's replay. The questions
+        // held behind it are not asked of a connection that has gone; each is
+        // sent in its turn, once the next connection's replay is over.
+        if self.completed_orders_open {
             self.completed_orders_open = false;
-            self.completed_orders_deadline = None;
-            // Whether anyone is still owed an answer, read before the queue
-            // is cleared. The flag below is about the request whose window is
-            // open; a question queued behind it has never been answered at
-            // all, and suppressing its signal left it waiting out its own
-            // clock for a connection the engine already knew was gone.
-            let a_queued_question_dies_here = self.completed_orders_wanted.is_some();
-            self.completed_orders_wanted = None;
-            // A question queued behind the window dies with it, on its own
-            // turn: the caller waiting on it is told the answer is over rather
-            // than waiting for a connection that has gone. Said after the
-            // handover below, not before it — the end is what wakes that
-            // caller, and woken first it drained the answer before the orders
-            // the venue had already stated were in it.
-            let queued_dies_here = self.completed_orders_queued_on.take();
-            self.deliver_finished_orders(shared, Handover::Final);
-            if let Some(queued) = queued_dies_here {
-                shared.orders.note_completed_orders_end_on(queued);
-            }
-            if a_queued_question_dies_here || !self.completed_orders_answered {
-                shared.orders.note_completed_orders_end_on(self.completed_orders_asked_on);
-            }
-            self.completed_orders_answered = false;
+            self.deliver_finished_orders(shared);
+            self.end_completed_orders(self.completed_orders_asked_on, shared);
         }
+        // The next connection has a replay of its own to hold behind.
+        self.replay_hold_until = None;
         // The engine stops believing these statuses here, and said so to
         // nobody — so the API layer went on reporting the pre-disconnect
         // status and `req_open_orders` kept asserting it.
@@ -3578,13 +3758,13 @@ impl CcpState {
         // where the retries ran out — so a caller asking what the account
         // holds was answered at once from the pre-drop book with nothing to
         // say the venue had not been heard from since.
-        shared.portfolio.account_download_is_pending();
+        for (_, portfolio) in shared.account_portfolios() { portfolio.account_download_is_pending(); }
         for order in context.uncertain_orders() {
             let update = executions::uncertain_update(&order, shared.orders.get_order_info(order.order_id));
             shared.orders.push_order_update(update);
             emit(event_tx, Event::OrderUpdate(update));
         }
-        self.fail_pending_lookups(context, shared, event_tx);
+        self.fail_pending_lookups(shared, event_tx);
         // Don't emit Event::Disconnected — auto-reconnect handles CCP drops
         // transparently.
         // Python is only notified if reconnect exhausts retries.
@@ -3599,7 +3779,7 @@ impl CcpState {
     /// or a contract the venue does not know, ten to twenty seconds after the
     /// connection went. The historical connection has failed its own at once
     /// all along.
-    fn fail_pending_lookups(&mut self, context: &mut Context, shared: &SharedState, event_tx: &Option<EventSink>) {
+    fn fail_pending_lookups(&mut self, shared: &SharedState, event_tx: &Option<EventSink>) {
         const WHY: &str = "the trading connection went away before the venue answered";
         // A caller's details request is failed and ended, as one that ran its
         // deadline out is. A fetch of the engine's own is forgotten, so the
@@ -3633,7 +3813,7 @@ impl CcpState {
         // the venue had taken its document — no end, and no refusal either.
         for (_, asked) in self.pending_advisor.drain() {
             shared.reference.push_advisor_refused(
-                asked.req_id, ADVISOR_SAVE_REFUSED, WHY.to_string(),
+                asked.origin(), ADVISOR_SAVE_REFUSED, WHY.to_string(),
             );
         }
         // A scan parked behind the naming of its rows is released with the
@@ -3641,15 +3821,20 @@ impl CcpState {
         // waited on went with the connection.
         for pe in &mut self.pending_scanner_enrichment { pe.deadline = Instant::now(); }
         self.sweep_scanner_enrichments(shared);
+        // A search given up on is over with the connection that carried it,
+        // and the ones held behind it are refused with it: nothing is left to
+        // send them on.
+        self.matching_symbols_abandoned = None;
         let mut refused: Vec<u32> = self.pending_matching_symbols.drain(..).map(|(rid, _)| rid).collect();
+        refused.extend(self.queued_matching_symbols.drain(..).map(|(rid, _)| rid));
         refused.extend(self.pending_option_params.drain(..).map(|(rid, ..)| rid));
-        // A subscription waiting on the naming of its contract is told, and
-        // the slot its registration took is offered back; a request waiting on
-        // the same is refused under its own number.
-        for (_, p, _) in self.pending_md_subscribe.drain(..) {
-            shared.market.push_subscription_failure(p.instrument, WHY.to_string());
-            context.slots_to_reconsider.push(p.instrument);
-        }
+        refused.extend(self.queued_option_params.drain(..).map(|q| q.req_id));
+        // An order waiting on a lookup is refused with the connection it was
+        // asked on.
+        let orders: Vec<u32> = self.order_naming.drain(..).map(|(rid, _)| rid).collect();
+        self.orders_named.extend(orders.into_iter().map(|rid| {
+            (rid, OrderNamed::Refused(crate::error_codes::Refusal::NOT_CONNECTED, WHY.to_string()))
+        }));
         let named: Vec<(u32, bool)> = self.pending_named.drain(..)
             .filter_map(|(_, cmd, _)| request_id(&cmd).map(|rid| {
                 (rid, matches!(cmd, crate::types::ControlCommand::FetchHistorical { .. }))
@@ -3684,12 +3869,6 @@ impl CcpState {
         self.replay_hold_until = Some(Instant::now());
     }
 
-    /// The same for the sentinel that ends an open window.
-    #[cfg(test)]
-    pub(crate) fn give_up_waiting_for_the_sentinel(&mut self) {
-        self.completed_orders_deadline = Some(Instant::now());
-    }
-
     /// And for every dividend query outstanding.
     ///
     /// Takes the query as already sent, because a test has no socket to send
@@ -3706,6 +3885,7 @@ impl CcpState {
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         shared: &SharedState,
+        left: &mut usize,
     ) {
         // A question the venue never answered. Kept, it held its contract for
         // the life of the session and stayed on this list for ever; given up
@@ -3726,40 +3906,10 @@ impl CcpState {
             }
         }
 
-        // A caller who has waited long enough is told so. The window is not
-        // shut with them.
-        //
-        // The two are different things and were one. A clock here says when a
-        // caller has waited long enough; it says nothing about where the
-        // venue's answer ends, and the answer is a run of ordinary reports
-        // that carry no mark of which question they answer. Shutting the
-        // window on the clock hands the rest of that answer to the live path,
-        // where a report stating a fill is a fill and moves a position — and
-        // it says the venue finished when the venue said no such thing.
-        //
-        // So the caller is released with what arrived and the window stays
-        // open until the wire closes it: the sentinel, or the connection
-        // going away. A question queued behind it waits, which is what the
-        // reference client does with a second question while one is pending.
-        if self.completed_orders_open
-            && self.completed_orders_deadline.is_some_and(|at| Instant::now() >= at)
-        {
-            self.completed_orders_deadline = None;
-            // A copy, because the window is still open and the reports that
-            // finish these orders have not arrived. Drained here, the terminal
-            // report of an order already handed over would start a fresh
-            // record with none of its fields and the caller would be left with
-            // the half-built one for good.
-            self.deliver_finished_orders(shared, Handover::SoFar);
-            shared.orders.note_completed_orders_end_on(self.completed_orders_asked_on);
-            // Said, so the sentinel does not say it again to nobody and leave
-            // the next caller reading it as its own answer.
-            self.completed_orders_answered = true;
-            log::warn!(
-                "the venue has not said it has finished; the caller is answered with what \
-                 arrived and the rest is still read as history",
-            );
-        }
+        // No clock ends a question the venue is answering: the answer names
+        // no question, so what arrives after a deadline would be read as the
+        // next question's. A question held behind it waits for the sentinel,
+        // or for the end of the connection.
         let Some(waited_since) = self.completed_orders_wanted else { return };
         if self.completed_orders_open {
             return;
@@ -3776,8 +3926,14 @@ impl CcpState {
         // hold the question all over again. It is cleared there, past the hold.
         // On the turn the question that was held was asked on, which is not
         // the open window's: this is that question going out at last.
-        let asked_on = self.completed_orders_queued_on.unwrap_or(self.completed_orders_asked_on);
-        self.send_completed_orders_request(asked_on, ccp_conn, hb, shared);
+        let Some(asked_on) = self.completed_orders_queued.front().copied() else {
+            self.completed_orders_wanted = None;
+            return;
+        };
+        if *left > 0 {
+            *left -= 1;
+            self.send_completed_orders_request(asked_on, ccp_conn, hb, shared);
+        }
     }
 
     /// Report the orders the recovery push did not account for.
@@ -3824,6 +3980,8 @@ impl CcpState {
         account_id: &str,
         shared: &SharedState,
     ) {
+        shared.set_session_account(account_id);
+        self.account_requests.clear();
         *ccp_conn = Some(conn);
         self.disconnected = false;
         // This connection has not yet named what it has working, and neither
@@ -3839,7 +3997,7 @@ impl CcpState {
         // caller asking what the account holds was answered from the pre-drop
         // snapshot the moment the connection came back, before the venue had
         // restated a single holding.
-        shared.portfolio.account_download_is_pending();
+        for (_, portfolio) in shared.account_portfolios() { portfolio.account_download_is_pending(); }
         self.recovery_sweep_at = Some(Instant::now() + RECOVERY_PUSH_GRACE);
         hb.last_ccp_sent = Instant::now();
         hb.last_ccp_recv = Instant::now();
@@ -3868,8 +4026,11 @@ impl CcpState {
             // that squares the account is the end of the request carrying it;
             // the counter's key below is a second subscribe on the same
             // account, and first-wins leaves it measuring nothing.
+            shared.name_account_request(OPENING_ACCOUNT_REQUEST, account_id);
             shared.portfolio.holdings_restated_under(OPENING_ACCOUNT_REQUEST);
             let key = self.next_account_request_key();
+            self.account_requests.push((key.clone(), account_id.to_string()));
+            shared.name_account_request(&key, account_id);
             let _ = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts),
                 (6040, "6"), (6036, "1"), (6095, account_id), (6529, &key),
@@ -3879,8 +4040,9 @@ impl CcpState {
             // this connection: the venue serves one on the connection that
             // asked, and the marks a caller reads otherwise stop moving with
             // nothing said.
-            for (req_id, account) in &self.pnl_subscriptions {
-                let pnl_key = format!("PLR.{req_id}");
+            for (_, _, account) in &self.pnl_subscriptions {
+                let pnl_key = Self::next_pnl_key();
+                shared.name_account_request(&pnl_key, account);
                 let _ = conn.send_fix(&[
                     (fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts),
                     (6040, "142"), (6529, &pnl_key), (1, account),
@@ -3895,6 +4057,12 @@ impl CcpState {
                 "CCP reconnected, sent account/position re-subscribe and {} P&L renewal(s)",
                 self.pnl_subscriptions.len(),
             );
+        }
+
+        for (account, portfolio) in shared.account_portfolios() {
+            if !std::sync::Arc::ptr_eq(&portfolio, &shared.portfolio) {
+                self.send_account_refresh(&account, ccp_conn, hb, shared);
+            }
         }
 
     }
@@ -3969,7 +4137,7 @@ fn handle_pnl_prices(msg: &[u8], shared: &SharedState) {
     let table = con_ids.into_iter().zip(prices)
         .filter_map(|(con_id, price)| Some((con_id?, price.to_string())))
         .collect();
-    shared.portfolio.set_venue_prices(table);
+    if let Some(portfolio) = shared.portfolio_for_message(msg) { portfolio.set_venue_prices(table); }
 }
 
 impl CcpState {
@@ -4108,7 +4276,8 @@ impl CcpState {
 /// puts what it carries on the row.
 fn identify_position(shared: &SharedState, def: &crate::control::contracts::ContractDefinition) {
     let con_id = def.con_id as i64;
-    let Some(existing) = shared.portfolio.position_info(con_id) else { return };
+    for (_, portfolio) in shared.account_portfolios() {
+    let Some(existing) = portfolio.position_info(con_id) else { continue };
     let sec_type = def.sec_type.to_api_str();
     let multiplier = if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() };
     // Only where the definition still fills something in. The write leaves
@@ -4123,9 +4292,9 @@ fn identify_position(shared: &SharedState, def: &crate::control::contracts::Cont
         || fills_a_gap(&existing.currency, &def.currency)
         || fills_a_gap(&existing.multiplier, &multiplier))
     {
-        return;
+        continue;
     }
-    shared.portfolio.set_position_info(PositionInfo {
+    portfolio.set_position_info(PositionInfo {
         con_id,
         position: existing.position,
         avg_cost: existing.avg_cost,
@@ -4135,6 +4304,7 @@ fn identify_position(shared: &SharedState, def: &crate::control::contracts::Cont
         multiplier,
         ..Default::default()
     });
+    }
 }
 
 /// Take the server's position as the engine's own.

@@ -1,5 +1,4 @@
-"""A single-position profit request naming another account is told what the
-account-level one is told: the figures are this session's account's."""
+"""A single-position profit request carries the account named."""
 import ibkr_dx
 
 
@@ -12,10 +11,12 @@ class Errors(ibkr_dx.EWrapper):
         self.seen.append((req_id, code, msg))
 
 
-def test_req_pnl_single_says_whose_figures_it_answers_with():
+def test_req_pnl_single_carries_the_named_account():
     w = Errors()
     c = ibkr_dx.EClient(w)
     c._test_connect("T", accounts=["T", "DU999"])
     c.reqPnLSingle(7, "DU999", "", 265598)
-    assert [(r, code) for r, code, _ in w.seen] == [(7, 321)], w.seen
-    assert "DU999" in w.seen[0][2]
+    c.poll()
+    assert not w.seen
+    assert any('account: "DU999"' in cmd for cmd in c._test_take_commands())
+    c.disconnect()

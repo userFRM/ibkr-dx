@@ -1,7 +1,7 @@
 //! Market data request/cancel methods.
 
 use pyo3::prelude::*;
-use crate::error_codes::{NO_SUCH_SUBSCRIPTION, Refusal};
+use crate::error_codes::Refusal;
 
 use crate::types::*;
 use super::{wire_req_id, EClient};
@@ -16,6 +16,17 @@ impl EClient {
     }
 
     /// Request market data for a contract.
+    ///
+    /// With `snapshot`, `tickSnapshotEnd` follows once the snapshot is whole,
+    /// as a gateway ends one: when the venue has stated the bid, the ask, the
+    /// last, the open and the close; on a contract of a type a gateway marks
+    /// as an option (`OPT`, `FOP`, `IOPT`, `WAR`, `EC`) also the option model,
+    /// 13 (83 delayed); on a delayed feed also the last trade's time, 88; or
+    /// eleven seconds after the request. Ticks 10, 11 and 12 (80, 81 and 82
+    /// delayed), the bid's, the ask's and the last's greeks, are not produced:
+    /// a gateway computes them with an option model of its own, and the venue
+    /// does not state them. A gateway's snapshot of an option also waits for
+    /// them; this client's does not.
     ///
     /// `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
@@ -72,113 +83,25 @@ impl EClient {
         mode_9887: i32,
         mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if self.tx_or_report(req_id)?.is_none() { return Ok(()); }
         if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
             return self.report_refusal(py, req_id, why);
         }
-
-        // A contract's news is asked for by the venue's id for the contract,
-        // and the caller may have stated a description instead. Resolved only
-        // when news is what was asked for: a quote on a description is asked
-        // for by description and the venue names it itself.
-        // Read the way the core reads the list, since the core is what then
-        // subscribes: `1292` is not 292, and `292:BRFG+DJNL` is. Read any other
-        // way, this names a contract the core asks no headlines for, or leaves
-        // unnamed one it does.
-        let wants_news = crate::client_core::parse_generic_tick_list(generic_tick_list).news;
-        let named;
-        let by_venue;
-        let contract = if wants_news && contract.con_id == 0 && !contract.symbol.is_empty() {
-            match self.qualify_contract_stated(py, contract) {
-                Ok(found) => { named = found; &named }
-                // Reported under the code for the cause. A session that ends
-                // mid-lookup is not code 200, which names a contract the venue
-                // does not hold and invites a retry.
-                Err(why) => return self.report_refusal(py, req_id, why),
-            }
-        } else {
-            // Named by the venue where the caller named it by id alone, as the
-            // request surface names it. Sent as it stands, the engine took the
-            // subscription, found no security type for it afterwards and gave
-            // it up, so the caller was told nothing and read no quotes.
-            let Some(found) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-            by_venue = found;
-            &*by_venue
-        };
-
-        let shared = self.shared_state()?;
-
-        // The engine can take up to REGISTRATION_TIMEOUT to reply; release
-        // the GIL for the round trip so a slow reply stalls this call, not
-        // every Python thread. Own the contract fields first —
-        // `contract` itself must not cross the detach boundary.
-        let con_id = contract.con_id;
-        let symbol = contract.symbol.clone();
-        let exchange = contract.exchange.clone();
-        let sec_type = contract.sec_type.clone();
-        let currency = contract.currency.clone();
-        // What tells two listings of one symbol apart, taken whole. A caller
-        // who names an option's class, its local name or where it is listed
-        // states it here the way every other request that names a contract by
-        // description does; dropped, the lookup behind the subscription asks a
-        // wider question than the caller put and is answered with several
-        // contracts, which names none.
-        let filters = contract.lookup_filters();
-        let generic_tick_list = generic_tick_list.to_string();
-        if let Err(why) = py.detach(|| self.core.register_mkt_data(
-            &shared, &tx, req_id,
-            con_id, &symbol, &exchange, &sec_type, &currency, &filters,
-            snapshot, regulatory_snapshot, &generic_tick_list, mode_9887,
-        )) {
-            return self.report_refusal(py, req_id, why);
-        }
-        self.core.cache_contract(contract.con_id, crate::types::model::Contract {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            sec_type: contract.sec_type.clone(),
-            exchange: contract.exchange.clone(),
-            currency: contract.currency.clone(),
-            last_trade_date_or_contract_month: contract.last_trade_date_or_contract_month.clone(),
-            strike: contract.strike,
-            right: contract.right.clone(),
-            multiplier: contract.multiplier.clone(),
-            ..Default::default()
-        });
-
-        Ok(())
+        self.ask_for_mkt_data(
+            py, req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode_9887,
+            None, None,
+        )
     }
 
     /// Cancel market data.
     pub fn cancel_mkt_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        // A number still taking its subscription on another thread has no
-        // record here yet. Refused for that, the caller was told its
-        // withdrawal had not happened and was left holding the subscription
-        // anyway — the venue withdraws one that arrives early rather than
-        // refusing it. Recorded against the registration, which reads it
-        // before it publishes what it opened and takes it back down instead.
-        // This surface registers with the interpreter lock released, which
-        // makes a cancel from a timer thread an ordinary thing to write.
-        //
-        // Asked before the record below, not after: a registration finishing
-        // between the two is seen by one of them either way, where asked the
-        // other way round it could fall between both and be refused for a
-        // subscription that is up.
-        if self.core.withdraw_while_registering(req_id) {
-            return Ok(());
-        }
-        // A caller withdrawing a subscription this client does not hold
-        // branches on being told so. Said nothing, the withdrawal reads
-        // exactly like one that worked. Reported here rather than in the body
-        // below, which this client also calls for withdrawals nobody asked
-        // for -- a snapshot that has ended, the watch behind an option
-        // calculation -- and those must stay silent.
-        if !self.core.holds_mkt_data(req_id) {
-            return self.report_refusal(py, req_id, Refusal::stated(
-                NO_SUCH_SUBSCRIPTION,
-                format!("no contract is being watched under request {req_id}"),
-            ));
-        }
+        // Whatever this number was registered as is over from here, whether
+        // or not the engine's record of it has been read yet.
+        self.core.withdrawing(req_id);
+        // The engine took the request before this, so it decides whether
+        // there is one to withdraw — refusing a number that watches nothing,
+        // as a caller branching on it is owed — and what goes to the venue.
         self.withdraw_mkt_data(py, &tx, req_id)
     }
 
@@ -216,91 +139,26 @@ impl EClient {
             Err(why) => return self.report_refusal(py, req_id, Refusal::validation(why)),
         };
 
-        // Named by the venue where the caller named it by id alone, as the
-        // request surface names it.
-        let Some(by_venue) = self.named_or_report(py, req_id, contract)? else { return Ok(()) };
-        let contract = &*by_venue;
-
-        // A stream is asked for by venue contract id. Sent
-        // with none, the venue answers "Unknown contract" against a query this
-        // client had not told anyone about, and the caller waited on a stream
-        // that was refused before it began.
-        let named;
-        let contract = if contract.con_id == 0 && !contract.symbol.is_empty() {
-            match self.qualify_contract_stated(py, contract) {
-                Ok(found) => { named = found; &named }
-                // Reported under the code for the cause. A session that ends
-                // mid-lookup is not code 200, which names a contract the venue
-                // does not hold and invites a retry.
-                Err(why) => return self.report_refusal(py, req_id, why),
-            }
-        } else {
-            contract
-        };
-
+        // A stream is asked for by the venue's id for the contract, and states
+        // what the contract is and where it trades: the engine names one the
+        // caller described, or gave by id alone, before it asks.
         let shared = self.shared_state()?;
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::RegisterInstrument {
-                contract: ContractRef { con_id: contract.con_id, symbol: contract.symbol.clone(), sec_type: contract.sec_type.clone(), exchange: contract.exchange.clone(), ..Default::default() },
-                identity: String::new(),
-                reply_tx: None,
-            }) {
-            return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
+        if let Err(why) = self.core.register_tbt(
+            &shared, &tx, req_id, contract.con_id, &contract.symbol, &contract.sec_type,
+            &contract.exchange, &contract.currency, tbt_type, number_of_ticks.max(0) as u32,
+            ignore_size,
+        ) {
+            return self.report_refusal(py, req_id, why);
         }
-        // Same registration-wait hazard as req_mkt_data: release the GIL for
-        // the reply round trip.
-        let con_id = contract.con_id;
-        let symbol = contract.symbol.clone();
-        let (sec_type, exchange) = (contract.sec_type.clone(), contract.exchange.clone());
-        let opened = match py.detach(|| self.core.register_tbt(
-            &shared, &tx, req_id, con_id, &symbol, &sec_type, &exchange, tbt_type,
-            number_of_ticks.max(0) as u32, ignore_size,
-        )) {
-            Ok(opened) => opened,
-            Err(why) => return self.report_refusal(py, req_id, why),
-        };
-        // The kind this request asked for, kept so the callback can state it.
-        // The record does not carry it, and every print was labelled as an
-        // exchange print whichever stream it came from. Kept only where there
-        // is still a stream: one withdrawn while the registration was away has
-        // already been taken back down, and a kind left behind for it outlives
-        // the stream it describes.
-        if opened.is_some() && let TbtType::AllLast | TbtType::Last = tbt_type {
-            let kind = if matches!(tbt_type, TbtType::AllLast) { 2 } else { 1 };
-            self.tbt_kind.lock().unwrap().insert(req_id, kind);
-        }
-
         Ok(())
     }
 
     /// Cancel tick-by-tick data.
     fn cancel_tick_by_tick_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        // A number still taking its stream on another thread has no record
-        // here yet, and is withdrawn the way the quote subscription above is:
-        // recorded against the registration, which takes the stream back down
-        // when it reads it. Asked before the record below for the reason given
-        // there.
-        if self.core.withdraw_while_registering_tbt(req_id) {
-            return Ok(());
-        }
-        // Only what this request took out. Removing the contract's quote
-        // mapping here took the quotes away from whoever was watching them.
-        // Removed before the send, not across it: the send is bounded and runs
-        // detached from Python, so a guard spanning it blocks another thread
-        // cancelling a different subscription.
-        let instrument = self.core.tbt_to_instrument.lock().unwrap().remove(&req_id);
-        // A caller withdrawing a stream this client does not hold branches on
-        // being told so. Said nothing, the withdrawal reads exactly like one
-        // that worked.
-        let Some(instrument) = instrument else {
-            return self.report_refusal(py, req_id, Refusal::stated(
-                NO_SUCH_SUBSCRIPTION,
-                format!("no tick stream is held under request {req_id}"),
-            ));
-        };
-        // A refused withdrawal leaves the stream's callback kind in place.
-        self.tbt_kind.lock().unwrap().remove(&req_id);
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::UnsubscribeTbt { req_id, instrument }) {
+        // The engine took the stream before this, so it decides whether there
+        // is one to withdraw, and refuses a number that carries none.
+        if let Err(why) = self.send_control(&tx, ControlCommand::UnsubscribeTbt { req_id }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -312,7 +170,7 @@ impl EClient {
     /// moment for the result.
     fn req_ping(&self, py: Python<'_>) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::Ping) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::Ping) {
             return self.report_refusal(py, -1, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -409,7 +267,7 @@ impl EClient {
         if let Err(why) = self.core.hold_the_book(req_id) {
             return self.report_refusal(py, req_id, why);
         }
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::SubscribeDepth {
+        if let Err(why) = self.send_control(&tx, ControlCommand::SubscribeDepth {
                 contract: ContractRef { con_id: contract.con_id, symbol: contract.symbol.clone(), exchange: contract.exchange.clone(), sec_type: contract.sec_type.clone(), currency: contract.currency.clone(), ..Default::default() },
                 req_id: wire,
                 num_rows,
@@ -442,7 +300,7 @@ impl EClient {
         if let Err(why) = self.core.release_the_book(req_id) {
             return self.report_refusal(py, req_id, why);
         }
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::UnsubscribeDepth { req_id: wire }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::UnsubscribeDepth { req_id: wire }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -487,7 +345,7 @@ impl EClient {
         // bar of the stream arrived as `historical_data_update`, so a caller
         // that overrode only `real_time_bar` read the stream as dead.
         self.core.historical_request_is_new(wire);
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::SubscribeRealTimeBar {
+        if let Err(why) = self.send_control(&tx, ControlCommand::SubscribeRealTimeBar {
                 contract: contract.into(),
                 req_id: wire,
                 what_to_show: what_to_show.to_string(),
@@ -502,7 +360,7 @@ impl EClient {
     /// Cancel real-time bars.
     fn cancel_real_time_bars(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        if let Err(why) = Self::send_control(py, &tx, ControlCommand::CancelRealTimeBar { req_id: wire_req_id(req_id)? }) {
+        if let Err(why) = self.send_control(&tx, ControlCommand::CancelRealTimeBar { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -730,11 +588,10 @@ impl EClient {
             ));
         }
         scan.under_con_id = con_id;
-        // Written where the subscription can find it before the subscription is
-        // made: the series goes out through the same path every other does, and
-        // that path reads the scan from here rather than carrying it.
-        self.shared_state()?.reference.note_spread_scan(con_id as u32, scan.stated());
-        self.req_mkt_data(py, req_id, contract, "481", false, false, None)
+        // The scan rides its own request, so two scans of one contract each
+        // state their own; the engine sends one at a time.
+        let mode = self.core.subscription_mode();
+        self.ask_for_mkt_data(py, req_id, contract, "481", false, false, mode, Some(scan.stated()), None)
     }
 
     /// The strategies a spread scan stated for a request, as the venue stated
@@ -1006,51 +863,62 @@ impl EClient {
     pub(crate) fn withdraw_mkt_data(
         &self,
         py: Python<'_>,
-        tx: &std::sync::mpsc::SyncSender<ControlCommand>,
+        tx: &std::sync::mpsc::Sender<ControlCommand>,
         req_id: i64,
     ) -> PyResult<()> {
-        let shared = self.shared_state()?;
-        let withdrawn = self.core.unregister_mkt_data(&shared, req_id);
-        // Asked separately, because the quotes stay up for another caller
-        // while the headlines this one asked for stop. Withdrawn only
-        // alongside the quotes, they carried on with nobody listening.
-        if let Some(subject) = withdrawn.headlines {
-            let _ = Self::send_control(py, tx, ControlCommand::UnsubscribeNews { subject });
-        }
-        // And the series this caller brought to a subscription that stays up
-        // for somebody else. Left behind, the venue serves them for the life
-        // of that subscription with nobody reading them. They ride with the
-        // withdrawal of the whole subscription too, for the case where that
-        // subscription has already been replaced by one this caller knows
-        // nothing about.
-        let series = withdrawn.series;
-        if let Some(instrument) = withdrawn.subscription {
-            if let Err(why) = Self::send_control(
-                py, tx,
-                ControlCommand::Unsubscribe {
-                    instrument,
-                    con_id: withdrawn.con_id,
-                    took_it: withdrawn.took_it,
-                    series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
-                    issued: withdrawn.decided_at,
-                },
-            ) {
-                return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
-            }
-        } else if let Some((instrument, generic_ticks)) = series
-            && let Err(why) = Self::send_control(
-                py, tx,
-                ControlCommand::StopAskingForSeries {
-                    instrument,
-                    con_id: withdrawn.con_id,
-                    took_it: withdrawn.took_it,
-                    generic_ticks,
-                    issued: withdrawn.decided_at,
-                },
-            )
-        {
+        if let Err(why) = self.send_control(tx, ControlCommand::CancelMktData { req_id }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
+        Ok(())
+    }
+
+    /// Hand a market-data request to the engine, which names the contract
+    /// where the caller described it or gave only its id, registers it, and
+    /// serves the request: nothing waits here. What it is served on, or why it
+    /// is not, stands in the session's order.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ask_for_mkt_data(
+        &self,
+        py: Python<'_>,
+        req_id: i64,
+        contract: &Contract,
+        generic_tick_list: &str,
+        snapshot: bool,
+        regulatory_snapshot: bool,
+        mode_9887: i32,
+        spread_scan: Option<String>,
+        calculation: Option<Box<crate::types::Calculation>>,
+    ) -> PyResult<()> {
+        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        let shared = self.shared_state()?;
+        // What tells two listings of one symbol apart, taken whole. A caller
+        // who names an option's class, its local name or where it is listed
+        // states it here the way every other request that names a contract by
+        // description does; dropped, the lookup behind the subscription asks a
+        // wider question than the caller put and is answered with several
+        // contracts, which names none.
+        let filters = contract.lookup_filters();
+        if let Err(why) = self.core.register_mkt_data(
+            &shared, &tx, req_id,
+            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            &contract.currency, &filters,
+            snapshot, regulatory_snapshot, generic_tick_list, mode_9887,
+            spread_scan, calculation,
+        ) {
+            return self.report_refusal(py, req_id, why);
+        }
+        self.core.cache_contract(contract.con_id, crate::types::model::Contract {
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
+            currency: contract.currency.clone(),
+            last_trade_date_or_contract_month: contract.last_trade_date_or_contract_month.clone(),
+            strike: contract.strike,
+            right: contract.right.clone(),
+            multiplier: contract.multiplier.clone(),
+            ..Default::default()
+        });
         Ok(())
     }
 }

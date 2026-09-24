@@ -38,5 +38,10 @@ def test_the_wait_ends_with_the_session():
         _ends_the_session_soon(c)
         started = time.monotonic()
         ask(c)
+        # The engine holds the question, and refuses it once the session has
+        # ended: well inside the ten seconds the download is given.
+        while not any(code == 504 for _, code in w.seen) and time.monotonic() - started < 5:
+            c.poll()
+            time.sleep(0.02)
         assert time.monotonic() - started < 5, f"{name}: the wait ended with the session, not the clock"
         assert any(code == 504 for _, code in w.seen), f"{name}: and the caller was told: {w.seen}"

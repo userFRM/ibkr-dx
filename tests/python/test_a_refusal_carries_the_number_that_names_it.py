@@ -47,6 +47,7 @@ def test_a_stop_with_no_trigger_price_is_refused_under_403():
     for n, order_type in enumerate(["STP", "STP LMT", "TRAIL", "TRAIL LIMIT"], start=1):
         w.seen.clear()
         c.placeOrder(n, spy(), order(order_type))
+        c.poll()
         assert [code for code, _ in w.seen] == [403], (
             f"{order_type}: a stop with nothing to trigger on: {w.seen}"
         )
@@ -61,6 +62,7 @@ def test_a_combination_with_no_legs_is_refused_under_314():
 
     c.placeOrder(1, bag, order("LMT"))
 
+    c.poll()
     assert [code for code, _ in w.seen] == [314], (
         f"a combination that names no legs: {w.seen}"
     )
@@ -73,6 +75,7 @@ def test_a_log_level_that_is_not_one_is_refused_under_319():
 
     c.setServerLogLevel(9)
 
+    c.poll()
     assert [code for code, _ in w.seen] == [319], (
         f"a level outside 1 to 5 is refused, not substituted: {w.seen}"
     )

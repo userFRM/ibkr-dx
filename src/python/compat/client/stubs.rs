@@ -203,16 +203,16 @@ impl EClient {
     /// A question answered in the call it was asked in leaves nothing to
     /// withdraw. One that opened a watch is holding a subscription the caller
     /// never asked for by name, and this is what releases it.
-    fn cancel_calculate_implied_volatility(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+    fn cancel_calculate_implied_volatility(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        self.forget_option_calc(py, req_id);
+        self.forget_option_calc(req_id);
         Ok(())
     }
 
     /// As for [`cancel_calculate_implied_volatility`](Self::cancel_calculate_implied_volatility).
-    fn cancel_calculate_option_price(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+    fn cancel_calculate_option_price(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        self.forget_option_calc(py, req_id);
+        self.forget_option_calc(req_id);
         Ok(())
     }
 
@@ -262,7 +262,8 @@ impl EClient {
     /// request made before connecting is: an answer waits for a dispatch pass,
     /// and with no session there is nothing to make one.
     fn req_current_time(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_connected) = self.tx_or_report(-1)? else { return Ok(()) };
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::CurrentTime, ends: true };
+        let Some(_connected) = self.tx_or_report_as(refused)? else { return Ok(()) };
         let seconds = self.venue_time_millis().div_euclid(1_000);
         self.deliver(py, "current_time", (seconds,))?;
         Ok(())
@@ -278,7 +279,8 @@ impl EClient {
     /// Before a session exists this is reported on `error`, as
     /// `req_current_time` is.
     fn req_current_time_in_millis(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_connected) = self.tx_or_report(-1)? else { return Ok(()) };
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::CurrentTimeInMillis, ends: true };
+        let Some(_connected) = self.tx_or_report_as(refused)? else { return Ok(()) };
         let millis = self.venue_time_millis();
         self.deliver(py, "current_time_in_millis", (millis,))?;
         Ok(())
@@ -296,13 +298,14 @@ impl EClient {
     /// The venue's answer reaches `receive_fa` under the same number the
     /// partition was asked for by.
     fn request_fa(&self, py: Python<'_>, fa_data_type: i32) -> PyResult<()> {
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::Fa, ends: true };
         let Some(partition) = advisor_partition(fa_data_type) else {
-            return self.report_refusal(py, -1, crate::error_codes::Refusal::validation(
+            return self.report_refusal_as(py, refused, crate::error_codes::Refusal::validation(
                 format!("no advisor configuration is named by {fa_data_type}"),
             ));
         };
-        let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        Self::send_control(py, &tx, ControlCommand::AdvisorConfig {
+        let Some(tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
+        self.send_control(&tx, ControlCommand::AdvisorConfig {
             // Nothing to carry back: the answer to a question about a
             // partition names the partition, not a request.
             req_id: -1,
@@ -311,7 +314,7 @@ impl EClient {
             partition: partition.to_string(),
             fa_data_type,
             document: None,
-        })
+        }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, refused, crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
@@ -326,14 +329,14 @@ impl EClient {
             ));
         };
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        Self::send_control(py, &tx, ControlCommand::AdvisorConfig {
+        self.send_control(&tx, ControlCommand::AdvisorConfig {
             req_id,
             // Replacing it with what is carried.
             command: 3,
             partition: partition.to_string(),
             fa_data_type,
             document: Some(cxml.to_string()),
-        })
+        }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, super::request_origin(req_id), crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 
     // ── Display Groups ──
@@ -343,7 +346,7 @@ impl EClient {
     fn query_display_groups(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         self.core.query_display_groups(req_id);
-        Ok(())
+        self.say_group_events()
     }
 
     /// Watch what a display group is showing. Answered on
@@ -351,7 +354,7 @@ impl EClient {
     fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         self.core.subscribe_to_group_events(req_id, group_id);
-        Ok(())
+        self.say_group_events()
     }
 
     /// Stop watching a display group.
@@ -371,7 +374,7 @@ impl EClient {
         if let Err(reason) = self.core.update_display_group(req_id, contract_info) {
             report_reason(self, req_id, &Refusal::validation(reason));
         }
-        Ok(())
+        self.say_group_events()
     }
 
     // ── Verification ──
@@ -445,7 +448,8 @@ impl EClient {
     /// Ask which news providers this account may read. Answered on
     /// `news_providers`.
     fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::NewsProviders, ends: true };
+        let Some(_tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
         let shared = self.shared_state()?;
         let np = shared.reference.news_providers();
         let mut providers: Vec<Py<NewsProviderPy>> = Vec::with_capacity(np.len());
@@ -485,7 +489,8 @@ impl EClient {
     /// Ask which account families this login belongs to. Answered on
     /// `family_codes`.
     fn req_family_codes(&self, py: Python<'_>) -> PyResult<()> {
-        let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        let refused = crate::types::model::ErrorOrigin::Question { q: crate::types::model::Question::FamilyCodes, ends: true };
+        let Some(_tx) = self.tx_or_report_as(refused)? else { return Ok(()) };
         let shared = self.shared_state()?;
         let codes = shared.reference.family_codes();
         // Objects, as the reference client passes them: a program reads
@@ -559,11 +564,11 @@ impl EClient {
 
     /// What event types the corporate-events calendar carries. Answered on
     /// `wshMetaData`.
-    fn req_wsh_meta_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+    fn req_wsh_meta_data(&self, _py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        Self::send_control(py, &tx, ControlCommand::FetchCalendarMetaData {
+        self.send_control(&tx, ControlCommand::FetchCalendarMetaData {
             req_id: wire_req_id(req_id)?,
-        })
+        }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, super::request_origin(req_id), crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 
     /// Stop waiting on the event types.
@@ -573,19 +578,19 @@ impl EClient {
     /// otherwise reach a caller who has said they are done with it. A cancel
     /// naming no waiting request says so rather than returning as though it
     /// acted.
-    fn cancel_wsh_meta_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+    fn cancel_wsh_meta_data(&self, _py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        Self::send_control(py, &tx, ControlCommand::CancelCalendar {
+        self.send_control(&tx, ControlCommand::CancelCalendar {
             req_id: wire_req_id(req_id)?,
-        })
+        }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, super::request_origin(req_id), crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 
     /// Stop waiting on the calendar's events. As above.
-    fn cancel_wsh_event_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+    fn cancel_wsh_event_data(&self, _py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        Self::send_control(py, &tx, ControlCommand::CancelCalendar {
+        self.send_control(&tx, ControlCommand::CancelCalendar {
             req_id: wire_req_id(req_id)?,
-        })
+        }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, super::request_origin(req_id), crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 
     /// The calendar's events. Answered on `wshEventData`.
@@ -632,14 +637,31 @@ impl EClient {
                 .filter(|n| *n > 0 && *n < i64::MAX && *n != UNSET);
         }
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        Self::send_control(py, &tx, ControlCommand::FetchCalendarEvents {
+        self.send_control(&tx, ControlCommand::FetchCalendarEvents {
             req_id: wire_req_id(req_id)?,
             query: Box::new(query),
-        })
+        }).or_else(|why| Python::attach(|py| self.report_refusal_as(py, super::request_origin(req_id), crate::error_codes::Refusal::not_connected(why.to_string()))))
     }
 }
 
 impl EClient {
+    /// What the display groups answered at the call, pushed where the call
+    /// stands in the session's order.
+    fn say_group_events(&self) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        for event in self.core.drain_group_events() {
+            shared.push_call_record(crate::bridge::Record::Reply(match event {
+                crate::client_core::GroupEvent::List(req_id, groups) => {
+                    crate::bridge::Reply::DisplayGroupList(req_id, groups)
+                }
+                crate::client_core::GroupEvent::Updated(req_id, info) => {
+                    crate::bridge::Reply::DisplayGroupUpdated(req_id, info)
+                }
+            }));
+        }
+        Ok(())
+    }
+
     /// The reference client's answer to a verification request, which it
     /// gives itself: 504 without a session, and 508 with one.
     fn refuse_verification(&self, py: Python<'_>) -> PyResult<()> {
@@ -680,76 +702,22 @@ impl EClient {
     /// watching the contract: a question that opened none of its own is
     /// answerable only while somebody else keeps theirs up, and the moment
     /// they withdraw it there is no model coming and nothing said about it.
+    ///
+    /// The engine opens it and keeps the question, on the slot the request is
+    /// served on, and answers it where the venue states the model; a watch it
+    /// cannot open is refused under the request's number. A request already
+    /// watching the contract keeps the question on the watch it holds.
     fn watch_for_option_model(
         &self, py: Python<'_>, req_id: i64, contract: &Contract,
         wants_volatility: bool, option_price: f64, under_price: f64,
     ) -> PyResult<bool> {
-        // A subscription this client opens rather than the caller. Refusals
-        // are reported by the subscribe itself and leave nothing watching,
-        // which is what is read back here rather than the call's own result:
-        // this surface answers a refusal on the error callback and returns
-        // normally, so the result alone does not say whether it took.
-        //
-        // What is read back is the slot the request holds. Not one found under
-        // the contract's conId alone: a contract stated by description carries
-        // none, and the engine is the first to know which slot it resolved to
-        // — so asked that way the answer was no however the subscribe went, and
-        // every question about a described contract was refused with the watch
-        // it had just opened left running.
-        //
-        // A request already holding a slot is the case to be careful with. It
-        // may be watching this very contract, which is what makes the venue
-        // state a model at all — and it cannot open a second watch, so the
-        // subscribe below would be refused and the question turned down on a
-        // contract that is already being watched. Where the contract names an
-        // id, its slot answers which of the two this is; where it does not,
-        // there is nothing to compare and the caller's own watch is not this
-        // question's to claim.
-        let Ok(shared) = self.shared_state() else { return Ok(false) };
-        let its_own = contract.to_api().con_id;
-        let its_slot = || {
-            (its_own != 0)
-                .then(|| self.core.cached_instrument(&shared, its_own))
-                .flatten()
-        };
-        // The request's own slot, where it already has one, may be this
-        // contract's — which is what makes the venue state a model at all, and
-        // a request already watching something is refused a second watch. Asked
-        // only whether it holds a slot, such a request read as watching some
-        // other contract and the question was turned down on one the venue was
-        // already stating a model for.
-        if !(its_slot().is_some() && its_slot() == self.core.watching(req_id)) {
-            // Asked for even where the slot it holds is another contract's,
-            // because the refusal that answers is the caller's to hear — and an
-            // interrupt raised in their handler for it leaves the call rather
-            // than being swallowed here.
-            let held_before = self.core.holds_mkt_data(req_id);
-            self.req_mkt_data(py, req_id, contract, "", false, false, None)?;
-            let took = if its_own != 0 {
-                its_slot().is_some() && its_slot() == self.core.watching(req_id)
-            } else {
-                // A contract stated by description carries no id to compare, and
-                // the engine is the first to know which slot it resolved to. What
-                // it held before still has to be asked: a request already watching
-                // something is refused a second watch, so a slot found after a
-                // refused subscribe is the other contract's — kept, the question
-                // was answered on it and cancelling the question withdrew it.
-                !held_before && self.core.holds_mkt_data(req_id)
-            };
-            if !took {
-                return Ok(false);
-            }
-        }
-        self.pending_option_calcs.lock().unwrap().insert(
-            req_id,
-            crate::api::client::PendingOptionCalc {
-                contract: contract.to_api(),
-                wants_volatility,
-                option_price,
-                under_price,
-                answered: false,
-            },
-        );
+        let mode = self.core.subscription_mode();
+        self.ask_for_mkt_data(
+            py, req_id, contract, "", false, false, mode, None,
+            Some(Box::new(crate::types::Calculation {
+                contract: contract.to_api(), wants_volatility, option_price, under_price,
+            })),
+        )?;
         Ok(true)
     }
 
@@ -761,81 +729,12 @@ impl EClient {
     /// description read as one — neither carries a conId to tell them apart —
     /// and the withdrawal of the first was skipped for a second that was
     /// watching something else entirely.
-    fn forget_option_calc(&self, py: Python<'_>, req_id: i64) {
-        if self.pending_option_calcs.lock().unwrap().remove(&req_id).is_none() {
-            return;
-        }
-        // The watch was this client's own, so it goes without a word: the
-        // caller withdrew a question, not a subscription.
+    fn forget_option_calc(&self, req_id: i64) {
+        // The engine forgets the question with the watch it opened for it, in
+        // the order it took them, and says nothing: the caller withdrew a
+        // question, not a subscription. A watch the caller opened itself stays.
         if let Ok(tx) = self.tx() {
-            let _ = self.withdraw_mkt_data(py, &tx, req_id);
-        }
-    }
-
-    /// Answer the questions that were waiting on the venue to state a model,
-    /// and forget them.
-    ///
-    /// One the venue still cannot answer is kept: the watch is open, so the
-    /// model may yet arrive. It is dropped when the caller withdraws it.
-    pub(crate) fn answer_kept_option_calcs(&self) {
-        let kept: Vec<(i64, crate::api::client::PendingOptionCalc)> = self
-            .pending_option_calcs.lock().unwrap()
-            .iter().map(|(k, v)| (*k, v.clone())).collect();
-        for (req_id, calc) in kept {
-            if calc.answered {
-                continue;
-            }
-            if self.solve_and_push_kept(req_id, &calc) {
-                // Marked, not dropped, so the caller's withdrawal still has a
-                // question to find and can still take down the watch this
-                // client opened to obtain the model. Nothing is sent here.
-                if let Some(kept) = self.pending_option_calcs.lock().unwrap().get_mut(&req_id) {
-                    kept.answered = true;
-                }
-            }
-        }
-    }
-
-    /// Answer one kept question, if the venue has stated a model by now.
-    /// Answers whether it did.
-    fn solve_and_push_kept(
-        &self, req_id: i64, calc: &crate::api::client::PendingOptionCalc,
-    ) -> bool {
-        let Ok(shared) = self.shared_state() else { return false };
-        let (given, und) = (calc.option_price, calc.under_price);
-        let wants_volatility = calc.wants_volatility;
-        let solved = self.core.solve_option(&shared, &calc.contract, Some(req_id), |terms, model, schedule| {
-            if wants_volatility {
-                crate::control::option_model::implied_volatility(
-                    terms, model, schedule, given, und,
-                )
-            } else {
-                crate::control::option_model::option_price(terms, model, schedule, given, und)
-            }
-        });
-        match solved {
-            Ok(answer) => {
-                // The caller supplied one of the pair and asked for the other,
-                // so the answer takes the side they left open.
-                let (implied_vol, opt_price) =
-                    if wants_volatility { (answer, given) } else { (given, answer) };
-                shared.market.push_option_computation(crate::types::OptionComputation {
-                    implied_vol,
-                    opt_price,
-                    und_price: und,
-                    ..crate::types::OptionComputation::solved(req_id)
-                });
-                true
-            }
-            // As on the other surface: only the refusal saying the venue has
-            // not stated its model resolves by waiting. The rest never do, and
-            // read as "not yet" they keep the question for the life of the
-            // session with nothing ever said about it.
-            Err(why) if why.message == crate::client_core::OPTION_MODEL_UNSTATED => false,
-            Err(why) => {
-                report_reason(self, req_id, &why);
-                true
-            }
+            let _ = self.send_control(&tx, ControlCommand::CancelCalculation { req_id });
         }
     }
 
@@ -988,13 +887,13 @@ mod advisor_partition_tests {
 mod option_model_watch_tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::mpsc::Receiver;
     use std::sync::atomic::Ordering;
+    use crate::api::client::tests::Engine;
     use crate::bridge::SharedState;
 
-    /// A connected client whose engine is a channel the test reads, and the
+    /// A connected client, the engine that takes what its calls send, and the
     /// wrapper it reports to.
-    fn wired(py: Python<'_>) -> (EClient, Receiver<ControlCommand>, Py<PyAny>) {
+    fn wired(py: Python<'_>) -> (EClient, Engine, Arc<SharedState>, Py<PyAny>) {
         let client = EClient::__new__(&pyo3::types::PyTuple::empty(py), None);
         let wrapper = py
             .eval(c"__import__('builtins').type('W', (), {'__init__': lambda s: setattr(s, 'calls', []), '__getattr__': lambda s, n: (lambda *a: s.calls.append((n, a)))})()", None, None)
@@ -1002,33 +901,19 @@ mod option_model_watch_tests {
             .unbind();
         client.__init__(wrapper.clone_ref(py)).unwrap();
         let shared = Arc::new(SharedState::new());
-        shared.market.set_instrument_count(2);
-        let (tx, rx) = std::sync::mpsc::sync_channel(16);
-        *client.shared.lock().unwrap() = Some(shared);
+        shared.market.set_instrument_count(4);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *client.shared.lock().unwrap() = Some(shared.clone());
         *client.control_tx.lock().unwrap() = Some(tx);
         client.connected.store(true, Ordering::Release);
-        // A registration answered from another thread has to outlast being
-        // scheduled; see the same note beside the client this file's
-        // neighbours build.
-        client.core.set_registration_timeout(std::time::Duration::from_secs(30));
-        (client, rx, wrapper)
+        let engine = Engine::new(rx, &shared);
+        (client, engine, shared, wrapper)
     }
 
-    /// An engine that answers the next subscribe with the slot it resolved
-    /// the description to, which is the only side that knows it, and hands the
-    /// channel back.
-    fn resolves_to(
-        rx: Receiver<ControlCommand>, slot: u32,
-    ) -> std::thread::JoinHandle<Receiver<ControlCommand>> {
-        std::thread::spawn(move || {
-            while let Ok(cmd) = rx.recv() {
-                if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = cmd {
-                    let _ = reply.send(Ok(slot));
-                    return rx;
-                }
-            }
-            panic!("the watch must reach the engine");
-        })
+    /// Let the engine take what the calls sent, and read what it said.
+    fn settle(py: Python<'_>, client: &EClient, engine: &Engine, shared: &Arc<SharedState>) {
+        engine.pump();
+        client.dispatch_once(py, shared).unwrap();
     }
 
     /// An option the caller states by description, carrying no conId.
@@ -1052,15 +937,23 @@ mod option_model_watch_tests {
     fn a_question_about_a_described_contract_is_kept_against_the_slot_the_request_took() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, rx, wrapper) = wired(py);
-            let engine = resolves_to(rx, 0);
+            let (client, engine, shared, wrapper) = wired(py);
             client.calculate_implied_volatility(py, 7, &described("SPY"), 1.0, 100.0, None)
                 .unwrap();
-            let _rx = py.detach(|| engine.join().unwrap());
+            engine.pump();
+            assert!(engine.engine().md_requests.is_empty(), "the watch waits for naming");
+            engine.name_subscription(7, &crate::types::model::Contract {
+                con_id: 700001, symbol: "SPY".into(), sec_type: "OPT".into(),
+                exchange: "SMART".into(), currency: "USD".into(),
+                last_trade_date_or_contract_month: "20261218".into(),
+                strike: 100.0, right: "C".into(), ..Default::default()
+            }, &shared);
+            settle(py, &client, &engine, &shared);
 
-            assert!(client.pending_option_calcs.lock().unwrap().contains_key(&7),
+            assert!(shared.market.holds_calculation(7),
                 "the question waits on the model the watch will bring");
-            assert_eq!(client.core.watching(7), Some(0), "under the slot the engine resolved");
+            let slot = engine.engine().md_requests[&7].slot;
+            assert_eq!(client.core.watching(7), Some(slot), "under the slot the engine took for it");
             let told: Vec<String> = wrapper.getattr(py, "calls").unwrap()
                 .cast_bound::<pyo3::types::PyList>(py).unwrap().iter()
                 .map(|c| c.get_item(0).unwrap().extract::<String>().unwrap())
@@ -1079,25 +972,28 @@ mod option_model_watch_tests {
     fn withdrawing_one_described_question_withdraws_its_own_watch() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, rx, _wrapper) = wired(py);
-            let engine = resolves_to(rx, 0);
+            let (client, engine, shared, _wrapper) = wired(py);
             client.calculate_implied_volatility(py, 7, &described("SPY"), 1.0, 100.0, None)
                 .unwrap();
-            let rx = py.detach(|| engine.join().unwrap());
-            let engine = resolves_to(rx, 1);
             client.calculate_implied_volatility(py, 8, &described("QQQ"), 1.0, 100.0, None)
                 .unwrap();
-            let rx = py.detach(|| engine.join().unwrap());
+            engine.pump();
+            assert!(engine.engine().md_requests.is_empty(), "both watches wait for naming");
+            for (req_id, con_id, symbol) in [(7, 700001, "SPY"), (8, 700002, "QQQ")] {
+                engine.name_subscription(req_id, &crate::types::model::Contract {
+                    con_id, symbol: symbol.into(), sec_type: "OPT".into(),
+                    exchange: "SMART".into(), currency: "USD".into(),
+                    last_trade_date_or_contract_month: "20261218".into(),
+                    strike: 100.0, right: "C".into(), ..Default::default()
+                }, &shared);
+            }
+            settle(py, &client, &engine, &shared);
 
-            client.cancel_calculate_implied_volatility(py, 7).unwrap();
-            let withdrawn: Vec<u32> = rx.try_iter()
-                .filter_map(|cmd| match cmd {
-                    ControlCommand::Unsubscribe { instrument, .. } => Some(instrument),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(withdrawn, [0], "the withdrawn question's own slot, and only it");
-            assert!(client.pending_option_calcs.lock().unwrap().contains_key(&8),
+            client.cancel_calculate_implied_volatility(7).unwrap();
+            settle(py, &client, &engine, &shared);
+            let left: Vec<i64> = engine.engine().md_requests.keys().copied().collect();
+            assert_eq!(left, [8], "the withdrawn question's own watch, and only it");
+            assert!(shared.market.holds_calculation(8),
                 "the question still waiting keeps its watch");
         });
     }
@@ -1109,37 +1005,32 @@ mod option_model_watch_tests {
         Python::initialize();
         Python::attach(|py| {
             for ids in [[7, 8], [8, 7]] {
-                let (client, rx, _wrapper) = wired(py);
-                client.core.set_registration_timeout(std::time::Duration::from_secs(5));
+                let (client, engine, shared, _wrapper) = wired(py);
                 let option = Contract { con_id: 1234, ..described("SPY") };
-                let engine = resolves_to(rx, 0);
                 client.calculate_implied_volatility(py, 7, &option, 1.0, 100.0, None).unwrap();
-                let rx = py.detach(|| engine.join().unwrap());
                 client.calculate_option_price(py, 8, &option, 0.2, 100.0, None).unwrap();
-                assert_eq!(client.core.watching(7), Some(0));
-                assert_eq!(client.core.watching(8), Some(0));
-                assert!(!rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::Subscribe { .. })),
-                    "both questions share one wire subscription");
+                settle(py, &client, &engine, &shared);
+                let slot = client.core.watching(7).expect("the first question watches the contract");
+                assert_eq!(client.core.watching(8), Some(slot), "both questions share one watch");
                 let cancel = |id| {
-                    if id == 7 { client.cancel_calculate_implied_volatility(py, id).unwrap(); }
-                    else { client.cancel_calculate_option_price(py, id).unwrap(); }
+                    if id == 7 { client.cancel_calculate_implied_volatility(id).unwrap(); }
+                    else { client.cancel_calculate_option_price(id).unwrap(); }
                 };
                 cancel(ids[0]);
+                settle(py, &client, &engine, &shared);
                 assert_eq!(client.core.watching(ids[0]), None);
-                assert_eq!(client.core.watching(ids[1]), Some(0));
-                assert!(!rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::Unsubscribe { .. })));
+                assert_eq!(client.core.watching(ids[1]), Some(slot));
+                assert!(engine.engine().farm.holds_market_data(slot), "the watch stays for the other");
                 cancel(ids[1]);
-                let withdrawn: Vec<_> = rx.try_iter().filter_map(|cmd| match cmd {
-                    ControlCommand::Unsubscribe { instrument, .. } => Some(instrument),
-                    _ => None,
-                }).collect();
-                assert_eq!(withdrawn, [0]);
-                assert!(client.pending_option_calcs.lock().unwrap().is_empty());
+                settle(py, &client, &engine, &shared);
+                assert!(!engine.engine().farm.holds_market_data(slot), "and goes with the last");
+                assert_eq!(shared.market.kept_calculation_count(), 0);
                 assert_eq!(client.core.watching(ids[1]), None);
             }
         });
     }
 }
+
 
 #[cfg(test)]
 mod calendar_request_tests {
@@ -1160,7 +1051,7 @@ mod calendar_request_tests {
         Python::initialize();
         Python::attach(|py| {
             let client = EClient::__new__(&pyo3::types::PyTuple::empty(py), None);
-            let (tx, rx) = std::sync::mpsc::sync_channel(4);
+            let (tx, rx) = std::sync::mpsc::channel();
             *client.shared.lock().unwrap() = Some(Arc::new(SharedState::new()));
             *client.control_tx.lock().unwrap() = Some(tx);
             client.connected.store(true, Ordering::Release);

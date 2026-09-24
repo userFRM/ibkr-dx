@@ -1,5 +1,15 @@
 use std::sync::Arc;
 
+/// Read the refusal delivered by a request's public entry point.
+pub(crate) fn reported(client: &EClient, call: impl FnOnce()) -> Result<(), crate::error_codes::Refusal> {
+    call();
+    match client.shared.drain_refused().pop() {
+        Some((_, code, message)) => Err(crate::error_codes::Refusal::stated(code as i32, message)),
+        None => Ok(()),
+    }
+}
+
+
 use super::*;
 use crate::types::model::PRICE_SCALE_F;
 use crate::api::wrapper::Wrapper;
@@ -15,21 +25,246 @@ use crate::control::histogram::HistogramEntry;
 ///
 /// A replace carries the caller's statement of the order on the replace
 /// itself, so there is one command and not two.
-pub(crate) fn next_command(
-    rx: &std::sync::mpsc::Receiver<ControlCommand>,
-) -> Option<ControlCommand> {
+pub(crate) fn next_command(rx: &Engine) -> Option<ControlCommand> {
     rx.try_recv().ok()
 }
 
+/// The commands a test client hands its engine, read as the engine sends
+/// them.
+///
+/// There is no engine behind a test client. An order a call hands over is
+/// taken here by the engine's own order intake — its contract registered, the
+/// order checked against what this session placed, built — so what a test
+/// reads is what the engine would put on the wire, and a refusal the engine
+/// makes is pushed as it would push it. Every other command is read as the
+/// call sent it.
+pub(crate) struct Engine {
+    rx: std::sync::mpsc::Receiver<ControlCommand>,
+    /// The loop's own channel, for what it carries through its laps.
+    into: std::sync::mpsc::Sender<ControlCommand>,
+    engine: std::cell::RefCell<crate::engine::hot_loop::HotLoop>,
+    out: std::cell::RefCell<std::collections::VecDeque<ControlCommand>>,
+}
+
+impl Engine {
+    pub(crate) fn new(rx: std::sync::mpsc::Receiver<ControlCommand>, shared: &Arc<SharedState>) -> Self {
+        let mut engine = crate::engine::hot_loop::HotLoop::new(shared.clone(), None, None);
+        // SPY holds the first slot, as the client's own cache has it.
+        engine.context.market.register_described(756733, "SPY", "STK", "SMART", "", "");
+        let (into, taken) = std::sync::mpsc::channel();
+        engine.set_control_rx(taken);
+        Self { rx, into, engine: std::cell::RefCell::new(engine), out: Default::default() }
+    }
+
+    /// Take everything the calls have sent so far, and what the engine held
+    /// of it once it can go: as a call that waited used to, within the bounds
+    /// the engine keeps.
+    pub(crate) fn pump(&self) {
+        while let Ok(cmd) = self.rx.try_recv() {
+            self.take(cmd);
+        }
+        let began = std::time::Instant::now();
+        loop {
+            let mut engine = self.engine.borrow_mut();
+            engine.work_through_orders(&mut 64);
+            let built: Vec<_> = engine.context.drain_pending_orders().collect();
+            self.out.borrow_mut().extend(built.into_iter().map(ControlCommand::Order));
+            if engine.intake.waiting() == 0 || began.elapsed() > std::time::Duration::from_secs(15) {
+                return;
+            }
+            drop(engine);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Run the engine's side on its own thread for as long as the calls keep
+    /// the channel open, for a test whose call waits on what the engine does.
+    /// What it would have sent is handed back when the channel closes.
+    pub(crate) fn run(self) -> std::thread::JoinHandle<Vec<ControlCommand>> {
+        std::thread::spawn(move || {
+            let mut sent = Vec::new();
+            loop {
+                match self.rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                    Ok(cmd) => self.take(cmd),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                self.pump();
+                sent.extend(self.out.borrow_mut().drain(..));
+            }
+            sent
+        })
+    }
+
+    /// Take one command as the engine takes it.
+    fn take(&self, cmd: ControlCommand) {
+        match crate::engine::hot_loop::intake::order_command(cmd) {
+            Ok(order) => {
+                let mut engine = self.engine.borrow_mut();
+                engine.take_order_command(order);
+                let built: Vec<_> = engine.context.drain_pending_orders().collect();
+                self.out.borrow_mut().extend(built.into_iter().map(ControlCommand::Order));
+            }
+            // A market-data request, which the engine carries in its own laps
+            // too: read back as it was asked, and taken by the loop.
+            Err(other @ (ControlCommand::Subscribe { .. }
+                | ControlCommand::CancelMktData { .. }
+                | ControlCommand::CancelCalculation { .. }
+                | ControlCommand::SubscribeTbt { .. }
+                | ControlCommand::UnsubscribeTbt { .. })) => {
+                self.out.borrow_mut().push_back(other.clone());
+                let _ = self.into.send(other);
+                self.engine.borrow_mut().poll_once();
+            }
+            Err(other) => self.out.borrow_mut().push_back(other),
+        }
+    }
+
+    /// Whether the engine keeps anything under this number for a later
+    /// transmit, once it has taken what the calls sent.
+    pub(crate) fn keeps(&self, order_id: u64) -> bool {
+        self.pump();
+        self.engine.borrow().intake.keeps(order_id)
+    }
+
+    /// The engine's loop, for a test that drives it further.
+    pub(crate) fn engine(&self) -> std::cell::RefMut<'_, crate::engine::hot_loop::HotLoop> {
+        self.engine.borrow_mut()
+    }
+
+    /// Answer the lookup naming a subscription's contract.
+    pub(crate) fn name_subscription(&self, req_id: i64, contract: &Contract, shared: &SharedState) {
+        let mut held = self.engine.borrow_mut();
+        let engine = &mut *held;
+        let query = engine.ccp.pending_named.iter().find_map(|(query, command, _)| {
+            matches!(command, ControlCommand::Subscribe { req_id: id, .. } if *id == req_id)
+                .then_some(*query)
+        }).expect("the request is waiting for its name");
+        let fields = [
+            (35, "d".to_string()), (320, query.to_string()), (323, "4".to_string()),
+            (55, contract.symbol.clone()), (167, contract.sec_type.clone()),
+            (6008, contract.con_id.to_string()), (207, contract.exchange.clone()),
+            (15, contract.currency.clone()), (202, contract.strike.to_string()),
+            (201, if contract.right == "C" { "1" } else { "0" }.to_string()),
+            (541, contract.last_trade_date_or_contract_month.clone()),
+        ];
+        let fields: Vec<_> = fields.iter().map(|(tag, value)| (*tag, value.as_str())).collect();
+        let frame = crate::protocol::fix::fix_build(&fields, 1);
+        engine.ccp.process_ccp_message(&frame, &mut None, &mut engine.context,
+            shared, &None, &mut crate::engine::hot_loop::HeartbeatState::new(), "DU123");
+        engine.poll_once();
+    }
+
+    pub(crate) fn try_recv(&self) -> Result<ControlCommand, std::sync::mpsc::TryRecvError> {
+        self.pump();
+        self.out.borrow_mut().pop_front().ok_or(std::sync::mpsc::TryRecvError::Empty)
+    }
+
+    pub(crate) fn try_iter(&self) -> impl Iterator<Item = ControlCommand> + '_ {
+        std::iter::from_fn(|| self.try_recv().ok())
+    }
+
+    /// Wait for the next command, until every sender has gone.
+    pub(crate) fn recv(&self) -> Result<ControlCommand, std::sync::mpsc::RecvError> {
+        loop {
+            if let Some(cmd) = self.out.borrow_mut().pop_front() {
+                return Ok(cmd);
+            }
+            match self.rx.recv_timeout(std::time::Duration::from_millis(1)) {
+                Ok(cmd) => self.take(cmd),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(std::sync::mpsc::RecvError);
+                }
+            }
+        }
+    }
+
+    /// The channel itself, for a test that runs an engine of its own on it.
+    pub(crate) fn into_receiver(self) -> std::sync::mpsc::Receiver<ControlCommand> {
+        self.rx
+    }
+}
+
+/// Take what the calls handed the engine, and read the session: what the
+/// engine recorded and refused is delivered, as a caller's next read delivers
+/// it.
+pub(crate) fn settled(client: &EClient, rx: &Engine) -> Vec<String> {
+    rx.pump();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    w.events
+}
+
+/// What the engine refused of what the calls handed it, once it has taken
+/// them: the number each is reported under, its code and its words.
+pub(crate) fn engine_refused(rx: &Engine, shared: &SharedState) -> Vec<(i64, i64, String)> {
+    rx.pump();
+    shared.drain_refused()
+}
+
+/// An order this session placed and the engine sent, for a test that needs
+/// one working to withdraw: placed through the call, and its record read.
+pub(crate) fn placed_here(client: &EClient, rx: &Engine, order_id: i64) {
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), transmit: true, ..Default::default()
+    };
+    client.try_place_order(order_id, &spy(), &order).expect("placed");
+    assert!(
+        matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. }))),
+        "the order goes out",
+    );
+    settled(client, rx);
+}
+
 /// Helper: create a test EClient backed by SharedState + channel.
-pub(crate) fn test_client() -> (EClient, std::sync::mpsc::Receiver<ControlCommand>, Arc<SharedState>) {
+pub(crate) fn test_client() -> (EClient, Engine, Arc<SharedState>) {
     let shared = Arc::new(SharedState::new());
-    let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(|| {});
     let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
-    // Pre-seed SPY so find_or_register_instrument hits the fast path.
+    // Pre-seed SPY's slot, as a subscription the engine has taken leaves it.
     client.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
-    (client, rx, shared)
+    let engine = Engine::new(rx, &shared);
+    (client, engine, shared)
+}
+
+/// What the engine does with the questions the calls handed it, for a client
+/// with no engine behind it: each held until what it is answered from has
+/// been stated — within the bounds the engine keeps — and answered where it
+/// then stands. Answers every question taken; hands back the other commands
+/// the calls sent, in order.
+pub(crate) fn the_engine_answers(rx: &Engine, shared: &Arc<SharedState>) -> Vec<ControlCommand> {
+    let mut asks = crate::engine::hot_loop::asks::Asks::new();
+    let mut others = Vec::new();
+    for cmd in std::iter::from_fn(|| rx.try_recv().ok()) {
+        match cmd {
+            ControlCommand::Ask(ask) => asks.take(ask),
+            ControlCommand::Retire(what) => asks.retire(what, shared),
+            other => others.push(other),
+        }
+    }
+    let began = std::time::Instant::now();
+    loop {
+        asks.answer_what_is_ready(shared, &mut 64);
+        if asks.len() == 0 || began.elapsed() > std::time::Duration::from_secs(15) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    others
+}
+
+/// Ask what the account has finished, and answer as the engine answers: the
+/// question goes to the engine, and its answer stands where the venue's
+/// sentinel does. There is no engine behind this client, so the answer is
+/// pushed here.
+pub(crate) fn completed_orders_asked_and_answered(client: &EClient, api_only: bool) {
+    client.req_completed_orders(api_only);
+    client.shared.push_call_record(crate::bridge::Record::Answer(
+        crate::bridge::Answer::CompletedOrders { api_only },
+    ));
 }
 
 /// The slot a contract holds is not answered after the engine has taken it
@@ -76,7 +311,7 @@ fn a_short_bracket_reads_its_exits_the_way_a_sell_does() {
 }
 
 /// Helper: SPY contract.
-fn spy() -> Contract {
+pub(crate) fn spy() -> Contract {
     Contract {
         con_id: 756733, symbol: "SPY".into(), exchange: "SMART".into(),
         sec_type: "STK".into(),
@@ -98,11 +333,11 @@ fn modifying_a_stop_carries_the_new_trigger() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
         aux_price: 600.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9201, &spy(), &stop).unwrap();
+    client.try_place_order(9201, &spy(), &stop).unwrap();
     rx.try_recv().expect("the submit");
 
     let moved = Order { aux_price: 610.0, ..stop };
-    client.place_order(9201, &spy(), &moved).unwrap();
+    client.try_place_order(9201, &spy(), &moved).unwrap();
 
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { stop_price, .. }) => assert_eq!(
@@ -123,11 +358,11 @@ fn modifying_a_trailing_stop_limit_carries_its_offset_and_trail() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL LIMIT".into(),
         aux_price: 1.0, lmt_price_offset: 0.1, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9202, &spy(), &placed).unwrap();
+    client.try_place_order(9202, &spy(), &placed).unwrap();
     rx.try_recv().expect("the submit");
 
     let moved = Order { aux_price: 2.0, lmt_price_offset: 0.2, ..placed };
-    client.place_order(9202, &spy(), &moved).unwrap();
+    client.try_place_order(9202, &spy(), &moved).unwrap();
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { price, stop_price, .. }) => assert_eq!(
             (price, stop_price), ((0.2 * PRICE_SCALE_F) as i64, (2.0 * PRICE_SCALE_F) as i64),
@@ -153,7 +388,7 @@ fn a_replace_carries_the_callers_statement_of_the_order() {
         last_exec: Default::default(),
     });
     let capped = Order { lmt_price: 101.0, ..named };
-    client.place_order(9302, &spy(), &capped).unwrap();
+    client.try_place_order(9302, &spy(), &capped).unwrap();
 
     match rx.try_recv().expect("the replace") {
         ControlCommand::Order(OrderRequest::Modify { order_id, spec, .. }) => {
@@ -172,7 +407,7 @@ fn a_replace_carries_the_callers_statement_of_the_order() {
     // every replace of it, the latest standing at the engine.
     client.core.update_order_status(&shared, 9302, OrderStatus::Submitted, 0.0, 1.0, 0);
     let recapped = Order { lmt_price: 102.0, ..capped };
-    client.place_order(9302, &spy(), &recapped).unwrap();
+    client.try_place_order(9302, &spy(), &recapped).unwrap();
     let mut seen = Vec::new();
     while let Ok(cmd) = rx.try_recv() {
         seen.push(match cmd {
@@ -203,14 +438,14 @@ fn a_held_replace_of_a_venue_named_order_still_states_it() {
         last_exec: Default::default(),
     });
     let held = Order { lmt_price: 101.0, transmit: false, ..named.clone() };
-    client.place_order(9303, &spy(), &held).unwrap();
+    client.try_place_order(9303, &spy(), &held).unwrap();
     assert!(
         rx.try_recv().is_err(),
         "a held replace holds its statement with it, so nothing leaves yet",
     );
 
     let sent = Order { lmt_price: 101.0, transmit: true, ..named };
-    client.place_order(9303, &spy(), &sent).unwrap();
+    client.try_place_order(9303, &spy(), &sent).unwrap();
     let mut stated = false;
     while let Ok(cmd) = rx.try_recv() {
         if let ControlCommand::Order(OrderRequest::Modify { order_id: 9303, spec, .. }) = cmd {
@@ -236,7 +471,7 @@ fn a_bracket_leg_replaced_before_its_acknowledgement_is_replaced_not_placed_agai
         action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 111.0, tif: "DAY".into(), transmit: true, ..Default::default()
     };
-    client.place_order(tp_id, &spy(), &moved).unwrap();
+    client.try_place_order(tp_id, &spy(), &moved).unwrap();
     let mut seen = Vec::new();
     while let Ok(cmd) = rx.try_recv() {
         seen.push(match cmd {
@@ -256,8 +491,9 @@ fn a_bracket_leg_replaced_before_its_acknowledgement_is_replaced_not_placed_agai
 /// answer from the record for the life of the order.
 #[test]
 fn a_brackets_legs_are_recorded_as_the_wire_states_them() {
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, _shared) = test_client();
     let [parent, tp, sl] = client.place_bracket(&spy(), "SSHORT", 1.0, 100.0, 90.0, 110.0).unwrap();
+    settled(&client, &rx);
     let entry = client.core.tracked_order(parent as u64).expect("tracked");
     assert_eq!((entry.action.as_str(), entry.tif.as_str(), entry.oca_group.as_str(), entry.oca_type, entry.parent_id), ("SSHORT", "DAY", "", 0, 0));
     for (id, order_type, lmt, aux) in [(tp, "LMT", 90.0, 0.0), (sl, "STP", 0.0, 110.0)] {
@@ -281,7 +517,7 @@ fn a_locally_placed_child_reports_the_parent_it_was_given() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, ..Default::default()
     };
-    client.place_order(9401, &spy(), &child).unwrap();
+    client.try_place_order(9401, &spy(), &child).unwrap();
     while rx.try_recv().is_ok() {}
 
     shared.orders.push_order_update(OrderUpdate {
@@ -337,7 +573,7 @@ fn a_fill_reports_the_parent_the_child_was_given() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, ..Default::default()
     };
-    client.place_order(9402, &spy(), &child).unwrap();
+    client.try_place_order(9402, &spy(), &child).unwrap();
     while rx.try_recv().is_ok() {}
 
     shared.orders.push_fill(Fill {
@@ -364,7 +600,7 @@ fn a_what_if_preview_reports_the_parent_the_child_was_given() {
         lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, what_if: true,
         ..Default::default()
     };
-    client.place_order(9403, &spy(), &child).unwrap();
+    client.try_place_order(9403, &spy(), &child).unwrap();
     while rx.try_recv().is_ok() {}
 
     shared.orders.push_what_if(WhatIfResponse {
@@ -402,7 +638,7 @@ fn a_preview_is_no_longer_tracked_while_its_own_callback_runs() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 110.0, tif: "DAY".into(), what_if: true, ..Default::default()
     };
-    client.place_order(9404, &spy(), &preview).unwrap();
+    client.try_place_order(9404, &spy(), &preview).unwrap();
     while rx.try_recv().is_ok() {}
 
     shared.orders.push_what_if(WhatIfResponse {
@@ -445,8 +681,7 @@ fn a_preview_is_no_longer_tracked_while_its_own_callback_runs() {
 #[test]
 fn a_tick_by_tick_stream_checks_the_number_it_was_given() {
     let (client, _rx, _shared) = test_client();
-    let err = client
-        .req_tick_by_tick_data(u32::MAX as i64 + 1, &spy(), "Last", 0, false)
+    let err = crate::api::client::tests::reported(&client, || client.req_tick_by_tick_data(u32::MAX as i64 + 1, &spy(), "Last", 0, false))
         .expect_err("a number no request id can hold is refused");
     assert!(err.message.contains("req_id"), "got: {err}");
 }
@@ -470,51 +705,41 @@ fn a_held_order_that_is_withdrawn_does_not_go_out_later() {
         ..Default::default()
     };
 
-    client.place_order(80, &spy(), &leg(80, 0, false)).expect("held");
-    client.cancel_order(80, "").expect("withdrawn");
+    client.try_place_order(80, &spy(), &leg(80, 0, false)).expect("held");
+    crate::api::client::tests::reported(&client, || client.cancel_order(80, "")).expect("withdrawn");
     assert!(rx.try_recv().is_err(), "nothing was sent, so nothing is withdrawn at the venue");
 
-    client.place_order(81, &spy(), &leg(81, 80, true)).expect("this one transmits");
+    client.try_place_order(81, &spy(), &leg(81, 80, true)).expect("this one transmits");
     let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(sent.len(), 1, "only the order that transmitted: {sent:?}");
 }
 
-/// order the refusal had already taken out.
+/// A placement is recorded ahead of anything the venue says about it.
+///
+/// Every later report about the order is read against the record. The engine
+/// writes it into the session's order before it sends the order, so the
+/// venue's first answer, which can only follow the send, always finds it.
 #[test]
 fn a_placement_is_recorded_before_its_command_can_be_taken() {
-    let shared = Arc::new(SharedState::new());
-    // A channel that hands over one command at a time. The placement stays
-    // inside its send until something takes it, which is what makes the moment
-    // before the command exists anywhere observable.
-    let (tx, rx) = std::sync::mpsc::sync_channel(0);
-    let client = EClient::from_parts(shared, tx, std::thread::spawn(|| {}), "DU123".into());
-    client.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
+    let (client, rx, shared) = test_client();
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), transmit: true, ..Default::default()
     };
-
-    let recorded = std::thread::scope(|scope| {
-        scope.spawn(|| client.place_order(77, &spy(), &order).expect("the order goes out"));
-        // Nothing has taken the command yet, so the placement is still inside
-        // its send, and the record has to be here by now.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !client.core.is_order_tracked(77) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        let recorded = client.core.is_order_tracked(77);
-        rx.recv().expect("the submit");
-        recorded
+    client.try_place_order(77, &spy(), &order).expect("the order goes out");
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. }))));
+    // The venue answers at once, before the caller has read anything.
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 77, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0.0, remaining_qty: 1.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
-    // The client's own shutdown goes down this channel when it is dropped, and
-    // a channel that hands over one at a time waits for somebody to take it.
-    // Taken before the assertion, so a failing one is a failure and not a wait.
-    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let heard = settled(&client, &rx);
     assert!(
-        recorded,
-        "the order was published before this client had anywhere to record what \
-         the venue goes on to say about it",
+        client.core.is_order_tracked(77),
+        "the order was sent before this client had anywhere to record what the venue \
+         goes on to say about it",
     );
+    assert!(heard.iter().any(|e| e.starts_with("order_status:77:Submitted")), "{heard:?}");
 }
 
 /// The other surface waited for the naming all along.
@@ -590,10 +815,10 @@ fn withdrawing_a_held_order_frees_its_id_to_place_again() {
         ..Default::default()
     };
 
-    client.place_order(82, &spy(), &leg(82, 0, false)).expect("held");
-    client.cancel_order(82, "").expect("withdrawn");
+    client.try_place_order(82, &spy(), &leg(82, 0, false)).expect("held");
+    crate::api::client::tests::reported(&client, || client.cancel_order(82, "")).expect("withdrawn");
 
-    client.place_order(82, &spy(), &leg(82, 0, true)).expect("placed again under the same id");
+    client.try_place_order(82, &spy(), &leg(82, 0, true)).expect("placed again under the same id");
     match rx.try_recv().expect("the order goes out") {
         ControlCommand::Order(OrderRequest::SubmitEx { order_id, .. }) => {
             assert_eq!(order_id, 82, "the id places a new order");
@@ -618,9 +843,9 @@ fn transmitting_a_parent_releases_what_hangs_from_it() {
         ..Default::default()
     };
 
-    client.place_order(90, &spy(), &leg(90, 0, false)).expect("held");
-    client.place_order(91, &spy(), &leg(91, 90, false)).expect("held under it");
-    client.place_order(90, &spy(), &leg(90, 0, true)).expect("the parent transmits");
+    client.try_place_order(90, &spy(), &leg(90, 0, false)).expect("held");
+    client.try_place_order(91, &spy(), &leg(91, 90, false)).expect("held under it");
+    client.try_place_order(90, &spy(), &leg(90, 0, true)).expect("the parent transmits");
 
     let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(sent.len(), 2, "the child held under it goes too: {sent:?}");
@@ -647,8 +872,8 @@ fn placing_again_under_a_held_id_submits_it_rather_than_replacing_it() {
         ..Default::default()
     };
 
-    client.place_order(90, &spy(), &leg(false, 100.0)).expect("held");
-    client.place_order(90, &spy(), &leg(true, 105.0)).expect("the same id transmits");
+    client.try_place_order(90, &spy(), &leg(false, 100.0)).expect("held");
+    client.try_place_order(90, &spy(), &leg(true, 105.0)).expect("the same id transmits");
 
     let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(sent.len(), 1, "one order goes out, not a replace and a stale submit: {sent:?}");
@@ -666,48 +891,7 @@ fn placing_again_under_a_held_id_submits_it_rather_than_replacing_it() {
         }
         other => panic!("expected a submit, got {other:?}"),
     }
-    assert!(!client.core.is_held(90), "and nothing of it is left queued");
-}
-
-/// A family that cannot all reach the engine is not half sent and forgotten.
-///
-/// Taken out of the hold first and then sent one by one, a send that failed
-/// partway left the parent live at the venue with its protective children
-/// already forgotten, and the caller was told only that the call had failed.
-#[test]
-fn a_family_the_engine_stops_receiving_says_what_reached_it() {
-    let (client, rx, _shared) = test_client();
-    let leg = |id: i64, parent: i64, transmit: bool| Order {
-        order_id: id,
-        parent_id: parent,
-        transmit,
-        action: if parent == 0 { "BUY".into() } else { "SELL".into() },
-        total_quantity: 100.0,
-        order_type: "LMT".into(),
-        lmt_price: 100.0,
-        tif: "DAY".into(),
-        ..Default::default()
-    };
-
-    client.place_order(90, &spy(), &leg(90, 0, false)).expect("held");
-    client.place_order(91, &spy(), &leg(91, 90, false)).expect("held under it");
-    client.place_order(92, &spy(), &leg(92, 90, false)).expect("held under it");
-    drop(rx);
-
-    let why = client
-        .place_order(90, &spy(), &leg(90, 0, true))
-        .expect_err("the engine is gone, so the family cannot go out");
-    assert!(
-        why.message.contains("nothing was sent") && why.message.contains("still held"),
-        "the caller is told nothing went and the family is still there: {why}",
-    );
-    for id in [91u64, 92] {
-        assert!(client.core.is_held(id), "order {id} is still held to be sent again");
-    }
-    assert!(
-        !client.core.is_held(90),
-        "the order that asked to go does not stay queued under the terms it replaced",
-    );
+    assert!(!rx.keeps(90), "and nothing of it is left queued");
 }
 
 /// A bracket built the way the reference client's own sample builds one.
@@ -733,11 +917,11 @@ fn a_bracket_held_back_goes_out_when_its_last_leg_transmits() {
         ..Default::default()
     };
 
-    client.place_order(70, &spy(), &held(70, 0, false)).expect("kept, not refused");
-    client.place_order(71, &spy(), &held(71, 70, false)).expect("kept, not refused");
+    client.try_place_order(70, &spy(), &held(70, 0, false)).expect("kept, not refused");
+    client.try_place_order(71, &spy(), &held(71, 70, false)).expect("kept, not refused");
     assert!(rx.try_recv().is_err(), "nothing goes out while every leg is held");
 
-    client.place_order(72, &spy(), &held(72, 70, true)).expect("and this one sends them");
+    client.try_place_order(72, &spy(), &held(72, 70, true)).expect("and this one sends them");
     let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(sent.len(), 3, "the parent, the sibling and this one: {sent:?}");
 }
@@ -758,8 +942,7 @@ fn a_stream_on_a_finished_lookups_number_is_a_stream() {
         "the lookup finished",
     );
 
-    client
-        .req_real_time_bars(4242, &spy(), 5, "TRADES", true)
+    crate::api::client::tests::reported(&client, || client.req_real_time_bars(4242, &spy(), 5, "TRADES", true))
         .expect("the stream takes the number");
     assert!(
         !client.core.hist_initial_complete.lock().unwrap().contains(&4242),
@@ -786,7 +969,7 @@ fn an_unusable_quantity_is_refused() {
             action: "BUY".into(), total_quantity: qty, order_type: "MKT".into(),
             tif: "DAY".into(), ..Default::default()
         };
-        let err = client.place_order(9102, &spy(), &order)
+        let err = client.try_place_order(9102, &spy(), &order)
             .expect_err("must be refused");
         assert!(err.message.contains(expect), "quantity {qty}: expected {expect:?}, got: {err}");
     }
@@ -804,7 +987,7 @@ fn the_quantity_boundaries_are_exact() {
             action: "BUY".into(), total_quantity: qty, order_type: "MKT".into(),
             tif: "DAY".into(), ..Default::default()
         };
-        client.place_order(9601, &spy(), &order)
+        client.try_place_order(9601, &spy(), &order)
     };
 
     let largest = crate::types::MAX_QTY_SHARES;
@@ -828,14 +1011,14 @@ fn zero_shares_reaches_the_venue_rather_than_a_refusal_written_here() {
         action: "BUY".into(), total_quantity: 0.0, order_type: "MKT".into(),
         tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9602, &spy(), &bare).expect("the venue is asked, not this client");
+    client.try_place_order(9602, &spy(), &bare).expect("the venue is asked, not this client");
     assert!(rx.try_recv().is_ok(), "and it reaches the wire to be asked");
 
     let cash = Order {
         action: "BUY".into(), total_quantity: 0.0, order_type: "LMT".into(),
         lmt_price: 100.0, cash_qty: 1000.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9603, &spy(), &cash).expect("a cash-sized order still places");
+    client.try_place_order(9603, &spy(), &cash).expect("a cash-sized order still places");
 }
 
 /// A relative order is modified as itself.
@@ -850,10 +1033,10 @@ fn a_relative_order_is_modified_as_itself() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "REL".into(),
         aux_price: 1.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9201, &spy(), &submit).expect("the relative order submits");
+    client.try_place_order(9201, &spy(), &submit).expect("the relative order submits");
     while rx.try_recv().is_ok() {}
     let moved = Order { aux_price: 1.5, ..submit };
-    client.place_order(9201, &spy(), &moved).expect("and its replace goes");
+    client.try_place_order(9201, &spy(), &moved).expect("and its replace goes");
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert!(
             matches!(spec.kind, crate::types::OrderKind::Rel { offset, .. }
@@ -875,10 +1058,10 @@ fn an_order_with_a_minimum_quantity_is_modified_with_it() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), min_qty: 50, ..Default::default()
     };
-    client.place_order(9301, &spy(), &order).expect("the order submits");
+    client.try_place_order(9301, &spy(), &order).expect("the order submits");
     while rx.try_recv().is_ok() {}
     let moved = Order { lmt_price: 101.0, ..order };
-    client.place_order(9301, &spy(), &moved).expect("and its replace goes");
+    client.try_place_order(9301, &spy(), &moved).expect("and its replace goes");
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => {
             assert_eq!(spec.attrs.min_qty, 50, "the minimum rides the replace");
@@ -901,7 +1084,7 @@ fn an_order_naming_a_model_is_placed_for_it() {
         lmt_price: 100.0, tif: "DAY".into(), model_code: "GROWTH".into(),
         ..Default::default()
     };
-    client.place_order(9501, &spy(), &order).expect("an order for a model is placed");
+    client.try_place_order(9501, &spy(), &order).expect("an order for a model is placed");
     match rx.try_recv().expect("the order reaches the wire") {
         ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. }) => assert_eq!(
             attrs.model_code, "GROWTH",
@@ -965,7 +1148,7 @@ fn an_order_that_cannot_be_placed_as_asked_is_refused() {
             lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
         };
         set(&mut order);
-        let err = client.place_order(9401, &spy(), &order)
+        let err = client.try_place_order(9401, &spy(), &order)
             .expect_err(&format!("{what} must be refused"));
         assert!(err.message.contains(names), "{what}: {err}");
         assert!(rx.try_recv().is_err(), "{what}: nothing reaches the wire");
@@ -986,10 +1169,10 @@ fn a_limit_if_touched_is_replaced_as_itself() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "LIT".into(),
         lmt_price: 100.0, aux_price: 101.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9302, &spy(), &order).expect("the limit-if-touched submits");
+    client.try_place_order(9302, &spy(), &order).expect("the limit-if-touched submits");
     while rx.try_recv().is_ok() {}
 
-    client.place_order(9302, &spy(), &order).expect("and is replaced as itself");
+    client.try_place_order(9302, &spy(), &order).expect("and is replaced as itself");
     match next_command(&rx).expect("the replace reaches the wire") {
         ControlCommand::Order(OrderRequest::Modify { order_id, .. }) => {
             assert_eq!(order_id, 9302);
@@ -1006,10 +1189,10 @@ fn a_minimum_added_by_a_modify_goes_out_on_it() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9303, &spy(), &plain).expect("a plain limit submits");
+    client.try_place_order(9303, &spy(), &plain).expect("a plain limit submits");
     while rx.try_recv().is_ok() {}
     let attributed = Order { min_qty: 50, ..plain };
-    client.place_order(9303, &spy(), &attributed).expect("the replace goes");
+    client.try_place_order(9303, &spy(), &attributed).expect("the replace goes");
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => {
             assert_eq!(spec.attrs.min_qty, 50, "the minimum rides the replace");
@@ -1045,11 +1228,11 @@ fn every_restatable_type_still_modifies() {
             action: "BUY".into(), total_quantity: 1.0, order_type: order_type.into(),
             lmt_price: lmt, aux_price: aux, tif: "DAY".into(), ..Default::default()
         };
-        client.place_order(9701, &spy(), &order)
+        client.try_place_order(9701, &spy(), &order)
             .unwrap_or_else(|e| panic!("{order_type} must submit: {e}"));
         while rx.try_recv().is_ok() {}
 
-        client.place_order(9701, &spy(), &order)
+        client.try_place_order(9701, &spy(), &order)
             .unwrap_or_else(|e| panic!("{order_type} must still modify: {e}"));
         match next_command(&rx).expect("the modify") {
             ControlCommand::Order(OrderRequest::Modify { .. }) => {}
@@ -1069,14 +1252,14 @@ fn a_trailing_stop_limit_changed_into_a_limit_goes_out_as_the_limit() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL LIMIT".into(),
         aux_price: 1.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9702, &spy(), &trail).expect("the trailing stop limit submits");
+    client.try_place_order(9702, &spy(), &trail).expect("the trailing stop limit submits");
     while rx.try_recv().is_ok() {}
 
     let limit = Order {
         action: "SELL".into(), total_quantity: 2.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9702, &spy(), &limit).expect("the change goes");
+    client.try_place_order(9702, &spy(), &limit).expect("the change goes");
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert!(
             matches!(spec.kind, crate::types::OrderKind::Limit { .. }),
@@ -1094,11 +1277,11 @@ fn a_limit_order_still_modifies() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9202, &spy(), &order).unwrap();
+    client.try_place_order(9202, &spy(), &order).unwrap();
     while rx.try_recv().is_ok() {}
 
     let moved = Order { lmt_price: 101.0, ..order };
-    client.place_order(9202, &spy(), &moved).expect("a limit modify still goes through");
+    client.try_place_order(9202, &spy(), &moved).expect("a limit modify still goes through");
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { .. }) => {}
         other => panic!("expected a Modify, got {other:?}"),
@@ -1446,7 +1629,7 @@ fn next_order_id_monotonic() {
 /// zero in a release one, which the venue refuses as an id already used.
 #[test]
 fn the_id_after_the_highest_there_is_does_not_wrap_to_zero() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.orders.push_order_info(u64::MAX, crate::bridge::RichOrderInfo {
         contract: Default::default(),
         order: crate::types::model::Order { order_id: -1, ..Default::default() },
@@ -1455,7 +1638,7 @@ fn the_id_after_the_highest_there_is_does_not_wrap_to_zero() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_ids(&mut w);
+    client.req_ids(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
 
     assert_eq!(w.events.len(), 1);
     assert!(
@@ -1467,9 +1650,9 @@ fn the_id_after_the_highest_there_is_does_not_wrap_to_zero() {
 
 #[test]
 fn req_ids_calls_wrapper() {
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut w = RecordingWrapper::default();
-    client.req_ids(&mut w);
+    client.req_ids(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     assert_eq!(w.events.len(), 1);
     assert!(w.events[0].starts_with("next_valid_id:"));
 }
@@ -1478,12 +1661,11 @@ fn req_ids_calls_wrapper() {
 //  Market data requests
 // ═══════════════════════════════════════════════════════════════════
 
+/// The request goes to the engine whole: the engine registers the contract.
 #[test]
-fn req_mkt_data_sends_register_and_subscribe() {
+fn req_mkt_data_sends_subscribe() {
     let (client, rx, _shared) = test_client();
-    let _ = client.req_mkt_data(1, &spy(), "", false, false);
-    let cmd1 = rx.try_recv().unwrap();
-    assert!(matches!(cmd1, ControlCommand::RegisterInstrument { contract: ContractRef { con_id: 756733, .. }, .. }));
+    let _ = client.try_req_mkt_data(1, &spy(), "", false, false);
     let cmd2 = rx.try_recv().unwrap();
     match cmd2 {
         ControlCommand::Subscribe { contract: ContractRef { con_id, symbol, .. }, .. } => {
@@ -1497,8 +1679,7 @@ fn req_mkt_data_sends_register_and_subscribe() {
 #[test]
 fn req_mkt_data_defaults_to_realtime_mode() {
     let (client, rx, _shared) = test_client();
-    let _ = client.req_mkt_data(1, &spy(), "", false, false);
-    let _register = rx.try_recv().unwrap();
+    let _ = client.try_req_mkt_data(1, &spy(), "", false, false);
     match rx.try_recv().unwrap() {
         ControlCommand::Subscribe { mode_9887, .. } => assert_eq!(mode_9887, 0),
         other => panic!("expected Subscribe, got {other:?}"),
@@ -1509,8 +1690,7 @@ fn req_mkt_data_defaults_to_realtime_mode() {
 fn req_mkt_data_ex_propagates_mode_9887() {
     for mode in [1_i32, 2, 3] {
         let (client, rx, _shared) = test_client();
-        let _ = client.req_mkt_data_ex(1, &spy(), "", false, false, mode, &[]);
-        let _register = rx.try_recv().unwrap();
+        let _ = client.try_req_mkt_data_ex(1, &spy(), "", false, false, mode, &[]);
         match rx.try_recv().unwrap() {
             ControlCommand::Subscribe { contract: ContractRef { con_id, .. }, mode_9887, .. } => {
                 assert_eq!(mode_9887, mode);
@@ -1529,49 +1709,41 @@ fn req_mkt_data_ex_propagates_mode_9887() {
 #[test]
 fn a_stream_outlives_the_snapshot_it_was_watching() {
     let (client, rx, _shared) = test_client();
-    // The snapshot holds the contract.
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.snapshot_reqs.lock().unwrap().insert(1, (std::time::Instant::now(), 0));
-
-    // A stream watches what is already up.
-    client.req_mkt_data(2, &spy(), "", false, false).expect("watches what is up");
-    while rx.try_recv().is_ok() {}
+    // The snapshot holds the contract, and a stream watches what is already up.
+    client.try_req_mkt_data(1, &spy(), "", true, false).expect("the snapshot");
+    client.try_req_mkt_data(2, &spy(), "", false, false).expect("watches what is up");
+    settled(&client, &rx);
+    let slot = rx.engine().md_requests[&1].slot;
 
     // The snapshot has what it asked for and withdraws.
-    client.cancel_mkt_data(1).expect("the snapshot is done");
-
-    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).expect("the snapshot is done");
+    settled(&client, &rx);
     assert!(
-        !sent.iter().any(|c| matches!(c, ControlCommand::Unsubscribe { .. })),
-        "the snapshot took the stream's subscription down with it: {sent:?}",
+        rx.engine().farm.holds_market_data(slot),
+        "the snapshot took the stream's subscription down with it",
     );
     assert_eq!(
-        client.core.instrument_to_req.lock().unwrap().get(&0).copied(),
+        client.core.instrument_to_req.lock().unwrap().get(&slot).copied(),
         Some(2),
         "and the stream holds it now",
     );
 }
 
-/// Two callers asking for the headlines on a contract neither has registered
-/// yet still ask once between them. Decided against the instrument, both
-/// found nobody had asked — the instrument is not known that early — and both
-/// asked, leaving a subscription the one withdrawal could not match.
+/// Two requests asking for the headlines on one contract ask the venue once
+/// between them, and the headlines outlast the first of them: the venue is
+/// asked by contract and withdrawn by contract, so asking twice leaves a
+/// subscription the one withdrawal cannot match.
 #[test]
-fn two_callers_racing_for_one_contract_ask_for_the_headlines_once() {
-    let (client, rx, shared) = test_client();
-    // Asked against the contract, which both callers name before either has
-    // an instrument to name instead.
-    let first = client.core.first_to_ask_for_news(spy().con_id, 1);
-    let second = client.core.first_to_ask_for_news(spy().con_id, 2);
+fn two_requests_for_one_contracts_headlines_ask_once() {
+    let (client, rx, _shared) = test_client();
+    client.try_req_mkt_data(1, &spy(), "292", false, false).expect("taken");
+    client.try_req_mkt_data(2, &spy(), "292", false, false).expect("taken");
+    rx.pump();
+    assert_eq!(rx.engine().farm.news_subscriptions.len(), 1, "asked once between them");
 
-    assert!(first, "the first caller asks");
-    assert!(!second, "and the second finds it already asked");
-
-    // And the headlines outlast the first of them.
-    assert_eq!(client.core.release_news(&shared, 1), None, "one of two left");
-    let _ = rx.try_recv();
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).expect("withdrawn");
+    rx.pump();
+    assert_eq!(rx.engine().farm.news_subscriptions.len(), 1, "one of two left");
 }
 
 /// An order that is done stops being tracked, whether it filled or not.
@@ -1652,7 +1824,7 @@ fn a_profit_subscription_on_an_ended_session_takes_no_slot() {
     let mut w = Heard::default();
     client.req_pnl(9, "DU123", "");
     client.process_msgs(&mut w);
-    assert!(client.core.pnl_req_id.lock().unwrap().is_none(), "the slot is not taken");
+    assert!(client.core.pnl_req_id.lock().unwrap().is_empty(), "the slot is not taken");
     assert!(w.0.contains(&504), "and the caller is told the session is over: {:?}", w.0);
 }
 
@@ -1686,10 +1858,10 @@ fn an_account_read_after_the_session_ended_is_refused() {
     }
 
     let mut w = Heard::default();
-    client.req_positions(&mut w);
-    client.req_managed_accts(&mut w);
-    client.req_account_updates_multi(1, "", "", false, &mut w);
-    client.req_positions_multi(2, "", "", &mut w);
+    client.req_positions(); client.process_msgs(&mut w);
+    client.req_managed_accts(); client.process_msgs(&mut w);
+    client.req_account_updates_multi(1, "", "", false); client.process_msgs(&mut w);
+    client.req_positions_multi(2, "", ""); client.process_msgs(&mut w);
     // The refusals are queued and handed over on the next pass, as every
     // refusal this surface makes is.
     client.process_msgs(&mut w);
@@ -1715,17 +1887,21 @@ fn a_withdrawal_names_an_order_this_client_is_working() {
     let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
 
-    let refused = client.cancel_order(42, "");
+    crate::api::client::tests::reported(&client, || client.cancel_order(42, "")).expect("taken");
+    let refused = engine_refused(&rx, &shared);
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 135),
+        matches!(refused.as_slice(), [(42, 135, _)]),
         "no order is working under that number: {refused:?}",
     );
     assert!(rx.try_recv().is_err(), "and nothing was sent under it");
 
     // An order this session placed.
-    client.core.track_order(42, spy(), Order::default(), 0);
-    client.cancel_order(42, "").expect("the withdrawal goes");
-    rx.try_recv().expect("and it reaches the engine");
+    placed_here(&client, &rx, 42);
+    crate::api::client::tests::reported(&client, || client.cancel_order(42, "")).expect("the withdrawal goes");
+    assert!(
+        matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { order_id: 42, .. }))),
+        "and it reaches the venue",
+    );
 
     // And one carried over from a previous session, which this client learns
     // of only from the connect-time replay. Refusing this is the failure that
@@ -1739,8 +1915,8 @@ fn a_withdrawal_names_an_order_this_client_is_working() {
         },
         last_exec: Default::default(),
     });
-    client.cancel_order(77, "").expect("an order the venue named is withdrawable");
-    rx.try_recv().expect("and that withdrawal reaches the engine too");
+    crate::api::client::tests::reported(&client, || client.cancel_order(77, "")).expect("an order the venue named is withdrawable");
+    rx.try_recv().expect("and that withdrawal reaches the venue too");
 }
 
 /// A number the venue has finished an order under does not place another.
@@ -1759,7 +1935,7 @@ fn a_number_the_venue_has_finished_an_order_under_places_no_other() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(83, &spy(), &order).expect("placed");
+    client.try_place_order(83, &spy(), &order).expect("placed");
     rx.try_recv().expect("the first order goes out");
 
     shared.orders.push_order_update(OrderUpdate {
@@ -1769,9 +1945,10 @@ fn a_number_the_venue_has_finished_an_order_under_places_no_other() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
-    let refused = client.place_order(83, &spy(), &order);
+    client.try_place_order(83, &spy(), &order).expect("taken");
+    let refused = engine_refused(&rx, &shared);
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 103),
+        matches!(refused.as_slice(), [(83, 103, _)]),
         "the number has already been worked: {refused:?}",
     );
     assert!(
@@ -1813,7 +1990,7 @@ fn an_answering_call_does_not_swallow_a_venue_data_notice() {
 
     // The pump an answering call runs, into a collector with no session record.
     let mut collector = RecordingWrapper::default();
-    client.pump_for_ask(&mut collector);
+    client.pump_for_ask(&mut collector, &[]);
     assert!(
         !collector.events.iter().any(|e| e.starts_with("error:-1:2103:")),
         "the notice went to the ask collector and is gone: {:?}", collector.events,
@@ -1859,22 +2036,19 @@ fn a_restore_without_a_loss_the_caller_saw_is_not_announced() {
     );
 }
 
-/// A recovery that lands between the two reads is not undone by the loss it
-/// followed.
+/// A loss and the recovery from it, both queued before a read, are said in
+/// the order they happened, and the session reads as connected after them.
 ///
-/// The pair is read one flag at a time, and the engine can recover in the gap:
-/// the loss is taken, the recovery lands, and the recovery is taken on the
-/// same pass. Each setter clears the other, so holding both means the recovery
-/// is the later of the two. Applied the other way round the loss went on last,
-/// and a session that had come back — resubscribed and answering — read as
-/// disconnected for the rest of its life, with nothing queued to say otherwise
-/// and the caller told it recovered before it was told it had gone.
+/// Each is a record pushed as the connection flag flips, so the read hands
+/// them over in their order rather than reconciling two flags it happens to
+/// find raised together.
 #[test]
-fn a_recovery_landing_between_the_two_reads_is_not_undone_by_the_loss() {
+fn a_loss_and_its_recovery_in_one_read_are_said_in_order() {
     let (client, _rx, shared) = test_client();
     assert!(client.is_connected(), "connected to begin with");
 
-    shared.raise_a_loss_a_recovery_landed_behind_for_test();
+    shared.set_connection_lost();
+    shared.set_connection_restored();
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
@@ -1920,32 +2094,6 @@ fn an_answering_call_does_not_swallow_the_notice_that_the_session_closed() {
     );
 }
 
-/// A request that asked for headlines and then failed to register leaves
-/// nothing behind.
-///
-/// The headlines go out before the registration can fail, and the record of
-/// who asked is what the next caller reads to decide whether to ask at all.
-/// Left standing for a request that never started, this contract's headlines
-/// are never requested again and the subscription that did go out cannot be
-/// withdrawn — the path that withdraws it needs a request this one no longer
-/// has.
-#[test]
-fn a_failed_request_does_not_keep_this_contract_from_asking_for_news_again() {
-    let (client, rx, _shared) = test_client();
-    let con_id = spy().con_id;
-
-    // No engine answers a registration here, so the request fails after the
-    // headlines have been asked for.
-    let refused = client.req_mkt_data(1, &spy(), "292", false, false);
-    assert!(refused.is_err(), "the registration was expected to fail");
-
-    assert!(
-        client.core.first_to_ask_for_news(con_id, 2),
-        "the failed request is still recorded as watching, so nobody asks again",
-    );
-    let _ = rx.try_iter().count();
-}
-
 /// A calculation asked before the venue has stated a model keeps the question
 /// and waits, rather than refusing it for having been asked first. The venue
 /// states a model for a contract that is watched, so asking about one that is
@@ -1953,25 +2101,25 @@ fn a_failed_request_does_not_keep_this_contract_from_asking_for_news_again() {
 /// the watch will bring.
 #[test]
 fn a_calculation_waits_for_the_model_rather_than_refusing() {
-    let (client, _rx, _shared) = test_client();
-    // Already watched, so the watch needs no opening — what is at issue is
-    // whether the question survives the venue not having stated a model yet.
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-
+    let (client, rx, shared) = test_client();
     client.calculate_implied_volatility(7, &spy(), 12.5, 600.0);
+    settled(&client, &rx);
 
     assert!(
-        client.pending_option_calcs.lock().unwrap().contains_key(&7),
+        shared.market.holds_calculation(7),
         "the question was not kept, so the model will arrive with nobody asking",
     );
+    assert_eq!(client.backlog(), 1, "the unanswered calculation is still held");
 
     // Withdrawn by the caller: the watch goes with it.
     client.cancel_calculate_implied_volatility(7);
+    settled(&client, &rx);
     assert!(
-        !client.pending_option_calcs.lock().unwrap().contains_key(&7),
+        !shared.market.holds_calculation(7),
         "the question outlived the caller's interest in it",
     );
+    assert!(!rx.engine().md_requests.contains_key(&7), "and the watch it opened went with it");
+    assert_eq!(client.backlog(), 0, "the withdrawal finishes the held question");
 }
 
 /// The other direction of the same pair: a price asked for at a stated
@@ -1979,150 +2127,126 @@ fn a_calculation_waits_for_the_model_rather_than_refusing() {
 /// withdrawn the same way.
 #[test]
 fn a_price_calculation_waits_and_is_withdrawn_the_same_way() {
-    let (client, _rx, _shared) = test_client();
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-
+    let (client, rx, shared) = test_client();
     client.calculate_option_price(9, &spy(), 0.25, 600.0);
+    settled(&client, &rx);
     assert!(
-        client.pending_option_calcs.lock().unwrap().contains_key(&9),
+        shared.market.holds_calculation(9),
         "the question was not kept, so the model will arrive with nobody asking",
     );
 
     client.cancel_calculate_option_price(9);
+    settled(&client, &rx);
     assert!(
-        !client.pending_option_calcs.lock().unwrap().contains_key(&9),
+        !shared.market.holds_calculation(9),
         "the question outlived the caller's interest in it",
     );
+    assert!(!rx.engine().md_requests.contains_key(&9), "and the watch it opened went with it");
 }
 
-/// The venue is asked for the headlines by contract and withdrawn by
-/// contract, so it is asked once. Asked once per caller, a second caller
-/// added a subscription the single withdrawal could not match, and it was
-/// left running with nobody listening.
-#[test]
-fn the_headlines_are_asked_for_once_however_many_callers_want_them() {
-    let (client, rx, _shared) = test_client();
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-
-    client.req_mkt_data(2, &spy(), "292", false, false).expect("watches what is up");
-    client.req_mkt_data(3, &spy(), "292", false, false).expect("watches what is up");
-    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-
-    let asked = sent.iter()
-        .filter(|c| matches!(c, ControlCommand::SubscribeNews { .. }))
-        .count();
-    assert_eq!(asked, 1, "asked more times than it can be withdrawn: {sent:?}");
-}
-
-/// The headlines stop when the last caller that asked for them goes, not when
-/// the first one does and not when the quotes happen to end. A caller
+/// The headlines stop when the last request that asked for them goes, not
+/// when the first one does and not when the quotes happen to end. A request
 /// watching a subscription someone else opened leaves by a different path,
 /// and the news it asked for was never withdrawn on that one.
 #[test]
 fn the_headlines_stop_with_the_last_caller_that_asked_for_them() {
-    let (client, rx, shared) = test_client();
-    // Someone already watches the quotes, and asked for no headlines.
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    let (client, rx, _shared) = test_client();
+    // Someone already watches the quotes, and asked for no headlines; a
+    // second request watches the same contract and does want them.
+    client.try_req_mkt_data(1, &spy(), "", false, false).expect("taken");
+    client.try_req_mkt_data(2, &spy(), "292", false, false).expect("watches what is up");
+    rx.pump();
+    let slot = rx.engine().md_requests[&1].slot;
+    assert_eq!(rx.engine().farm.news_subscriptions.len(), 1);
 
-    // A second caller watches the same contract and does want them.
-    client.req_mkt_data(2, &spy(), "292", false, false).expect("watches what is up");
-    while rx.try_recv().is_ok() {}
-    // Cancelled through the client, so the withdrawal has to reach the wire
-    // and not merely be decided on.
-    client.cancel_mkt_data(2).expect("cancelled");
-    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert!(
-        sent.iter().any(|c| matches!(c, ControlCommand::UnsubscribeNews { .. })),
-        "the headlines were left running: {sent:?}",
-    );
-    assert!(
-        !sent.iter().any(|c| matches!(c, ControlCommand::Unsubscribe { .. })),
-        "the quotes stay up for the caller still watching: {sent:?}",
-    );
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(2)).expect("cancelled");
+    rx.pump();
+    assert!(rx.engine().farm.news_subscriptions.is_empty(), "the headlines were left running");
+    assert!(rx.engine().farm.holds_market_data(slot), "the quotes stay up for the request still watching");
 
-    // Two callers asking: the headlines outlast the first of them.
-    client.req_mkt_data(3, &spy(), "292", false, false).expect("watches what is up");
-    client.req_mkt_data(4, &spy(), "292", false, false).expect("watches what is up");
-    let stop_news = client.core.unregister_mkt_data(&shared, 3).headlines;
-    assert_eq!(stop_news, None, "one of two left, so the headlines carry on");
-    let stop_news = client.core.unregister_mkt_data(&shared, 4).headlines;
-    assert_eq!(stop_news, Some(NewsSubject::Slot(0)), "and stop when the last of them goes");
+    // Two requests asking: the headlines outlast the first of them.
+    client.try_req_mkt_data(3, &spy(), "292", false, false).expect("taken");
+    client.try_req_mkt_data(4, &spy(), "292", false, false).expect("taken");
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(3)).expect("cancelled");
+    rx.pump();
+    assert_eq!(rx.engine().farm.news_subscriptions.len(), 1, "one of two left, so the headlines carry on");
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(4)).expect("cancelled");
+    rx.pump();
+    assert!(rx.engine().farm.news_subscriptions.is_empty(), "and stop when the last of them goes");
 }
 
 // A second live subscription on the same contract would clobber
 // the first's reverse mapping and orphan it silently. Reject at the call.
 #[test]
 fn a_second_caller_watches_the_subscription_that_is_up() {
-    let (client, rx, shared) = test_client();
-    // Existing live subscription for SPY (instrument 0) under req_id 1.
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-
-    client.req_mkt_data(2, &spy(), "", false, false)
+    let (client, rx, _shared) = test_client();
+    client.try_req_mkt_data(1, &spy(), "", false, false).expect("taken");
+    client.try_req_mkt_data(2, &spy(), "", false, false)
         .expect("a second caller watches it rather than being refused");
-    assert!(rx.try_recv().is_err(), "one contract, one subscription on the wire");
-    assert_eq!(client.core.followers_of(0), vec![2], "and it hears the quotes");
+    settled(&client, &rx);
+    let slot = rx.engine().md_requests[&1].slot;
+    assert_eq!(rx.engine().md_requests[&2].slot, slot, "one contract, one subscription on the wire");
+    assert_eq!(client.core.followers_of(slot), vec![2], "and it hears the quotes");
     assert_eq!(
-        client.core.instrument_to_req.lock().unwrap().get(&0).copied(),
+        client.core.instrument_to_req.lock().unwrap().get(&slot).copied(),
         Some(1),
         "the one that holds it still holds it",
     );
 
     // The holder leaves; the one still watching takes it over rather than
     // losing the feed, and nothing is withdrawn from the venue.
-    let withdraw = client.core.unregister_mkt_data(&shared, 1).subscription;
-    assert!(withdraw.is_none(), "nothing is withdrawn while someone is watching");
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).expect("withdrawn");
+    settled(&client, &rx);
+    assert!(rx.engine().farm.holds_market_data(slot), "nothing is withdrawn while someone is watching");
     assert_eq!(
-        client.core.instrument_to_req.lock().unwrap().get(&0).copied(),
+        client.core.instrument_to_req.lock().unwrap().get(&slot).copied(),
         Some(2),
         "handed to the one still watching",
     );
 
     // And when the last one leaves, it goes.
-    let withdraw = client.core.unregister_mkt_data(&shared, 2).subscription;
-    assert_eq!(withdraw, Some(0), "the last one out withdraws it");
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(2)).expect("withdrawn");
+    settled(&client, &rx);
+    assert!(!rx.engine().farm.holds_market_data(slot), "the last one out withdraws it");
 }
 
 // A contract given the ordinary ibapi way carries conId 0. Cached as
 // an identity it maps every later symbol onto the first one's instrument, and
-// the guard above then refuses them all — a symbol-only client could
+// the duplicate guard then refuses them all — a symbol-only client could
 // hold exactly one subscription.
 #[test]
 fn a_second_symbol_is_not_a_duplicate_of_the_first_con_id_less_contract() {
-    let (client, rx, _shared) = test_client();
-    // What a live symbol-only subscription under req_id 1 leaves behind.
-    client.core.con_id_to_instrument.lock().unwrap().insert(0, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-
-    let qqq = Contract {
-        symbol: "QQQ".into(), sec_type: "STK".into(), exchange: "SMART".into(),
-        ..Default::default()
+    let (client, rx, shared) = test_client();
+    let by_symbol = |symbol: &str| Contract {
+        symbol: symbol.into(), sec_type: "STK".into(), exchange: "SMART".into(),
+        currency: "USD".into(), ..Default::default()
     };
-    let err = client.req_mkt_data(2, &qqq, "", false, false).unwrap_err();
-    assert!(!err.message.contains("req_id 1"), "QQQ is not the live contract: {err}");
-    match rx.try_recv().expect("the registration reaches the engine") {
-        ControlCommand::RegisterInstrument { contract: ContractRef { con_id, symbol, .. }, .. } => {
-            assert_eq!((con_id, symbol.as_str()), (0, "QQQ"));
-        }
-        other => panic!("expected RegisterInstrument, got {other:?}"),
-    }
+    client.try_req_mkt_data(1, &by_symbol("SPY"), "", false, false).expect("taken");
+    client.try_req_mkt_data(2, &by_symbol("QQQ"), "", false, false).expect("taken");
+    rx.pump();
+    assert!(rx.engine().md_requests.is_empty(), "both requests wait for naming");
+    rx.name_subscription(1, &Contract { con_id: 756733, ..by_symbol("SPY") }, &shared);
+    rx.name_subscription(2, &Contract { con_id: 320227, ..by_symbol("QQQ") }, &shared);
+    let heard = settled(&client, &rx);
+
+    assert!(heard.iter().all(|e| !e.starts_with("error:2:")), "QQQ is not the live contract: {heard:?}");
+    let engine = rx.engine();
+    assert_ne!(
+        engine.md_requests[&1].slot, engine.md_requests[&2].slot,
+        "each symbol holds a slot of its own",
+    );
 }
 
 #[test]
 fn cancel_mkt_data_sends_unsubscribe() {
     let (client, rx, _shared) = test_client();
-    // Pre-register mapping
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.cancel_mkt_data(1).unwrap();
-    let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Unsubscribe { instrument: 0, .. }));
+    client.try_req_mkt_data(1, &spy(), "", false, false).expect("taken");
+    settled(&client, &rx);
+    let slot = rx.engine().md_requests[&1].slot;
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).unwrap();
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::CancelMktData { req_id: 1 })));
+    assert!(!rx.engine().farm.holds_market_data(slot), "the subscription goes");
+    settled(&client, &rx);
     // Mapping should be cleared
     assert!(client.core.req_to_instrument.lock().unwrap().get(&1).is_none());
 }
@@ -2135,12 +2259,12 @@ fn cancel_mkt_data_sends_unsubscribe() {
 #[test]
 fn cancel_mkt_data_under_a_number_that_holds_nothing_says_so() {
     let (client, rx, _shared) = test_client();
-    let refused = client.cancel_mkt_data(999);
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(999)).expect("handed to the engine");
+    let heard = settled(&client, &rx);
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 300),
-        "nothing is being watched under that number: {refused:?}",
+        heard.iter().any(|e| e.starts_with("error:999:300:")),
+        "nothing is being watched under that number: {heard:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
 }
 
 /// Nothing about a session reaches the disk unless the caller asks for it. A
@@ -2187,8 +2311,7 @@ fn req_tick_by_tick_data_is_sent_rather_than_refused() {
     let (client, _rx, _shared) = test_client();
     // A kind the venue does not name is still refused, and refused for saying
     // so rather than for the feed being unreachable.
-    let err = client
-        .req_tick_by_tick_data(10, &spy(), "Sideways", 0, false)
+    let err = crate::api::client::tests::reported(&client, || client.req_tick_by_tick_data(10, &spy(), "Sideways", 0, false))
         .expect_err("a kind that is not a kind is refused");
     assert!(err.message.contains("no such kind"), "{err}");
     assert!(
@@ -2211,14 +2334,18 @@ fn the_two_trade_streams_are_asked_for_separately() {
 #[test]
 fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
     let (client, rx, _shared) = test_client();
-    // A trade stream is held in its own table. Held in the quote table, a
+    // A trade stream is held in its own record. Held in the quote table, a
     // request for trades was handed the contract's quotes, and withdrawing it
     // took the quotes away from whoever was watching them.
-    client.core.tbt_to_instrument.lock().unwrap().insert(10, 3);
+    rx.engine().hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
+        instrument: 3, query_id: "tbt_10".into(), kind: crate::types::TbtType::AllLast,
+        caller_req_id: 10, venue_id: 0, ignore_size: false, min_tick: 0, size_tick: 0.0,
+        running: Default::default(),
+    });
     client.core.instrument_to_req.lock().unwrap().insert(3, 99);
-    client.cancel_tick_by_tick_data(10).unwrap();
-    let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::UnsubscribeTbt { instrument: 3, .. }));
+    crate::api::client::tests::reported(&client, || client.cancel_tick_by_tick_data(10)).unwrap();
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::UnsubscribeTbt { req_id: 10 })));
+    assert!(rx.engine().hmds.tbt_subscriptions.is_empty(), "the stream goes");
     assert_eq!(
         client.core.instrument_to_req.lock().unwrap().get(&3).copied(),
         Some(99),
@@ -2237,21 +2364,21 @@ fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
 #[test]
 fn a_request_already_carrying_a_tick_stream_is_not_given_another() {
     let (client, rx, _shared) = test_client();
-    client.core.tbt_to_instrument.lock().unwrap().insert(5, 3);
-    while rx.try_recv().is_ok() {}
+    rx.engine().hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
+        instrument: 3, query_id: "tbt_5".into(), kind: crate::types::TbtType::AllLast,
+        caller_req_id: 5, venue_id: 0, ignore_size: false, min_tick: 0, size_tick: 0.0,
+        running: Default::default(),
+    });
 
     let elsewhere = Contract { symbol: "QQQ".into(), con_id: 320227571, ..spy() };
-    let refused = client.req_tick_by_tick_data(5, &elsewhere, "BidAsk", 0, false);
+    crate::api::client::tests::reported(&client, || client.req_tick_by_tick_data(5, &elsewhere, "BidAsk", 0, false)).expect("taken");
+    let heard = settled(&client, &rx);
 
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 102),
-        "the number is already carrying a stream: {refused:?}",
+        heard.iter().any(|e| e.starts_with("error:5:102:")),
+        "the number is already carrying a stream: {heard:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
-    assert_eq!(
-        client.core.tbt_to_instrument.lock().unwrap().get(&5).copied(), Some(3),
-        "the stream it was already carrying is untouched",
-    );
+    assert_eq!(rx.engine().hmds.tbt_subscriptions.len(), 1, "the stream it was already carrying is untouched");
 }
 
 /// Withdrawing a tick stream this client does not hold is answered, not
@@ -2262,12 +2389,12 @@ fn a_request_already_carrying_a_tick_stream_is_not_given_another() {
 #[test]
 fn cancel_tick_by_tick_under_a_number_that_holds_nothing_says_so() {
     let (client, rx, _shared) = test_client();
-    let refused = client.cancel_tick_by_tick_data(999);
+    crate::api::client::tests::reported(&client, || client.cancel_tick_by_tick_data(999)).expect("handed to the engine");
+    let heard = settled(&client, &rx);
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 300),
-        "nothing is held under that number: {refused:?}",
+        heard.iter().any(|e| e.starts_with("error:999:300:")),
+        "nothing is held under that number: {heard:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2288,7 +2415,7 @@ fn place_order_carries_a_fractional_quantity() {
         lmt_price: 150.0,
         ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2318,11 +2445,11 @@ fn an_order_is_refused_once_the_trading_connection_has_stopped() {
 
     // A quote feed ending is not the trading connection ending.
     shared.reference.set_session_over("the market data farm");
-    client.place_order(1, &spy(), &order).expect("the trading connection still carries it");
+    client.try_place_order(1, &spy(), &order).expect("the trading connection still carries it");
     while rx.try_recv().is_ok() {}
 
     shared.reference.set_trading_over("the trading connection");
-    let err = client.place_order(2, &spy(), &order)
+    let err = client.try_place_order(2, &spy(), &order)
         .expect_err("and is refused once that has stopped");
     assert!(err.message.contains("never sent"), "{err}");
     assert!(rx.try_recv().is_err(), "nothing reaches the wire");
@@ -2345,7 +2472,7 @@ fn an_exercise_and_a_bracket_are_refused_once_the_trading_connection_has_stopped
     };
     shared.reference.set_trading_over("the trading connection");
 
-    let err = client.exercise_options(1, &opt, 1, 1, "DU123", false, Default::default())
+    let err = crate::api::client::tests::reported(&client, || client.exercise_options(1, &opt, 1, 1, "DU123", false, Default::default()))
         .expect_err("an exercise is refused");
     assert!(err.message.contains("never sent"), "{err}");
 
@@ -2361,7 +2488,7 @@ fn place_order_market() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order { action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default() };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2378,7 +2505,7 @@ fn place_order_limit() {
         action: "BUY".into(), total_quantity: 50.0, order_type: "LMT".into(),
         lmt_price: 150.25, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2402,7 +2529,7 @@ fn place_order_trailing_stop_carries_initial_trigger() {
         trail_stop_price: 10.00,     // initial stop trigger
         ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_amt, trail_stop_price, .. }, .. }) => {
             assert_eq!(trail_amt, (0.50 * PRICE_SCALE_F) as i64);
@@ -2421,7 +2548,7 @@ fn place_order_trailing_stop_without_trigger_is_unset() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
         aux_price: 0.50, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_stop_price, .. }, .. }) => {
             assert_eq!(trail_stop_price, None);
@@ -2446,7 +2573,7 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
         adjustable_trailing_unit: 0,               // amount
         ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2483,7 +2610,7 @@ fn place_order_adjustable_stop_carries_bracket_attrs_and_tif() {
         tif: "GTC".into(),
         ..Default::default()
     };
-    client.place_order(7, &spy(), &order).unwrap();
+    client.try_place_order(7, &spy(), &order).unwrap();
 
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { kind, tif, attrs, .. }) => {
@@ -2509,12 +2636,12 @@ fn modify_carries_outside_rth_from_the_resubmitted_order() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, outside_rth: false, ..Default::default()
     };
-    client.place_order(70, &spy(), &order).unwrap();
+    client.try_place_order(70, &spy(), &order).unwrap();
     let _submit = rx.try_recv().unwrap();
 
     // Same id -> modify. Caller still says outside_rth=false.
     let reprice = Order { lmt_price: 101.0, ..order.clone() };
-    client.place_order(70, &spy(), &reprice).unwrap();
+    client.try_place_order(70, &spy(), &reprice).unwrap();
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { outside_rth, .. }) => {
             assert!(!outside_rth, "a modify must not opt the order into the extended session");
@@ -2524,7 +2651,7 @@ fn modify_carries_outside_rth_from_the_resubmitted_order() {
 
     // And it survives when the caller does want it.
     let rth_out = Order { lmt_price: 102.0, outside_rth: true, ..order.clone() };
-    client.place_order(70, &spy(), &rth_out).unwrap();
+    client.try_place_order(70, &spy(), &rth_out).unwrap();
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { outside_rth, .. }) => {
             assert!(outside_rth, "an explicit outside_rth=true must reach the replace");
@@ -2546,7 +2673,7 @@ fn place_order_adjustable_trail_percent_unit_passes_through() {
         adjustable_trailing_unit: 100,             // percent
         ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { kind: crate::types::OrderKind::AdjustableStop {
@@ -2566,7 +2693,7 @@ fn place_order_limit_gtc_carries_the_tif() {
         action: "BUY".into(), total_quantity: 10.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "GTC".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2585,7 +2712,7 @@ fn place_order_limit_hidden_carries_the_attribute() {
         action: "BUY".into(), total_quantity: 10.0, order_type: "LMT".into(),
         lmt_price: 100.0, hidden: true, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2607,7 +2734,7 @@ fn place_order_stop_with_parent_and_gtc_uses_submit_ex() {
         aux_price: 240.0, tif: "GTC".into(), parent_id: 42,
         oca_group: "77".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2630,7 +2757,7 @@ fn place_order_market_outside_rth_uses_submit_ex() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "MKT".into(),
         outside_rth: true, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2652,7 +2779,7 @@ fn place_order_trailing_amount_with_oca_uses_submit_ex() {
         aux_price: 2.0, tif: "GTC".into(), oca_group: "exit_9".into(),
         oca_type: 2, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2676,7 +2803,7 @@ fn place_order_empty_tif_is_day() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "STP".into(),
         aux_price: 240.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx { tif, kind: OrderKind::Stop { .. }, .. }) => {
             assert_eq!(tif, b'0', "an empty tif is DAY");
@@ -2699,12 +2826,12 @@ fn an_order_held_back_reaches_neither_the_venue_nor_a_refusal() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, transmit: false, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).expect("kept, not refused");
+    client.try_place_order(1, &spy(), &order).expect("kept, not refused");
     assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
 
     // Placed again, transmitting, it goes.
     let now = Order { transmit: true, ..order };
-    client.place_order(1, &spy(), &now).expect("and now it goes");
+    client.try_place_order(1, &spy(), &now).expect("and now it goes");
     assert!(rx.try_recv().is_ok(), "the order the caller asked to send");
 }
 
@@ -2718,7 +2845,7 @@ fn place_order_accepts_the_connected_account_by_name() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, account: "DU123".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).expect("the connected account is not a mismatch");
+    client.try_place_order(1, &spy(), &order).expect("the connected account is not a mismatch");
     assert!(rx.try_recv().is_ok(), "and the order reaches the engine");
 }
 
@@ -2727,7 +2854,7 @@ fn place_order_accepts_the_connected_account_by_name() {
 /// goes out on the account it names, and one naming none is refused.
 #[test]
 fn an_order_goes_out_on_the_account_the_login_puts_it_on() {
-    let account_of = |rx: &std::sync::mpsc::Receiver<ControlCommand>| match next_command(rx) {
+    let account_of = |rx: &Engine| match next_command(rx) {
         Some(ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. })) => attrs.account,
         other => panic!("expected a placement, got {other:?}"),
     };
@@ -2736,17 +2863,17 @@ fn an_order_goes_out_on_the_account_the_login_puts_it_on() {
         lmt_price: 150.0, account: "U9999999".into(), ..Default::default()
     };
     let (client, rx, _shared) = test_client();
-    client.place_order(1, &spy(), &order).expect("one account: placed");
+    client.try_place_order(1, &spy(), &order).expect("one account: placed");
     assert_eq!(account_of(&rx), "", "on the login's own account");
 
     let (mut client, rx, shared) = test_client();
     client.accounts = vec!["DU123".into(), "U2".into()];
     shared.reference.set_login(client.accounts.clone(), false);
     let named = Order { account: "U2".into(), ..order.clone() };
-    client.place_order(1, &spy(), &named).expect("several accounts: placed");
+    client.try_place_order(1, &spy(), &named).expect("several accounts: placed");
     assert_eq!(account_of(&rx), "U2", "on the account it names");
     let unnamed = Order { account: String::new(), ..order };
-    let refused = client.place_order(2, &spy(), &unnamed).expect_err("naming none is refused");
+    let refused = client.try_place_order(2, &spy(), &unnamed).expect_err("naming none is refused");
     assert_eq!((refused.code, refused.message.as_str()), (321, "You must specify an account."));
     assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
 }
@@ -2759,7 +2886,7 @@ fn place_order_unknown_tif_is_rejected() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "XYZ".into(), ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.to_string().contains("tif"), "got: {err}");
     assert!(rx.try_recv().is_err());
 }
@@ -2777,7 +2904,7 @@ fn place_order_all_or_none_trail_reaches_the_wire() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
         aux_price: 2.0, all_or_none: true, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).expect("the pair is the venue's to refuse");
+    client.try_place_order(1, &spy(), &order).expect("the pair is the venue's to refuse");
     match rx.try_recv().expect("it reaches the wire") {
         ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { .. }, attrs, .. }) => {
             assert!(attrs.all_or_none, "carrying the instruction it was given");
@@ -2806,7 +2933,7 @@ fn place_order_stop() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
         aux_price: 145.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2826,7 +2953,7 @@ fn place_order_stop_limit() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP LMT".into(),
         lmt_price: 144.0, aux_price: 145.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2846,7 +2973,7 @@ fn place_order_trailing_stop_amount() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
         aux_price: 2.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2865,7 +2992,7 @@ fn place_order_trailing_stop_percent() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
         trailing_percent: 5.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2884,7 +3011,7 @@ fn place_order_trailing_stop_limit() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL LIMIT".into(),
         lmt_price: 148.0, aux_price: 2.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStopLimit { .. }, .. })));
@@ -2897,7 +3024,7 @@ fn place_order_moc() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MOC".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Moc, .. })));
@@ -2911,7 +3038,7 @@ fn place_order_loc() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LOC".into(),
         lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Loc { .. }, .. })));
@@ -2925,7 +3052,7 @@ fn place_order_mit() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MIT".into(),
         aux_price: 148.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Mit { .. }, .. })));
@@ -2939,7 +3066,7 @@ fn place_order_lit() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LIT".into(),
         lmt_price: 150.0, aux_price: 148.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Lit { .. }, .. })));
@@ -2952,7 +3079,7 @@ fn place_order_mtl() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MTL".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Mtl, .. })));
@@ -2965,7 +3092,7 @@ fn place_order_mkt_prt() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MKT PRT".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::MktPrt, .. })));
@@ -2979,7 +3106,7 @@ fn place_order_stp_prt() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP PRT".into(),
         aux_price: 145.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::StpPrt { .. }, .. })));
@@ -2993,7 +3120,7 @@ fn place_order_rel() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "REL".into(),
         aux_price: 0.10, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Rel { .. }, .. })));
@@ -3007,7 +3134,7 @@ fn place_order_peg_mkt() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "PEG MKT".into(),
         aux_price: 0.05, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::PegMkt { .. }, .. })));
@@ -3021,7 +3148,7 @@ fn place_order_peg_mid() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "PEG MID".into(),
         aux_price: 0.02, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::PegMid { .. }, .. })));
@@ -3035,7 +3162,7 @@ fn place_order_midprice() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MIDPRICE".into(),
         lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::MidPrice { .. }, .. })));
@@ -3048,7 +3175,7 @@ fn place_order_snap_mkt() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP MKT".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::SnapMkt { .. }, .. })));
@@ -3061,7 +3188,7 @@ fn place_order_snap_mid() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP MID".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::SnapMid { .. }, .. })));
@@ -3074,7 +3201,7 @@ fn place_order_snap_pri() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP PRI".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::SnapPri { .. }, .. })));
@@ -3087,7 +3214,7 @@ fn place_order_box_top() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "BOX TOP".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Mtl, .. })));
@@ -3100,7 +3227,7 @@ fn place_order_sell_side() {
     let order = Order {
         action: "SELL".into(), total_quantity: 50.0, order_type: "MKT".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -3118,7 +3245,7 @@ fn place_order_short_sell_side() {
     let order = Order {
         action: "SSHORT".into(), total_quantity: 50.0, order_type: "MKT".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -3139,7 +3266,7 @@ fn place_order_algo_vwap() {
         algo_params: vec![TagValue { tag: "maxPctVol".into(), value: "0.1".into() }],
         ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx {
@@ -3154,7 +3281,7 @@ fn place_order_what_if() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, what_if: true, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
     // The order the caller described, asked about rather than placed.
@@ -3170,7 +3297,7 @@ fn place_order_unsupported_type_returns_error() {
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "FANTASY".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     let err = result.unwrap_err();
     assert!(err.message.contains("Unsupported order type"));
     assert_eq!(err.code, 387, "one refusal, one number, wherever it is raised");
@@ -3187,7 +3314,7 @@ fn a_preview_is_refused_for_a_type_this_client_cannot_send() {
         order_type: "SOMETHING NEW".into(), what_if: true,
         ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("Unsupported order type"), "got: {err}");
 }
 
@@ -3203,13 +3330,13 @@ fn an_algo_order_states_the_limit_it_is_sent_as() {
         algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Normal".into() }],
         ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &market_with_algo).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &market_with_algo).unwrap_err();
     assert!(err.message.contains("limit order"), "got: {err}");
 
     let limit_with_algo = Order {
         order_type: "LMT".into(), lmt_price: 100.0, ..market_with_algo
     };
-    client.place_order(2, &spy(), &limit_with_algo).expect("a limit carries the algo");
+    client.try_place_order(2, &spy(), &limit_with_algo).expect("a limit carries the algo");
     assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::SubmitEx {
         kind: OrderKind::Adaptive { .. }, .. })));
 }
@@ -3223,7 +3350,7 @@ fn a_pegged_to_benchmark_order_reaches_the_builder() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "PEG BENCH".into(),
         lmt_price: 100.0, reference_contract_id: 265598, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).expect("PEG BENCH is placeable");
+    client.try_place_order(1, &spy(), &order).expect("PEG BENCH is placeable");
     assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::SubmitEx {
         kind: OrderKind::PegBench { .. }, .. })));
 }
@@ -3241,7 +3368,7 @@ fn place_order_non_stk_contract_rejected() {
         ..Default::default()
     };
     let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "MKT".into(), ..Default::default() };
-    let err = client.place_order(1, &bare, &order).expect_err("a chain is not a contract");
+    let err = client.try_place_order(1, &bare, &order).expect_err("a chain is not a contract");
     assert!(err.message.contains("OPT"), "the refusal names the type: {err}");
     assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
 
@@ -3250,13 +3377,10 @@ fn place_order_non_stk_contract_rejected() {
         con_id: 999001, sec_type: "OPT".into(), exchange: "SMART".into(),
         ..Default::default()
     };
-    let refusal = client.place_order(2, &by_id, &order).unwrap_err();
-    assert!(!refusal.message.contains("names a whole chain"), "an id is not a chain: {refusal}");
+    client.try_place_order(2, &by_id, &order).expect("an id is not a chain");
 
-    // The named case is not asserted here: this fixture has no engine, so
-    // registering an instrument blocks on a reply that never arrives. That an
-    // identified option is accepted is pinned by `contract_gate_tests`, and that
-    // the identity reaches the wire by `an_option_order_names_its_contract`.
+    // That an identified option is accepted is pinned by `contract_gate_tests`,
+    // and that the identity reaches the wire by `an_option_order_names_its_contract`.
 }
 
 /// What an exercise refuses, and it refuses before it builds anything: a
@@ -3268,9 +3392,9 @@ fn place_order_non_stk_contract_rejected() {
 /// hold is answered as a gateway answers it: there is no position there.
 #[test]
 fn an_exercise_it_cannot_serve_is_refused_before_anything_is_sent() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
     let opt = Contract {
-        con_id: 999002, symbol: "AAPL".into(), sec_type: "OPT".into(),
+        con_id: 999002, symbol: "AAPL".into(), sec_type: "OPT".into(), exchange: "SMART".into(),
         last_trade_date_or_contract_month: "20260619".into(), strike: 230.0,
         right: "C".into(), multiplier: "100".into(), ..Default::default()
     };
@@ -3282,16 +3406,25 @@ fn an_exercise_it_cannot_serve_is_refused_before_anything_is_sent() {
         ("another account", 1, 1, "DU999"),
     ];
     for (name, action, qty, account) in cases {
-        client.exercise_options(1, &opt, action, qty, account, false, Default::default()).expect_err(name);
+        crate::api::client::tests::reported(&client, || client.exercise_options(1, &opt, action, qty, account, false, Default::default())).expect_err(name);
         assert!(rx.try_recv().is_err(), "{name} reached the engine");
     }
 
-    // One it can serve gets as far as naming the contract. This fixture has no
-    // engine to answer the registration, so the call ends there.
-    let _ = client.exercise_options(1, &opt, 1, 1, "DU123", false, Default::default());
+    // One it can serve goes out once the engine has checked it as a gateway
+    // does: the account holds the option, and it is in the money.
+    shared.portfolio.account_download_is_settled();
+    shared.portfolio.set_position_info(crate::types::PositionInfo {
+        con_id: opt.con_id, position: 1.0, ..Default::default()
+    });
+    let identity = crate::types::model::contract_identity(
+        &opt.last_trade_date_or_contract_month, opt.strike, &opt.right, &opt.multiplier, &opt.currency,
+    );
+    let slot = rx.engine().register_contract(opt.con_id, opt.symbol.clone(), &opt.sec_type, &opt.exchange, &identity, "");
+    shared.market.note_stated_figures(slot, 493, vec![1.5, 1.0, 0.2]);
+    crate::api::client::tests::reported(&client, || client.exercise_options(1, &opt, 1, 1, "DU123", false, Default::default())).expect("served");
     assert!(
-        matches!(rx.try_recv(), Ok(ControlCommand::RegisterInstrument { contract: ContractRef { con_id: 999002, .. }, .. })),
-        "a served exercise registers its contract",
+        matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. }))),
+        "a served exercise goes out",
     );
 }
 
@@ -3308,11 +3441,11 @@ fn an_order_states_where_it_is_to_be_filled() {
         ..Default::default()
     };
 
-    let refused = client.place_order(1, &nowhere, &order).expect_err("no destination");
+    let refused = client.try_place_order(1, &nowhere, &order).expect_err("no destination");
     assert_eq!(refused.code, crate::error_codes::Refusal::VALIDATION);
     assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
 
-    client.place_order(2, &spy(), &order).expect("a destination is all it lacked");
+    client.try_place_order(2, &spy(), &order).expect("a destination is all it lacked");
     assert!(rx.try_recv().is_ok());
 }
 
@@ -3326,7 +3459,7 @@ fn place_order_explicit_stk_contract_accepted() {
         exchange: "SMART".into(), ..Default::default()
     };
     let order = Order { action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default() };
-    client.place_order(1, &stk, &order).unwrap();
+    client.try_place_order(1, &stk, &order).unwrap();
     assert!(rx.try_recv().is_ok());
 }
 
@@ -3337,7 +3470,7 @@ fn place_order_invalid_action_returns_error() {
     let order = Order {
         action: "INVALID".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
 }
 
@@ -3361,24 +3494,25 @@ fn a_staged_revision_does_not_hide_the_order_the_venue_is_working() {
         transmit,
         ..Default::default()
     };
-    client.place_order(88, &spy(), &order(true, 100.0)).expect("placed and sent");
+    client.try_place_order(88, &spy(), &order(true, 100.0)).expect("placed and sent");
     assert!(matches!(
         rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. })),
     ));
     // A revision of it, kept rather than sent.
-    client.place_order(88, &spy(), &order(false, 101.0)).expect("the change is kept");
+    client.try_place_order(88, &spy(), &order(false, 101.0)).expect("the change is kept");
     assert!(next_command(&rx).is_none(), "nothing goes to the venue for a change that is held");
+    settled(&client, &rx);
     assert!(
         client.core.is_working_at_the_venue(88, Some(&client.shared)),
         "the order is still one the venue is working",
     );
 
-    client.cancel_order(88, "").expect("withdrawn");
+    crate::api::client::tests::reported(&client, || client.cancel_order(88, "")).expect("withdrawn");
     match rx.try_recv().expect("the cancel travels") {
         ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 88),
         other => panic!("expected a cancel, got {other:?}"),
     }
-    assert!(!client.core.is_held(88), "and the change that was kept goes with it");
+    assert!(!rx.keeps(88), "and the change that was kept goes with it");
 }
 
 /// A replace releases nothing that is waiting to be placed.
@@ -3395,7 +3529,7 @@ fn replacing_an_order_does_not_send_the_family_it_is_still_building() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: price, tif: "DAY".into(), transmit: true, ..Default::default()
     };
-    client.place_order(50, &spy(), &entry(100.0)).expect("the parent goes");
+    client.try_place_order(50, &spy(), &entry(100.0)).expect("the parent goes");
     assert!(matches!(
         rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. })),
     ));
@@ -3405,16 +3539,16 @@ fn replacing_an_order_does_not_send_the_family_it_is_still_building() {
         lmt_price: 110.0, tif: "DAY".into(), transmit: false, parent_id: 50,
         ..Default::default()
     };
-    client.place_order(51, &spy(), &exit).expect("the exit is kept");
+    client.try_place_order(51, &spy(), &exit).expect("the exit is kept");
     assert!(rx.try_recv().is_err(), "and nothing goes out for it");
 
-    client.place_order(50, &spy(), &entry(99.0)).expect("the parent is replaced");
+    client.try_place_order(50, &spy(), &entry(99.0)).expect("the parent is replaced");
     match next_command(&rx).expect("the replace goes out") {
         ControlCommand::Order(OrderRequest::Modify { order_id, .. }) => assert_eq!(order_id, 50),
         other => panic!("expected a replace of the parent, got {other:?}"),
     }
     assert!(next_command(&rx).is_none(), "and the exit is not sent with it");
-    assert!(client.core.is_held(51), "it is still waiting to be placed");
+    assert!(rx.keeps(51), "it is still waiting to be placed");
 }
 
 /// A change to an order that has finished is not sent with a later family.
@@ -3432,19 +3566,21 @@ fn a_change_to_an_order_that_finished_is_not_released_with_the_next_family() {
         lmt_price: price, tif: "DAY".into(), transmit, parent_id: 60,
         ..Default::default()
     };
-    client.place_order(61, &spy(), &exit(true, 110.0)).expect("the exit goes");
+    client.try_place_order(61, &spy(), &exit(true, 110.0)).expect("the exit goes");
     assert!(matches!(
         rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. })),
     ));
-    client.place_order(61, &spy(), &exit(false, 111.0)).expect("a change to it is kept");
+    client.try_place_order(61, &spy(), &exit(false, 111.0)).expect("a change to it is kept");
     assert!(next_command(&rx).is_none(), "nothing goes to the venue for a change that is held");
     // And then the order it was a change to fills.
-    client.core.update_order_status(
-        &shared, 61, crate::types::OrderStatus::Filled, 100.0, 0.0, 0,
-    );
-    assert!(!client.core.is_held(61), "the change goes with the order it changed");
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 61, instrument: 0, status: OrderStatus::Filled,
+        filled_qty: 100.0, remaining_qty: 0.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    client.process_msgs(&mut RecordingWrapper::default());
 
-    client.place_order(62, &spy(), &exit(true, 112.0)).expect("the next exit goes");
+    assert!(!rx.keeps(61), "a finished order leaves no revision waiting for a later transmit");
+    client.try_place_order(62, &spy(), &exit(true, 112.0)).expect("the next exit goes");
     match rx.try_recv().expect("it goes out") {
         ControlCommand::Order(OrderRequest::SubmitEx { order_id, .. }) => {
             assert_eq!(order_id, 62, "the order that transmits is the one that goes");
@@ -3452,6 +3588,7 @@ fn a_change_to_an_order_that_finished_is_not_released_with_the_next_family() {
         other => panic!("expected the new order, got {other:?}"),
     }
     assert!(rx.try_recv().is_err(), "and nothing goes out for the order that finished");
+    assert!(!rx.keeps(61), "the change went with the order it changed");
 }
 
 /// Naming a contract the venue has not named does not take the order apart.
@@ -3464,7 +3601,7 @@ fn a_change_to_an_order_that_finished_is_not_released_with_the_next_family() {
 /// something else entirely.
 #[test]
 fn naming_a_contract_keeps_the_hedge_and_the_legs_the_caller_stated() {
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, _shared) = test_client();
     let mut hedged = spy();
     hedged.con_id = 0;
     hedged.delta_neutral_contract = Some(crate::types::model::DeltaNeutralContract {
@@ -3476,14 +3613,15 @@ fn naming_a_contract_keeps_the_hedge_and_the_legs_the_caller_stated() {
     let mut as_the_venue_names_it = spy();
     as_the_venue_names_it.con_id = 756733;
     as_the_venue_names_it.delta_neutral_contract = None;
-    client.core.remember_named(key, as_the_venue_names_it);
+    rx.engine().intake.remember_named(key, as_the_venue_names_it);
 
     let order = Order {
         order_id: 60, action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 100.0, tif: "DAY".into(),
         transmit: true, ..Default::default()
     };
-    client.place_order(60, &hedged, &order).expect("placed");
+    client.try_place_order(60, &hedged, &order).expect("placed");
+    settled(&client, &rx);
 
     let held = client.core.open_orders.lock().unwrap();
     let placed = held.get(&60).expect("the order is tracked");
@@ -3508,13 +3646,15 @@ fn a_refused_replacement_leaves_the_terms_the_venue_holds() {
         order_type: "LMT".into(), lmt_price: price, tif: "DAY".into(),
         transmit: true, ..Default::default()
     };
-    client.place_order(66, &spy(), &order(100.0, 100.0)).expect("placed");
+    client.try_place_order(66, &spy(), &order(100.0, 100.0)).expect("placed");
     let _ = rx.try_recv();
+    settled(&client, &rx);
     client.core.update_order_status(
         &shared, 66, crate::types::OrderStatus::Submitted, 0.0, 100.0, 0,
     );
     // A replacement goes out, and the record takes it.
-    client.place_order(66, &spy(), &order(200.0, 105.0)).expect("replaced");
+    client.try_place_order(66, &spy(), &order(200.0, 105.0)).expect("replaced");
+    settled(&client, &rx);
     assert_eq!(
         client.core.open_orders.lock().unwrap().get(&66).map(|o| o.order.lmt_price),
         Some(105.0),
@@ -3554,14 +3694,16 @@ fn replacing_an_order_keeps_what_it_has_already_filled() {
         transmit: true,
         ..Default::default()
     };
-    client.place_order(77, &spy(), &order(100.0, 100.0)).expect("placed");
+    client.try_place_order(77, &spy(), &order(100.0, 100.0)).expect("placed");
     let _ = rx.try_recv();
+    settled(&client, &rx);
     // Thirty of it trades.
     client.core.update_order_status(
         &shared, 77, crate::types::OrderStatus::PartiallyFilled, 30.0, 70.0, 0,
     );
 
-    client.place_order(77, &spy(), &order(120.0, 101.0)).expect("replaced");
+    client.try_place_order(77, &spy(), &order(120.0, 101.0)).expect("replaced");
+    settled(&client, &rx);
 
     let held = client.core.open_orders.lock().unwrap();
     let tracked = held.get(&77).expect("the order is still tracked");
@@ -3587,7 +3729,7 @@ fn an_order_numbered_at_or_below_zero_is_refused_not_renumbered() {
     };
     for stated in [0i64, -5] {
         let why = client
-            .place_order(stated, &spy(), &order)
+            .try_place_order(stated, &spy(), &order)
             .expect_err("a number at or below zero names no order");
         assert!(why.message.contains(&format!("order_id {stated}")), "{why}");
     }
@@ -3596,11 +3738,12 @@ fn an_order_numbered_at_or_below_zero_is_refused_not_renumbered() {
 
 #[test]
 fn cancel_order_sends_cancel_command() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
     // A withdrawal names an order this client is working, or it is answered
     // rather than sent under a number the venue never gave out.
-    client.core.track_order(42, spy(), Order::default(), 0);
-    client.cancel_order(42, "").unwrap();
+    placed_here(&client, &rx, 42);
+    crate::api::client::tests::reported(&client, || client.cancel_order(42, "")).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 42),
@@ -3615,7 +3758,7 @@ fn cancel_order_sends_cancel_command() {
 fn a_cancel_time_note_names_the_order_it_belongs_to() {
     let (client, _rx, shared) = test_client();
     assert!(
-        client.cancel_order(0, "20260904 12:00:00").is_err(),
+        crate::api::client::tests::reported(&client, || client.cancel_order(0, "20260904 12:00:00")).is_err(),
         "zero is not an order number",
     );
     assert!(
@@ -3624,15 +3767,16 @@ fn a_cancel_time_note_names_the_order_it_belongs_to() {
     );
 
     let (client, rx, shared) = test_client();
-    client.core.track_order(17, spy(), Order::default(), 0);
-    client.cancel_order(17, "20260904 12:00:00").unwrap();
-    let notes = shared.orders.drain_order_inactive();
-    assert_eq!(notes.len(), 1, "the note is recorded once");
-    assert_eq!(notes[0].0, 17, "against the order named");
+    shared.orders.set_replay_done();
+    placed_here(&client, &rx, 17);
+    crate::api::client::tests::reported(&client, || client.cancel_order(17, "20260904 12:00:00")).unwrap();
     match rx.try_recv().expect("the cancel is sent anyway") {
         ControlCommand::Order(OrderRequest::Cancel { order_id, .. }) => assert_eq!(order_id, 17),
         other => panic!("expected a cancel, got {other:?}"),
     }
+    let notes = shared.orders.drain_order_inactive();
+    assert_eq!(notes.len(), 1, "the note is recorded once");
+    assert_eq!(notes[0].0, 17, "against the order named");
 }
 
 /// The executions mutex is not held while user callbacks run. A wrapper that
@@ -3664,7 +3808,7 @@ fn req_executions_does_not_hold_the_lock_across_callbacks() {
     );
 
     let mut w = Reentrant { core: &client.core, observed_locked: false, rows: 0 };
-    client.req_executions(1, &crate::types::model::ExecutionFilter::default(), &mut w);
+    client.req_executions(1, &crate::types::model::ExecutionFilter::default()); client.process_msgs(&mut w);
     assert_eq!(w.rows, 1, "the execution must still be replayed");
     assert!(!w.observed_locked,
         "executions lock must be released before the callback runs");
@@ -3694,7 +3838,7 @@ fn execution_filter_time_is_a_lower_bound() {
     let mut w = Rows::default();
     client.req_executions(1, &crate::types::model::ExecutionFilter {
         time: "20260729-10:00:00".into(), ..Default::default()
-    }, &mut w);
+    }); client.process_msgs(&mut w);
     assert_eq!(w.seen, vec!["20260729-11:00:00"], "only executions at or after the bound");
 
     // Punctuation differs between the two sides in practice; the comparison is
@@ -3702,14 +3846,14 @@ fn execution_filter_time_is_a_lower_bound() {
     let mut w2 = Rows::default();
     client.req_executions(1, &crate::types::model::ExecutionFilter {
         time: "20260729 10:00:00".into(), ..Default::default()
-    }, &mut w2);
+    }); client.process_msgs(&mut w2);
     assert_eq!(w2.seen, vec!["20260729-11:00:00"], "separator must not change the bound");
 
     // A date-only bound keeps the whole day rather than dropping it.
     let mut w3 = Rows::default();
     client.req_executions(1, &crate::types::model::ExecutionFilter {
         time: "20260729".into(), ..Default::default()
-    }, &mut w3);
+    }); client.process_msgs(&mut w3);
     assert_eq!(w3.seen.len(), 2, "a date-only bound keeps that day");
 }
 
@@ -3733,7 +3877,7 @@ fn a_restated_execution_answers_req_executions_and_nobody_else() {
         "nobody asked, so nobody is told: {:?}", w.events,
     );
 
-    client.req_executions(7, &crate::types::model::ExecutionFilter::default(), &mut w);
+    client.req_executions(7, &crate::types::model::ExecutionFilter::default()); client.process_msgs(&mut w);
     let answered: Vec<&String> = w.events.iter().filter(|e| e.starts_with("exec_details:")).collect();
     assert_eq!(answered, ["exec_details:7:BOT:10"], "the caller that asked is answered");
 }
@@ -3792,7 +3936,7 @@ fn two_prints_of_one_order_in_one_pass_are_two_executions() {
     // would be one execution: the second is refused as a duplicate of the
     // first, and the caller is answered with half its fills.
     w.rows.clear();
-    client.req_executions(3, &crate::types::model::ExecutionFilter::default(), &mut w);
+    client.req_executions(3, &crate::types::model::ExecutionFilter::default()); client.process_msgs(&mut w);
     assert_eq!(
         w.rows,
         [("0001f4e8.1".to_string(), 5.0), ("0001f4e8.2".to_string(), 10.0)],
@@ -3805,11 +3949,11 @@ fn req_global_cancel_sends_cancel_all_for_each_instrument() {
     let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
     shared.market.set_instrument_count(2);
-    client.req_global_cancel("").unwrap();
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).unwrap();
     let mut cancel_instruments = vec![];
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::CancelAll { instrument, .. }) = cmd {
-            cancel_instruments.push(instrument);
+        if let ControlCommand::Order(OrderRequest::GlobalCancel { instruments, .. }) = cmd {
+            cancel_instruments.extend(instruments);
         }
     }
     assert_eq!(cancel_instruments.len(), 2);
@@ -3821,7 +3965,7 @@ fn req_global_cancel_sends_cancel_all_for_each_instrument() {
 fn req_global_cancel_no_instruments_no_commands() {
     let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
-    client.req_global_cancel("").unwrap();
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).unwrap();
     assert!(rx.try_recv().is_err());
 }
 
@@ -3838,15 +3982,21 @@ fn a_global_cancel_frees_the_ids_of_orders_never_sent() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), transmit: false, ..Default::default()
     };
-    client.place_order(84, &spy(), &held).expect("held");
+    client.try_place_order(84, &spy(), &held).expect("held");
     assert!(rx.try_recv().is_err(), "nothing was sent for it");
 
     shared.orders.set_replay_done();
-    client.req_global_cancel("").expect("everything withdrawn");
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).expect("everything withdrawn");
+    let sent: Vec<ControlCommand> = rx.try_iter().collect();
+    assert!(
+        sent.iter().all(|c| matches!(c, ControlCommand::Order(OrderRequest::GlobalCancel { .. }))),
+        "only the withdrawals of what is working go: {sent:?}",
+    );
+    settled(&client, &rx);
     assert!(!client.core.is_order_tracked(84), "the record goes with the command");
 
     let order = Order { transmit: true, ..held };
-    client.place_order(84, &spy(), &order).expect("placed again under the same id");
+    client.try_place_order(84, &spy(), &order).expect("placed again under the same id");
     match rx.try_recv().expect("the order goes out") {
         ControlCommand::Order(OrderRequest::SubmitEx { order_id, .. }) => {
             assert_eq!(order_id, 84, "the id places a new order");
@@ -3870,16 +4020,17 @@ fn a_global_cancel_keeps_the_order_a_staged_revision_belongs_to() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: price, tif: "DAY".into(), transmit, ..Default::default()
     };
-    client.place_order(85, &spy(), &order(100.0, true)).expect("placed and sent");
+    client.try_place_order(85, &spy(), &order(100.0, true)).expect("placed and sent");
     assert!(matches!(
         rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. })),
     ));
-    client.place_order(85, &spy(), &order(101.0, false)).expect("the change is kept");
+    client.try_place_order(85, &spy(), &order(101.0, false)).expect("the change is kept");
     assert!(next_command(&rx).is_none(), "nothing goes to the venue for a change that is held");
 
     shared.orders.set_replay_done();
-    client.req_global_cancel("").expect("everything withdrawn");
-    assert!(!client.core.is_held(85), "the change that was never sent is forgotten");
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).expect("everything withdrawn");
+    assert!(!rx.keeps(85), "the change that was never sent is forgotten");
+    settled(&client, &rx);
     assert!(
         client.core.is_working_at_the_venue(85, Some(&client.shared)),
         "and the order it was a change to is still one the venue is working",
@@ -3899,21 +4050,21 @@ fn a_global_cancel_says_when_the_venue_has_not_finished_naming() {
     // was named nothing at all is the other case, and says nothing — there is
     // no uncovered order to warn about.
     shared.orders.note_naming_began();
-    let refusal = client.req_global_cancel("").expect_err(
-        "a withdrawal composed before the naming finished says so rather than returning",
-    );
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).expect("taken");
     let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(
-        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
+        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::GlobalCancel { instruments, .. })] if instruments == &[0]),
         "what had been named is still withdrawn: {sent:?}",
     );
-    assert_eq!(
-        refusal.code, crate::error_codes::Refusal::NO_ANSWER,
-        "under this client's own number for a wait the venue did not finish",
-    );
+    let refused = shared.drain_refused();
     assert!(
-        refusal.message.contains("had not finished naming"),
-        "the caller is told what was and was not covered: {refusal}",
+        matches!(
+            refused.as_slice(),
+            [(-1, code, message)] if *code == i64::from(crate::error_codes::Refusal::NO_ANSWER)
+                && message.contains("had not finished naming"),
+        ),
+        "the caller is told what was and was not covered, under this client's own number \
+         for a wait the venue did not finish: {refused:?}",
     );
 }
 
@@ -3936,13 +4087,13 @@ fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
         fn open_order_end(&mut self) { self.ended += 1; }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     // The venue began naming and never said it had finished. An account that
     // was named nothing at all is the other case, and says nothing — there is
     // no missing order to warn about.
     shared.orders.note_naming_began();
     let mut heard = Heard::default();
-    client.req_all_open_orders(&mut heard);
+    client.req_all_open_orders(); the_engine_answers(&rx, &shared); client.process_msgs(&mut heard);
     assert_eq!(heard.ended, 1, "what had arrived is still delivered, and still ends");
     assert!(
         heard.told.iter().any(|(req_id, code, message)| {
@@ -3968,7 +4119,7 @@ fn stp_order_with_zero_aux_price_is_rejected() {
         lmt_price: 145.0, // common mistake: setting lmt_price instead of aux_price
         ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("aux_price"));
 }
@@ -3981,7 +4132,7 @@ fn stp_order_with_valid_aux_price_succeeds() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
         aux_price: 145.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Stop { .. }, .. })));
 }
@@ -3994,7 +4145,7 @@ fn stp_lmt_order_with_zero_aux_price_is_rejected() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP LMT".into(),
         lmt_price: 144.0, ..Default::default() // aux_price missing
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("aux_price"));
 }
@@ -4007,7 +4158,7 @@ fn trail_order_with_zero_amount_and_zero_percent_is_rejected() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
         ..Default::default() // neither trailing_percent nor aux_price
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("trailing_percent"));
 }
@@ -4020,7 +4171,7 @@ fn trail_order_with_trailing_percent_succeeds() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
         trailing_percent: 5.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailPct { .. }, .. })));
 }
@@ -4033,7 +4184,7 @@ fn trail_limit_order_with_zero_aux_price_is_rejected() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL LIMIT".into(),
         lmt_price: 148.0, ..Default::default() // aux_price missing
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("aux_price"));
 }
@@ -4046,7 +4197,7 @@ fn mit_order_with_zero_aux_price_is_rejected() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MIT".into(),
         ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("aux_price"));
 }
@@ -4059,7 +4210,7 @@ fn stp_prt_order_with_zero_aux_price_is_rejected() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP PRT".into(),
         ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("aux_price"));
 }
@@ -4072,7 +4223,7 @@ fn lit_order_with_zero_aux_price_is_rejected() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LIT".into(),
         lmt_price: 150.0, ..Default::default() // aux_price missing
     };
-    let result = client.place_order(1, &spy(), &order);
+    let result = client.try_place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().message.contains("aux_price"));
 }
@@ -4089,7 +4240,7 @@ fn place_order_rejects_nan_lmt_price() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: f64::NAN, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("lmt_price"), "got: {err}");
 }
 
@@ -4101,7 +4252,7 @@ fn place_order_rejects_infinite_lmt_price() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: f64::INFINITY, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("lmt_price"), "got: {err}");
 }
 
@@ -4115,7 +4266,7 @@ fn place_order_rejects_lmt_price_that_overflows_the_wire() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 1.0e12, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("lmt_price"), "got: {err}");
 }
 
@@ -4131,7 +4282,7 @@ fn place_order_rejects_lmt_price_at_the_exact_wire_boundary() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: i64::MAX as f64 / PRICE_SCALE_F, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("lmt_price"), "got: {err}");
 }
 
@@ -4145,7 +4296,7 @@ fn place_order_rejects_nan_aux_price() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
         aux_price: f64::NAN, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("aux_price"), "got: {err}");
 }
 
@@ -4161,7 +4312,7 @@ fn a_negative_quantity_is_carried_to_the_venue() {
     let order = Order {
         action: "BUY".into(), total_quantity: -100.0, order_type: "MKT".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).expect("carried, not refused here");
+    client.try_place_order(1, &spy(), &order).expect("carried, not refused here");
     assert!(rx.try_recv().is_ok(), "it reaches the wire");
 }
 
@@ -4172,7 +4323,7 @@ fn place_order_rejects_nan_quantity() {
     let order = Order {
         action: "BUY".into(), total_quantity: f64::NAN, order_type: "MKT".into(), ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("total_quantity"), "got: {err}");
 }
 
@@ -4183,7 +4334,7 @@ fn place_order_rejects_infinite_quantity() {
     let order = Order {
         action: "BUY".into(), total_quantity: f64::INFINITY, order_type: "MKT".into(), ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("total_quantity"), "got: {err}");
 }
 
@@ -4195,7 +4346,7 @@ fn place_order_rejects_negative_display_size() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, display_size: -5, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("display_size"), "got: {err}");
 }
 
@@ -4207,7 +4358,7 @@ fn place_order_rejects_negative_min_qty() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, min_qty: -5, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("min_qty"), "got: {err}");
 }
 
@@ -4219,7 +4370,7 @@ fn place_order_rejects_negative_parent_id() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, parent_id: -5, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("parent_id"), "got: {err}");
 }
 
@@ -4231,7 +4382,7 @@ fn place_order_rejects_negative_trailing_percent() {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
         trailing_percent: -5.0, ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert_eq!(
         (err.code, err.message.as_str()),
         (321, "Invalid Trailing Percent value. Valid values are greater than 0 and less than 100."),
@@ -4248,7 +4399,7 @@ fn place_order_adaptive_rejects_unknown_priority() {
         algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Aggressive".into() }],
         ..Default::default()
     };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    let err = client.try_place_order(1, &spy(), &order).unwrap_err();
     assert!(err.message.contains("adaptivePriority"), "got: {err}");
 }
 
@@ -4260,7 +4411,7 @@ fn place_order_adaptive_defaults_priority_when_absent() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, algo_strategy: "Adaptive".into(), ..Default::default()
     };
-    client.place_order(1, &spy(), &order).unwrap();
+    client.try_place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::Order(OrderRequest::SubmitEx {
             kind: OrderKind::Adaptive { priority, .. }, ..
@@ -4309,7 +4460,7 @@ fn build_order_request_adaptive_rejects_unknown_priority() {
 #[test]
 fn req_historical_data_sends_fetch_historical() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_data(5, &spy(), "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    client.try_req_historical_data(5, &spy(), "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistorical { contract: ContractRef { con_id, sec_type, exchange, .. }, req_id, duration, bar_size, what_to_show, use_rth, .. } => {
@@ -4338,7 +4489,7 @@ fn req_historical_data_carries_the_contract_s_own_type_and_venue() {
         con_id: 495512563, symbol: "ES".into(),
         sec_type: "FUT".into(), exchange: "CME".into(), ..Default::default()
     };
-    client.req_historical_data(6, &es, "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    client.try_req_historical_data(6, &es, "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::FetchHistorical { contract: ContractRef { sec_type, exchange, .. }, .. } => {
             assert_eq!(sec_type, "FUT");
@@ -4356,10 +4507,10 @@ fn req_historical_data_rejects_unknown_bar_size() {
     let (client, rx, _shared) = test_client();
     // A size that is not one is refused rather than answered with five-minute
     // candles. Its casing is not what makes it one: `1 Min` is a minute.
-    let err = client.req_historical_data(5, &spy(), "", "2 D", "1 minute", "TRADES", true, 1, false).unwrap_err();
+    let err = client.try_req_historical_data(5, &spy(), "", "2 D", "1 minute", "TRADES", true, 1, false).unwrap_err();
     assert!(err.message.contains("bar_size"), "got: {err}");
     assert!(rx.try_recv().is_err(), "nothing may reach the engine");
-    client.req_historical_data(5, &spy(), "", "2 D", "1 Min", "TRADES", true, 1, false)
+    client.try_req_historical_data(5, &spy(), "", "2 D", "1 Min", "TRADES", true, 1, false)
         .expect("a minute asked for in another casing is still a minute");
     assert!(rx.try_recv().is_ok(), "and it reaches the engine");
 }
@@ -4367,7 +4518,7 @@ fn req_historical_data_rejects_unknown_bar_size() {
 #[test]
 fn req_historical_data_rejects_unknown_what_to_show() {
     let (client, rx, _shared) = test_client();
-    let err = client.req_historical_data(5, &spy(), "", "2 D", "1 min", "TRADE", true, 1, false).unwrap_err();
+    let err = client.try_req_historical_data(5, &spy(), "", "2 D", "1 min", "TRADE", true, 1, false).unwrap_err();
     assert!(err.message.contains("what_to_show"), "got: {err}");
     assert!(rx.try_recv().is_err());
 }
@@ -4378,7 +4529,7 @@ fn req_historical_data_rejects_unsupported_keep_up_to_date_size() {
     // A second is shorter than the five-second bars a forming bar is folded
     // from, so nothing can form it. Refused here rather than answered with
     // five-second bars relabelled as one-second ones.
-    let err = client.req_historical_data(5, &spy(), "", "1 D", "1 secs", "TRADES", true, 1, true).unwrap_err();
+    let err = client.try_req_historical_data(5, &spy(), "", "1 D", "1 secs", "TRADES", true, 1, true).unwrap_err();
     assert!(err.message.contains("kept up to date"), "got: {err}");
     assert!(rx.try_recv().is_err());
 }
@@ -4386,7 +4537,7 @@ fn req_historical_data_rejects_unsupported_keep_up_to_date_size() {
 #[test]
 fn req_historical_data_accepts_streamable_keep_up_to_date_size() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_data(5, &spy(), "", "1 D", "5 mins", "TRADES", true, 1, true).unwrap();
+    client.try_req_historical_data(5, &spy(), "", "1 D", "5 mins", "TRADES", true, 1, true).unwrap();
     assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { keep_up_to_date: true, .. }));
 }
 
@@ -4397,7 +4548,7 @@ fn req_historical_data_accepts_streamable_keep_up_to_date_size() {
 #[test]
 fn req_historical_data_serves_adjusted_last() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_data(5, &spy(), "", "1 Y", "1 day", "ADJUSTED_LAST", true, 1, false)
+    client.try_req_historical_data(5, &spy(), "", "1 Y", "1 day", "ADJUSTED_LAST", true, 1, false)
         .expect("the callback path serves ADJUSTED_LAST");
     match rx.try_recv().expect("the request reaches the engine") {
         ControlCommand::FetchHistorical { what_to_show, .. } => {
@@ -4418,7 +4569,7 @@ fn req_historical_data_sends_adjusted_last_for_a_contract_named_by_symbol() {
         ..Default::default()
     };
     client
-        .req_historical_data(5, &by_symbol, "", "1 Y", "1 day", "ADJUSTED_LAST", true, 1, false)
+        .try_req_historical_data(5, &by_symbol, "", "1 Y", "1 day", "ADJUSTED_LAST", true, 1, false)
         .expect("sent, as a gateway sends it");
     match rx.try_recv().expect("the request reaches the engine") {
         ControlCommand::FetchHistorical { contract, what_to_show, .. } => {
@@ -4434,7 +4585,7 @@ fn req_historical_data_sends_adjusted_last_for_a_contract_named_by_symbol() {
 fn req_historical_data_refuses_adjusted_last_kept_up_to_date() {
     let (client, rx, _shared) = test_client();
     let err = client
-        .req_historical_data(5, &spy(), "", "1 D", "5 mins", "ADJUSTED_LAST", true, 1, true)
+        .try_req_historical_data(5, &spy(), "", "1 D", "5 mins", "ADJUSTED_LAST", true, 1, true)
         .unwrap_err();
     assert_eq!(
         (err.code, err.message.as_str()),
@@ -4466,7 +4617,7 @@ fn a_historical_request_a_gateway_refuses_is_refused_here() {
         (spy(), "", "5 mins", "", true, "Source price not supported with live updates"),
     ] {
         let err = client
-            .req_historical_data(5, &contract, end, "1 M", size, series, true, 1, keep)
+            .try_req_historical_data(5, &contract, end, "1 M", size, series, true, 1, keep)
             .expect_err(reason);
         assert_eq!((err.code, err.message.as_str()), (Refusal::VALIDATION, reason));
         assert!(rx.try_recv().is_err(), "nothing was sent for {reason}");
@@ -4476,7 +4627,7 @@ fn a_historical_request_a_gateway_refuses_is_refused_here() {
         ("1 week", "TRADES", true), ("1 month", "MIDPOINT", true), ("1 day", "ADJUSTED_LAST", false),
     ] {
         client
-            .req_historical_data(5, &spy(), "", "1 Y", size, series, true, 1, keep)
+            .try_req_historical_data(5, &spy(), "", "1 Y", size, series, true, 1, keep)
             .unwrap_or_else(|e| panic!("{size} {series}: {e}"));
         assert!(rx.try_recv().is_ok(), "{size} {series} is sent");
     }
@@ -4492,7 +4643,7 @@ fn a_request_with_no_engine_behind_it_says_so_under_its_own_code() {
     drop(rx);
 
     let refused = client
-        .req_contract_details(1, &spy())
+        .try_req_contract_details(1, &spy())
         .expect_err("nothing can be sent with no engine to send it");
     assert_eq!(
         refused.code,
@@ -4535,32 +4686,32 @@ fn a_bracket_that_never_reached_the_engine_leaves_nothing_tracked() {
 fn an_unwireable_req_id_is_refused() {
     type Call = fn(&EClient, i64) -> Result<(), Refusal>;
     let calls: &[(&str, Call)] = &[
-        ("req_historical_data", |c, id| c.req_historical_data(id, &spy(), "", "1 D", "1 min", "TRADES", true, 1, false)),
-        ("cancel_historical_data", |c, id| c.cancel_historical_data(id)),
-        ("req_head_time_stamp", |c, id| c.req_head_time_stamp(id, &spy(), "TRADES", true, 1)),
-        ("cancel_head_time_stamp", |c, id| c.cancel_head_time_stamp(id)),
-        ("req_contract_details", |c, id| c.req_contract_details(id, &spy())),
-        ("req_matching_symbols", |c, id| c.req_matching_symbols(id, "SP")),
-        ("req_sec_def_opt_params", |c, id| c.req_sec_def_opt_params(id, "SPY", "", "STK", 756733)),
-        ("req_scanner_subscription", |c, id| c.req_scanner_subscription(id, "STK", "STK.US", "TOP_PERC_GAIN", 10, &[])),
-        ("cancel_scanner_subscription", |c, id| c.cancel_scanner_subscription(id)),
-        ("req_historical_news", |c, id| c.req_historical_news(id, 756733, "BRFG", "", "", 10)),
-        ("req_news_article", |c, id| c.req_news_article(id, "BRFG", "BRFG$1")),
-        ("req_fundamental_data", |c, id| c.req_fundamental_data(id, &spy(), "ReportSnapshot")),
-        ("cancel_fundamental_data", |c, id| c.cancel_fundamental_data(id)),
-        ("req_histogram_data", |c, id| c.req_histogram_data(id, &spy(), true, "3 days")),
-        ("cancel_histogram_data", |c, id| c.cancel_histogram_data(id)),
-        ("req_historical_ticks", |c, id| c.req_historical_ticks(id, &spy(), "", "20260101 16:00:00", 100, "TRADES", true, false)),
-        ("req_historical_schedule", |c, id| c.req_historical_schedule(id, &spy(), "", "1 D", true)),
-        ("req_mkt_depth", |c, id| c.req_mkt_depth(id, &spy(), 5, false)),
+        ("req_historical_data", |c, id| c.try_req_historical_data(id, &spy(), "", "1 D", "1 min", "TRADES", true, 1, false)),
+        ("cancel_historical_data", |c, id| crate::api::client::tests::reported(c, || c.cancel_historical_data(id))),
+        ("req_head_time_stamp", |c, id| c.try_req_head_time_stamp(id, &spy(), "TRADES", true, 1)),
+        ("cancel_head_time_stamp", |c, id| crate::api::client::tests::reported(c, || c.cancel_head_time_stamp(id))),
+        ("req_contract_details", |c, id| c.try_req_contract_details(id, &spy())),
+        ("req_matching_symbols", |c, id| c.try_req_matching_symbols(id, "SP")),
+        ("req_sec_def_opt_params", |c, id| c.try_req_sec_def_opt_params(id, "SPY", "", "STK", 756733)),
+        ("req_scanner_subscription", |c, id| c.try_req_scanner_subscription(id, "STK", "STK.US", "TOP_PERC_GAIN", 10, &[], "")),
+        ("cancel_scanner_subscription", |c, id| c.try_cancel_scanner_subscription(id)),
+        ("req_historical_news", |c, id| c.try_req_historical_news(id, 756733, "BRFG", "", "", 10)),
+        ("req_news_article", |c, id| crate::api::client::tests::reported(c, || c.req_news_article(id, "BRFG", "BRFG$1"))),
+        ("req_fundamental_data", |c, id| c.try_req_fundamental_data(id, &spy(), "ReportSnapshot")),
+        ("cancel_fundamental_data", |c, id| crate::api::client::tests::reported(c, || c.cancel_fundamental_data(id))),
+        ("req_histogram_data", |c, id| c.try_req_histogram_data(id, &spy(), true, "3 days")),
+        ("cancel_histogram_data", |c, id| crate::api::client::tests::reported(c, || c.cancel_histogram_data(id))),
+        ("req_historical_ticks", |c, id| crate::api::client::tests::reported(c, || c.req_historical_ticks(id, &spy(), "", "20260101 16:00:00", 100, "TRADES", true, false))),
+        ("req_historical_schedule", |c, id| c.try_req_historical_schedule(id, &spy(), "", "1 D", true)),
+        ("req_mkt_depth", |c, id| crate::api::client::tests::reported(c, || c.req_mkt_depth(id, &spy(), 5, false))),
         // Asks for the book first: a withdrawal now says when it holds none,
         // and that refusal is not the one this test is about.
         ("cancel_mkt_depth", |c, id| {
-            let _ = c.req_mkt_depth(id, &spy(), 5, false);
-            c.cancel_mkt_depth(id)
+            let _ = crate::api::client::tests::reported(c, || c.req_mkt_depth(id, &spy(), 5, false));
+            crate::api::client::tests::reported(c, || c.cancel_mkt_depth(id))
         }),
-        ("req_real_time_bars", |c, id| c.req_real_time_bars(id, &spy(), 5, "TRADES", true)),
-        ("cancel_real_time_bars", |c, id| c.cancel_real_time_bars(id)),
+        ("req_real_time_bars", |c, id| crate::api::client::tests::reported(c, || c.req_real_time_bars(id, &spy(), 5, "TRADES", true))),
+        ("cancel_real_time_bars", |c, id| crate::api::client::tests::reported(c, || c.cancel_real_time_bars(id))),
     ];
     for (name, call) in calls {
         for bad in [u32::MAX as i64 + 1, -1] {
@@ -4603,7 +4754,7 @@ fn an_unwireable_req_id_is_refused() {
 #[test]
 fn cancel_historical_data_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_historical_data(5).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_historical_data(5)).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelHistorical { req_id: 5 }));
 }
@@ -4611,7 +4762,7 @@ fn cancel_historical_data_sends_cancel() {
 #[test]
 fn req_head_time_stamp_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_head_time_stamp(10, &spy(), "TRADES", true, 1).unwrap();
+    client.try_req_head_time_stamp(10, &spy(), "TRADES", true, 1).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHeadTimestamp { contract: ContractRef { con_id, .. }, req_id, what_to_show, use_rth, .. } => {
@@ -4631,7 +4782,7 @@ fn req_head_time_stamp_sends_fetch() {
 #[test]
 fn req_contract_details_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_contract_details(7, &spy()).unwrap();
+    client.try_req_contract_details(7, &spy()).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchContractDetails { contract: ContractRef { con_id, .. }, req_id, .. } => {
@@ -4660,7 +4811,7 @@ fn req_contract_details_forwards_filter_fields() {
         trading_class: "AAPL".into(),
         ..Default::default()
     };
-    client.req_contract_details(9, &contract).unwrap();
+    client.try_req_contract_details(9, &contract).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::FetchContractDetails { contract: ContractRef { con_id, .. }, req_id, filters, .. } => {
             assert_eq!(req_id, 9);
@@ -4687,7 +4838,7 @@ fn req_contract_details_forwards_identifier_lookup() {
         sec_id: "US0378331005".into(), sec_id_type: "ISIN".into(),
         ..Default::default()
     };
-    client.req_contract_details(11, &contract).unwrap();
+    client.try_req_contract_details(11, &contract).unwrap();
     match rx.try_recv().unwrap() {
         ControlCommand::FetchContractDetails { filters, .. } => {
             assert_eq!(filters.sec_id, "US0378331005");
@@ -4708,7 +4859,7 @@ fn req_contract_details_forwards_that_an_expired_contract_is_in_scope() {
             symbol: "ES".into(), sec_type: "FUT".into(), exchange: "CME".into(),
             include_expired, ..Default::default()
         };
-        client.req_contract_details(12, &contract).unwrap();
+        client.try_req_contract_details(12, &contract).unwrap();
         match rx.try_recv().unwrap() {
             ControlCommand::FetchContractDetails { include_expired: stated, .. } => {
                 assert_eq!(stated, include_expired);
@@ -4721,7 +4872,7 @@ fn req_contract_details_forwards_that_an_expired_contract_is_in_scope() {
 #[test]
 fn req_matching_symbols_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_matching_symbols(8, "AAPL").unwrap();
+    client.try_req_matching_symbols(8, "AAPL").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
@@ -4739,7 +4890,7 @@ fn req_matching_symbols_sends_fetch() {
 fn a_pattern_carrying_the_field_separator_is_refused() {
     let (client, _rx, _shared) = test_client();
     let err = client
-        .req_matching_symbols(8, "AAPL\x011=999")
+        .try_req_matching_symbols(8, "AAPL\x011=999")
         .expect_err("a pattern cannot carry the byte that separates fields");
     assert!(err.message.contains("separates fields"), "{}", err.message);
 }
@@ -4795,18 +4946,18 @@ fn an_executions_filter_reads_a_side_in_either_vocabulary() {
 fn a_request_number_holds_one_book_and_says_when_it_holds_none() {
     let (client, rx, _shared) = test_client();
 
-    let withdrawn = client.cancel_mkt_depth(7);
+    let withdrawn = crate::api::client::tests::reported(&client, || client.cancel_mkt_depth(7));
     assert!(
         withdrawn.as_ref().is_err_and(|why| why.code == 310),
         "nothing is held under that number: {withdrawn:?}",
     );
     assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
 
-    client.req_mkt_depth(7, &spy(), 5, false).expect("the first book is asked for");
+    crate::api::client::tests::reported(&client, || client.req_mkt_depth(7, &spy(), 5, false)).expect("the first book is asked for");
     rx.try_recv().expect("and it reaches the engine");
 
     let elsewhere = Contract { symbol: "QQQ".into(), con_id: 320227571, ..spy() };
-    let refused = client.req_mkt_depth(7, &elsewhere, 5, false);
+    let refused = crate::api::client::tests::reported(&client, || client.req_mkt_depth(7, &elsewhere, 5, false));
     assert!(
         refused.as_ref().is_err_and(|why| why.code == 102),
         "the number already holds a book: {refused:?}",
@@ -4814,9 +4965,9 @@ fn a_request_number_holds_one_book_and_says_when_it_holds_none() {
     assert!(rx.try_recv().is_err(), "and the second contract was not asked for");
 
     // Withdrawn, the number is the caller's again.
-    client.cancel_mkt_depth(7).expect("the book is withdrawn");
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_depth(7)).expect("the book is withdrawn");
     rx.try_recv().expect("and the withdrawal reaches the engine");
-    client.req_mkt_depth(7, &elsewhere, 5, false).expect("the number is free again");
+    crate::api::client::tests::reported(&client, || client.req_mkt_depth(7, &elsewhere, 5, false)).expect("the number is free again");
 }
 
 /// A replay says nothing about what a fill cost until the venue has.
@@ -4863,7 +5014,7 @@ fn a_replayed_fill_says_nothing_about_a_cost_the_venue_has_not_stated() {
     }
 
     let mut w = Costs::default();
-    client.req_executions(9, &crate::types::model::ExecutionFilter::default(), &mut w);
+    client.req_executions(9, &crate::types::model::ExecutionFilter::default()); client.process_msgs(&mut w);
 
     assert_eq!(w.0.len(), 2, "both fills are replayed: {:?}", w.0);
     assert_eq!(
@@ -4990,8 +5141,9 @@ fn a_queued_fill_survives_a_completed_orders_read() {
     }
 
     let mut w = Executions::default();
-    // Read before the queue is next pumped, which is what discards the record.
-    client.req_completed_orders(false, &mut w);
+    // Answered where it stands, after the fill queued before it: the read
+    // delivers the fill against its record, then files the completion.
+    completed_orders_asked_and_answered(&client, false);
     client.process_msgs(&mut w);
 
     assert_eq!(
@@ -5017,7 +5169,7 @@ fn a_queued_fill_survives_a_completed_orders_read() {
 /// own fill moved its own holding.
 #[test]
 fn a_restated_holding_reaches_a_caller_that_already_asked() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598, position: 100.0, symbol: "AAPL".into(),
@@ -5025,7 +5177,7 @@ fn a_restated_holding_reaches_a_caller_that_already_asked() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     let reported = |w: &RecordingWrapper| {
         w.events.iter().filter(|e| e.starts_with("position:")).count()
     };
@@ -5054,7 +5206,7 @@ fn a_restated_holding_reaches_a_caller_that_already_asked() {
 /// watcher, the first would take it and the other would never hear of it.
 #[test]
 fn a_holding_that_moves_reaches_every_watcher() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     let held = |qty: f64| PositionInfo {
         con_id: 265598, position: qty, symbol: "AAPL".into(),
@@ -5063,8 +5215,8 @@ fn a_holding_that_moves_reaches_every_watcher() {
     shared.portfolio.set_position_info(held(100.0));
 
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
-    client.req_positions_multi(9, "", "", &mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
+    client.req_positions_multi(9, "", ""); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     let counted = |w: &RecordingWrapper, what: &str| {
         w.events.iter().filter(|e| e.starts_with(what)).count()
     };
@@ -5078,7 +5230,7 @@ fn a_holding_that_moves_reaches_every_watcher() {
     assert_eq!(counted(&w, "position_multi:"), was_multi + 1, "and the one per request");
 
     // Withdrawn under its own id, leaving the other watching.
-    client.cancel_positions_multi(9);
+    client.cancel_positions_multi(9); the_engine_answers(&rx, &shared);
     shared.portfolio.set_position_info(held(175.0));
     client.process_msgs(&mut w);
 
@@ -5119,7 +5271,7 @@ fn a_joining_watcher_is_watching_before_its_answer_is_read() {
     /// Reads whether the request is already registered at the moment the
     /// answer reaches the caller.
     struct WatchingYet<'a> {
-        watchers: &'a std::sync::Mutex<std::collections::HashSet<i64>>,
+        watchers: &'a std::sync::Mutex<crate::client_core::AccountRoutes>,
         registered_when_answered: Option<bool>,
     }
     impl crate::api::wrapper::Wrapper for WatchingYet<'_> {
@@ -5128,21 +5280,21 @@ fn a_joining_watcher_is_watching_before_its_answer_is_read() {
             _contract: &Contract, _position: f64, _avg_cost: f64,
         ) {
             self.registered_when_answered =
-                Some(self.watchers.lock().unwrap().contains(&req_id));
+                Some(self.watchers.lock().unwrap().positions.contains_key(&req_id));
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598, position: 100.0, symbol: "AAPL".into(),
         sec_type: "STK".into(), currency: "USD".into(), ..Default::default()
     });
 
     let mut watching = WatchingYet {
-        watchers: &client.positions_multi_requested,
+        watchers: &client.core.account_routes,
         registered_when_answered: None,
     };
-    client.req_positions_multi(9, "", "", &mut watching);
+    client.req_positions_multi(9, "", ""); the_engine_answers(&rx, &shared); client.process_msgs(&mut watching);
 
     assert_eq!(
         watching.registered_when_answered, Some(true),
@@ -5160,7 +5312,7 @@ fn a_joining_watcher_is_watching_before_its_answer_is_read() {
 /// that holding again until it moves once more.
 #[test]
 fn a_watchers_first_answer_and_its_registration_are_one_moment() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let held = |con_id: i64, qty: f64| PositionInfo {
         con_id, position: qty, symbol: "AAPL".into(),
         sec_type: "STK".into(), currency: "USD".into(), ..Default::default()
@@ -5169,11 +5321,12 @@ fn a_watchers_first_answer_and_its_registration_are_one_moment() {
 
     // Held from outside, the way a dispatch pass holds it while it takes the
     // moves: the registration cannot complete until it is let go.
-    let registering = client.positions_multi_requested.lock().unwrap();
+    client.req_positions_multi(7, "", ""); the_engine_answers(&rx, &shared);
+    let registering = client.core.account_routes.lock().unwrap();
     std::thread::scope(|s| {
         let asking = s.spawn(|| {
             let mut heard = RecordingWrapper::default();
-            client.req_positions_multi(7, "", "", &mut heard);
+            client.process_msgs(&mut heard);
             heard
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -5196,7 +5349,7 @@ fn a_watchers_first_answer_and_its_registration_are_one_moment() {
 /// went stale on the next fill.
 #[test]
 fn a_holding_that_moves_after_the_request_is_reported() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     let held = |qty: f64| PositionInfo {
         con_id: 265598, position: qty, symbol: "AAPL".into(),
@@ -5205,7 +5358,7 @@ fn a_holding_that_moves_after_the_request_is_reported() {
     shared.portfolio.set_position_info(held(100.0));
 
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     let reported = |w: &RecordingWrapper| {
         w.events.iter().filter(|e| e.starts_with("position:")).count()
     };
@@ -5216,7 +5369,7 @@ fn a_holding_that_moves_after_the_request_is_reported() {
     assert_eq!(reported(&w), 2, "and the holding once it moves");
 
     // Withdrawn, so what moves after is no longer reported.
-    client.cancel_positions();
+    client.cancel_positions(); the_engine_answers(&rx, &shared);
     shared.portfolio.set_position_info(held(175.0));
     client.process_msgs(&mut w);
     assert_eq!(reported(&w), 2, "a withdrawn ask is not answered further");
@@ -5227,7 +5380,7 @@ fn a_holding_that_moves_after_the_request_is_reported() {
 /// history, and a caller acting on the feed re-acts on what it was just told.
 #[test]
 fn moves_from_before_the_request_are_not_refired_as_changes() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     // Two holdings arrive before anything asks, so both moves queue.
     shared.portfolio.set_position_info(PositionInfo {
@@ -5240,7 +5393,7 @@ fn moves_from_before_the_request_are_not_refired_as_changes() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
 
     // Afterwards, one of them moves.
     shared.portfolio.set_position_info(PositionInfo {
@@ -5267,7 +5420,7 @@ fn moves_from_before_the_request_are_not_refired_as_changes() {
 /// The same replay, on the per-request feed.
 #[test]
 fn moves_from_before_the_request_are_not_refired_on_the_per_request_feed() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598, position: 100.0, symbol: "AAPL".into(), ..Default::default()
     });
@@ -5276,7 +5429,7 @@ fn moves_from_before_the_request_are_not_refired_on_the_per_request_feed() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_positions_multi(9, "", "", &mut w);
+    client.req_positions_multi(9, "", ""); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
 
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 756733, position: -75.0, symbol: "SPY".into(), ..Default::default()
@@ -5296,7 +5449,7 @@ fn moves_from_before_the_request_are_not_refired_on_the_per_request_feed() {
 
 #[test]
 fn req_positions_delivers_via_wrapper() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     // The account has stated everything it holds. Without it this waits out
     // the whole ten seconds for a signal no engine is here to send, and comes
     // back through the timeout rather than through delivery.
@@ -5306,7 +5459,7 @@ fn req_positions_delivers_via_wrapper() {
     shared.portfolio.set_position_info(PositionInfo { con_id: 265598, position: 100.0, avg_cost: 150 * PRICE_SCALE, symbol: "AAPL".into(), ..Default::default() });
     shared.portfolio.set_position_info(PositionInfo { con_id: 756733, position: -50.0, avg_cost: 400 * PRICE_SCALE, symbol: "SPY".into(), ..Default::default() });
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     let positions: Vec<_> = w.events.iter().filter(|e| e.starts_with("position:")).collect();
     assert_eq!(positions.len(), 2);
     assert!(w.events.last().unwrap() == "position_end");
@@ -5330,16 +5483,17 @@ fn the_account_figures_are_the_ones_the_venue_stated() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
-    shared.portfolio.note_account_value("NetLiquidation", "12345.678", "CHF");
-    shared.portfolio.note_account_value("SettledCash", "42.5", "CHF");
+    let (client, rx, shared) = test_client();
+    shared.portfolio_for("DU999").note_account_value("NetLiquidation", "12345.678", "CHF");
+    shared.portfolio_for("DU999").note_account_value("SettledCash", "42.5", "CHF");
 
+    shared.portfolio_for("DU999").account_download_is_settled();
     let mut rows = Rows::default();
-    client.req_account_updates_multi(1, "DU999", "", false, &mut rows);
+    client.req_account_updates_multi(1, "DU999", "", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
 
     assert!(
         rows.0.iter().any(|(account, key, value, currency)| {
-            account == "DU123" && key == "NetLiquidation" && value == "12345.678"
+            account == "DU999" && key == "NetLiquidation" && value == "12345.678"
                 && currency == "CHF"
         }),
         "the figure, currency and account as stated: {:?}",
@@ -5350,7 +5504,7 @@ fn the_account_figures_are_the_ones_the_venue_stated() {
         "a figure the venue states outside the eight that were worked out here",
     );
     assert!(
-        rows.0.iter().all(|(account, ..)| account == "DU123"),
+        rows.0.iter().all(|(account, ..)| account == "DU999"),
         "an account that was asked about is not the account these are for",
     );
 }
@@ -5370,7 +5524,7 @@ fn a_ledger_request_is_given_the_ledger_alone() {
             self.0.push((req_id, key.to_string(), currency.to_string()));
         }
     }
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     shared.portfolio.note_account_value("NetLiquidation", "100", "USD");
     shared.portfolio.note_ledger_value("Currency", "USD", "USD");
@@ -5378,8 +5532,8 @@ fn a_ledger_request_is_given_the_ledger_alone() {
     shared.portfolio.note_ledger_value("NetLiquidationByCurrency", "100.00", "USD");
 
     let mut rows = Rows::default();
-    client.req_account_updates_multi(1, "", "", true, &mut rows);
-    client.req_account_updates_multi(2, "", "", false, &mut rows);
+    client.req_account_updates_multi(1, "", "", true); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
+    client.req_account_updates_multi(2, "", "", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
     let keys = |req: i64, rows: &Rows| -> Vec<String> {
         let mut k: Vec<String> =
             rows.0.iter().filter(|(r, ..)| *r == req).map(|(_, key, _)| key.clone()).collect();
@@ -5413,18 +5567,20 @@ fn an_account_code_is_checked_as_a_gateway_checks_it() {
     client.req_account_updates(true, "X");
     client.process_msgs(&mut w);
     assert!(!w.events.iter().any(|e| e.starts_with("error:")), "{:?}", w.events);
+    // The engine refreshes the one account the session opened under as it
+    // takes the subscription, whatever was named.
     assert!(
-        rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { account } if account == "DU123")),
-        "the one account is refreshed whatever was named",
+        rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::Ask(Ask::AccountUpdates { .. }))),
+        "the subscription reaches the engine",
     );
 
     let (mut client, rx, shared) = test_client();
     client.accounts = vec!["DU123".into(), "DU456".into()];
     shared.reference.set_login(client.accounts.clone(), false);
     let mut w = RecordingWrapper::default();
-    client.req_account_updates(true, "");
-    client.req_account_updates(true, "U9");
-    client.req_account_updates(false, "");
+    client.req_account_updates(true, ""); the_engine_answers(&rx, &shared);
+    client.req_account_updates(true, "U9"); the_engine_answers(&rx, &shared);
+    client.req_account_updates(false, ""); the_engine_answers(&rx, &shared);
     client.process_msgs(&mut w);
     let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
     assert_eq!(errors, [
@@ -5432,28 +5588,22 @@ fn an_account_code_is_checked_as_a_gateway_checks_it() {
         "error:-1:321:Invalid account code 'U9'.",
     ], "{:?}", w.events);
     assert!(
-        !rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { .. })),
+        !rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::Ask(Ask::AccountUpdates { .. }))),
         "nothing is asked of the venue for a refused subscription",
     );
-    // One the login holds, and every account, are answered with this
-    // session's account's figures, and the caller is told whose they are.
+    // A named account is carried without a session-account notice.
     let mut w = RecordingWrapper::default();
     client.req_account_updates(true, "DU456");
-    assert!(rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { .. })));
-    client.req_account_updates(true, "All");
-    assert!(rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::RefreshAccount { .. })), "All is taken");
-    client.req_account_updates(true, "DU123");
+    assert!(rx.try_iter().any(|cmd| matches!(cmd,
+        ControlCommand::Ask(Ask::AccountUpdates { account }) if account == "DU456")));
+    client.req_account_updates(true, "DU123"); the_engine_answers(&rx, &shared);
     client.process_msgs(&mut w);
-    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
-    assert_eq!(errors, [
-        "error:-1:321:DU456 was named and the figures that follow are DU123's, which is the account this session opened under",
-        "error:-1:321:All was named and the figures that follow are DU123's, which is the account this session opened under",
-    ], "{:?}", w.events);
+    assert!(w.events.iter().all(|e| !e.starts_with("error:")), "{:?}", w.events);
 
     // An ended session is told it has ended, not that it named no account.
     shared.reference.set_session_over("the session ended");
     let mut w = RecordingWrapper::default();
-    client.req_account_updates(true, "");
+    client.req_account_updates(true, ""); the_engine_answers(&rx, &shared);
     client.process_msgs(&mut w);
     let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
     assert_eq!(errors.len(), 1, "{:?}", w.events);
@@ -5473,7 +5623,7 @@ fn an_execution_filters_account_is_checked_as_a_gateway_checks_it() {
     );
     let filter = crate::types::model::ExecutionFilter { acct_code: "X".into(), ..Default::default() };
     let mut w = RecordingWrapper::default();
-    client.req_executions(1, &filter, &mut w);
+    client.req_executions(1, &filter); client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:")), "{:?}", w.events);
 
     client.accounts = vec!["DU123".into(), "DU456".into()];
@@ -5493,7 +5643,7 @@ fn an_execution_filters_account_is_checked_as_a_gateway_checks_it() {
         }
     }
     let mut w = Told::default();
-    client.req_executions(2, &filter, &mut w);
+    client.req_executions(2, &filter); client.process_msgs(&mut w);
     assert_eq!(w.0, ["error:2:321:Invalid account code X."], "refused, and told nothing else, as a gateway tells it");
 
     // A date that is not a day is refused as a gateway reads the request,
@@ -5502,7 +5652,7 @@ fn an_execution_filters_account_is_checked_as_a_gateway_checks_it() {
         acct_code: "X".into(), specific_dates: vec![20260231], ..Default::default()
     };
     let mut w = Told::default();
-    client.req_executions(3, &filter, &mut w);
+    client.req_executions(3, &filter); client.process_msgs(&mut w);
     assert_eq!(w.0.len(), 1, "{:?}", w.0);
     assert!(w.0[0].starts_with("error:3:320:"), "{:?}", w.0);
 }
@@ -5531,25 +5681,22 @@ fn an_account_summary_a_gateway_refuses_takes_nothing() {
     let mut w = RecordingWrapper::default();
     client.req_account_summary(3, "All", "NetLiquidation");
     client.process_msgs(&mut w);
-    assert!(
-        w.events.iter().any(|e| e == "error:3:321:All was named and the figures that follow are \
-            DU123's, which is the account this session opened under"),
-        "{:?}", w.events,
-    );
+    assert!(w.events.iter().all(|e| !e.starts_with("error:")), "{:?}", w.events);
     assert!(client.core.account_summary_req.lock().unwrap().is_some(), "and it is answered");
 }
 
 /// A holding is labelled with the account that holds it.
 #[test]
 fn holdings_are_labelled_with_the_account_that_holds_them() {
-    let (client, _rx, shared) = test_client();
-    shared.portfolio.set_position_info(PositionInfo {
+    let (client, rx, shared) = test_client();
+    shared.portfolio_for("DU999").set_position_info(PositionInfo {
         con_id: 756733, position: 100.0, avg_cost: 400 * PRICE_SCALE, ..Default::default()
     });
+    shared.portfolio_for("DU999").account_download_is_settled();
     let mut w = RecordingWrapper::default();
-    client.req_positions_multi(2, "DU999", "", &mut w);
+    client.req_positions_multi(2, "DU999", ""); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     assert!(
-        w.events.iter().any(|e| e.starts_with("position_multi:2:DU123:")),
+        w.events.iter().any(|e| e.starts_with("position_multi:2:DU999:")),
         "another account's name sat on this account's holdings: {:?}",
         w.events,
     );
@@ -5576,12 +5723,12 @@ fn the_account_figures_keep_arriving_under_the_request_that_asked() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     shared.portfolio.note_account_value("NetLiquidation", "100.00", "USD");
 
     let mut rows = Rows::default();
-    client.req_account_updates_multi(7, "", "", false, &mut rows);
+    client.req_account_updates_multi(7, "", "", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
     assert!(
         rows.0.iter().any(|(req, key, value)| *req == 7 && key == "NetLiquidation" && value == "100.00"),
         "the first batch states the account: {:?}", rows.0,
@@ -5598,7 +5745,7 @@ fn the_account_figures_keep_arriving_under_the_request_that_asked() {
 
     // Withdrawn, and the next move reaches nobody.
     rows.0.clear();
-    client.cancel_account_updates_multi(7);
+    client.cancel_account_updates_multi(7); the_engine_answers(&rx, &shared);
     shared.portfolio.note_account_value("NetLiquidation", "102.00", "USD");
     client.process_msgs(&mut rows);
     assert!(rows.0.is_empty(), "a withdrawn request went on being reported to: {:?}", rows.0);
@@ -5624,30 +5771,32 @@ fn a_second_subscription_does_not_eat_the_first_one_s_moves() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     shared.portfolio.note_account_value("NetLiquidation", "100.00", "USD");
 
     let mut rows = Rows::default();
-    client.req_account_updates_multi(1, "", "", false, &mut rows);
+    client.req_account_updates_multi(1, "", "", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
     assert!(rows.0.iter().any(|(r, ..)| *r == 1), "the first ask is answered");
 
     // The figure moves, and before anything is dispatched a second caller asks.
     shared.portfolio.note_account_value("NetLiquidation", "101.00", "USD");
     rows.0.clear();
-    client.req_account_updates_multi(2, "", "", false, &mut rows);
+    client.req_account_updates_multi(2, "", "", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
     assert!(
         rows.0.iter().any(|(r, k, v)| *r == 2 && k == "NetLiquidation" && v == "101.00"),
         "the second ask is answered with the account as it stands: {:?}", rows.0,
     );
 
-    // And the watcher already standing is still owed that move.
-    rows.0.clear();
-    client.process_msgs(&mut rows);
+    // And the watcher already standing is still owed that move: in the read
+    // that answered the second ask, the move being state the read took
+    // before its records.
     assert!(
         rows.0.iter().any(|(r, k, v)| *r == 1 && k == "NetLiquidation" && v == "101.00"),
         "the first watcher was never told the move the second ask overtook: {:?}", rows.0,
     );
+    rows.0.clear();
+    client.process_msgs(&mut rows);
     // And the one just answered is not told again what it was just given. A
     // first batch read outside the record leaves every figure looking
     // undelivered, and the next dispatch says the whole account back to a
@@ -5659,24 +5808,19 @@ fn a_second_subscription_does_not_eat_the_first_one_s_moves() {
 
     // Withdrawn and asked again, the account comes whole rather than as the
     // nothing that has moved since.
-    client.cancel_account_updates_multi(1);
+    client.cancel_account_updates_multi(1); the_engine_answers(&rx, &shared);
     rows.0.clear();
-    client.req_account_updates_multi(1, "", "", false, &mut rows);
+    client.req_account_updates_multi(1, "", "", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut rows);
     assert!(
         rows.0.iter().any(|(r, k, v)| *r == 1 && k == "NetLiquidation" && v == "101.00"),
         "a fresh ask is answered with the account, not with what moved: {:?}", rows.0,
     );
 }
 
-/// A model names a slice of the account, and a slice is not what this session
-/// is told about.
-///
-/// The venue states the account whole. Echoing the caller's model onto every
-/// row labelled the whole account's figures and holdings as that model's, and
-/// a caller keeping a book per model files one model as holding everything the
-/// account holds.
+/// Multi-account replies echo the model label stated by the caller.
+/// Unsupported model selection is reported separately in the session log.
 #[test]
-fn a_model_that_was_asked_about_does_not_label_the_whole_account() {
+fn multi_account_answers_echo_the_model_the_caller_stated() {
     #[derive(Default)]
     struct Labels { models: Vec<String>, said: Vec<String> }
     impl crate::api::wrapper::Wrapper for Labels {
@@ -5697,7 +5841,7 @@ fn a_model_that_was_asked_about_does_not_label_the_whole_account() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     shared.portfolio.note_account_value("NetLiquidation", "12345.678", "CHF");
     shared.portfolio.set_position_info(PositionInfo {
@@ -5705,30 +5849,30 @@ fn a_model_that_was_asked_about_does_not_label_the_whole_account() {
     });
 
     let mut heard = Labels::default();
-    client.req_account_updates_multi(1, "", "TECH", false, &mut heard);
-    client.req_positions_multi(2, "", "TECH", &mut heard);
+    client.req_account_updates_multi(1, "", "TECH", false); the_engine_answers(&rx, &shared); client.process_msgs(&mut heard);
+    client.req_positions_multi(2, "", "TECH"); the_engine_answers(&rx, &shared); client.process_msgs(&mut heard);
 
     assert!(!heard.models.is_empty(), "the account answered at all");
     assert!(
-        heard.models.iter().all(|model| model.is_empty()),
-        "the whole account's figures came back labelled with a model: {:?}",
+        heard.models.iter().all(|model| model == "TECH"),
+        "the answer did not echo the stated model: {:?}",
         heard.models,
     );
     let about_the_model: Vec<&String> =
         heard.said.iter().filter(|why| why.contains("TECH")).collect();
     assert_eq!(
-        about_the_model.len(), 2,
-        "the caller is told once per request: {:?}", heard.said,
+        about_the_model.len(), 0,
+        "the selection is a log notice: {:?}", heard.said,
     );
 }
 
 #[test]
 fn req_positions_empty_still_calls_position_end() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     // As above: the account has spoken, and it holds nothing.
     shared.portfolio.account_download_is_settled();
     let mut w = RecordingWrapper::default();
-    client.req_positions(&mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     assert_eq!(w.events, vec!["position_end"]);
 }
 
@@ -5739,16 +5883,24 @@ fn req_positions_empty_still_calls_position_end() {
 #[test]
 fn req_scanner_parameters_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_scanner_parameters().unwrap();
+    crate::api::client::tests::reported(&client, || client.req_scanner_parameters()).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::FetchScannerParams));
 }
 
 #[test]
+fn a_scan_stating_settings_pairs_is_taken() {
+    let (client, rx, shared) = test_client();
+    client.req_scanner_subscription(3, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25, &[], "Annual,true");
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::SubscribeScanner { req_id: 3, .. }));
+    assert!(shared.drain_refused().is_empty());
+}
+
+#[test]
 fn req_scanner_subscription_sends_subscribe() {
     let (client, rx, _shared) = test_client();
-    client.req_scanner_subscription(3, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25,
-        &[TagValue { tag: "priceAbove".into(), value: "10".into() }]).unwrap();
+    client.try_req_scanner_subscription(3, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25,
+        &[TagValue { tag: "priceAbove".into(), value: "10".into() }], "").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::SubscribeScanner { req_id, scan_code, max_items, filters, .. } => {
@@ -5764,7 +5916,7 @@ fn req_scanner_subscription_sends_subscribe() {
 #[test]
 fn cancel_scanner_subscription_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_scanner_subscription(3).unwrap();
+    client.try_cancel_scanner_subscription(3).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelScanner { req_id: 3 }));
 }
@@ -5778,8 +5930,8 @@ fn req_historical_news_sends_fetch() {
     let (client, rx, _shared) = test_client();
     // The query carries no time bounds, so a window is refused rather than
     // dropped: the answer is the most recent headlines, not the window's.
-    assert!(client.req_historical_news(4, 265598, "BRFG", "2026-01-01", "2026-03-01", 10).is_err());
-    client.req_historical_news(4, 265598, "BRFG", "", "", 10).unwrap();
+    assert!(client.try_req_historical_news(4, 265598, "BRFG", "2026-01-01", "2026-03-01", 10).is_err());
+    client.try_req_historical_news(4, 265598, "BRFG", "", "", 10).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, max_results, .. } => {
@@ -5792,10 +5944,28 @@ fn req_historical_news_sends_fetch() {
     }
 }
 
+/// `total_results` is the TWS API's `int`, taken as a gateway takes it: no
+/// more than three hundred go out, and a smaller number is passed on as
+/// stated, below nought included.
+#[test]
+fn a_headline_count_is_capped_at_three_hundred_and_a_lower_one_passed_on() {
+    let (client, rx, _shared) = test_client();
+    for (asked, sent) in [(500, 300), (300, 300), (7, 7), (0, 0), (-5, -5)] {
+        client.req_historical_news(4, 265598, "BRFG", "", "", asked);
+        match rx.try_recv().expect("the request is taken") {
+            ControlCommand::FetchHistoricalNews { max_results, .. } => {
+                assert_eq!(max_results, sent, "{asked} asked");
+            }
+            other => panic!("expected FetchHistoricalNews, got {other:?}"),
+        }
+    }
+    assert!(client.shared.drain_refused().is_empty(), "nothing is refused");
+}
+
 #[test]
 fn req_news_article_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_news_article(5, "BRFG", "BRFG$12345").unwrap();
+    crate::api::client::tests::reported(&client, || client.req_news_article(5, "BRFG", "BRFG$12345")).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
@@ -5814,7 +5984,7 @@ fn req_news_article_sends_fetch() {
 #[test]
 fn req_fundamental_data_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_fundamental_data(6, &spy(), "ReportSnapshot").unwrap();
+    client.try_req_fundamental_data(6, &spy(), "ReportSnapshot").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchFundamentalData { req_id, report_type, .. } => {
@@ -5828,7 +5998,7 @@ fn req_fundamental_data_sends_fetch() {
 #[test]
 fn cancel_fundamental_data_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_fundamental_data(6).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_fundamental_data(6)).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelFundamentalData { req_id: 6 }));
 }
@@ -5840,7 +6010,7 @@ fn cancel_fundamental_data_sends_cancel() {
 #[test]
 fn req_histogram_data_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_histogram_data(7, &spy(), true, "1 week").unwrap();
+    client.try_req_histogram_data(7, &spy(), true, "1 week").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistogramData { req_id, use_rth, period, .. } => {
@@ -5855,7 +6025,7 @@ fn req_histogram_data_sends_fetch() {
 #[test]
 fn cancel_histogram_data_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_histogram_data(7).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_histogram_data(7)).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelHistogramData { req_id: 7 }));
 }
@@ -5869,11 +6039,11 @@ fn req_historical_ticks_sends_fetch() {
     let (client, rx, _shared) = test_client();
     // Either end, and the count says how far it reaches. Naming neither, or
     // both, is what the venue refuses.
-    assert!(client.req_historical_ticks(8, &spy(), "", "", 1000, "TRADES", true, false).is_err());
-    assert!(client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "20260101 16:00:00", 1000, "TRADES", true, false).is_err());
-    client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true, false).unwrap();
+    assert!(crate::api::client::tests::reported(&client, || client.req_historical_ticks(8, &spy(), "", "", 1000, "TRADES", true, false)).is_err());
+    assert!(crate::api::client::tests::reported(&client, || client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "20260101 16:00:00", 1000, "TRADES", true, false)).is_err());
+    crate::api::client::tests::reported(&client, || client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true, false)).unwrap();
     let _ = rx.try_recv();
-    client.req_historical_ticks(8, &spy(), "", "20260101 16:00:00", 1000, "TRADES", true, false).unwrap();
+    crate::api::client::tests::reported(&client, || client.req_historical_ticks(8, &spy(), "", "20260101 16:00:00", 1000, "TRADES", true, false)).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalTicks { contract: ContractRef { con_id, .. }, req_id, number_of_ticks, what_to_show, ignore_size, .. } => {
@@ -5886,7 +6056,7 @@ fn req_historical_ticks_sends_fetch() {
         _ => panic!("expected FetchHistoricalTicks"),
     }
     // Asked to leave out a change that moves only a size, the request says so.
-    client.req_historical_ticks(9, &spy(), "", "20260101 16:00:00", 1000, "BID_ASK", true, true).unwrap();
+    crate::api::client::tests::reported(&client, || client.req_historical_ticks(9, &spy(), "", "20260101 16:00:00", 1000, "BID_ASK", true, true)).unwrap();
     assert!(matches!(
         rx.try_recv().unwrap(),
         ControlCommand::FetchHistoricalTicks { req_id: 9, ignore_size: true, .. }
@@ -5901,14 +6071,14 @@ fn req_historical_ticks_sends_fetch() {
 #[test]
 fn a_real_time_bar_request_states_a_series_the_venue_serves() {
     let (client, _rx, _shared) = test_client();
-    let err = client.req_real_time_bars(9, &spy(), 5, "BDI", true).unwrap_err();
+    let err = crate::api::client::tests::reported(&client, || client.req_real_time_bars(9, &spy(), 5, "BDI", true)).unwrap_err();
     assert!(err.message.contains("Unsupported what_to_show"), "got: {err}");
 }
 
 #[test]
 fn req_real_time_bars_sends_subscribe() {
     let (client, rx, _shared) = test_client();
-    client.req_real_time_bars(9, &spy(), 5, "TRADES", true).unwrap();
+    crate::api::client::tests::reported(&client, || client.req_real_time_bars(9, &spy(), 5, "TRADES", true)).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::SubscribeRealTimeBar { contract: ContractRef { con_id, .. }, req_id, what_to_show, use_rth, .. } => {
@@ -5924,7 +6094,7 @@ fn req_real_time_bars_sends_subscribe() {
 #[test]
 fn cancel_real_time_bars_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_real_time_bars(9).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_real_time_bars(9)).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelRealTimeBar { req_id: 9 }));
 }
@@ -5936,7 +6106,7 @@ fn cancel_real_time_bars_sends_cancel() {
 #[test]
 fn req_historical_schedule_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_schedule(11, &spy(), "20260101 16:00:00", "1 D", true).unwrap();
+    client.try_req_historical_schedule(11, &spy(), "20260101 16:00:00", "1 D", true).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalSchedule { contract: ContractRef { con_id, .. }, req_id, use_rth, .. } => {
@@ -5958,7 +6128,7 @@ fn quote_escape_hatch() {
     let q = Quote { bid: 200 * PRICE_SCALE, ..Default::default() };
     shared.market.push_quote(0, &q);
 
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(|| {});
     let client = EClient::from_parts(shared, tx, handle, "DU123".into());
 
@@ -5975,7 +6145,7 @@ fn quote_escape_hatch() {
 fn rtt_none_until_measured_and_ping_sends_command() {
     let (client, rx, shared) = test_client();
     assert_eq!(client.last_rtt(), None);
-    client.req_ping().unwrap();
+    crate::api::client::tests::reported(&client, || client.req_ping()).unwrap();
     assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Ping));
 
     shared.set_ccp_rtt(std::time::Duration::from_micros(1234));
@@ -5988,7 +6158,7 @@ fn quote_by_instrument_direct() {
     let q = Quote { ask: 300 * PRICE_SCALE, ..Default::default() };
     shared.market.push_quote(2, &q);
 
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(|| {});
     let client = EClient::from_parts(shared, tx, handle, "DU123".into());
 
@@ -6009,7 +6179,7 @@ fn account_reads_shared_state() {
     shared.portfolio.set_account(&a);
     shared.portfolio.account_download_is_settled();
     let (client2, _rx2, _) = {
-        let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+        let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(|| {});
         (EClient::from_parts(shared.clone(), tx, handle, "DU123".into()), rx, shared.clone())
     };
@@ -6134,7 +6304,7 @@ fn process_msgs_dispatches_order_updates() {
 #[test]
 fn process_msgs_dispatches_inactive_reason_as_error() {
     let (client, _rx, shared) = test_client();
-    shared.orders.push_order_inactive(46, 399, "Order held pending margin check".into());
+    shared.orders.push_order_inactive(46, crate::types::model::OrderOp::Venue, 399, "Order held pending margin check".into());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "error:46:399:Order held pending margin check"));
@@ -6146,13 +6316,13 @@ fn process_msgs_dispatches_inactive_reason_as_error() {
 /// "Inactive" — does not resurrect into it.
 #[test]
 fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(82, &spy(), &order).unwrap();
-    client.place_order(83, &spy(), &order).unwrap();
+    client.try_place_order(82, &spy(), &order).unwrap();
+    client.try_place_order(83, &spy(), &order).unwrap();
 
     shared.orders.push_order_update(OrderUpdate {
         order_id: 82, instrument: 0, status: OrderStatus::Inactive,
@@ -6166,7 +6336,7 @@ fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
     client.process_msgs(&mut w);
 
     w.events.clear();
-    client.req_all_open_orders(&mut w);
+    client.req_all_open_orders(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("open_order:82:")),
         "genuinely-inactive order must remain in the open-order snapshot after dispatch");
     assert!(!w.events.iter().any(|e| e.starts_with("open_order:83:")),
@@ -6366,7 +6536,7 @@ fn process_msgs_dispatches_tbt_trade() {
     let (client, _rx, shared) = test_client();
     client.core.instrument_to_req.lock().unwrap().insert(0, 10);
     shared.market.push_tbt_trade(TbtTrade {
-        req_id: 10,
+        req_id: 10, kind: crate::types::TbtType::Last,
         // A hundred shares, held the way every quantity is held.
         instrument: 0, price: 150 * PRICE_SCALE, size: 100 * crate::types::QTY_SCALE,
         timestamp: 1700000000, exchange: "ARCA".into(), conditions: "".into(),
@@ -6403,7 +6573,7 @@ fn process_msgs_tbt_records_carry_the_request_they_arrived_under() {
     // up by contract, both would be handed whichever request was made last.
     client.core.instrument_to_req.lock().unwrap().insert(0, 99);
     shared.market.push_tbt_trade(TbtTrade {
-        req_id: 10,
+        req_id: 10, kind: crate::types::TbtType::Last,
         instrument: 0, price: 150 * PRICE_SCALE, size: 100 * crate::types::QTY_SCALE,
         timestamp: 0, exchange: "".into(), conditions: "".into(),
         past_limit: false,
@@ -6586,7 +6756,7 @@ fn a_preview_is_never_reported_as_a_working_order() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, what_if: true, ..Default::default()
     };
-    client.place_order(6101, &spy(), &preview).unwrap();
+    client.try_place_order(6101, &spy(), &preview).unwrap();
     while rx.try_recv().is_ok() {}
 
     // Still unanswered: nothing reads it as working.
@@ -6621,12 +6791,12 @@ fn a_refused_preview_is_reported_and_leaves_nothing() {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, what_if: true, ..Default::default()
     };
-    client.place_order(6102, &spy(), &preview).unwrap();
+    client.try_place_order(6102, &spy(), &preview).unwrap();
     while rx.try_recv().is_ok() {}
 
     // The venue's refusal of a preview arrives as an error under the
     // order's number.
-    shared.orders.push_order_inactive(6102, 201, "the margin cannot be stated".into());
+    shared.orders.push_order_inactive(6102, crate::types::model::OrderOp::Place, 201, "the margin cannot be stated".into());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(
@@ -6642,7 +6812,8 @@ fn a_refused_preview_is_reported_and_leaves_nothing() {
 /// free to the next order.
 #[test]
 fn a_preview_the_venue_refuses_answers_the_refusal_and_leaves_nothing() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
+    let _engine = rx.run();
     let preview = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, what_if: true, ..Default::default()
@@ -6659,7 +6830,7 @@ fn a_preview_the_venue_refuses_answers_the_refusal_and_leaves_nothing() {
                 if let Some(id) = found { break id; }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             };
-            pushed.orders.push_order_inactive(id, 201, "the margin cannot be stated".into());
+            pushed.orders.push_order_inactive(id, crate::types::model::OrderOp::Place, 201, "the margin cannot be stated".into());
         });
         client.what_if_order(&spy(), &preview).expect_err("the venue refused")
     });
@@ -6741,7 +6912,7 @@ fn process_msgs_dispatches_head_timestamp() {
 #[test]
 fn a_head_timestamp_is_written_the_way_it_was_asked_for() {
     let (client, _rx, shared) = test_client();
-    client.req_head_time_stamp(11, &spy(), "TRADES", true, 2).expect("the request is sent");
+    client.try_req_head_time_stamp(11, &spy(), "TRADES", true, 2).expect("the request is sent");
     shared.reference.push_head_timestamp(11, HeadTimestampResponse {
         head_timestamp: "20200101-00:00:00".into(), timezone: String::new(),
     });
@@ -6754,7 +6925,7 @@ fn a_head_timestamp_is_written_the_way_it_was_asked_for() {
     );
 
     // A request asking for format 1 keeps the wire's own spelling.
-    client.req_head_time_stamp(12, &spy(), "TRADES", true, 1).expect("the request is sent");
+    client.try_req_head_time_stamp(12, &spy(), "TRADES", true, 1).expect("the request is sent");
     shared.reference.push_head_timestamp(12, HeadTimestampResponse {
         head_timestamp: "20200101-00:00:00".into(), timezone: String::new(),
     });
@@ -6771,7 +6942,7 @@ fn a_historical_request_under_a_used_id_answers_from_the_beginning() {
     client.core.hist_initial_complete.lock().unwrap().insert(13);
 
     client
-        .req_historical_data(13, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false)
+        .try_req_historical_data(13, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false)
         .expect("the request is sent");
     shared.reference.push_historical_data(13, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
@@ -6796,29 +6967,13 @@ fn a_historical_request_under_a_used_id_answers_from_the_beginning() {
 }
 
 /// A trade callback names the stream it carries: tick type 1 = Last,
-/// 2 = AllLast. The trade record does not carry it, so the request's kind is.
+/// 2 = AllLast, as the record carries it from the stream it arrived on.
 #[test]
 fn a_trade_stream_says_which_of_the_two_it_is() {
-    let (client, rx, shared) = test_client();
-    // Long enough for the stand-in below to be scheduled. The tests default to
-    // a millisecond, which is a real engine answering from another thread and
-    // a flake when the machine is busy.
-    client.core.set_registration_timeout(std::time::Duration::from_secs(5));
-    // Standing in for the engine, which answers a subscription by naming the
-    // slot it took. Without an answer the call waits out its registration.
-    let engine = std::thread::spawn(move || {
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::SubscribeTbt { reply_tx: Some(reply), .. } = cmd {
-                let _ = reply.try_send(Ok(0));
-            }
-        }
-    });
-    client.req_tick_by_tick_data(20, &spy(), "AllLast", 0, false).expect("subscribed");
-    client.req_tick_by_tick_data(21, &spy(), "Last", 0, false).expect("subscribed");
-
-    for req_id in [20, 21] {
+    let (client, _rx, shared) = test_client();
+    for (req_id, kind) in [(20, TbtType::AllLast), (21, TbtType::Last)] {
         shared.market.push_tbt_trade(crate::types::TbtTrade {
-            instrument: 0, req_id, price: PRICE_SCALE, size: 1, timestamp: 0,
+            instrument: 0, req_id, kind, price: PRICE_SCALE, size: 1, timestamp: 0,
             exchange: "NYSE".into(), conditions: String::new(),
             past_limit: false, unreported: false,
         });
@@ -6831,9 +6986,6 @@ fn a_trade_stream_says_which_of_the_two_it_is() {
         w.events,
     );
     assert!(w.events.iter().any(|e| e.starts_with("tbt_last:21:1:")));
-
-    drop(client);
-    engine.join().expect("the stand-in engine");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -7169,14 +7321,14 @@ fn modify_limit_order_price_via_resubmit() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(80, &spy(), &order).unwrap();
+    client.try_place_order(80, &spy(), &order).unwrap();
     while rx.try_recv().is_ok() {}
 
     let modified = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 152.0, ..Default::default()
     };
-    client.place_order(80, &spy(), &modified).unwrap();
+    client.try_place_order(80, &spy(), &modified).unwrap();
 
     let mut found = false;
     while let Ok(cmd) = rx.try_recv() {
@@ -7199,7 +7351,7 @@ fn modify_order_before_ack_no_panic() {
             order_type: "LMT".into(), lmt_price: 150.0 + price as f64,
             ..Default::default()
         };
-        let _ = client.place_order(42, &spy(), &order);
+        let _ = client.try_place_order(42, &spy(), &order);
     }
     let mut count = 0;
     while rx.try_recv().is_ok() { count += 1; }
@@ -7214,13 +7366,13 @@ fn cancel_during_modify_no_panic() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(99, &spy(), &order).unwrap();
+    client.try_place_order(99, &spy(), &order).unwrap();
     let modified = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 151.0, ..Default::default()
     };
-    client.place_order(99, &spy(), &modified).unwrap();
-    client.cancel_order(99, "").unwrap();
+    client.try_place_order(99, &spy(), &modified).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_order(99, "")).unwrap();
 
     let mut has_cancel = false;
     while let Ok(cmd) = rx.try_recv() {
@@ -7263,7 +7415,7 @@ fn rapid_modify_multiple_prices_no_crash() {
             order_type: "LMT".into(), lmt_price: 100.0 + i as f64 * 0.01,
             ..Default::default()
         };
-        let _ = client.place_order(77, &spy(), &order);
+        let _ = client.try_place_order(77, &spy(), &order);
     }
     let mut order_count = 0;
     // The statement each replace goes behind is not itself a modify.
@@ -7283,7 +7435,7 @@ fn modify_tif_day_to_gtc_via_resubmit() {
         order_type: "LMT".into(), lmt_price: 150.0,
         tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(88, &spy(), &order).unwrap();
+    client.try_place_order(88, &spy(), &order).unwrap();
     while rx.try_recv().is_ok() {}
 
     let modified = Order {
@@ -7291,7 +7443,7 @@ fn modify_tif_day_to_gtc_via_resubmit() {
         order_type: "LMT".into(), lmt_price: 150.0,
         tif: "GTC".into(), ..Default::default()
     };
-    client.place_order(88, &spy(), &modified).unwrap();
+    client.try_place_order(88, &spy(), &modified).unwrap();
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
@@ -7315,14 +7467,14 @@ fn modify_price_and_qty_simultaneously() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(55, &spy(), &order).unwrap();
+    client.try_place_order(55, &spy(), &order).unwrap();
     while rx.try_recv().is_ok() {}
 
     let modified = Order {
         action: "BUY".into(), total_quantity: 200.0,
         order_type: "LMT".into(), lmt_price: 148.0, ..Default::default()
     };
-    client.place_order(55, &spy(), &modified).unwrap();
+    client.try_place_order(55, &spy(), &modified).unwrap();
 
     let mut found = false;
     while let Ok(cmd) = rx.try_recv() {
@@ -7349,13 +7501,13 @@ fn a_modify_into_another_type_goes_out_as_that_type() {
             action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
             lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
         };
-        client.place_order(9401, &spy(), &plain).expect("a plain limit submits");
+        client.try_place_order(9401, &spy(), &plain).expect("a plain limit submits");
         while rx.try_recv().is_ok() {}
 
         let converted = Order {
             order_type: order_type.into(), aux_price: 99.0, ..plain.clone()
         };
-        client.place_order(9401, &spy(), &converted)
+        client.try_place_order(9401, &spy(), &converted)
             .unwrap_or_else(|e| panic!("{order_type}: the conversion goes: {e}"));
         let expected = crate::client_core::ClientCore::build_order_request(&converted, 9401, 0, None)
             .expect("the same order places");
@@ -7380,14 +7532,14 @@ fn modify_order_type_lmt_to_stp() {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(66, &spy(), &order).unwrap();
+    client.try_place_order(66, &spy(), &order).unwrap();
     while rx.try_recv().is_ok() {}
 
     let modified = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "STP".into(), aux_price: 149.0, ..Default::default()
     };
-    client.place_order(66, &spy(), &modified).unwrap();
+    client.try_place_order(66, &spy(), &modified).unwrap();
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
@@ -7549,7 +7701,7 @@ fn session_token_bytes_roundtrip_through_biguint() {
     use num_bigint::BigUint;
 
     let shared = Arc::new(SharedState::new());
-    let (tx, _rx) = std::sync::mpsc::sync_channel(4096);
+    let (tx, _rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(|| {});
     let mut client = EClient::from_parts(shared, tx, handle, "DU123".into());
 
@@ -7591,9 +7743,11 @@ fn engine_connection_loss_fires_connection_closed_once() {
     assert!(w.events.iter().any(|e| e.starts_with("error:-1:1102:")), "{:?}", w.events);
     assert!(client.is_connected());
 
-    // The session's end.
+    // The session's end: the loss, and the engine's last record as its loop
+    // ends.
     shared.reference.set_session_over("the venue ended it");
     shared.set_connection_lost();
+    shared.push_closed();
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| *e == "connection_closed").count(), 1, "{:?}", w.events);
     assert!(!client.is_connected(), "is_connected must turn false");
@@ -7643,6 +7797,8 @@ fn queued_data_is_dispatched_before_connection_closed() {
     shared.reference.push_contract_details_end(7);
     shared.reference.set_session_over("the venue ended it");
     shared.set_connection_lost();
+    // The engine's last record, as its loop ends.
+    shared.push_closed();
     client.process_msgs(&mut w);
 
     assert_eq!(w.events.first().map(String::as_str), Some("contract_details_end:7"), "{:?}", w.events);
@@ -7715,7 +7871,7 @@ fn a_display_group_keeps_its_followers_in_step() {
     );
 
     // One of them puts a contract in it.
-    client.update_display_group(10, "756733@SMART").unwrap();
+    crate::api::client::tests::reported(&client, || client.update_display_group(10, "756733@SMART")).unwrap();
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     let told: Vec<&String> = w.events.iter()
@@ -7726,12 +7882,12 @@ fn a_display_group_keeps_its_followers_in_step() {
     assert!(told.iter().any(|e| e.contains(":11:")), "{told:?}");
 
     // A caller that follows nothing has no group to put a contract in.
-    let refusal = client.update_display_group(99, "1@SMART").unwrap_err();
+    let refusal = crate::api::client::tests::reported(&client, || client.update_display_group(99, "1@SMART")).unwrap_err();
     assert!(refusal.message.contains("follows no display group"), "{refusal}");
 
     // Once it stops following, it is no longer told.
     client.unsubscribe_from_group_events(11);
-    client.update_display_group(10, "").unwrap();
+    crate::api::client::tests::reported(&client, || client.update_display_group(10, "")).unwrap();
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     let told: Vec<&String> = w.events.iter()
@@ -7755,11 +7911,11 @@ fn managed_accounts_names_every_account_the_login_holds() {
     let mut w = W::default();
 
     // One account: answered with that account and no comma.
-    client.req_managed_accts(&mut w);
+    client.req_managed_accts(); client.process_msgs(&mut w);
     assert_eq!(w.0, vec!["DU123".to_string()]);
 
     client.accounts = vec!["DU123".into(), "DU456".into(), "DU789".into()];
-    client.req_managed_accts(&mut w);
+    client.req_managed_accts(); client.process_msgs(&mut w);
     assert_eq!(w.0[1], "DU123,DU456,DU789");
 }
 
@@ -7919,7 +8075,7 @@ fn subscribing_to_account_updates_reports_the_portfolio() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut heard = Heard::default();
 
     client.req_account_updates(true, "DU123");
@@ -7941,6 +8097,8 @@ fn subscribing_to_account_updates_reports_the_portfolio() {
     // one the venue had stopped naming.
     shared.portfolio.set_account_download_complete("AR.1");
     shared.portfolio.account_download_is_settled();
+    // The subscription is answered where the account has stated itself.
+    the_engine_answers(&rx, &shared);
     client.process_msgs(&mut heard);
 
     assert!(heard.values.contains(&"NetLiquidation".to_string()), "the values still arrive");
@@ -8008,13 +8166,13 @@ fn the_current_time_is_the_venues_own() {
 
     // Before the venue has said anything, the question is still answered —
     // with this machine's clock, which is what no shift means.
-    client.req_current_time(&mut heard);
+    client.req_current_time(); client.process_msgs(&mut heard);
     assert_eq!(heard.times.len(), 1, "a connected session is told the time");
     assert!(heard.errors.is_empty(), "and is not refused for it");
 
     // Once the venue states its clock, the answer lands on that clock.
     shared.market.note_venue_time("20260815-12:00:00");
-    client.req_current_time(&mut heard);
+    client.req_current_time(); client.process_msgs(&mut heard);
     let stated = heard.times[1];
     assert!(
         (stated - 1_786_795_200).abs() < 5,
@@ -8043,8 +8201,8 @@ fn the_millisecond_clock_keeps_what_the_second_one_drops() {
 
     // A stamp with no fraction: the two agree to the thousand.
     shared.market.note_venue_time("20260815-12:00:00");
-    client.req_current_time(&mut heard);
-    client.req_current_time_in_millis(&mut heard);
+    client.req_current_time(); client.process_msgs(&mut heard);
+    client.req_current_time_in_millis(); client.process_msgs(&mut heard);
     assert_eq!(heard.secs[0], 1_786_795_200);
     // The clock keeps running between the statement and the reading — that is
     // the whole point of holding a difference rather than a stamp — so this is
@@ -8060,8 +8218,8 @@ fn the_millisecond_clock_keeps_what_the_second_one_drops() {
 
     // One with a fraction: seconds cannot carry it, milliseconds can.
     shared.market.note_venue_time("20260815-12:00:00.250");
-    client.req_current_time(&mut heard);
-    client.req_current_time_in_millis(&mut heard);
+    client.req_current_time(); client.process_msgs(&mut heard);
+    client.req_current_time_in_millis(); client.process_msgs(&mut heard);
     assert_eq!(heard.secs[1], 1_786_795_200, "the same second");
     near(heard.millis[1], 1_786_795_200_250, "and a quarter of it besides");
 }
@@ -8084,9 +8242,13 @@ fn the_last_thing_the_connection_did_is_what_a_caller_is_told() {
     client.process_msgs(&mut w);
 
     assert!(!client.is_connected(), "the connection went and did not come back");
+    let said: Vec<&str> = w.events.iter()
+        .filter(|e| e.starts_with("error:-1:1100:") || e.starts_with("error:-1:1102:"))
+        .map(|e| &e[..13])
+        .collect();
     assert_eq!(
-        w.events.iter().filter(|e| e.starts_with("error:-1:1100:")).count(), 1,
-        "and the caller is told once: {:?}", w.events,
+        said, ["error:-1:1100", "error:-1:1102", "error:-1:1100"],
+        "and the caller is told each of the three, in the order they happened: {:?}", w.events,
     );
 
     // The other way round: a recovery after a loss stands.
@@ -8109,7 +8271,7 @@ fn the_last_thing_the_connection_did_is_what_a_caller_is_told() {
 #[test]
 fn a_request_during_a_recoverable_loss_is_carried_and_one_after_the_end_is_refused() {
     use std::sync::atomic::Ordering;
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut w = RecordingWrapper::default();
     let refused = |w: &RecordingWrapper| {
         w.events.iter().filter(|e| e.starts_with("error:-1:504")).count()
@@ -8124,7 +8286,7 @@ fn a_request_during_a_recoverable_loss_is_carried_and_one_after_the_end_is_refus
     assert!(!client.is_connected(), "the loss was announced");
 
     client.positions_requested.store(true, Ordering::Release);
-    client.cancel_positions();
+    client.cancel_positions(); the_engine_answers(&rx, &shared);
     client.req_account_summary(7, "All", "NetLiquidation");
     client.process_msgs(&mut w);
     assert_eq!(refused(&w), 0, "a request during recovery was refused: {:?}", w.events);
@@ -8136,7 +8298,7 @@ fn a_request_during_a_recoverable_loss_is_carried_and_one_after_the_end_is_refus
         crate::reliability::retry::DisconnectReason::EngineStopped.as_str(),
     );
     client.positions_requested.store(true, Ordering::Release);
-    client.cancel_positions();
+    client.cancel_positions(); the_engine_answers(&rx, &shared);
     client.req_account_summary(8, "All", "NetLiquidation");
     client.process_msgs(&mut w);
     assert_eq!(refused(&w), 2, "each is answered 504 once: {:?}", w.events);
@@ -8214,7 +8376,7 @@ fn solving_an_option_answers_against_the_venues_own_model() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut heard = Heard::default();
 
     let mut option = spy();
@@ -8224,12 +8386,13 @@ fn solving_an_option_answers_against_the_venues_own_model() {
     option.right = "C".into();
     option.last_trade_date_or_contract_month = "20270115".into();
 
-    // With no published model there is nothing to solve against; the call reports
-    // that rather than inventing a rate.
+    // With no published model there is nothing to solve against; the question
+    // waits for the model its watch brings rather than inventing a rate.
     client.calculate_option_price(5, &option, 0.25, 505.0);
+    rx.pump();
     client.process_msgs(&mut heard);
     assert!(heard.computed.is_empty(), "no model, no answer");
-    assert!(!heard.errors.is_empty(), "and the caller is told why");
+    assert!(shared.market.holds_calculation(5), "and the question waits for one");
 
     // With it, the answer is solved and delivered under the caller's request.
     shared.market.push_option_computation(crate::types::OptionComputation {
@@ -8359,11 +8522,11 @@ fn completed_orders_are_still_there_when_they_are_asked_for_again() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 1);
 
     let mut again = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut again);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut again);
     assert_eq!(
         again.events.iter().filter(|e| *e == "completed_order").count(),
         1,
@@ -8381,7 +8544,7 @@ fn completed_orders_are_still_there_when_they_are_asked_for_again() {
 /// statement and outranks the local record.
 #[test]
 fn an_order_the_venue_has_finished_with_is_not_reported_as_working() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     client.core.track_order(
         44,
         Contract { symbol: "SPY".into(), sec_type: "STK".into(), ..Default::default() },
@@ -8397,7 +8560,7 @@ fn an_order_the_venue_has_finished_with_is_not_reported_as_working() {
     shared.orders.set_replay_done();
 
     let mut w = RecordingWrapper::default();
-    client.req_open_orders(&mut w);
+    client.req_open_orders(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     assert!(
         !w.events.iter().any(|e| e == "open_order" || e.starts_with("open_order:")),
         "an order the venue has finished with is not working: {:?}", w.events,
@@ -8408,144 +8571,33 @@ fn an_order_the_venue_has_finished_with_is_not_reported_as_working() {
     );
 }
 
-/// One question of what the account has finished at a time.
+/// A second question of what the account has finished is asked, not refused,
+/// and the call waits for nothing.
 ///
-/// The answer is a run of ordinary reports and one sentinel, and nothing in
-/// the run says which question it answers — so two callers waiting at once
-/// both read the same sentinel and both take the first answer as their own.
-/// The client this replaces refuses the second outright. This one says so and
-/// ends, rather than handing over somebody else's answer.
+/// The answer is a run of ordinary reports and one sentinel that names no
+/// question, so the engine asks one at a time: a second asked while the first
+/// is out waits its turn there. Refused here instead, a caller that asked
+/// twice lost its second answer; waited on here, a call sat out the venue's
+/// answer on the caller's thread.
 #[test]
-fn a_second_question_about_what_the_account_has_finished_is_refused() {
-    let (client, _rx, shared) = test_client();
-    shared.orders.push_completed_order(crate::types::CompletedOrder {
-        order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
-        filled_qty: 100, timestamp_ns: 0,
-    });
-    // A caller already waiting, which is what the claim stands for.
-    assert!(shared.orders.claim_the_completed_orders_question().is_some());
-
-    let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
-    assert!(
-        w.events.iter().any(|e| e.starts_with("error")),
-        "the caller is told why it was not sent: {:?}", w.events,
-    );
-    assert!(
-        w.events.iter().any(|e| e == "completed_orders_end"),
-        "and is ended rather than left waiting: {:?}", w.events,
-    );
-    assert!(
-        !w.events.iter().any(|e| e == "completed_order"),
-        "and is handed nobody else's answer: {:?}", w.events,
-    );
-
-    // Once the first is over, the next one is sent.
-    shared.orders.the_completed_orders_question_is_over();
-    let engine = {
-        let shared = shared.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            shared.orders.note_completed_orders_asked();
-            // On the turn the question was asked under, which is what the
-            // engine reads off the command.
-            let turn = shared.orders.completed_orders_turn();
-            shared.orders.note_completed_orders_end_on(turn);
-        })
-    };
-    let mut next = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut next);
-    engine.join().unwrap();
-    assert_eq!(
-        next.events.iter().filter(|e| *e == "completed_order").count(), 1,
-        "the question is free again: {:?}", next.events,
-    );
-}
-
-/// A caller is released by the end of its own question, not by the answer to
-/// one somebody else gave up on.
-///
-/// The answer is a run of ordinary reports and one sentinel, and nothing in
-/// the run says which question it answers. A caller that waits long enough
-/// gives up and leaves its answer still on its way: read as a count alone, the
-/// next caller took that answer as its own.
-#[test]
-fn a_caller_is_released_by_the_end_of_its_own_question() {
-    let (client, rx, shared) = test_client();
-    // The caller before this one asked and gave up.
-    let abandoned_turn = shared.orders.claim_the_completed_orders_question()
-        .expect("the question is free");
-    shared.orders.the_completed_orders_question_is_over();
-
-    // Its answer arrives while this caller is waiting on its own.
-    let engine = {
-        let shared = shared.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            shared.orders.note_completed_orders_asked();
-            shared.orders.note_completed_orders_end_on(abandoned_turn);
-        })
-    };
+fn a_second_question_about_what_the_account_has_finished_is_asked_in_its_turn() {
+    let (client, rx, _shared) = test_client();
     let began = std::time::Instant::now();
-    let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
-    engine.join().unwrap();
-    assert!(
-        began.elapsed() >= std::time::Duration::from_secs(14),
-        "the abandoned caller's answer released this one: {:?}", began.elapsed(),
-    );
-    assert!(
-        w.events.iter().any(|e| e.starts_with("error")),
-        "and this caller is told its own question went unanswered: {:?}", w.events,
-    );
-    // The question went out under this caller's own turn.
-    let asked: Vec<u64> = std::iter::from_fn(|| rx.try_recv().ok())
+    client.req_completed_orders(false);
+    client.req_completed_orders(true);
+    assert!(began.elapsed() < std::time::Duration::from_millis(500), "the calls wait for nothing");
+    let asked: Vec<bool> = std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|cmd| match cmd {
-            ControlCommand::FetchCompletedOrders { turn } => Some(turn),
+            ControlCommand::FetchCompletedOrders { api_only } => Some(api_only),
             _ => None,
         })
         .collect();
-    assert_eq!(asked, [abandoned_turn + 1], "its own turn, not the abandoned one: {asked:?}");
-}
-
-/// A question the engine refuses at once is answered at once.
-///
-/// The engine counts the question as asked and, where there is no connection
-/// to carry it, counts the answer as ended in the same pass. A wait that
-/// re-read the count of answers at the moment it saw the ask adopted a figure
-/// that already included its own answer — and then sat out its whole deadline
-/// waiting for a figure that could not move again, before reporting that the
-/// venue had not finished.
-#[test]
-fn a_question_answered_before_the_wait_looks_does_not_wait_it_out() {
-    let (client, _rx, shared) = test_client();
-    // What the engine does with the question where there is no connection to
-    // carry it: it counts the ask and the end in one pass, both of them
-    // between two of the caller's looks.
-    let engine = {
-        let shared = shared.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            shared.orders.note_completed_orders_asked();
-            // On the turn the question was asked under, which is what the
-            // engine reads off the command.
-            let turn = shared.orders.completed_orders_turn();
-            shared.orders.note_completed_orders_end_on(turn);
-        })
-    };
-
-    let began = std::time::Instant::now();
+    assert_eq!(asked, [false, true], "both questions reach the engine, in order");
     let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
-    engine.join().unwrap();
+    client.process_msgs(&mut w);
     assert!(
-        began.elapsed() < std::time::Duration::from_secs(2),
-        "the wait sat out its deadline for an answer it already had: {:?}",
-        began.elapsed(),
-    );
-    assert!(
-        w.events.iter().any(|e| e == "completed_orders_end"),
-        "and the caller is told the answer is over: {:?}", w.events,
+        !w.events.iter().any(|e| e.starts_with("error")),
+        "and neither is refused: {:?}", w.events,
     );
 }
 
@@ -8584,7 +8636,7 @@ fn an_order_named_permanently_after_it_was_answered_replaces_its_earlier_copy() 
 
     let mut w = RecordingWrapper::default();
     let engine = answering(shared.clone());
-    client.req_completed_orders(false, &mut w);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut w);
     engine.join().unwrap();
     assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 1);
 
@@ -8593,7 +8645,7 @@ fn an_order_named_permanently_after_it_was_answered_replaces_its_earlier_copy() 
 
     let mut again = RecordingWrapper::default();
     let engine = answering(shared.clone());
-    client.req_completed_orders(false, &mut again);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut again);
     engine.join().unwrap();
     assert_eq!(
         again.events.iter().filter(|e| *e == "completed_order").count(),
@@ -8619,7 +8671,7 @@ fn a_completed_order_the_venue_takes_back_leaves_the_archive() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut w);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 1);
 
     shared.orders.push_order_correction(31, crate::bridge::RichOrderInfo {
@@ -8630,7 +8682,7 @@ fn a_completed_order_the_venue_takes_back_leaves_the_archive() {
     });
 
     let mut after = RecordingWrapper::default();
-    client.req_completed_orders(false, &mut after);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut after);
     assert_eq!(
         after.events.iter().filter(|e| *e == "completed_order").count(),
         0,
@@ -8650,17 +8702,17 @@ fn a_request_named_by_id_refuses_a_contract_that_has_none() {
         symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
         ..Default::default()
     };
-    assert!(client.req_fundamental_data(1, &described, "ReportSnapshot").is_err());
-    assert!(client.req_histogram_data(2, &described, true, "3 days").is_err());
-    assert!(client.req_historical_news(3, -1, "BRFG", "", "", 5).is_err());
+    assert!(client.try_req_fundamental_data(1, &described, "ReportSnapshot").is_err());
+    assert!(client.try_req_histogram_data(2, &described, true, "3 days").is_err());
+    assert!(client.try_req_historical_news(3, -1, "BRFG", "", "", 5).is_err());
     assert!(
-        client.req_historical_ticks(4, &spy(), "", "", -1, "TRADES", true, false).is_err(),
+        crate::api::client::tests::reported(&client, || client.req_historical_ticks(4, &spy(), "", "", -1, "TRADES", true, false)).is_err(),
         "a count below zero asked for four billion ticks",
     );
 
     // And one that carries the id is sent.
-    assert!(client.req_fundamental_data(5, &spy(), "ReportSnapshot").is_ok());
-    assert!(client.req_histogram_data(6, &spy(), true, "3 days").is_ok());
+    assert!(client.try_req_fundamental_data(5, &spy(), "ReportSnapshot").is_ok());
+    assert!(client.try_req_histogram_data(6, &spy(), true, "3 days").is_ok());
 }
 
 /// A refusal that can never work keeps its own number.
@@ -8693,7 +8745,7 @@ fn a_depth_request_states_the_contract_it_was_given() {
     let by_id = crate::types::model::Contract {
         con_id: 495512563, exchange: "SMART".into(), ..Default::default()
     };
-    client.req_mkt_depth(1, &by_id, 5, false).expect("the request is sent");
+    crate::api::client::tests::reported(&client, || client.req_mkt_depth(1, &by_id, 5, false)).expect("the request is sent");
     match rx.try_recv().expect("the subscription") {
         ControlCommand::SubscribeDepth { contract, .. } => {
             assert_eq!(contract.sec_type, "", "a security type nobody stated");
@@ -8719,7 +8771,7 @@ fn a_book_a_gateway_refuses_before_asking_is_refused_here() {
         (combo, 5, "Market depth does not support combos."),
         (spy(), 0, "Market depth rows requested must be greater than zero."),
     ] {
-        let refused = client.req_mkt_depth(1, &contract, rows, false).expect_err(reason);
+        let refused = crate::api::client::tests::reported(&client, || client.req_mkt_depth(1, &contract, rows, false)).expect_err(reason);
         assert_eq!((refused.code, refused.message.as_str()), (Refusal::VALIDATION, reason));
         assert!(rx.try_recv().is_err(), "nothing was sent for it");
         assert!(client.core.hold_the_book(1).is_ok(), "and no book slot was taken");
@@ -8735,7 +8787,7 @@ fn a_book_asked_for_with_no_session_is_refused_for_that_first() {
     let (client, rx, shared) = test_client();
     shared.reference.set_session_over("the trading connection");
     let no_exchange = crate::types::model::Contract { con_id: 756733, ..Default::default() };
-    let refused = client.req_mkt_depth(1, &no_exchange, 0, false).expect_err("no session");
+    let refused = crate::api::client::tests::reported(&client, || client.req_mkt_depth(1, &no_exchange, 0, false)).expect_err("no session");
     assert_eq!(refused.code, Refusal::NOT_CONNECTED, "{refused:?}");
     assert!(rx.try_recv().is_err());
 }
@@ -8753,7 +8805,7 @@ fn no_book_is_taken_on_a_feed_that_is_over_for_the_session() {
     let contract = crate::types::model::Contract {
         con_id: 495512563, exchange: "SMART".into(), ..Default::default()
     };
-    let asked = client.req_mkt_depth(1, &contract, 5, false);
+    let asked = crate::api::client::tests::reported(&client, || client.req_mkt_depth(1, &contract, 5, false));
     assert!(asked.is_err(), "the caller is refused: {asked:?}");
     assert!(rx.try_recv().is_err(), "and nothing was sent for it");
     // The slot is free, so a later session's request under the same number is
@@ -8787,7 +8839,7 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
         close: 1.5, volume: 10, wap: 1.2, count: 3, end: String::new(),
     };
     // Format 1 is the wire's own spelling.
-    let _ = client.req_historical_data(
+    let _ = client.try_req_historical_data(
         1, &spy(), "", "1 D", "1 day", "TRADES", true, 1, false,
     );
     shared.reference.push_historical_data(1, HistoricalResponse {
@@ -8798,7 +8850,7 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
     assert_eq!(heard.0[0].1, "20260815-12:00:00", "the wire's own spelling");
 
     // And seconds since the epoch for the request that asked for them.
-    let _ = client.req_historical_data(
+    let _ = client.try_req_historical_data(
         2, &spy(), "", "1 D", "1 day", "TRADES", true, 2, false,
     );
     shared.reference.push_historical_data(2, HistoricalResponse {
@@ -8899,13 +8951,13 @@ fn an_order_nobody_touched_is_not_refused_for_what_it_does_not_carry() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9501, &spy(), &order).expect("a plain order is placed");
+    client.try_place_order(9501, &spy(), &order).expect("a plain order is placed");
 
     // And the same order built by the shorthand, which fills no more than it
     // names.
     let (client, _rx, _shared) = test_client();
     client
-        .place_order(9502, &spy(), &Order::limit("BUY", 1.0, 100.0))
+        .try_place_order(9502, &spy(), &Order::limit("BUY", 1.0, 100.0))
         .expect("the shorthand's order is placed");
 }
 
@@ -8980,7 +9032,7 @@ fn a_question_takes_its_turn_before_it_sends() {
     let place = placing.split("pub fn place(").nth(1).expect("place is there");
     let body = place.split("\n    }").next().unwrap_or(place);
     let turn = body.find("self.take_the_turn()").expect("place takes a turn");
-    let send = body.find("self.place_order(").expect("place sends the order");
+    let send = body.find("self.try_place_order(").expect("place sends the order");
     assert!(turn < send, "the order is sent before the turn is taken");
 }
 
@@ -9141,7 +9193,7 @@ fn a_number_the_wire_cannot_carry_is_refused_wherever_it_sits() {
         }),
     ];
     for (named, order) in cases {
-        let err = match client.place_order(1, &spy(), &order) {
+        let err = match client.try_place_order(1, &spy(), &order) {
             Err(e) => e,
             Ok(()) => panic!("{named} was accepted"),
         };
@@ -9187,23 +9239,29 @@ fn each_report_on_an_order_is_delivered() {
 /// instrument is refused rather than recorded.
 #[test]
 fn a_replace_does_not_move_an_order_to_another_contract() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(2);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, ..Default::default()
     };
-    client.place_order(1, &spy(), &order).expect("the first placement");
+    client.try_place_order(1, &spy(), &order).expect("the first placement");
+    rx.try_recv().expect("the order goes out");
 
     let elsewhere = Contract {
         con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(),
         ..Default::default()
     };
-    client.core.con_id_to_instrument.lock().unwrap().insert(elsewhere.con_id, 1);
-    let err = client
-        .place_order(1, &elsewhere, &Order { lmt_price: 151.0, ..order.clone() })
-        .expect_err("an order working on one contract is not replaced onto another");
-    assert!(err.message.contains("another contract"), "{err}");
+    rx.engine().context.market.register_described(elsewhere.con_id, "AAPL", "STK", "SMART", "", "");
+    client
+        .try_place_order(1, &elsewhere, &Order { lmt_price: 151.0, ..order.clone() })
+        .expect("taken");
+    let refused = engine_refused(&rx, &shared);
+    assert!(
+        matches!(refused.as_slice(), [(1, _, message)] if message.contains("another contract")),
+        "an order working on one contract is not replaced onto another: {refused:?}",
+    );
+    settled(&client, &rx);
 
     // And the record is the contract the venue is working, not the one refused.
     assert_eq!(
@@ -9212,9 +9270,12 @@ fn a_replace_does_not_move_an_order_to_another_contract() {
     );
 
     // The same order on the same contract still replaces.
-    client
-        .place_order(1, &spy(), &Order { lmt_price: 151.0, ..order })
-        .expect("a replace naming the contract it was placed on");
+    client.try_place_order(1, &spy(), &Order { lmt_price: 151.0, ..order }).expect("taken");
+    assert!(
+        matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Modify { .. }))),
+        "a replace naming the contract it was placed on",
+    );
+    assert!(shared.drain_refused().is_empty());
 }
 
 /// A bracket is held to the checks a single order is held to.
@@ -9252,7 +9313,7 @@ fn asking_for_the_accounts_pnl_asks_the_venue() {
     let (client, rx, _shared) = test_client();
     client.req_pnl(9, "DU123", "");
     let asked = rx.try_iter().find_map(|cmd| match cmd {
-        ControlCommand::SubscribePnl { req_id, account } => Some((req_id, account)),
+        ControlCommand::SubscribePnl { req_id, account, .. } => Some((req_id, account)),
         _ => None,
     });
     assert_eq!(
@@ -9277,7 +9338,7 @@ fn asking_for_the_accounts_pnl_asks_the_venue() {
     );
     assert!(w.events.iter().any(|e| e == "error:10:321:Invalid account code"), "{:?}", w.events);
     assert!(w.events.iter().any(|e| e == "error:11:321:Account must not be empty"), "{:?}", w.events);
-    assert_eq!(*client.core.pnl_req_id.lock().unwrap(), None, "and no slot is taken");
+    assert!(client.core.pnl_req_id.lock().unwrap().is_empty(), "and no slot is taken");
 }
 
 /// `regulatory_snapshot` reaches the venue rather than being refused here, and
@@ -9293,24 +9354,28 @@ fn a_chargeable_snapshot_is_asked_for_even_where_the_contract_is_watched() {
     let (client, rx, _shared) = test_client();
     // A subscription on this contract is already up and held by another
     // request, which is the state that used to swallow this one.
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.try_req_mkt_data(1, &spy(), "", false, false).expect("taken");
+    settled(&client, &rx);
+    let slot = rx.engine().md_requests[&1].slot;
+    let asked = |rx: &Engine| -> Vec<u32> {
+        rx.engine().farm.instrument_md_reqs.iter()
+            .find(|(id, _)| *id == slot)
+            .map(|(_, reqs)| reqs.entries.iter().map(|e| e.request_type).collect())
+            .unwrap_or_default()
+    };
+    let before = asked(&rx);
 
-    // An ordinary request does follow it, and asks the engine for nothing.
-    client.req_mkt_data(2, &spy(), "", false, false).expect("it follows the stream");
-    assert!(
-        !rx.try_iter().any(|c| matches!(c, ControlCommand::Subscribe { .. })),
-        "an ordinary request shares the subscription that is up",
-    );
+    // An ordinary request does follow it, and asks the venue for nothing.
+    client.try_req_mkt_data(2, &spy(), "", false, false).expect("it follows the stream");
+    settled(&client, &rx);
+    assert_eq!(asked(&rx), before, "an ordinary request shares the subscription that is up");
 
-    // The chargeable one does not.
-    let _ = client.req_mkt_data_ex(3, &spy(), "", false, true, 0, &[]);
+    // The chargeable one does not. 624 is the venue's request type for it.
+    client.try_req_mkt_data_ex(3, &spy(), "", false, true, 0, &[]).expect("taken");
+    settled(&client, &rx);
     assert!(
-        rx.try_iter().any(|c| matches!(
-            c, ControlCommand::Subscribe { regulatory_snapshot: true, .. }
-        )),
-        "the chargeable snapshot is asked for on its own",
+        asked(&rx).contains(&624),
+        "the chargeable snapshot is asked for on its own: {:?}", asked(&rx),
     );
 }
 
@@ -9328,17 +9393,17 @@ fn a_caller_cannot_take_a_number_this_client_reserves() {
     let spy = spy();
 
     let taken = ReferenceState::ASK_ID_BASE as i64;
-    let refused = client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231");
+    let refused = crate::api::client::tests::reported(&client, || client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231"));
     assert!(refused.is_err(), "a request numbered {taken} must not be sent");
 
     // Every request, not one of them: a number from that band collides on
     // whichever call carries it.
     assert!(
-        client.req_historical_data(taken, &spy, "", "1 D", "1 hour", "TRADES", true, 1, false).is_err(),
+        client.try_req_historical_data(taken, &spy, "", "1 D", "1 hour", "TRADES", true, 1, false).is_err(),
         "bars numbered inside the band must be refused too",
     );
     assert!(
-        client.req_contract_details(taken, &spy).is_err(),
+        client.try_req_contract_details(taken, &spy).is_err(),
         "and a contract lookup",
     );
 
@@ -9347,18 +9412,18 @@ fn a_caller_cannot_take_a_number_this_client_reserves() {
     // held one through is open precisely when it matters.
     _shared.reference.note_ours(crate::bridge::RecordKind::Answer, taken);
     assert!(
-        client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231").is_err(),
+        crate::api::client::tests::reported(&client, || client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231")).is_err(),
         "held or not, the band is not a caller's to number in",
     );
     _shared.reference.forget_ours(crate::bridge::RecordKind::Answer, taken);
 
     // The number below the band is a caller's to use, and still works.
     assert!(
-        client.req_adjustments(taken - 1, 4815747, "STK", "SMART", "20240101", "20241231").is_ok(),
+        crate::api::client::tests::reported(&client, || client.req_adjustments(taken - 1, 4815747, "STK", "SMART", "20240101", "20241231")).is_ok(),
         "the band is a ceiling on caller numbers, not a ban on large ones",
     );
     // And an ordinary request is unaffected.
-    assert!(client.req_contract_details(1, &spy).is_ok());
+    assert!(client.try_req_contract_details(1, &spy).is_ok());
 }
 
 /// A refusal against a request too wide to carry is reported against no
@@ -9417,7 +9482,7 @@ fn a_request_numbered_where_the_engine_numbers_its_own_is_refused() {
 #[test]
 fn every_path_that_hands_out_a_wide_order_id_says_so() {
     for (file, wanted) in [
-        ("src/api/client/orders.rs", ["fn reserve_order_ids(", "pub fn req_ids("]),
+        ("src/api/client/orders.rs", ["fn reserve_order_ids(", "fn stated_next_id("]),
         ("src/python/compat/client/mod.rs", ["fn take_order_id(", "fn stated_order_id("]),
     ] {
         let src = std::fs::read_to_string(
@@ -9483,10 +9548,10 @@ fn a_global_cancel_waits_for_the_venue_to_name_the_working_orders() {
         venue.market.set_instrument_count(1);
         venue.orders.set_replay_done();
     });
-    client.req_global_cancel("").unwrap();
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).unwrap();
     let sent: Vec<ControlCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert!(
-        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::CancelAll { instrument: 0, .. })]),
+        matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::GlobalCancel { instruments, .. })] if instruments == &[0]),
         "the order the venue named is withdrawn: {sent:?}",
     );
 }
@@ -9546,6 +9611,63 @@ fn an_answering_call_does_not_wait_on_itself_to_name_a_contract_given_by_id() {
     }
 }
 
+/// A request for bars, a head timestamp, a histogram, ticks or a schedule
+/// that gives its contract by id alone goes to the engine as it stands, and
+/// the engine asks the venue to name it by that id before the request goes.
+/// Named at the call, the caller's thread waited out the lookup's round trip.
+#[test]
+fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
+    let by_id_alone = Contract { con_id: 495_512_563, ..Default::default() };
+    let (client, rx, shared) = test_client();
+    client.try_req_historical_data(1, &by_id_alone, "", "1 D", "1 hour", "TRADES", true, 1, false).expect("handed over");
+    client.try_req_head_time_stamp(2, &by_id_alone, "TRADES", true, 1).expect("handed over");
+    client.try_req_histogram_data(3, &by_id_alone, true, "1 week").expect("handed over");
+    crate::api::client::tests::reported(&client, || client.req_historical_ticks(4, &by_id_alone, "20250101 00:00:00", "", 10, "TRADES", true, false))
+        .expect("handed over");
+    client.try_req_historical_schedule(5, &by_id_alone, "", "1 D", true).expect("handed over");
+    let sent: Vec<ControlCommand> = rx.try_iter().collect();
+    assert_eq!(sent.len(), 5, "each is handed over as it stands: {sent:?}");
+
+    let mut engine = rx.engine();
+    for cmd in sent {
+        assert!(
+            engine.ccp.hold_until_named(cmd, &mut None, &mut crate::engine::hot_loop::HeartbeatState::new(), &shared)
+                .is_none(),
+            "each waits for the venue to name its contract",
+        );
+    }
+    assert!(shared.reference.drain_historical_errors().is_empty(), "and nothing was refused");
+    assert!(engine.ccp.withdraw_named(3, |_| true), "a held request is withdrawn by its own cancel");
+    assert_eq!(engine.ccp.pending_named.len(), 4);
+}
+
+/// A spread scan's text rides its own request, so two scans of one contract
+/// each state their own; the engine takes one of a contract at a time.
+#[test]
+fn a_spread_scan_carries_its_own_text() {
+    let (client, rx, _shared) = test_client();
+    let scan = |account: &str| crate::types::SpreadScan {
+        version: 6, account: account.into(), ..Default::default()
+    };
+    crate::api::client::tests::reported(&client, || client.req_spread_scan(1, &spy(), &scan("DU1"))).expect("taken");
+    crate::api::client::tests::reported(&client, || client.req_spread_scan(2, &spy(), &scan("DU2"))).expect("taken");
+    let stated: Vec<(i64, Vec<u32>, Option<String>)> = rx.try_iter()
+        .filter_map(|cmd| match cmd {
+            ControlCommand::Subscribe { req_id, generic_ticks, spread_scan, .. } => {
+                Some((req_id, generic_ticks, spread_scan))
+            }
+            _ => None,
+        })
+        .collect();
+    let with = |account: &str| Some(crate::types::SpreadScan { under_con_id: spy().con_id, ..scan(account) }.stated());
+    assert_eq!(
+        stated,
+        [(1, vec![481], with("DU1")), (2, vec![481], with("DU2"))],
+        "each request states its own scan",
+    );
+    assert_eq!(rx.engine().held_scans.len(), 1, "and the second waits for the first");
+}
+
 /// A preview carrying an algo strategy is still a preview.
 ///
 /// The flag that asks for one used to be a kind of order, so an order that was
@@ -9595,7 +9717,7 @@ fn a_withdrawal_against_an_account_working_nothing_says_nothing() {
     let (client, _rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     // The venue named nothing at all: no naming began, and none finished.
-    client.req_global_cancel("").expect(
+    crate::api::client::tests::reported(&client, || client.req_global_cancel("")).expect(
         "an account the venue named nothing for is withdrawn without complaint",
     );
 }
@@ -9677,14 +9799,15 @@ fn a_replayed_order_is_replaced_rather_than_placed_again() {
     // Naming another contract on a replace is refused: the venue's own book
     // says which contract this order is on, and a replace names the order.
     let elsewhere = Contract { symbol: "QQQ".into(), con_id: 320227571, ..spy() };
-    let wrong = client.place_order(4242, &elsewhere, &revision);
+    client.try_place_order(4242, &elsewhere, &revision).expect("taken");
+    let refused = engine_refused(&rx, &shared);
     assert!(
-        wrong.is_err_and(|why| why.message.contains("another contract")),
-        "a replace naming a contract the order is not on is refused",
+        matches!(refused.as_slice(), [(4242, _, message)] if message.contains("another contract")),
+        "a replace naming a contract the order is not on is refused: {refused:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
+    assert!(rx.try_recv().is_err(), "and nothing was sent for it");
 
-    client.place_order(4242, &spy(), &revision).expect("the revision travels");
+    client.try_place_order(4242, &spy(), &revision).expect("the revision travels");
     match rx.try_recv().expect("something travels") {
         ControlCommand::Order(OrderRequest::Modify { order_id, price, .. }) => {
             assert_eq!(order_id, 4242);
@@ -9710,15 +9833,16 @@ fn a_held_revision_that_is_withdrawn_leaves_the_terms_the_venue_holds() {
         order_type: "LMT".into(), lmt_price: price, tif: "DAY".into(),
         transmit, ..Default::default()
     };
-    client.place_order(91, &spy(), &order(true, 100.0)).expect("placed and sent");
+    client.try_place_order(91, &spy(), &order(true, 100.0)).expect("placed and sent");
     assert!(matches!(
         rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitEx { .. })),
     ));
     // A change to it, kept rather than sent.
-    client.place_order(91, &spy(), &order(false, 101.0)).expect("the change is kept");
+    client.try_place_order(91, &spy(), &order(false, 101.0)).expect("the change is kept");
     assert!(next_command(&rx).is_none(), "nothing goes to the venue for a change that is held");
 
-    client.cancel_order(91, "").expect("withdrawn");
+    crate::api::client::tests::reported(&client, || client.cancel_order(91, "")).expect("withdrawn");
+    settled(&client, &rx);
 
     let stated = client.core.open_orders.lock().unwrap()
         .get(&91).expect("the order is still tracked").order.lmt_price;
@@ -9740,12 +9864,13 @@ fn a_revision_sent_out_of_the_hold_keeps_the_terms_it_states() {
         order_type: "LMT".into(), lmt_price: price, tif: "DAY".into(),
         transmit, ..Default::default()
     };
-    client.place_order(93, &spy(), &order(true, 100.0)).expect("placed and sent");
+    client.try_place_order(93, &spy(), &order(true, 100.0)).expect("placed and sent");
     let _ = rx.try_recv();
     // A change kept rather than sent, and then a second that transmits: the
     // first leaves the hold on the way out, behind the second.
-    client.place_order(93, &spy(), &order(false, 101.0)).expect("the change is kept");
-    client.place_order(93, &spy(), &order(true, 102.0)).expect("and this one goes");
+    client.try_place_order(93, &spy(), &order(false, 101.0)).expect("the change is kept");
+    client.try_place_order(93, &spy(), &order(true, 102.0)).expect("and this one goes");
+    settled(&client, &rx);
 
     let tracked = client.core.open_orders.lock().unwrap()
         .get(&93).expect("still tracked").clone();
@@ -9773,7 +9898,7 @@ fn a_number_this_session_has_spent_is_not_handed_out_again() {
     };
     // Numbers of the caller's own choosing, none of which the venue has named.
     for id in [10, 11, 12] {
-        client.place_order(id, &spy(), &order(id)).expect("placed");
+        client.try_place_order(id, &spy(), &order(id)).expect("placed");
     }
     while rx.try_recv().is_ok() {}
 
@@ -9795,23 +9920,23 @@ fn a_number_this_session_has_spent_is_not_handed_out_again() {
 #[test]
 fn a_request_already_watching_a_contract_is_not_given_another() {
     let (client, rx, _shared) = test_client();
-    client.core.con_id_to_instrument.lock().unwrap().insert(spy().con_id, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 5);
-    client.core.req_to_instrument.lock().unwrap().insert(5, 0);
-    while rx.try_recv().is_ok() {}
+    client.try_req_mkt_data(5, &spy(), "", false, false).expect("taken");
+    settled(&client, &rx);
+    let slot = client.core.watching(5).expect("it watches the contract");
 
     let elsewhere = Contract { symbol: "QQQ".into(), con_id: 320227571, ..spy() };
-    let refused = client.req_mkt_data(5, &elsewhere, "", false, false);
+    client.try_req_mkt_data(5, &elsewhere, "", false, false).expect("handed to the engine");
+    let heard = settled(&client, &rx);
 
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 102),
-        "the number is already watching something under 102: {refused:?}",
+        heard.iter().any(|e| e.starts_with("error:5:102:")),
+        "the number is already watching something under 102: {heard:?}",
     );
-    assert!(rx.try_recv().is_err(), "and nothing was asked of the engine for it");
     assert_eq!(
-        client.core.req_to_instrument.lock().unwrap().get(&5).copied(), Some(0),
+        client.core.watching(5), Some(slot),
         "the contract it was already watching is untouched",
     );
+    assert_eq!(rx.engine().md_requests[&5].con_id, spy().con_id, "and so is the engine's record of it");
 }
 
 /// A contract the venue refuses is refused to everyone watching it.
@@ -9854,7 +9979,7 @@ fn a_refused_contract_is_refused_to_everyone_watching_it() {
 #[test]
 fn a_withdrawal_before_the_replay_has_landed_is_sent() {
     let (client, rx, _shared) = test_client();
-    let sent = client.cancel_order(42, "");
+    let sent = crate::api::client::tests::reported(&client, || client.cancel_order(42, ""));
     assert!(sent.is_ok(), "not refused on what is not yet known: {sent:?}");
     assert!(rx.try_recv().is_ok(), "and the withdrawal went out");
 }
@@ -9865,7 +9990,7 @@ fn a_withdrawal_before_the_replay_has_landed_is_sent() {
 fn a_withdrawal_after_the_trading_connection_ended_is_not_connected() {
     let (client, rx, shared) = test_client();
     shared.reference.set_trading_over("the test ended it");
-    let refused = client.cancel_order(1, "");
+    let refused = crate::api::client::tests::reported(&client, || client.cancel_order(1, ""));
     assert!(
         refused.as_ref().is_err_and(|why| why.code == 504),
         "no connection to carry it: {refused:?}",
@@ -9882,7 +10007,7 @@ fn a_withdrawal_of_a_finished_order_is_not_cancellable() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(84, &spy(), &order).expect("placed");
+    client.try_place_order(84, &spy(), &order).expect("placed");
     rx.try_recv().expect("the order goes out");
     shared.orders.push_order_update(OrderUpdate {
         order_id: 84, instrument: 0, status: OrderStatus::Filled,
@@ -9891,9 +10016,10 @@ fn a_withdrawal_of_a_finished_order_is_not_cancellable() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
-    let refused = client.cancel_order(84, "");
+    crate::api::client::tests::reported(&client, || client.cancel_order(84, "")).expect("taken");
+    let refused = engine_refused(&rx, &shared);
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 161),
+        matches!(refused.as_slice(), [(84, 161, _)]),
         "the order finished under this client's eyes: {refused:?}",
     );
     assert!(rx.try_recv().is_err(), "and nothing was sent under it");
@@ -9904,22 +10030,23 @@ fn a_withdrawal_of_a_finished_order_is_not_cancellable() {
 /// branching on it withdraws and places anew rather than re-sending.
 #[test]
 fn a_replace_naming_another_contract_is_refused_as_a_mismatch() {
-    let (client, rx, _shared) = test_client();
-    client.core.con_id_to_instrument.lock().unwrap().insert(265598, 1);
+    let (client, rx, shared) = test_client();
+    rx.engine().context.market.register_described(265598, "AAPL", "STK", "SMART", "", "");
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(85, &spy(), &order).expect("placed");
+    client.try_place_order(85, &spy(), &order).expect("placed");
     rx.try_recv().expect("the order goes out");
 
     let aapl = Contract {
         con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(),
         exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
     };
-    let refused = client.place_order(85, &aapl, &order);
+    client.try_place_order(85, &aapl, &order).expect("taken");
+    let refused = engine_refused(&rx, &shared);
     assert!(
-        refused.as_ref().is_err_and(|why| why.code == 105),
+        matches!(refused.as_slice(), [(85, 105, _)]),
         "the replace names another contract: {refused:?}",
     );
     assert!(rx.try_recv().is_err(), "and nothing was sent under it");
@@ -9943,7 +10070,7 @@ fn a_book_reset_is_delivered_before_the_levels_that_follow_it() {
         }
     }
     let (client, _rx, shared) = test_client();
-    client.req_mkt_depth(7, &spy(), 5, false).expect("asked");
+    crate::api::client::tests::reported(&client, || client.req_mkt_depth(7, &spy(), 5, false)).expect("asked");
     shared.reference.push_historical_error(
         7, crate::error_codes::DEPTH_BOOK_RESET, "Market depth data has been RESET".into(),
     );
@@ -9964,12 +10091,12 @@ fn a_book_reset_is_delivered_before_the_levels_that_follow_it() {
 fn a_wait_for_the_download_ends_with_the_session() {
     type Ask = fn(&EClient, &mut RecordingWrapper);
     let asks: [(&str, Ask); 3] = [
-        ("req_positions", |c, w| c.req_positions(w)),
-        ("req_positions_multi", |c, w| c.req_positions_multi(9, "", "", w)),
-        ("req_account_updates_multi", |c, w| c.req_account_updates_multi(9, "", "", true, w)),
+        ("req_positions", |c, _| c.req_positions()),
+        ("req_positions_multi", |c, _| c.req_positions_multi(9, "", "")),
+        ("req_account_updates_multi", |c, _| c.req_account_updates_multi(9, "", "", true)),
     ];
     for (name, ask) in asks {
-        let (client, _rx, shared) = test_client();
+        let (client, rx, shared) = test_client();
         let s = Arc::clone(&shared);
         let ender = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -9978,11 +10105,12 @@ fn a_wait_for_the_download_ends_with_the_session() {
         let started = std::time::Instant::now();
         let mut w = RecordingWrapper::default();
         ask(&client, &mut w);
+        the_engine_answers(&rx, &shared);
         client.process_msgs(&mut w);
         ender.join().unwrap();
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
-            "{name}: the wait ended with the session, not with the clock",
+            "{name}: the hold ended with the session, not with the clock",
         );
         assert!(
             w.events.iter().any(|e| e.starts_with("error:") && e.contains(":504:")),
@@ -9997,14 +10125,14 @@ fn a_wait_for_the_download_ends_with_the_session() {
 /// holding again on `position`.
 #[test]
 fn a_standing_watch_does_not_make_the_plain_answer_replay_the_book() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.portfolio.account_download_is_settled();
     let mut w = RecordingWrapper::default();
-    client.req_positions_multi(9, "", "", &mut w);
+    client.req_positions_multi(9, "", ""); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 756733, position: -50.0, symbol: "SPY".into(), ..Default::default()
     });
-    client.req_positions(&mut w);
+    client.req_positions(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     client.process_msgs(&mut w);
     let plain: Vec<_> = w.events.iter()
         .filter(|e| e.starts_with("position:") && e.contains(":756733:")).collect();
@@ -10017,16 +10145,15 @@ fn a_standing_watch_does_not_make_the_plain_answer_replay_the_book() {
 /// A single-position profit request naming another account is told what the
 /// account-level one is told: the figures are this session's account's.
 #[test]
-fn req_pnl_single_says_whose_figures_it_answers_with() {
-    let (mut client, _rx, _shared) = test_client();
+fn req_pnl_single_carries_the_named_account() {
+    let (mut client, rx, _shared) = test_client();
     client.accounts = vec!["DU123".into(), "DU999".into()];
     let mut w = RecordingWrapper::default();
     client.req_pnl_single(7, "DU999", "", 265598);
     client.process_msgs(&mut w);
-    assert!(
-        w.events.iter().any(|e| e.starts_with("error:7:321:") && e.contains("DU999")),
-        "told under its own number: {:?}", w.events,
-    );
+    assert!(w.events.iter().all(|e| !e.starts_with("error:")), "{:?}", w.events);
+    assert!(rx.try_iter().any(|cmd| matches!(cmd,
+        ControlCommand::SubscribePnl { req_id: 7, account, .. } if account == "DU999")));
 }
 
 /// A fill's client is the one that placed the order where the report names
@@ -10047,7 +10174,7 @@ fn a_fill_whose_report_names_no_client_is_filed_under_the_placing_client() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), client_id: 5, ..Default::default()
     };
-    client.place_order(86, &spy(), &order).expect("placed");
+    client.try_place_order(86, &spy(), &order).expect("placed");
     rx.try_recv().expect("the order goes out");
     // The venue's record of it, carrying a report that names no client.
     shared.orders.push_order_info(86, crate::bridge::RichOrderInfo {
@@ -10115,7 +10242,8 @@ fn a_leg_replaced_with_a_bare_order_keeps_its_links_in_the_record() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 111.0, tif: "GTC".into(), transmit: true, client_id: 5, ..Default::default()
     };
-    client.place_order(tp, &spy(), &bare).unwrap();
+    client.try_place_order(tp, &spy(), &bare).unwrap();
+    settled(&client, &rx);
     let record = client.core.tracked_order(tp as u64).expect("tracked");
     assert_eq!(
         (record.parent_id, record.oca_group.as_str(), record.oca_type, record.client_id),
@@ -10129,23 +10257,26 @@ fn a_leg_replaced_with_a_bare_order_keeps_its_links_in_the_record() {
 /// neither applies nor carries either on a replace.
 #[test]
 fn a_replace_naming_links_the_order_lacks_goes_without_them() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
     let plain = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), transmit: true, ..Default::default()
     };
-    client.place_order(9305, &spy(), &plain).unwrap();
+    client.try_place_order(9305, &spy(), &plain).unwrap();
     while rx.try_recv().is_ok() {}
     // The way a group cancels is compared whether or not the order had a
     // group, so the group comes in under the way the order already has.
     let moved = Order { lmt_price: 101.0, oca_group: "G1".into(), oca_type: 2, ..plain.clone() };
-    assert_eq!(client.place_order(9305, &spy(), &moved).expect_err("a new way").code, 10327);
+    client.try_place_order(9305, &spy(), &moved).expect("taken");
+    let refused = engine_refused(&rx, &shared);
+    assert!(matches!(refused.as_slice(), [(9305, 10327, _)]), "a new way: {refused:?}");
     let linked = Order { lmt_price: 101.0, parent_id: 42, oca_group: "G1".into(), oca_type: 3, ..plain };
-    client.place_order(9305, &spy(), &linked).expect("the replace goes");
+    client.try_place_order(9305, &spy(), &linked).expect("the replace goes");
     assert!(
         matches!(next_command(&rx), Some(ControlCommand::Order(OrderRequest::Modify { .. }))),
-        "to the engine",
+        "to the venue",
     );
+    settled(&client, &rx);
     let record = client.core.tracked_order(9305).expect("tracked");
     assert_eq!((record.parent_id, record.oca_group.as_str(), record.oca_type), (0, "", 0), "the record is as placed");
 }
@@ -10154,28 +10285,35 @@ fn a_replace_naming_links_the_order_lacks_goes_without_them() {
 /// the numbers and words a gateway refuses it with.
 #[test]
 fn a_replace_moving_a_group_or_its_type_is_refused() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
     let grouped = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), oca_group: "A".into(), oca_type: 1,
         transmit: true, ..Default::default()
     };
-    client.place_order(9308, &spy(), &grouped).unwrap();
+    client.try_place_order(9308, &spy(), &grouped).unwrap();
     while rx.try_recv().is_ok() {}
     let moved = Order { oca_group: "B".into(), ..grouped.clone() };
-    let refused = client.place_order(9308, &spy(), &moved).expect_err("a new group is refused");
-    assert_eq!((refused.code, refused.message.as_str()), (10326, "OCA group revision is not allowed"));
+    client.try_place_order(9308, &spy(), &moved).expect("taken");
     let retyped = Order { oca_type: 2, ..grouped.clone() };
-    let refused = client.place_order(9308, &spy(), &retyped).expect_err("a new type is refused");
-    assert_eq!((refused.code, refused.message.as_str()), (10327, "OCA group type revision is not allowed"));
-    assert!(rx.try_recv().is_err(), "and nothing went to the engine");
+    client.try_place_order(9308, &spy(), &retyped).expect("taken");
+    let refused: Vec<(i64, i64, String)> = engine_refused(&rx, &shared);
+    assert_eq!(
+        refused,
+        [
+            (9308, 10326, "OCA group revision is not allowed".to_string()),
+            (9308, 10327, "OCA group type revision is not allowed".to_string()),
+        ],
+        "a new group is refused, and a new type",
+    );
+    assert!(rx.try_recv().is_err(), "and nothing went to the venue");
     // Where the venue lifted those checks at logon, both go.
     let (client, rx, shared) = test_client();
     shared.reference.set_enabled_features(vec!["NOAPIOCASTRICT".into()]);
-    client.place_order(9308, &spy(), &grouped).unwrap();
+    client.try_place_order(9308, &spy(), &grouped).unwrap();
     while rx.try_recv().is_ok() {}
-    client.place_order(9308, &spy(), &moved).expect("lifted, the replace goes");
-    assert!(rx.try_recv().is_ok(), "to the engine");
+    client.try_place_order(9308, &spy(), &moved).expect("lifted, the replace goes");
+    assert!(rx.try_recv().is_ok(), "to the venue");
 }
 
 /// The record of an order this client did not place follows the caller's
@@ -10196,23 +10334,25 @@ fn a_venue_named_orders_record_follows_the_callers_latest_statement() {
         last_exec: Default::default(),
     });
     let first = Order { lmt_price: 101.0, transmit: true, ..named.clone() };
-    client.place_order(9307, &spy(), &first).unwrap();
+    client.try_place_order(9307, &spy(), &first).unwrap();
     let second = Order { lmt_price: 102.0, transmit: true, ..named.clone() };
-    client.place_order(9307, &spy(), &second).unwrap();
+    client.try_place_order(9307, &spy(), &second).unwrap();
     let moved = Order { lmt_price: 103.0, oca_group: "G2".into(), transmit: true, ..named };
-    let refused = client.place_order(9307, &spy(), &moved).expect_err("a new group is refused");
-    assert_eq!(refused.code, 10326);
+    client.try_place_order(9307, &spy(), &moved).expect("taken");
     let mut stated = Vec::new();
     while let Ok(cmd) = rx.try_recv() {
         if let ControlCommand::Order(OrderRequest::Modify { price, spec: Some(spec), .. }) = cmd {
             stated.push((price, spec.attrs.oca_group_str.clone()));
         }
     }
+    let refused = shared.drain_refused();
+    assert!(matches!(refused.as_slice(), [(9307, 10326, _)]), "a new group is refused: {refused:?}");
     assert_eq!(
         stated,
         [((101.0 * PRICE_SCALE_F) as i64, "G1".to_string()), ((102.0 * PRICE_SCALE_F) as i64, "G1".to_string())],
         "each replace carried the caller's statement to the engine",
     );
+    settled(&client, &rx);
     let record = client.core.tracked_order(9307).expect("tracked");
     assert_eq!((record.lmt_price, record.oca_group.as_str()), (102.0, "G1"), "and the record says what the venue was last told");
 }
@@ -10229,13 +10369,14 @@ fn a_change_of_type_on_a_linked_order_goes_and_keeps_its_links() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
         aux_price: 109.0, tif: "GTC".into(), transmit: true, ..Default::default()
     };
-    client.place_order(tp, &spy(), &as_stop).expect("a linked leg changes type");
+    client.try_place_order(tp, &spy(), &as_stop).expect("a linked leg changes type");
     match next_command(&rx).expect("the modify") {
         ControlCommand::Order(OrderRequest::Modify { spec: Some(spec), .. }) => assert!(
             matches!(spec.kind, crate::types::OrderKind::Stop { .. }), "as a stop: {:?}", spec.kind,
         ),
         other => panic!("expected a Modify carrying the order, got {other:?}"),
     }
+    settled(&client, &rx);
     let record = client.core.tracked_order(tp as u64).expect("tracked");
     assert_eq!(
         (record.parent_id, record.oca_group.as_str()),
@@ -10252,6 +10393,7 @@ fn the_open_order_read_leaves_the_record_alone() {
     let (client, rx, shared) = test_client();
     let [_, tp, _] = client.place_bracket(&spy(), "BUY", 1.0, 100.0, 110.0, 90.0).unwrap();
     while rx.try_recv().is_ok() {}
+    settled(&client, &rx);
     shared.orders.push_order_info(tp as u64, crate::bridge::RichOrderInfo {
         contract: spy(),
         order: Order { order_id: tp, client_id: 7, ..Default::default() },
@@ -10290,7 +10432,7 @@ fn the_open_order_read_names_the_client_the_venue_names_where_the_record_names_n
 fn a_schedule_asked_for_as_historical_data_is_served() {
     let (client, rx, _shared) = test_client();
     client
-        .req_historical_data(7, &spy(), "", "1 D", "1 day", "SCHEDULE", true, 1, false)
+        .try_req_historical_data(7, &spy(), "", "1 D", "1 day", "SCHEDULE", true, 1, false)
         .expect("served, as the other surface serves it");
     assert!(
         matches!(rx.try_recv(), Ok(ControlCommand::FetchHistoricalSchedule { req_id: 7, .. })),
@@ -10312,7 +10454,7 @@ fn a_numeric_group_name_travels_as_named() {
         lmt_price: 100.0, tif: "DAY".into(), oca_group: "1234".into(), oca_type: 1, transmit: true,
         ..Default::default()
     };
-    client.place_order(9401, &spy(), &order).unwrap();
+    client.try_place_order(9401, &spy(), &order).unwrap();
     let mut stated = None;
     while let Ok(cmd) = rx.try_recv() {
         if let ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. }) = cmd {
@@ -10359,29 +10501,33 @@ fn the_acknowledged_increment_reaches_the_caller_on_tick_req_params() {
 /// still state each request's parameters once, including a reused number.
 #[test]
 fn tick_req_params_is_once_per_request_and_a_reused_number_is_told_again() {
-    let (client, _rx, shared) = test_client();
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    let (client, rx, shared) = test_client();
+    client.try_req_mkt_data(1, &spy(), "", false, false).unwrap();
+    rx.pump();
+    client.process_msgs(&mut RecordingWrapper::default());
     let params = crate::bridge::TickReqParams {
         min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
     };
     shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
         snapshot_permissions: 1, ..params.clone()
     });
-    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    client.try_req_mkt_data(2, &spy(), "", false, false).unwrap();
     shared.market.push_tick_req_params(0, params.clone());
     let mut w = RecordingWrapper::default();
+    rx.pump();
     client.process_msgs(&mut w);
     for req_id in [1, 2] {
         let event = format!("tick_req_params:{req_id}:0.01:9c0001:3");
         assert_eq!(w.events.iter().filter(|e| **e == event).count(), 1, "{:?}", w.events);
     }
     shared.market.push_tick_req_params(0, params);
+    rx.pump();
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_req_params:")).count(), 2);
 
-    client.cancel_mkt_data(2).unwrap();
-    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    client.try_cancel_mkt_data(2).unwrap();
+    client.try_req_mkt_data(2, &spy(), "", false, false).unwrap();
+    rx.pump();
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_req_params:2:")).count(), 2);
 }
@@ -10390,19 +10536,25 @@ fn tick_req_params_is_once_per_request_and_a_reused_number_is_told_again() {
 /// nothing, and its number, used again, is told the new request's.
 #[test]
 fn tick_req_params_withdrawn_before_delivery_go_to_the_number_used_again() {
-    let (client, _rx, shared) = test_client();
-    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    let (client, rx, shared) = test_client();
+    client.try_req_mkt_data(1, &spy(), "", false, false).unwrap();
+    rx.pump();
+    client.process_msgs(&mut RecordingWrapper::default());
+    client.try_req_mkt_data(2, &spy(), "", false, false).unwrap();
+    rx.pump();
+    client.process_msgs(&mut RecordingWrapper::default());
+    client.try_cancel_mkt_data(2).unwrap();
+    let mut w = RecordingWrapper::default();
+    rx.pump();
+    client.process_msgs(&mut w);
     shared.market.push_tick_req_params(0, crate::bridge::TickReqParams {
         min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
     });
-    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
-    client.cancel_mkt_data(2).unwrap();
-    let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     let told = |w: &RecordingWrapper| w.events.iter().filter(|e| e.starts_with("tick_req_params:2:")).count();
     assert_eq!(told(&w), 0, "the withdrawn request: {:?}", w.events);
-    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
+    client.try_req_mkt_data(2, &spy(), "", false, false).unwrap();
+    rx.pump();
     client.process_msgs(&mut w);
     assert_eq!(told(&w), 1, "the request under the same number: {:?}", w.events);
 }
@@ -10411,7 +10563,7 @@ fn tick_req_params_withdrawn_before_delivery_go_to_the_number_used_again() {
 /// session has been reset, and it is used for a new request.
 #[test]
 fn tick_req_params_are_told_again_after_a_released_slot_or_a_reset() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let hold = || {
         client.core.req_to_instrument.lock().unwrap().insert(1, 0);
         client.core.instrument_to_req.lock().unwrap().insert(0, 1);
@@ -10423,6 +10575,7 @@ fn tick_req_params_are_told_again_after_a_released_slot_or_a_reset() {
     let told = |w: &RecordingWrapper| w.events.iter().filter(|e| e.starts_with("tick_req_params:1:")).count();
     hold();
     shared.market.push_tick_req_params(0, params.clone());
+    rx.pump();
     client.process_msgs(&mut w);
     assert_eq!(told(&w), 1);
 
@@ -10430,12 +10583,14 @@ fn tick_req_params_are_told_again_after_a_released_slot_or_a_reset() {
     client.core.forget_released_slots(&shared);
     hold();
     shared.market.push_tick_req_params(0, params.clone());
+    rx.pump();
     client.process_msgs(&mut w);
     assert_eq!(told(&w), 2, "after the slot was taken back: {:?}", w.events);
 
     client.core.reset();
     hold();
     shared.market.push_tick_req_params(0, params);
+    rx.pump();
     client.process_msgs(&mut w);
     assert_eq!(told(&w), 3, "after a reset: {:?}", w.events);
 }
@@ -10448,7 +10603,7 @@ fn market_data_asked_for_with_no_session_is_refused_for_that_first() {
     shared.reference.set_session_over("the trading connection");
     let options = [ApiTagValue { tag: "foo".into(), value: "1".into() }];
     for options in [&options[..], &[]] {
-        let refused = client.req_mkt_data_ex(7, &spy(), "", false, false, 0, options).unwrap_err();
+        let refused = client.try_req_mkt_data_ex(7, &spy(), "", false, false, 0, options).unwrap_err();
         assert_eq!(refused.code, Refusal::NOT_CONNECTED, "{refused:?}");
     }
     assert!(rx.try_recv().is_err());
@@ -10507,9 +10662,9 @@ fn the_bbo_exchange_on_tick_req_params_is_what_smart_components_answers_to() {
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "tick_req_params:1:0.01:a60001:0"), "{:?}", w.events);
 
-    client.req_smart_components(7, "a60001", &mut w);
+    client.req_smart_components(7, "a60001"); client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "smart_components:7:1"), "{:?}", w.events);
-    client.req_smart_components(8, "zz0001", &mut w);
+    client.req_smart_components(8, "zz0001"); client.process_msgs(&mut w);
     assert!(
         w.events.iter().any(|e| e.starts_with("error:8:321:Invalid BBO exchange/security type code")),
         "{:?}", w.events,
@@ -10547,7 +10702,7 @@ fn a_map_of_venues_asked_for_early_is_answered_when_it_arrives() {
     shared.reference.note_bbo_exchange(4, "c2", "CASH");
     let mut w = RecordingWrapper::default();
     let asked = std::time::Instant::now();
-    client.req_smart_components(9, "c2000A", &mut w);
+    client.req_smart_components(9, "c2000A"); client.process_msgs(&mut w);
     assert!(asked.elapsed() < std::time::Duration::from_millis(500), "the call is not held");
     assert!(w.events.is_empty(), "nothing yet: {:?}", w.events);
 
@@ -10596,7 +10751,7 @@ fn a_map_of_venues_that_never_arrives_is_refused_as_a_gateway_refuses_it() {
 #[test]
 fn an_update_bar_is_dated_as_the_history_before_it() {
     let (client, _rx, shared) = test_client();
-    client.req_historical_data(5, &spy(), "", "1 D", "1 min", "TRADES", false, 1, true).expect("asked");
+    client.try_req_historical_data(5, &spy(), "", "1 D", "1 min", "TRADES", false, 1, true).expect("asked");
     shared.reference.push_historical_data(5, crate::control::historical::HistoricalResponse {
         query_id: "q5".into(), timezone: "US/Eastern".into(), is_complete: true, bars: Vec::new(),
     });
@@ -10627,7 +10782,7 @@ fn an_update_to_a_bar_of_a_day_or_longer_is_dated_by_its_day() {
         (7, "1 month", 1_788_220_800, "20260901"),
     ] {
         client
-            .req_historical_data(i64::from(req_id), &spy(), "", "1 Y", size, "TRADES", true, 1, true)
+            .try_req_historical_data(i64::from(req_id), &spy(), "", "1 Y", size, "TRADES", true, 1, true)
             .expect("asked");
         shared.reference.push_historical_data(req_id, crate::control::historical::HistoricalResponse {
             query_id: format!("q{req_id}"), timezone: "US/Eastern".into(), is_complete: true,
@@ -10700,8 +10855,9 @@ fn a_withdrawal_by_permanent_id_waits_for_the_venue_to_name_the_working_set() {
         });
         later.orders.set_replay_done();
     });
-    client.cancel_order_by_perm_id(777_001).expect("the order the venue names is withdrawn");
+    client.cancel_order_by_perm_id(777_001);
     naming.join().unwrap();
+    assert!(shared.drain_refused().is_empty(), "the order the venue names is withdrawn");
     assert!(
         matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { order_id: 4242, .. }))),
         "the withdrawal names the order the venue named",
@@ -10723,11 +10879,11 @@ fn withdrawing_a_held_parent_withdraws_the_children_held_under_it() {
         total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 100.0, tif: "DAY".into(),
         ..Default::default()
     };
-    client.place_order(90, &spy(), &leg(90, 0)).expect("held");
-    client.place_order(91, &spy(), &leg(91, 90)).expect("held under it");
-    client.cancel_order(90, "").expect("withdrawn");
+    client.try_place_order(90, &spy(), &leg(90, 0)).expect("held");
+    client.try_place_order(91, &spy(), &leg(91, 90)).expect("held under it");
+    crate::api::client::tests::reported(&client, || client.cancel_order(90, "")).expect("withdrawn");
     assert!(client.core.tracked_order(91).is_none(), "the child's record goes with the parent's");
-    assert!(!client.core.withdraw_held(91), "and nothing is held under the child's number");
+    assert!(!rx.keeps(91), "and nothing is held under the child's number");
     assert!(rx.try_recv().is_err(), "nothing reached the engine");
 }
 
@@ -10776,13 +10932,13 @@ fn asking_for_the_api_orders_alone_leaves_out_the_ones_typed_in() {
     }
 
     let mut only_the_api = Heard::default();
-    client.req_completed_orders(true, &mut only_the_api);
+    completed_orders_asked_and_answered(&client, true); client.process_msgs(&mut only_the_api);
     assert_eq!(only_the_api.0, [91], "the one the venue numbered, and not the other");
 
     // And the archive is kept whole, so the same session asking for all of
     // them is answered with all of them.
     let mut all_of_them = Heard::default();
-    client.req_completed_orders(false, &mut all_of_them);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut all_of_them);
     assert_eq!(all_of_them.0, [91, 92], "both");
 
     // And an order that finished while this session watched keeps the number
@@ -10806,7 +10962,7 @@ fn asking_for_the_api_orders_alone_leaves_out_the_ones_typed_in() {
         filled_qty: crate::types::QTY_SCALE, timestamp_ns: 0,
     });
     let mut live_one = Heard::default();
-    client.req_completed_orders(true, &mut live_one);
+    completed_orders_asked_and_answered(&client, true); client.process_msgs(&mut live_one);
     assert!(live_one.0.contains(&93), "the live one the venue numbered: {:?}", live_one.0);
 }
 
@@ -10819,7 +10975,7 @@ fn a_completed_order_names_the_client_that_placed_it() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), client_id: 5, ..Default::default()
     };
-    client.place_order(86, &spy(), &order).expect("placed");
+    client.try_place_order(86, &spy(), &order).expect("placed");
     rx.try_recv().expect("the order goes out");
     shared.orders.push_order_info(86, crate::bridge::RichOrderInfo {
         contract: spy(),
@@ -10839,30 +10995,22 @@ fn a_completed_order_names_the_client_that_placed_it() {
         }
     }
     let mut named = Named::default();
-    client.req_completed_orders(false, &mut named);
+    completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut named);
     assert_eq!(named.0, [(86, 5)], "the client that placed it");
-}
-
-/// A global cancel attempts every instrument and says how many it reached,
-/// on this surface as on the other.
-#[test]
-fn a_global_cancel_says_how_many_instruments_it_reached() {
-    let (client, rx, shared) = test_client();
-    shared.orders.set_replay_done();
-    shared.market.set_instrument_count(3);
-    drop(rx);
-    let refused = client.req_global_cancel("").expect_err("nothing reached the engine");
-    assert!(refused.message.contains("reached the engine for 0 of 3"), "{refused}");
 }
 
 /// The note that a withdrawal's time does not travel is said for a
 /// withdrawal that happens, not for one refused.
 #[test]
 fn a_refused_withdrawal_carries_no_note_about_its_time() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     shared.orders.set_replay_done();
-    let refused = client.cancel_order(77, "20260906-10:00:00").expect_err("no order is working under 77");
-    assert!(refused.message.contains("no order is working"), "{refused}");
+    crate::api::client::tests::reported(&client, || client.cancel_order(77, "20260906-10:00:00")).expect("taken");
+    let refused = engine_refused(&rx, &shared);
+    assert!(
+        matches!(refused.as_slice(), [(77, 135, message)] if message.contains("no order is working")),
+        "no order is working under 77: {refused:?}",
+    );
     assert!(shared.orders.drain_order_inactive().is_empty(), "and nothing is said about a time that did not travel");
 }
 
@@ -10927,7 +11075,7 @@ fn an_order_number_past_the_end_is_refused_and_leaves_the_allocator_whole() {
         tif: "DAY".into(), transmit: true, ..Default::default()
     };
 
-    let refused = client.place_order(i64::MAX, &spy(), &order);
+    let refused = client.try_place_order(i64::MAX, &spy(), &order);
     assert!(refused.is_err(), "an order number past the end was taken");
 
     assert!(
@@ -10948,20 +11096,21 @@ fn an_order_number_past_the_end_is_refused_and_leaves_the_allocator_whole() {
 /// start at one.
 #[test]
 fn an_exercise_does_not_take_the_number_of_a_working_order() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 1.0, tif: "GTC".into(), transmit: true, ..Default::default()
     };
-    client.place_order(11, &spy(), &order).expect("placed and sent");
+    client.try_place_order(11, &spy(), &order).expect("placed and sent");
     while rx.try_recv().is_ok() {}
 
-    let refused = client.exercise_options(
+    crate::api::client::tests::reported(&client, || client.exercise_options(
         11, &spy(), 1, 1, "", true, crate::client_core::ExerciseStates::default(),
-    );
+    )).expect("taken");
+    let refused = engine_refused(&rx, &shared);
     assert!(
-        refused.is_err(),
-        "the exercise took the number of an order the venue is working",
+        matches!(refused.as_slice(), [(11, 103, _)]),
+        "the exercise took the number of an order the venue is working: {refused:?}",
     );
     assert!(
         rx.try_recv().is_err(),
@@ -11008,16 +11157,22 @@ fn a_contract_named_by_description_is_answered_once_its_model_is_stated() {
         right: "C".into(),
         ..Default::default()
     };
-    let kept = crate::api::client::PendingOptionCalc {
+    shared.market.keep_calculation(9, crate::bridge::KeptCalculation {
         contract: described,
+        slot: iid,
         wants_volatility: true,
         option_price: 5.0,
         under_price: 100.0,
         answered: false,
-    };
+    });
+    let _ = client;
+    crate::client_core::answer_kept_calculations(&shared, Some(iid), None);
 
+    let answered = shared.market.drain_option_computations()
+        .iter().any(|c| c.answers == Some(9));
+    let refused = shared.drain_refused().iter().any(|(id, ..)| *id == 9);
     assert!(
-        client.solve_and_push_volatility(9, &kept),
+        answered || refused,
         "the question is kept and re-solved for ever, with its caller told \
          neither an answer nor a reason",
     );
@@ -11072,33 +11227,6 @@ fn a_first_ask_does_not_read_the_model_of_another_contract() {
     );
 }
 
-/// A tick withdrawal that is refused leaves the stream's kind where it found
-/// it.
-///
-/// The kind was taken out ahead of the record that says the stream is there,
-/// so a refused withdrawal took it anyway. A stream with no kind recorded is
-/// reported as the exchange's own, so every print of an AllLast stream after
-/// such a withdrawal was labelled as a different stream's — the withdrawal
-/// that was refused is the one thing that must leave nothing changed.
-#[test]
-fn a_refused_tick_withdrawal_leaves_the_kind_of_the_stream_still_running() {
-    let (client, _rx, _shared) = test_client();
-    // A kind on this number, and no mapping to withdraw a stream by.
-    client.tbt_kinds.lock().unwrap().insert(7, TbtType::AllLast);
-
-    let refused = client.cancel_tick_by_tick_data(7);
-    assert!(
-        refused.as_ref().is_err_and(|why| why.code == 300),
-        "nothing is held under that number: {refused:?}",
-    );
-    assert_eq!(
-        client.tbt_kinds.lock().unwrap().get(&7).copied(),
-        Some(TbtType::AllLast),
-        "the kind went with a withdrawal that was refused, and the stream it \
-         belongs to is still running",
-    );
-}
-
 /// Placing under the next id keeps the hedge and the legs the caller stated.
 ///
 /// `place` names the contract before it takes the turn, because a lookup takes
@@ -11109,7 +11237,8 @@ fn a_refused_tick_withdrawal_leaves_the_kind_of_the_stream_still_running() {
 /// nor legs.
 #[test]
 fn placing_by_description_keeps_the_hedge_the_caller_stated() {
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, _shared) = test_client();
+    let _engine = rx.run();
     let mut hedged = spy();
     hedged.con_id = 0;
     hedged.delta_neutral_contract = Some(crate::types::model::DeltaNeutralContract {
@@ -11185,6 +11314,8 @@ fn previewing_by_description_keeps_the_hedge_the_caller_stated() {
             // rather than at the answer timeout.
             let order_id = loop {
                 assert!(std::time::Instant::now() < give_up, "no preview was placed");
+                // The engine takes the preview as it takes an order.
+                let _ = rx.try_recv();
                 let found = placing.core.open_orders.lock().unwrap().iter()
                     .find(|(_, tracked)| tracked.order.what_if)
                     .map(|(id, tracked)| (*id, tracked.contract.clone()));
@@ -11194,7 +11325,7 @@ fn previewing_by_description_keeps_the_hedge_the_caller_stated() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             };
-            pushed.orders.push_order_inactive(order_id, 201, "the margin cannot be stated".into());
+            pushed.orders.push_order_inactive(order_id, crate::types::model::OrderOp::Place, 201, "the margin cannot be stated".into());
         });
         client.what_if_order(&hedged, &preview).expect_err("the venue refused")
     });
@@ -11208,125 +11339,44 @@ fn previewing_by_description_keeps_the_hedge_the_caller_stated() {
     );
 }
 
-/// A withdrawal arriving while the number is still taking its tick stream is
-/// taken, and the registration takes the stream back down.
+/// A tick stream withdrawn while the engine is still naming its contract is
+/// forgotten there: nothing is sent for it, and nothing is refused.
 ///
-/// The record a withdrawal reads is written when the farm names the contract,
-/// and a registration waits on that. In between there is nothing to find, so
-/// the withdrawal read as a number holding no stream — and refusing it for
-/// that is a refusal the venue never makes: the caller was told its withdrawal
-/// had not happened, the registration finished behind it, and it held a live
-/// stream it believed was gone.
+/// The engine names a contract given by description before it asks for the
+/// stream, and it takes the stream before its cancel. The cancel finds it held
+/// for the naming and withdraws it, so the naming's answer opens nothing.
 #[test]
-fn a_tick_withdrawal_during_registration_takes_the_stream_back_down() {
+fn a_tick_withdrawal_during_its_naming_sends_nothing() {
     let (client, rx, _shared) = test_client();
-    // Wide enough that the withdrawal lands inside the wait. A session states
-    // five seconds and the tests here a millisecond, which would close the
-    // window this is about before anything could arrive in it.
-    client.core.set_registration_timeout(std::time::Duration::from_secs(5));
+    let described = Contract { con_id: 0, currency: "USD".into(), ..spy() };
+    crate::api::client::tests::reported(&client, || client.req_tick_by_tick_data(7, &described, "AllLast", 0, false)).expect("taken");
+    rx.pump();
+    assert_eq!(rx.engine().ccp.pending_named.len(), 1, "held while the venue names it");
 
-    // The engine holds its answer back until the withdrawal has been made,
-    // which is the window under test.
-    let (seen_tx, seen_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let (go_tx, go_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let engine = std::thread::spawn(move || {
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::SubscribeTbt { reply_tx: Some(reply), .. } = cmd {
-                let _ = seen_tx.send(());
-                let _ = go_rx.recv();
-                let _ = reply.try_send(Ok(0));
-                break;
-            }
-        }
-        rx
-    });
-
-    let taking = &client;
-    let withdrawal = std::thread::scope(|scope| {
-        let asking = scope.spawn(move || taking.req_tick_by_tick_data(7, &spy(), "AllLast", 0, false));
-        seen_rx.recv().expect("the stream reached the engine");
-        assert!(
-            client.core.tbt_to_instrument.lock().unwrap().get(&7).is_none(),
-            "nothing is recorded for it yet, which is the window",
-        );
-        let withdrawal = client.cancel_tick_by_tick_data(7);
-        let _ = go_tx.send(());
-        asking.join().unwrap().expect("the request itself was not refused");
-        withdrawal
-    });
-    let rx = engine.join().expect("the engine thread ran");
-    let sent: Vec<_> = rx.try_iter().collect();
-
-    withdrawal.expect("a withdrawal that arrived early was refused, which the venue never does");
-    assert!(
-        client.core.tbt_to_instrument.lock().unwrap().get(&7).is_none(),
-        "the registration published a stream under a number whose caller had \
-         already been told it was withdrawn",
-    );
-    assert!(
-        client.tbt_kinds.lock().unwrap().get(&7).is_none(),
-        "a kind was left recorded for a stream that is gone",
-    );
-    assert!(
-        sent.iter().any(|c| matches!(
-            c, ControlCommand::UnsubscribeTbt { req_id: 7, instrument: 0 },
-        )),
-        "the stream it opened was never taken back down: {sent:?}",
-    );
+    crate::api::client::tests::reported(&client, || client.cancel_tick_by_tick_data(7)).expect("withdrawn");
+    let heard = settled(&client, &rx);
+    assert!(rx.engine().ccp.pending_named.is_empty(), "the held stream is forgotten");
+    assert!(rx.engine().hmds.tbt_subscriptions.is_empty(), "and nothing was asked for it");
+    assert!(heard.iter().all(|e| !e.starts_with("error:7:")), "and nothing refused: {heard:?}");
 }
 
-/// The same for a quote subscription: a withdrawal in the registration window
-/// is taken, and what the registration opened is taken back down.
-///
-/// The number is answered and left holding nothing, rather than refused and
-/// left holding a live subscription — which is the state a caller cannot act
-/// on, because the answer it was given says there is nothing to act on.
+/// The same for a quote subscription: withdrawn while the engine is still
+/// naming its contract, the lookup's answer opens nothing, and the number is
+/// left holding nothing rather than refused.
 #[test]
-fn a_quote_withdrawal_during_registration_takes_the_subscription_back_down() {
+fn a_quote_withdrawal_during_its_naming_opens_nothing() {
     let (client, rx, _shared) = test_client();
-    client.core.set_registration_timeout(std::time::Duration::from_secs(5));
+    let described = Contract { con_id: 0, currency: "USD".into(), ..spy() };
+    client.try_req_mkt_data(9, &described, "", false, false).expect("taken");
+    rx.pump();
+    assert_eq!(rx.engine().ccp.pending_named.len(), 1, "held while the venue names it");
 
-    let (seen_tx, seen_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let (go_tx, go_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let engine = std::thread::spawn(move || {
-        while let Ok(cmd) = rx.recv() {
-            if let ControlCommand::Subscribe { reply_tx: Some(reply), .. } = cmd {
-                let _ = seen_tx.send(());
-                let _ = go_rx.recv();
-                let _ = reply.try_send(Ok(0));
-                break;
-            }
-        }
-        rx
-    });
-
-    let taking = &client;
-    let withdrawal = std::thread::scope(|scope| {
-        let asking = scope.spawn(move || taking.req_mkt_data(9, &spy(), "", false, false));
-        seen_rx.recv().expect("the subscription reached the engine");
-        assert!(
-            !client.core.holds_mkt_data(9),
-            "nothing is recorded for it yet, which is the window",
-        );
-        let withdrawal = client.cancel_mkt_data(9);
-        let _ = go_tx.send(());
-        asking.join().unwrap().expect("the request itself was not refused");
-        withdrawal
-    });
-    let rx = engine.join().expect("the engine thread ran");
-    let sent: Vec<_> = rx.try_iter().collect();
-
-    withdrawal.expect("a withdrawal that arrived early was refused, which the venue never does");
-    assert!(
-        !client.core.holds_mkt_data(9),
-        "the registration published a subscription under a number whose caller \
-         had already been told it was withdrawn",
-    );
-    assert_eq!(client.core.watching(9), None, "a mapping was written for it all the same");
-    assert!(
-        sent.iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 0, .. })),
-        "the subscription it opened was never taken back down: {sent:?}",
-    );
+    crate::api::client::tests::reported(&client, || client.cancel_mkt_data(9)).expect("withdrawn");
+    let heard = settled(&client, &rx);
+    assert!(rx.engine().ccp.pending_named.is_empty(), "its lookup is forgotten");
+    assert!(!rx.engine().md_requests.contains_key(&9));
+    assert!(heard.iter().all(|e| !e.starts_with("error:9:")), "and nothing refused: {heard:?}");
+    assert!(!client.core.holds_mkt_data(9), "a mapping was left for it");
 }
 
 /// A request this client will not send is refused under the number for a
@@ -11367,7 +11417,7 @@ fn a_status_arriving_during_an_answering_call_reaches_the_kept_record() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9501, &spy(), &order).expect("placed");
+    client.try_place_order(9501, &spy(), &order).expect("placed");
     while rx.try_recv().is_ok() {}
     let record = Arc::new(std::sync::Mutex::new(RecordingWrapper::default()));
     client.keep_record(record.clone());
@@ -11402,6 +11452,7 @@ fn a_close_heard_by_the_kept_record_during_an_answering_call_is_not_said_again()
 
     shared.reference.set_session_over("the test ended it");
     shared.set_connection_lost();
+    shared.push_closed();
     let _ = client.corporate_actions(&spy(), "20240101", "20241231");
     let mut next_pass = RecordingWrapper::default();
     client.process_msgs(&mut next_pass);
@@ -11439,7 +11490,7 @@ fn a_reader_beside_an_answering_call_shares_one_state_with_the_kept_record() {
         action: "BUY".into(), total_quantity: 10.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-    client.place_order(9502, &spy(), &order).expect("placed");
+    client.try_place_order(9502, &spy(), &order).expect("placed");
     while rx.try_recv().is_ok() {}
     let client = Arc::new(client);
     let state = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -11537,7 +11588,7 @@ fn the_shared_id_numbers_a_request_past_an_order_id_no_request_carries() {
     assert_eq!(client.next_shared_id(), Ok(701), "a read, not a counter");
     assert!(client.next_order_id() > u32::MAX as i64, "orders still count past the wide one");
     assert!(
-        client.req_fundamental_data(seed, &spy(), "ReportSnapshot").is_ok(),
+        client.try_req_fundamental_data(seed, &spy(), "ReportSnapshot").is_ok(),
         "a request numbered from it goes out",
     );
 
@@ -11549,6 +11600,99 @@ fn the_shared_id_numbers_a_request_past_an_order_id_no_request_carries() {
         client.next_shared_id().map_err(|refusal| refusal.code),
         Err(Refusal::VALIDATION),
     );
+}
+
+/// The floor an allocator clears is read without waiting, and a replay raises
+/// it as the engine reads the replay: before the read that delivers what the
+/// replay says of the order it names.
+///
+/// Read by waiting for the replay, an allocation made while a replay runs
+/// waited up to three seconds; read off anything the reader delivers, one made
+/// between the venue naming an order and the read that delivers it handed out
+/// that order's id again.
+#[test]
+fn a_replays_watermark_is_the_floor_before_its_order_is_delivered() {
+    let (client, rx, shared) = test_client();
+    // A connection that has not finished naming what the account is working:
+    // anything that waits for the naming waits here.
+    shared.orders.replay_is_pending();
+    let began = std::time::Instant::now();
+    assert_eq!(client.order_id_floor(), 1, "nothing named yet");
+
+    let mut frame = std::collections::HashMap::new();
+    for (tag, val) in [
+        (11u32, "88"), (150, "0"), (39, "0"), (6008, "756733"),
+        (38, "100"), (55, "SPY"), (54, "1"), (40, "2"), (44, "150.00"),
+    ] {
+        frame.insert(tag, val.to_string());
+    }
+    {
+        let mut engine = rx.engine();
+        let engine = &mut *engine;
+        engine.ccp.handle_exec_report(&frame, b"", &mut engine.context, &shared, &None, "");
+    }
+    assert_eq!(client.order_id_floor(), 89, "the id the replay named is cleared at once");
+    assert!(
+        began.elapsed() < std::time::Duration::from_millis(500),
+        "the floor is read without waiting for the replay to settle",
+    );
+    assert!(!shared.orders.replay_done(), "and the replay has not finished");
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(
+        w.events.iter().any(|e| e.starts_with("order_status:88:")),
+        "the order the floor already cleared is delivered by the read after it: {:?}",
+        w.events,
+    );
+}
+
+/// The wait for the replay a logon ends with is bounded by the caller's own
+/// timeout: on an account whose replay names nothing, a 100 ms bound returns
+/// after about 100 ms with its refusal, not after the replay's own three
+/// seconds.
+#[test]
+fn a_bounded_wait_for_the_replay_ends_at_its_bound() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.replay_is_pending();
+    let began = std::time::Instant::now();
+    let answer = client.next_shared_id_within(Some(std::time::Duration::from_millis(100)));
+    let waited = began.elapsed();
+    assert_eq!(answer.map_err(|refusal| refusal.code), Err(Refusal::NO_ANSWER));
+    assert!(
+        waited >= std::time::Duration::from_millis(100) && waited < std::time::Duration::from_secs(1),
+        "about the bound: {waited:?}",
+    );
+
+    // Once the venue has named what the account is working, the same call
+    // answers at once.
+    shared.orders.note_the_venue_named(41);
+    shared.orders.set_replay_done();
+    assert_eq!(client.next_shared_id_within(Some(std::time::Duration::from_millis(100))), Ok(42));
+}
+
+/// And by the config's `cancel`: a logon that is taken back while it waits
+/// for the replay stops waiting at the next step.
+#[test]
+fn a_wait_for_the_replay_is_taken_back_by_the_cancel() {
+    let (mut client, _rx, shared) = test_client();
+    shared.orders.replay_is_pending();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    client.cancel = Some(Arc::clone(&cancel));
+    let setter = {
+        let cancel = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        })
+    };
+    let began = std::time::Instant::now();
+    let answer = client.next_shared_id_within(None);
+    setter.join().unwrap();
+    let refusal = answer.expect_err("taken back");
+    assert_eq!(refusal.code, Refusal::NO_ANSWER);
+    assert!(refusal.message.contains("taken back"), "{}", refusal.message);
+    assert!(began.elapsed() < std::time::Duration::from_secs(1), "not the replay's own bound");
 }
 
 /// The session that already held the account when this one connected is named
@@ -11587,13 +11731,16 @@ fn nvda() -> crate::control::adjustments::AdjustedContract {
 #[test]
 fn a_corporate_actions_request_holds_its_answer_until_it_is_taken() {
     let (client, rx, shared) = test_client();
-    client.req_adjustments(41, 4815747, "STK", "SMART", "20240101", "20241231").expect("sent");
+    crate::api::client::tests::reported(&client, || client.req_adjustments(41, 4815747, "STK", "SMART", "20240101", "20241231")).expect("sent");
     assert!(
         matches!(rx.try_recv(), Ok(ControlCommand::FetchAdjustments { req_id: 41, .. })),
         "the request goes out under its own number",
     );
     assert_eq!(client.adjustments_for(41), None, "nothing has arrived");
 
+    // The engine's step says where the answer goes, and there is no engine
+    // behind this client.
+    shared.reference.expect_adjustments(41);
     shared.reference.note_adjustments(nvda(), a_split(), 41);
     assert_eq!(client.adjustments_for(41), Some(a_split()), "the answer to request 41");
     assert_eq!(client.adjustments_for(41), None, "taken, so not there to take twice");
@@ -11616,10 +11763,10 @@ fn a_corporate_actions_request_holds_its_answer_until_it_is_taken() {
 #[test]
 fn a_corporate_actions_request_given_up_on_holds_nothing() {
     let (client, rx, shared) = test_client();
-    client.req_adjustments(42, 4815747, "STK", "SMART", "20240101", "20241231").expect("sent");
+    crate::api::client::tests::reported(&client, || client.req_adjustments(42, 4815747, "STK", "SMART", "20240101", "20241231")).expect("sent");
     let _ = rx.try_recv();
 
-    client.cancel_adjustments(42).expect("withdrawn");
+    crate::api::client::tests::reported(&client, || client.cancel_adjustments(42)).expect("withdrawn");
     assert!(
         matches!(rx.try_recv(), Ok(ControlCommand::CancelCorporateActions { req_id: 42 })),
         "the venue is told to stop",
@@ -11629,46 +11776,38 @@ fn a_corporate_actions_request_given_up_on_holds_nothing() {
 
     drop(rx);
     assert!(
-        client.req_adjustments(43, 4815747, "STK", "SMART", "20240101", "20241231").is_err(),
+        crate::api::client::tests::reported(&client, || client.req_adjustments(43, 4815747, "STK", "SMART", "20240101", "20241231")).is_err(),
         "no engine to send it to",
     );
     shared.reference.note_adjustments(nvda(), a_split(), 43);
     assert_eq!(client.adjustments_for(43), None, "a request that never went out holds nothing");
 }
 
-/// A description asking for headlines by provider is named first, as one asking
-/// for them bare is.
+/// A request asking for headlines by provider asks for them, as one asking
+/// for them bare does.
 ///
-/// Headlines are asked for by the venue's id for the contract, so a contract
-/// given by description is named before it is watched. Only a bare `292` was
-/// read as asking for them: `292:BRFG+DJNL`, the form that names the
-/// providers, left the description unnamed here and asked for no headlines at
-/// all.
+/// Only a bare `292` was read as asking for them: `292:BRFG+DJNL`, the form
+/// that names the providers, asked for no headlines at all.
 #[test]
-fn a_description_asking_for_headlines_by_provider_is_named_first() {
-    let (client, rx, shared) = test_client();
-    client.core.set_registration_timeout(std::time::Duration::from_millis(1));
+fn a_request_asking_for_headlines_by_provider_asks_for_them() {
+    let (client, rx, _shared) = test_client();
     let aapl = Contract {
         symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
         currency: "USD".into(), ..Default::default()
     };
-    let named_first = |sent: &[ControlCommand]| {
-        sent.iter().any(|c| matches!(c, ControlCommand::FetchContractDetails { .. }))
-    };
-
-    let _ = client.req_mkt_data(1, &aapl, "1292", false, false);
-    let sent: Vec<_> = rx.try_iter().collect();
-    assert!(!named_first(&sent), "1292 asks for no headlines: {sent:?}");
-
-    let sent = std::thread::scope(|s| {
-        let asking = s.spawn(|| client.req_mkt_data(2, &aapl, "mdoff,292:BRFG+DJNL", false, false));
-        let sent = rx.recv_timeout(std::time::Duration::from_secs(5)).into_iter().collect::<Vec<_>>();
-        // Over, so the naming returns rather than waiting out its deadline.
-        shared.reference.set_session_over("the test ended it");
-        let _ = asking.join();
-        sent
+    let headlines = |req_id: i64| rx.try_iter().find_map(|c| match c {
+        ControlCommand::Subscribe { req_id: asked, news, .. } if asked == req_id => Some(news),
+        _ => None,
     });
-    assert!(named_first(&sent), "the description went unnamed: {sent:?}");
+
+    client.try_req_mkt_data(1, &aapl, "1292", false, false).expect("taken");
+    assert_eq!(headlines(1), Some(None), "1292 asks for no headlines");
+
+    client.try_req_mkt_data(2, &aapl, "mdoff,292:BRFG+DJNL", false, false).expect("taken");
+    assert_eq!(
+        headlines(2), Some(Some("BRFG*DJNL".to_string())),
+        "the headlines are asked for from the providers named",
+    );
 }
 
 /// An order declining smart routing goes without it, and the caller is warned
@@ -11680,7 +11819,7 @@ fn an_order_declining_smart_routing_goes_and_is_warned_about() {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, tif: "DAY".into(), opt_out_smart_routing: true, ..Default::default()
     };
-    client.place_order(9801, &spy(), &order).expect("placed");
+    client.try_place_order(9801, &spy(), &order).expect("placed");
     assert!(
         matches!(next_command(&rx), Some(ControlCommand::Order(OrderRequest::SubmitEx { .. }))),
         "the order goes",
@@ -11692,7 +11831,7 @@ fn an_order_declining_smart_routing_goes_and_is_warned_about() {
     // Where the venue withdrew the choice, the order is refused instead.
     let (client, rx, shared) = test_client();
     shared.reference.set_enabled_features(vec!["DEPRPREFBEST".into()]);
-    let refused = client.place_order(9801, &spy(), &order).expect_err("refused");
+    let refused = client.try_place_order(9801, &spy(), &order).expect_err("refused");
     assert_eq!(
         (refused.code, refused.message.as_str()),
         (10348, "The 'OptOutFromSmartRouting' order attribute is not supported."),
@@ -11705,7 +11844,8 @@ fn an_order_declining_smart_routing_goes_and_is_warned_about() {
 /// smart routing is warned about and still answered with what it would cost.
 #[test]
 fn a_preview_warned_about_is_still_answered() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
+    let _engine = rx.run();
     let preview = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
         lmt_price: 100.0, what_if: true, opt_out_smart_routing: true, ..Default::default()
@@ -11734,7 +11874,9 @@ fn a_preview_warned_about_is_still_answered() {
     let state = answered.expect("the preview is answered, not ended by the warning");
     assert_eq!(state.status, "PreSubmitted");
 
-    // And the warning comes ahead of what the venue says about the order.
+    // And the warning comes ahead of what the venue says about the order: it
+    // is pushed at the call, before the venue can have answered it.
+    shared.orders.push_order_notice(7, crate::types::model::OrderOp::Place, 2181, "The 'OptOutFromSmartRouting' order attribute is not supported.".into());
     shared.orders.push_what_if(WhatIfResponse {
         order_id: 7, instrument: 0,
         init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
@@ -11742,7 +11884,6 @@ fn a_preview_warned_about_is_still_answered() {
         commission: None, min_commission: None, max_commission: None,
         commission_currency: String::new(), warning_text: String::new(),
     });
-    shared.orders.push_order_notice(7, 2181, "The 'OptOutFromSmartRouting' order attribute is not supported.".into());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     let at = |prefix: &str| w.events.iter().position(|e| e.starts_with(prefix));
@@ -11804,8 +11945,8 @@ fn the_verification_calls_and_the_two_quiet_cancels_are_answered_as_a_gateway_an
     client.verify_and_auth_request("app", "1", "key");
     client.verify_message("data");
     client.verify_and_auth_message("data", "response");
-    client.cancel_contract_data(5).unwrap();
-    client.cancel_historical_ticks(6).unwrap();
+    client.cancel_contract_data(5);
+    client.cancel_historical_ticks(6);
     client.process_msgs(&mut w);
     assert_eq!(w.0, vec![(-1, 508, said.to_string()), (-1, 508, said.to_string())]);
     assert!(rx.try_recv().is_err(), "nothing reaches the engine");
@@ -11814,12 +11955,12 @@ fn the_verification_calls_and_the_two_quiet_cancels_are_answered_as_a_gateway_an
     let mut w = Heard::default();
     client.verify_request("app", "1");
     client.verify_message("data");
-    assert_eq!(client.cancel_contract_data(5).unwrap_err().code, 504);
-    assert_eq!(client.cancel_historical_ticks(6).unwrap_err().code, 504);
+    client.cancel_contract_data(5);
+    client.cancel_historical_ticks(6);
     client.process_msgs(&mut w);
     assert_eq!(
         w.0.iter().map(|(id, code, _)| (*id, *code)).collect::<Vec<_>>(),
-        vec![(-1, 504), (-1, 504)],
+        vec![(-1, 504), (-1, 504), (5, 504), (6, 504)],
     );
 }
 
@@ -11831,9 +11972,9 @@ fn a_withdrawal_carries_its_operator_and_indicator() {
     use crate::types::model::OrderCancel;
     let (client, rx, _shared) = test_client();
     client.shared.orders.set_replay_done();
-    client.core.track_order(42, spy(), Order::default(), 0);
+    placed_here(&client, &rx, 42);
     let stated = OrderCancel { ext_operator: "OP1".into(), manual_order_indicator: 1, ..Default::default() };
-    client.cancel_order(42, &stated).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_order(42, &stated)).unwrap();
     match rx.try_recv().expect("the cancel") {
         ControlCommand::Order(OrderRequest::Cancel { order_id: 42, stated: carried }) => {
             assert_eq!(carried, stated);
@@ -11841,8 +11982,8 @@ fn a_withdrawal_carries_its_operator_and_indicator() {
         other => panic!("expected a cancel, got {other:?}"),
     }
     let time = String::new();
-    client.cancel_order(42, &time).unwrap();
-    client.cancel_order(42, time).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_order(42, &time)).unwrap();
+    crate::api::client::tests::reported(&client, || client.cancel_order(42, time)).unwrap();
     for _ in 0..2 {
         match rx.try_recv().expect("the cancel") {
             ControlCommand::Order(OrderRequest::Cancel { stated, .. }) => {
@@ -11854,22 +11995,22 @@ fn a_withdrawal_carries_its_operator_and_indicator() {
     // A time a gateway cannot read withdraws nothing, and neither does an
     // operator carrying the byte that separates fields.
     for unread in ["garbage", "2026-09-24 14:30:00", "20260924 14:30", "20260924-25:00:00"] {
-        assert_eq!(client.cancel_order(42, unread).unwrap_err().code, 10301, "{unread}");
+        assert_eq!(crate::api::client::tests::reported(&client, || client.cancel_order(42, unread)).unwrap_err().code, 10301, "{unread}");
     }
     let spliced = OrderCancel { ext_operator: "OP1\u{1}11=7".into(), ..Default::default() };
-    assert_eq!(client.cancel_order(42, &spliced).unwrap_err().code, 321);
-    assert_eq!(client.req_global_cancel(&spliced).unwrap_err().code, 321);
+    assert_eq!(crate::api::client::tests::reported(&client, || client.cancel_order(42, &spliced)).unwrap_err().code, 321);
+    assert_eq!(crate::api::client::tests::reported(&client, || client.req_global_cancel(&spliced)).unwrap_err().code, 321);
     assert!(rx.try_recv().is_err(), "nothing was withdrawn");
     // The forms a gateway reads, the date and the zone optional.
     for read in ["20260924-14:30:00", "20260924 14:30:00", "20260924 14:30:00 US/Eastern", "14:30:00"] {
-        client.cancel_order(42, read).unwrap();
+        crate::api::client::tests::reported(&client, || client.cancel_order(42, read)).unwrap();
         assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { .. }))), "{read}");
     }
     client.shared.market.set_instrument_count(1);
     let everything = OrderCancel { ext_operator: "OP2".into(), manual_order_indicator: 0, ..Default::default() };
-    client.req_global_cancel(&everything).unwrap();
+    crate::api::client::tests::reported(&client, || client.req_global_cancel(&everything)).unwrap();
     match rx.try_recv().expect("the withdrawal of every order") {
-        ControlCommand::Order(OrderRequest::CancelAll { stated, .. }) => {
+        ControlCommand::Order(OrderRequest::GlobalCancel { stated, .. }) => {
             assert_eq!(stated, everything);
         }
         other => panic!("expected a withdrawal of every order, got {other:?}"),
@@ -11889,7 +12030,7 @@ fn a_preview_spends_no_number_a_caller_is_handed() {
         let _answering = super::Answering::begin();
         let asked = i64::from(crate::bridge::ReferenceState::ASK_ID_BASE) + 7;
         let preview = Order { what_if: true, ..Order::limit("BUY", 1.0, 1.0) };
-        client.place_order(asked, &spy(), &preview).unwrap();
+        client.try_place_order(asked, &spy(), &preview).unwrap();
     }
     assert_eq!(client.next_order_id(), before + 1, "the preview took no caller's number");
 }
@@ -11936,25 +12077,16 @@ fn per_request_market_data_options_are_checked_before_contract_lookup() {
     let (client, rx, shared) = test_client();
     for (tag, value, code) in [("foo", "1", 10337), ("manual", "2", 10338), ("manual", "", 320)] {
         let options = [ApiTagValue { tag: tag.into(), value: value.into() }];
-        let why = client.req_mkt_data_ex(7, &Contract::default(), "", false, false, 2, &options).unwrap_err();
+        let why = client.try_req_mkt_data_ex(7, &Contract::default(), "", false, false, 2, &options).unwrap_err();
         assert_eq!(why.code, code);
         assert!(rx.try_recv().is_err());
     }
     shared.reference.set_enabled_features(vec!["NOAPIMISCVLD".into()]);
     let options = [ApiTagValue { tag: "foo".into(), value: "1".into() }];
-    let engine = std::thread::spawn(move || {
-        while let Ok(command) = rx.recv() {
-            if let ControlCommand::Subscribe { mode_9887, reply_tx: Some(reply), .. } = command {
-                assert_eq!(mode_9887, 2);
-                reply.send(Ok(0)).unwrap();
-                break;
-            }
-        }
-    });
-    client.req_mkt_data_ex(8, &spy(), "", false, false, 2, &options).unwrap();
-    engine.join().unwrap();
+    client.try_req_mkt_data_ex(8, &spy(), "", false, false, 2, &options).unwrap();
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Subscribe { mode_9887: 2, .. })));
     let options = [ApiTagValue { tag: "manual".into(), value: "2".into() }];
-    assert_eq!(client.req_mkt_data_ex(9, &spy(), "", false, false, 2, &options).unwrap_err().code, 321);
+    assert_eq!(client.try_req_mkt_data_ex(9, &spy(), "", false, false, 2, &options).unwrap_err().code, 321);
 }
 
 #[test]
@@ -11987,20 +12119,21 @@ fn retired_order_instructions_are_refused_or_warned_on_the_order_number() {
         nbbo_price_cap: 0.0, ..Default::default()
     };
     shared.reference.set_enabled_features(vec!["DEPRETFQNC".into()]);
-    assert_eq!(client.place_order(9810, &spy(), &order).unwrap_err().code, 10268);
+    assert_eq!(client.try_place_order(9810, &spy(), &order).unwrap_err().code, 10268);
     order.e_trade_only = false;
-    assert_eq!(client.place_order(9810, &spy(), &order).unwrap_err().code, 10269);
+    assert_eq!(client.try_place_order(9810, &spy(), &order).unwrap_err().code, 10269);
     order.firm_quote_only = false;
-    assert_eq!(client.place_order(9810, &spy(), &order).unwrap_err().code, 10270);
+    assert_eq!(client.try_place_order(9810, &spy(), &order).unwrap_err().code, 10270);
     assert!(rx.try_recv().is_err(), "the refused order never reaches the engine");
     order.e_trade_only = true;
     order.firm_quote_only = true;
     shared.reference.set_enabled_features(Vec::new());
-    client.place_order(9810, &spy(), &order).expect("placed without retired instructions");
+    client.try_place_order(9810, &spy(), &order).expect("placed without retired instructions");
     assert!(matches!(next_command(&rx), Some(ControlCommand::Order(OrderRequest::SubmitEx { .. }))));
     let warnings = shared.orders.drain_order_notices();
     assert_eq!(warnings.iter().map(|(id, code, _)| (*id, *code)).collect::<Vec<_>>(),
         [(9810, 2168), (9810, 2169), (9810, 2170)]);
+    client.process_msgs(&mut RecordingWrapper::default());
     let placed = client.core.tracked_order(9810).expect("held order");
     assert!(!placed.e_trade_only && !placed.firm_quote_only);
     assert_eq!(placed.nbbo_price_cap, f64::MAX);
@@ -12015,9 +12148,9 @@ fn retired_order_warnings_precede_a_later_instruction_refusal() {
         lmt_price: 100.0, e_trade_only: true, firm_quote_only: true,
         nbbo_price_cap: 0.0, opt_out_smart_routing: true, ..Default::default()
     };
-    assert_eq!(client.place_order(9811, &spy(), &order).unwrap_err().code, 10348);
-    assert_eq!(shared.orders.drain_order_notices().iter()
-        .map(|(id, code, _)| (*id, *code)).collect::<Vec<_>>(),
+    assert_eq!(client.try_place_order(9811, &spy(), &order).unwrap_err().code, 10348);
+    assert_eq!(shared.drain_refused().iter()
+        .map(|(origin, code, _)| (*origin, *code)).collect::<Vec<_>>(),
         [(9811, 2168), (9811, 2169), (9811, 2170)]);
     assert!(rx.try_recv().is_err());
 }
@@ -12030,6 +12163,6 @@ fn an_orders_option_list_is_checked_before_its_destination() {
             tag: "unknown".into(), value: "1".into(),
         }], ..Default::default()
     };
-    assert_eq!(client.place_order(9812, &Contract::default(), &order).unwrap_err().code, 10337);
+    assert_eq!(client.try_place_order(9812, &Contract::default(), &order).unwrap_err().code, 10337);
     assert!(rx.try_recv().is_err());
 }

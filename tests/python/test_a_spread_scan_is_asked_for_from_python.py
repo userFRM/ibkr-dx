@@ -52,7 +52,11 @@ def test_a_scan_is_asked_for_beside_the_series_it_is_answered_on():
     c.req_spread_scan(2, aapl(), ibkr_dx.SpreadScan(version=6, account="DU0000000"))
 
     sent = c._test_take_commands()
-    assert any("481" in cmd and "Series" in cmd for cmd in sent), sent
+    assert any(
+        cmd.startswith("Subscribe") and "[481]" in cmd and "spread_scan: Some" in cmd
+        for cmd in sent
+    ), sent
+    c.poll()
     assert heard.errors == [], heard.errors
 
 
@@ -63,5 +67,6 @@ def test_a_scan_naming_no_contract_is_refused_on_error():
 
     c.req_spread_scan(3, aapl(con_id=0), ibkr_dx.SpreadScan(version=6))
 
+    c.poll()
     assert heard.errors == [(3, 321)]
     assert c._test_take_commands() == [], "nothing is asked for a scan of nothing"

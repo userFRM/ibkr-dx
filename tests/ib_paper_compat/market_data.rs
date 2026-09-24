@@ -21,9 +21,9 @@ pub(super) fn phase_market_data(conns: Conns) -> Conns {
     );
 
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90017,
+            contract: ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -88,21 +88,21 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
     );
 
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90018,
+            contract: ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90019,
+            contract: ContractRef { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90020,
+            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -179,23 +179,18 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
         conns.hmds,
         None,
     );
-    let (registered_tx, registered_rx) = std::sync::mpsc::sync_channel(1);
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: Some(registered_tx),
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90021,
+            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
 
-    // Which slot the engine gave this contract, so the withdrawal below names
-    // the subscription that was actually opened. Assuming the first slot makes
-    // the silence that follows prove nothing: an unsubscribe aimed at a slot
-    // nobody holds is quiet for the same reason a working one is.
-    let instrument = registered_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the engine never answered the subscription")
-        .expect("the subscription was refused");
+    // The engine's word that it took the subscription, so the silence that
+    // follows the withdrawal proves something: a withdrawal of a request that
+    // never opened is quiet for the same reason a working one is.
+    taken_slot(&shared, 90021, Duration::from_secs(10)).expect("the subscription was not taken");
 
     // The feed has to be waited for rather than sampled. A fixed window opened
     // at the send is spent on starting the loop, resolving the contract and
@@ -218,7 +213,7 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
     }
 
     control_tx
-        .send(ControlCommand::Unsubscribe { instrument, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 })
+        .send(ControlCommand::CancelMktData { req_id: 90021 })
         .unwrap();
     // Ticks already in flight when the withdrawal is sent are absorbed rather
     // than counted.
@@ -370,7 +365,6 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
             symbol: "AAPL".into(),
             sec_type: "STK".into(),
             providers: "BZ+FLY".into(),
-            reply_tx: None,
         })
         .unwrap();
 
@@ -420,7 +414,6 @@ pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
             number_of_ticks: 0,
             ignore_size: false,
             tbt_type: TbtType::Last,
-            reply_tx: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -492,9 +485,9 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
     );
 
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90022,
+            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -650,14 +643,14 @@ pub(super) fn phase_fallback_market_data(conns: Conns) -> Conns {
     );
 
     control_tx
-        .send(ControlCommand::Subscribe {
+        .send(ControlCommand::Subscribe { req_id: 90023,
             contract: ContractRef { con_id, symbol: ALWAYS_QUOTING.0.into(),
                 // Named, not left to the default. A subscription with no
                 // exchange is asked for on BEST, and the venue refuses a
                 // crypto there: "BEST/CRYPTO/Top". The ticks still arrive and
                 // carry no prices, so the phase saw a stream and no quote.
-                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -742,14 +735,14 @@ pub(super) fn phase_fallback_streaming_validation(conns: Conns) -> Conns {
     );
 
     control_tx
-        .send(ControlCommand::Subscribe {
+        .send(ControlCommand::Subscribe { req_id: 90024,
             contract: ContractRef { con_id, symbol: ALWAYS_QUOTING.0.into(),
                 // Named, not left to the default. A subscription with no
                 // exchange is asked for on BEST, and the venue refuses a
                 // crypto there: "BEST/CRYPTO/Top". The ticks still arrive and
                 // carry no prices, so the phase saw a stream and no quote.
-                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -858,14 +851,14 @@ pub(super) fn phase_fallback_resubscribe(conns: Conns) -> Conns {
     );
 
     control_tx
-        .send(ControlCommand::Subscribe {
+        .send(ControlCommand::Subscribe { req_id: 90025,
             contract: ContractRef { con_id, symbol: ALWAYS_QUOTING.0.into(),
                 // Named, not left to the default. A subscription with no
                 // exchange is asked for on BEST, and the venue refuses a
                 // crypto there: "BEST/CRYPTO/Top". The ticks still arrive and
                 // carry no prices, so the phase saw a stream and no quote.
-                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -897,14 +890,14 @@ pub(super) fn phase_fallback_resubscribe(conns: Conns) -> Conns {
     );
 
     control_tx2
-        .send(ControlCommand::Subscribe {
+        .send(ControlCommand::Subscribe { req_id: 90026,
             contract: ContractRef { con_id, symbol: ALWAYS_QUOTING.0.into(),
                 // Named, not left to the default. A subscription with no
                 // exchange is asked for on BEST, and the venue refuses a
                 // crypto there: "BEST/CRYPTO/Top". The ticks still arrive and
                 // carry no prices, so the phase saw a stream and no quote.
-                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+                exchange: ALWAYS_QUOTING.2.into(), sec_type: ALWAYS_QUOTING.1.into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join2 = run_hot_loop(hot_loop2);
@@ -941,21 +934,21 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
 
     // Subscribe to 3 high-volume instruments
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90027,
+            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90028,
+            contract: ContractRef { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90029,
+            contract: ContractRef { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1062,7 +1055,6 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
             number_of_ticks: 0,
             ignore_size: false,
             tbt_type: TbtType::Last,
-            reply_tx: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1093,7 +1085,7 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
 
     // Step 2: Unsubscribe — instrument 0 is the first registered (SPY)
     control_tx
-        .send(ControlCommand::UnsubscribeTbt { req_id: 1, instrument: 0 })
+        .send(ControlCommand::UnsubscribeTbt { req_id: 1 })
         .unwrap();
     // What matters is that the stream stops, not how much of it was already on
     // its way. A payload in flight when the withdrawal goes out still arrives,
@@ -1154,9 +1146,9 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
 
     // Subscribe to both regular market data and TBT simultaneously
     control_tx
-        .send(ControlCommand::Subscribe {
-            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-            generic_ticks: Vec::new(), issued: 0,
+        .send(ControlCommand::Subscribe { req_id: 90030,
+            contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+            generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         })
         .unwrap();
     control_tx
@@ -1166,7 +1158,6 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
             number_of_ticks: 0,
             ignore_size: false,
             tbt_type: TbtType::Last,
-            reply_tx: None,
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1280,9 +1271,9 @@ pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
     // Subscribe to all 10 simultaneously
     for &(con_id, symbol) in instruments {
         control_tx
-            .send(ControlCommand::Subscribe {
-                contract: ContractRef { con_id, symbol: symbol.into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, reply_tx: None,
-                generic_ticks: Vec::new(), issued: 0,
+            .send(ControlCommand::Subscribe { req_id: con_id,
+                contract: ContractRef { con_id, symbol: symbol.into(), exchange: String::new(), sec_type: String::new(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, regulatory_snapshot: false, snapshot: false,
+                generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
             })
             .unwrap();
     }

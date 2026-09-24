@@ -263,13 +263,6 @@ fn is_warning(code: i64) -> bool {
     (2100..2200).contains(&code)
 }
 
-/// Whether the answering-call guard re-raises a loss on drop: the connection
-/// went during the wait, the caller kept no record of its own to have heard
-/// it, and no restore has landed since the last pump to make the loss stale.
-fn reraise_the_loss(went_during: bool, heard_by_the_caller: bool, restored_since: bool) -> bool {
-    went_during && !heard_by_the_caller && !restored_since
-}
-
 /// The venue's naming of a description, with what the caller stated put back
 /// around it.
 ///
@@ -293,65 +286,18 @@ pub(super) fn named_with_what_the_caller_stated(mut named: Contract, stated: &Co
     named
 }
 
-/// Holds the caller's right to be told the session closed, across pumping that
-/// this client does on its own behalf.
-///
-/// An answering call runs the dispatch into a collector of its own, and the
-/// notice that the session went away is delivered once and then latched.
-/// Delivered into that collector, the caller's wrapper never hears it and
-/// nothing says so again until a reconnect — the program goes on believing it
-/// is connected. Restored on the way out, and only where this call is what
-/// took it and no record the caller keeps was pumped beside the collector, so
-/// a caller that had already been told is not told twice.
-struct LeaveTheCloseNoticeForTheCaller<'a> {
-    client: &'a EClient,
-    told_before: bool,
-    connected_before: bool,
-}
-
-impl<'a> LeaveTheCloseNoticeForTheCaller<'a> {
-    fn new(client: &'a EClient) -> Self {
-        let told_before = client.close_notified.load(std::sync::atomic::Ordering::Acquire);
-        let connected_before = client.connected.load(std::sync::atomic::Ordering::Acquire);
-        Self { client, told_before, connected_before }
-    }
-}
-
-impl Drop for LeaveTheCloseNoticeForTheCaller<'_> {
-    fn drop(&mut self) {
-        // Where a record of the caller's own was pumped beside the collector,
-        // that record heard whatever the collector did, the close and a loss
-        // said under 1100 included, and hearing either again on the caller's
-        // next pass is hearing it twice.
-        let heard_by_the_caller = self.client.kept.lock().map(|k| k.is_some()).unwrap_or(false);
-        if !self.told_before && !heard_by_the_caller {
-            self.client.close_notified.store(false, std::sync::atomic::Ordering::Release);
-        }
-        // A loss said under 1100 during the wait was said to the collector.
-        // Where nothing of the caller's heard it too, the flag is raised again
-        // so the caller's next pass hears it.
-        let went_during = self.connected_before
-            && !self.client.connected.load(std::sync::atomic::Ordering::Acquire);
-        // A restore that landed after the last pump has already set the
-        // flag; re-raising the loss would clear it, and the caller would
-        // read 1100 and never the 1102 the engine recovered with.
-        let restored_since = self.client.shared.peek_connection_restored();
-        if reraise_the_loss(went_during, heard_by_the_caller, restored_since) {
-            self.client.shared.set_connection_lost();
-        }
-    }
-}
-
 impl EClient {
-    /// Pump the queues into a question's collector, and into the record the
-    /// session keeps as well.
+    /// One read for a question's collector.
     ///
-    /// The queues empty as they are read. Read into a collector alone, every
-    /// callback that collector does not implement — a fill, a trade, an
-    /// order's new status — was taken off the queue and dropped, and the
-    /// record a caller reads those back from never saw it. A question can run
-    /// for the whole answer timeout, so that is a whole timeout of them.
-    pub(crate) fn pump_for_ask(&self, collector: &mut impl crate::api::wrapper::Wrapper) {
+    /// With a record kept, a whole read: the record and the collector receive
+    /// every record in the session's order, the question's own answer in its
+    /// place, and the state after them, and the collector takes its answer
+    /// from the same pass. With none, the question takes only the records
+    /// under the numbers it holds — `own` — and leaves everything else where
+    /// it is for [`process_msgs`](EClient::process_msgs).
+    pub(crate) fn pump_for_ask(
+        &self, collector: &mut impl crate::api::wrapper::Wrapper, own: &[crate::bridge::Owner],
+    ) {
         // Locked per pump rather than for the length of the question, so a
         // caller reading the record from another thread waits for one pass and
         // not for the answer.
@@ -360,24 +306,28 @@ impl EClient {
             Some(record) => {
                 let mut held = record.lock().unwrap_or_else(|e| e.into_inner());
                 let mut both = crate::api::wrapper::Tee { asked: collector, kept: &mut *held };
-                self.read_the_session(&mut both, true);
+                let bulletins = self.core.bulletins_subscribed();
+                self.read_the_session(&mut both, crate::bridge::Take::Whole { bulletins });
             }
-            None => self.read_the_session(collector, false),
+            None => {
+                self.read_the_session(&mut *collector, crate::bridge::Take::Own(own));
+                self.deliver_own_summaries(collector, own);
+            }
         }
     }
 
     /// Pump until the collector says the answer is complete, or time runs out.
     fn wait_for<T, W: Wrapper>(
         &self, collector: &mut W, state: &Arc<Mutex<Pending<T>>>, what: &str,
+        own: &[crate::bridge::Owner],
     ) -> Result<Vec<T>, Refusal> {
-        let _notice = LeaveTheCloseNoticeForTheCaller::new(self);
         let deadline = Instant::now() + ANSWER_TIMEOUT;
         // Ended with the session, not at the end of the wait: a caller
         // retrying on "no answer" otherwise paid the wait per call for ever
         // while the session had been over the whole time. The streams and
         // the other surface return at once.
         while Instant::now() < deadline {
-            self.pump_for_ask(collector);
+            self.pump_for_ask(collector, own);
             if let Some(why) = self.shared.reference.session_over() {
                 return Err(Refusal::not_connected(format!("the session is over: {why}")));
             }
@@ -390,7 +340,7 @@ impl EClient {
         // the deadline, so an answer arriving during that last sleep is still
         // queued when the loop ends — and the caller is told nothing came about
         // an answer that had.
-        self.pump_for_ask(collector);
+        self.pump_for_ask(collector, own);
         let mut s = state.lock().unwrap();
         if let Some(e) = s.error.take() {
             return Err(e);
@@ -455,10 +405,10 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Bars { req_id, state: Arc::clone(&state) };
-        self.req_historical_data(
+        self.try_req_historical_data(
             req_id, contract, end_date_time, duration, bar_size, what_to_show, use_rth, 1, false,
         )?;
-        self.wait_for(&mut collector, &state, &format!("{duration} of bars for {}", contract.symbol))
+        self.wait_for(&mut collector, &state, &format!("{duration} of bars for {}", contract.symbol), &[crate::bridge::Owner::Request(req_id)])
     }
 
     /// A contract's corporate actions, asked for and waited on.
@@ -529,10 +479,9 @@ impl EClient {
             asked.get() as u32, contract.con_id, &contract.sec_type, &contract.exchange,
             start_date, end_date,
         )?;
-        let _notice = LeaveTheCloseNoticeForTheCaller::new(self);
         let deadline = Instant::now() + ANSWER_TIMEOUT;
         while Instant::now() < deadline {
-            self.pump_for_ask(&mut refused);
+            self.pump_for_ask(&mut refused, &[crate::bridge::Owner::Request(asked.get())]);
             if let Some(why) = self.shared.reference.session_over() {
                 return Err(Refusal::not_connected(format!("the session is over: {why}")));
             }
@@ -550,7 +499,7 @@ impl EClient {
         // deadline, so an answer arriving during that last sleep is never
         // looked for — and the guard on the way out throws it away. A caller
         // told nothing came, about an answer that had.
-        self.pump_for_ask(&mut refused);
+        self.pump_for_ask(&mut refused, &[crate::bridge::Owner::Request(asked.get())]);
         if let Some(refusal) = why.lock().unwrap().take() {
             return Err(refusal);
         }
@@ -624,10 +573,10 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Chain { req_id, state: Arc::clone(&state) };
-        self.req_sec_def_opt_params(
+        self.try_req_sec_def_opt_params(
             req_id, &underlying.symbol, "", &underlying.sec_type, underlying.con_id,
         )?;
-        self.wait_for(&mut collector, &state, &format!("the option chain on {}", underlying.symbol))
+        self.wait_for(&mut collector, &state, &format!("the option chain on {}", underlying.symbol), &[crate::bridge::Owner::Request(req_id)])
     }
 
     /// The earliest moment the venue holds data for a contract.
@@ -670,9 +619,9 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Head { req_id, state: Arc::clone(&state) };
-        self.req_head_time_stamp(req_id, contract, what_to_show, use_rth, 1)?;
+        self.try_req_head_time_stamp(req_id, contract, what_to_show, use_rth, 1)?;
         let what = format!("the first data the venue holds for {}", contract.symbol);
-        Ok(self.wait_for(&mut collector, &state, &what)?.remove(0))
+        Ok(self.wait_for(&mut collector, &state, &what, &[crate::bridge::Owner::Request(req_id)])?.remove(0))
     }
 
     /// Contracts whose name or symbol matches a pattern.
@@ -710,8 +659,8 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Matches { req_id, state: Arc::clone(&state) };
-        self.req_matching_symbols(req_id, pattern)?;
-        self.wait_for(&mut collector, &state, &format!("a search for {pattern}"))
+        self.try_req_matching_symbols(req_id, pattern)?;
+        self.wait_for(&mut collector, &state, &format!("a search for {pattern}"), &[crate::bridge::Owner::Request(req_id)])
     }
 
     /// The headlines the venue holds for a contract, up to the number asked
@@ -775,15 +724,12 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Headlines { req_id, state: Arc::clone(&state) };
-        // A count below zero is not a count: cast unchecked it asked for four
-        // billion headlines.
-        let total_results = u32::try_from(total_results).map_err(|_| {
-            Refusal::validation(format!("total_results {total_results} is negative"))
-        })?;
-        self.req_historical_news(
+        // Passed on as a gateway passes it: no more than three hundred, and a
+        // smaller number, below nought included, as stated.
+        self.try_req_historical_news(
             req_id, con_id, provider_codes, start_date_time, end_date_time, total_results,
         )?;
-        self.wait_for(&mut collector, &state, &format!("headlines for contract {con_id}"))
+        self.wait_for(&mut collector, &state, &format!("headlines for contract {con_id}"), &[crate::bridge::Owner::Request(req_id)])
     }
 
     /// How a contract's trades were spread across prices.
@@ -824,9 +770,9 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Histogram { req_id, state: Arc::clone(&state) };
-        self.req_histogram_data(req_id, contract, use_rth, period)?;
+        self.try_req_histogram_data(req_id, contract, use_rth, period)?;
         let what = format!("how {} traded across prices", contract.symbol);
-        self.wait_for(&mut collector, &state, &what)
+        self.wait_for(&mut collector, &state, &what, &[crate::bridge::Owner::Request(req_id)])
     }
 
     /// A fundamental document about a contract, as the venue writes it.
@@ -859,9 +805,9 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Document { req_id, state: Arc::clone(&state) };
-        self.req_fundamental_data(req_id, contract, report_type)?;
+        self.try_req_fundamental_data(req_id, contract, report_type)?;
         let what = format!("a {report_type} for {}", contract.symbol);
-        Ok(self.wait_for(&mut collector, &state, &what)?.remove(0))
+        Ok(self.wait_for(&mut collector, &state, &what, &[crate::bridge::Owner::Request(req_id)])?.remove(0))
     }
 
     /// What the venue says an order would cost, without placing it.
@@ -931,9 +877,9 @@ impl EClient {
         let asked = crate::types::model::Order { what_if: true, ..order.clone() };
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Preview { order_id, state: Arc::clone(&state) };
-        self.place_order(order_id, contract, &asked)?;
+        self.try_place_order(order_id, contract, &asked)?;
         let what = format!("a preview of {} {} {}", asked.action, asked.total_quantity, contract.symbol);
-        match self.wait_for(&mut collector, &state, &what) {
+        match self.wait_for(&mut collector, &state, &what, &[crate::bridge::Owner::Order(order_id), crate::bridge::Owner::Request(order_id)]) {
             Ok(mut rows) => Ok(rows.remove(0)),
             Err(refused) => {
                 // The question ended without an answer the caller could
@@ -1003,7 +949,7 @@ impl EClient {
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Values { req_id, state: Arc::clone(&state) };
         self.req_account_summary(req_id, "All", tags);
-        let rows = self.wait_for(&mut collector, &state, "the account summary");
+        let rows = self.wait_for(&mut collector, &state, "the account summary", &[crate::bridge::Owner::Request(req_id)]);
         self.cancel_account_summary(req_id);
         rows
     }
@@ -1096,16 +1042,9 @@ impl EClient {
             report: Arc::clone(&report),
             done: Arc::clone(&done),
         };
-        // The notice that the session went away is delivered once and then
-        // latched. Pumped into this collector, which does not take it, the
-        // caller's own wrapper never hears it and nothing says so again until
-        // a reconnect — so a caller waiting on an order when the session drops
-        // is told the order said nothing, and goes on believing it is
-        // connected. Left for them the way the other waits here leave it.
-        let _leave_the_notice = LeaveTheCloseNoticeForTheCaller::new(self);
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            self.pump_for_ask(&mut watch);
+            self.pump_for_ask(&mut watch, &[crate::bridge::Owner::Order(order_id)]);
             if let Some(why) = self.shared.reference.session_over() {
                 return Err(Refusal::not_connected(format!("the session is over: {why}")));
             }
@@ -1118,7 +1057,7 @@ impl EClient {
         // deadline, so a terminal status arriving in that last sleep is still
         // queued — and a caller is handed the working one it replaced, or told
         // the order said nothing when it had.
-        self.pump_for_ask(&mut watch);
+        self.pump_for_ask(&mut watch, &[crate::bridge::Owner::Order(order_id)]);
         report.lock().unwrap().clone().ok_or_else(|| {
             Refusal::no_answer(
                 format!("order {order_id} said nothing within {}s", timeout.as_secs()))
@@ -1140,9 +1079,8 @@ impl EClient {
         let req_id = asked.get();
         let answer = Arc::new(Mutex::new(Answer::default()));
         let mut collector = Collector { req_id, answer: Arc::clone(&answer) };
-        self.req_contract_details(req_id, contract)?;
+        self.try_req_contract_details(req_id, contract)?;
 
-        let _notice = LeaveTheCloseNoticeForTheCaller::new(self);
         // The clock measures silence, not the length of the answer. A class
         // naming every expiry is thousands of definitions and the venue sends
         // for as long as that takes; bounded on the total, an answer that is
@@ -1151,7 +1089,7 @@ impl EClient {
         let mut quiet_since = Instant::now();
         let mut had = 0usize;
         while quiet_since.elapsed() < LOOKUP_TIMEOUT {
-            self.pump_for_ask(&mut collector);
+            self.pump_for_ask(&mut collector, &[crate::bridge::Owner::Request(req_id)]);
             if let Some(why) = self.shared.reference.session_over() {
                 return Err(Refusal::not_connected(format!("the session is over: {why}")));
             }
@@ -1169,7 +1107,7 @@ impl EClient {
         // Once more before giving up, for the reason the shared waiter states:
         // the loop sleeps and then tests its deadline, so an answer arriving in
         // that last sleep is still queued when it ends.
-        self.pump_for_ask(&mut collector);
+        self.pump_for_ask(&mut collector, &[crate::bridge::Owner::Request(req_id)]);
 
         let mut a = answer.lock().unwrap();
         if let Some(e) = a.error.take() {
@@ -1348,12 +1286,12 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Rows { req_id, state: Arc::clone(&state) };
-        self.req_scanner_subscription(req_id, instrument, location, scan_code, most, &[])?;
-        let found = self.wait_for(&mut collector, &state, &format!("a {scan_code} scan"));
+        self.try_req_scanner_subscription(req_id, instrument, location, scan_code, most, &[], "")?;
+        let found = self.wait_for(&mut collector, &state, &format!("a {scan_code} scan"), &[crate::bridge::Owner::Request(req_id)]);
         // Withdrawn, and said so when it is not: a scan left running keeps
         // answering into a session nobody is reading, and this call states that
         // it does not leave one.
-        if let Err(e) = self.cancel_scanner_subscription(req_id) {
+        if let Err(e) = self.try_cancel_scanner_subscription(req_id) {
             log::warn!("scan {req_id} was not withdrawn: {e}");
         }
         found
@@ -1401,8 +1339,8 @@ impl EClient {
         let req_id = asked.get();
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = When { req_id, state: Arc::clone(&state) };
-        self.req_historical_schedule(req_id, contract, "", duration, true)?;
-        let found = self.wait_for(&mut collector, &state, "a trading schedule")?;
+        self.try_req_historical_schedule(req_id, contract, "", duration, true)?;
+        let found = self.wait_for(&mut collector, &state, "a trading schedule", &[crate::bridge::Owner::Request(req_id)])?;
         found.into_iter().next().ok_or_else(|| {
             Refusal::no_answer("the venue stated no schedule for this contract".to_string())
         })
@@ -1454,14 +1392,14 @@ impl EClient {
         let state = Arc::new(Mutex::new(Pending::default()));
         let mut collector = Json { req_id, state: Arc::clone(&state) };
         match con_id {
-            None => self.req_wsh_meta_data(req_id)?,
-            Some(con_id) => self.req_wsh_event_data(req_id, crate::types::CalendarQuery {
+            None => self.try_req_wsh_meta_data(req_id)?,
+            Some(con_id) => self.try_req_wsh_event_data(req_id, crate::types::CalendarQuery {
                 con_id: Some(con_id),
                 ..Default::default()
             })?,
         }
         let what = if con_id.is_some() { "calendar events" } else { "the calendar's schema" };
-        self.wait_for(&mut collector, &state, what)?
+        self.wait_for(&mut collector, &state, what, &[crate::bridge::Owner::Request(req_id)])?
             .into_iter()
             .next()
             .ok_or_else(|| Refusal::no_answer(format!("the venue stated no {what}")))
@@ -1493,18 +1431,6 @@ mod ask_id_holds_nothing_after_it_is_kept {
             shared.reference.is_ours(crate::bridge::RecordKind::Answer, id),
             "and the id is still this session's own",
         );
-    }
-
-    /// The answering-call guard re-raises a loss only when no restore has
-    /// landed since the last pump. A restore that arrives after the last pump
-    /// sets the flag; re-raising would clear it and the caller would read 1100
-    /// and never the 1102 the engine recovered with.
-    #[test]
-    fn the_guard_reraises_a_loss_only_when_no_restore_has_landed() {
-        assert!(reraise_the_loss(true, false, false), "loss during the wait, no record, no restore");
-        assert!(!reraise_the_loss(true, false, true), "a restore since the last pump makes the loss stale");
-        assert!(!reraise_the_loss(false, false, false), "no loss during the wait, nothing to re-raise");
-        assert!(!reraise_the_loss(true, true, false), "the caller's own record already heard it");
     }
 
     /// One released the ordinary way gives the session up too.

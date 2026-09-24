@@ -163,7 +163,7 @@ impl EClient {
     /// request has already gone.
     pub(crate) fn paired_sender(
         &self, shared: &Arc<SharedState>,
-    ) -> PyResult<std::sync::mpsc::SyncSender<crate::types::commands::ControlCommand>> {
+    ) -> PyResult<std::sync::mpsc::Sender<crate::types::commands::ControlCommand>> {
         let tx = self.control_tx.lock().unwrap().clone().ok_or_else(|| {
             PyRuntimeError::new_err("not connected")
         })?;
@@ -227,7 +227,7 @@ impl EClient {
                  and {} is not one", contract.con_id,
             ))
         })?;
-        Self::send_control(py, &tx, crate::types::commands::ControlCommand::FetchAdjustments {
+        self.send_control(&tx, crate::types::commands::ControlCommand::FetchAdjustments {
             req_id: req_id as u32,
             con_id,
             sec_type: contract.sec_type.clone(),
@@ -739,7 +739,7 @@ impl EClient {
         let asked = ask_id(&shared);
         let req_id = asked.get();
         let tx = self.paired_sender(&shared)?;
-        Self::send_control(py, &tx, crate::types::commands::ControlCommand::SubscribeScanner {
+        self.send_control(&tx, crate::types::commands::ControlCommand::SubscribeScanner {
             req_id: req_id as u32,
             instrument: instrument.to_string(),
             location_code: location_code.to_string(),
@@ -752,8 +752,8 @@ impl EClient {
         });
         // Withdrawn, and said so when it is not: this call states that it
         // does not leave a scan running.
-        if let Err(e) = Self::send_control(
-            py, &tx, crate::types::commands::ControlCommand::CancelScanner { req_id: req_id as u32 },
+        if let Err(e) = self.send_control(
+            &tx, crate::types::commands::ControlCommand::CancelScanner { req_id: req_id as u32 },
         ) {
             log::warn!("scan {req_id} was not withdrawn: {e}");
         }
@@ -850,7 +850,7 @@ impl EClient {
                 query: Box::new(crate::types::CalendarQuery { con_id: Some(con_id), ..Default::default() }),
             },
         };
-        Self::send_control(py, &tx, request)?;
+        self.send_control(&tx, request)?;
         let what = if con_id.is_some() { "calendar events" } else { "the calendar's schema" };
         wait_for(py, &shared, req_id, what, |sh| sh.reference.take_calendar_for(req_id as u32))
     }
@@ -935,73 +935,5 @@ impl EClient {
         })?;
 
         Ok(collected.iter().map(|d| ContractDetails::from_definition(py, d)).collect())
-    }
-
-    /// Name a description once, and remember what it was named.
-    ///
-    /// The venue's answer does not change while a session lasts, and asking
-    /// again per order turns a program that trades one contract into one that
-    /// sends a lookup per order for a name it already has.
-    pub(crate) fn qualify_once(
-        &self, py: Python<'_>, contract: &Contract, key: &str,
-    ) -> Result<Contract, Refusal> {
-        if let Some(already) = self.core.named_for(key) {
-            return Contract::from_api(py, &already).map_err(|e| Refusal::validation(e.to_string()));
-        }
-        let answer = self.qualify_contract_stated(py, contract)?;
-        self.core.remember_named(key.to_string(), answer.to_api());
-        Ok(answer)
-    }
-
-    pub(crate) fn qualify_contract_stated(
-        &self, py: Python<'_>, contract: &Contract,
-    ) -> Result<Contract, Refusal> {
-        let mut found = self.contract_details_stated(py, contract)?;
-        match found.len() {
-            0 => Err(Refusal::no_definition(format!(
-                "no contract matches {} {} on {}",
-                contract.sec_type, contract.symbol, contract.exchange,
-            ))),
-            1 => Ok(found.remove(0).contract.bind(py).borrow().clone()),
-            n => Err(Refusal::no_definition(format!(
-                "{} {} on {} matches {n} contracts; state the currency or the exchange",
-                contract.sec_type, contract.symbol, contract.exchange,
-            ))),
-        }
-    }
-
-    /// The contract as the venue names it, where the caller named it by id
-    /// alone, with a refusal reported to the caller rather than raised.
-    ///
-    /// A request states the contract's security type and its exchange, and the
-    /// venue routes on both. A caller that gave neither has stated neither, and
-    /// both are the venue's to say: asked for by id, it answers with them. Sent
-    /// as it stands, the engine takes the request, finds no security type for
-    /// it afterwards, and abandons it — so the caller is answered by a failure
-    /// that arrives later under no request of theirs, and nothing is sent.
-    ///
-    /// `None` once the refusal has been handed over, the way `tx_or_report`
-    /// answers a request made before connecting.
-    ///
-    /// Costs a round trip, so it happens only where the caller left them out.
-    pub(crate) fn named_or_report<'a>(
-        &self, py: Python<'_>, req_id: i64, contract: &'a Contract,
-    ) -> PyResult<Option<std::borrow::Cow<'a, Contract>>> {
-        if contract.con_id != 0
-            && (contract.sec_type.is_empty() || contract.exchange.is_empty())
-        {
-            // An id the request cannot carry names no contract the venue will
-            // find, so asking it to name one spends the whole lookup deadline
-            // to arrive at the refusal this states now. Stated the way every
-            // request that carries the id states it.
-            super::wire_u32("con_id", contract.con_id)?;
-            return match self.qualify_contract_stated(py, contract) {
-                Ok(named) => Ok(Some(std::borrow::Cow::Owned(named))),
-                // Reported under the code for the cause, as the other lookups
-                // on this surface report theirs.
-                Err(why) => self.report_refusal(py, req_id, why).map(|()| None),
-            };
-        }
-        Ok(Some(std::borrow::Cow::Borrowed(contract)))
     }
 }

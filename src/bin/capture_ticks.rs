@@ -155,10 +155,9 @@ fn main() {
         // No market-data subscription. The venue states the increments when it
         // takes the tick subscription on, so asking for market data as well was
         // only ever a way of learning something already on the way.
-        if let Err(e) = client.req_tick_by_tick_data(req, &resolved, kind, 0, false) {
-            println!("  {what:<20} the subscription was refused: {e}");
-            continue;
-        }
+        // A refusal is heard on the error callback, in its place; the wait
+        // below then reports that nothing arrived.
+        client.req_tick_by_tick_data(req, &resolved, kind, 0, false);
 
         // Wait for frames. A quiet market and a feed that will never speak look
         // the same from here, so the wait is bounded and reported either way.
