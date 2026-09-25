@@ -194,8 +194,8 @@ delivers callbacks on the thread that calls it; after `connect`, it delivers
 `next_valid_id` once the venue has named the orders the account is working.
 Requests and cancels return after admission; their answers and refusals arrive
 in session order. See
-[Moving to 0.2](https://userfrm.github.io/ibkr-dx/reference/migration-0.2.html)
-for the request, shutdown and settings changes.
+[Requests, delivery and shutdown](https://userfrm.github.io/ibkr-dx/reference/requests-and-delivery.html)
+for admission, delivery order, error origins and shutdown.
 
 In Rust:
 
@@ -903,8 +903,7 @@ path in each process. The `.lock` and `.tmp` files beside it are maintained by
 the client. See [order IDs](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html#order-ids-across-sessions)
 for the reservation scope.
 
-`registration_timeout_ms` has been removed: registration is held by the engine
-and no longer waits at the call.
+Registration is held by the engine and does not wait at the call.
 
 Configuration read and update requests through `reqConfigProtoBuf` and
 `updateConfigProtoBuf` (Rust: `req_config` and `update_config`) report 10357

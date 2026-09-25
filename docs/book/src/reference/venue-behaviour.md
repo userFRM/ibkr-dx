@@ -251,9 +251,8 @@ disables persistence; Rust `None` and Python `configure(order_id_file=None)`
 restore the environment/default selection.
 
 Entries are keyed by the SHA-256 digest of the account, in lowercase hex, so
-the file holds no account number. A file keyed by the account itself, as
-earlier versions wrote it, is rewritten under the digests when a session opens
-it, keeping every counter; an earlier version then no longer finds its entries.
+the file holds no account number. A file keyed by the account itself is
+rewritten under the digests when a session opens it, keeping every counter.
 The digest is not a secret: anyone holding the file can find an account's entry
 by digesting candidate account numbers.
 
