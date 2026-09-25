@@ -1281,7 +1281,7 @@ impl HotLoop {
                 subscribe @ ControlCommand::Subscribe { .. } => self.take_subscription(subscribe),
                 ControlCommand::CancelMktData { req_id } => self.withdraw_mkt_data(req_id),
                 ControlCommand::CancelCalculation { req_id } => self.withdraw_calculation(req_id),
-                ControlCommand::SubscribeTbt { contract, req_id, tbt_type, number_of_ticks, ignore_size } => {
+                ControlCommand::SubscribeTbt { contract, req_id, tbt_type, number_of_ticks, ignore_size, .. } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
                     // A stream is asked for by the venue's id for the contract.
                     // Sent with none, the venue answers "Unknown contract"
@@ -1577,14 +1577,7 @@ impl HotLoop {
                     // finds, and it goes on sending.
                     if self.hmds.keep_up_to_date_reqs.remove(&req_id) {
                         self.shared.market.purge_real_time_bars(req_id);
-                        let rtbar_query = self.hmds.rtbar_subs.iter()
-                            .find(|(_, rid, ..)| *rid == req_id)
-                            .map(|(qid, _, ticker_id, ..)| (qid.clone(), *ticker_id));
-                        self.hmds.rtbar_subs.retain(|(_, rid, ..)| *rid != req_id);
-                        self.hmds.rtbar_resub.retain(|r| r.req_id != req_id);
-                        if let Some((qid, ticker_id)) = rtbar_query {
-                            self.hmds.withdraw_bar_stream(qid, ticker_id, &mut self.hmds_conn, &mut self.hb);
-                        }
+                        self.hmds.withdraw_bar_stream(req_id, &mut self.hmds_conn, &mut self.hb);
                         self.hmds.forming_bars.retain(|f| f.req_id != req_id);
                     }
                     // A keep-up-to-date request rides the five-second stream,
@@ -1916,11 +1909,7 @@ impl HotLoop {
                     // or the next request under this number is served this
                     // stream's bars.
                     self.shared.market.purge_real_time_bars(req_id);
-                    self.hmds.rtbar_resub.retain(|r| r.req_id != req_id);
-                    if let Some(pos) = self.hmds.rtbar_subs.iter().position(|(_, rid, ..)| *rid == req_id) {
-                        let (query_id, _, ticker_id, ..) = self.hmds.rtbar_subs.remove(pos);
-                        self.hmds.withdraw_bar_stream(query_id, ticker_id, &mut self.hmds_conn, &mut self.hb);
-                    } else if !parked {
+                    if !self.hmds.withdraw_bar_stream(req_id, &mut self.hmds_conn, &mut self.hb) && !parked {
                         // A withdrawal that took a parked request acted, and
                         // says nothing beside it.
                         push_hmds_refusal(
@@ -8061,6 +8050,7 @@ mod tests {
             tbt_type: TbtType::AllLast,
             number_of_ticks: 0,
             ignore_size: false,
+            filters: Default::default(),
         }).unwrap();
         hl.poll_once();
 
@@ -8280,6 +8270,101 @@ mod tests {
         assert_eq!(resub, [756733], "and the reconnect record names the first contract");
         let told = shared.reference.drain_historical_errors();
         assert!(told.iter().any(|(rid, code, _)| *rid == 7 && *code == 386), "{told:?}");
+    }
+
+    /// Callers of one contract's five-second bars read one stream. The venue
+    /// numbers every query for them the same, so each caller is handed every
+    /// bar under its own number, a caller arriving once the stream is numbered
+    /// reads it without asking again, and the stream is withdrawn when its
+    /// last reader leaves. Handed to the first caller alone, the others heard
+    /// nothing, and a withdrawal by any of them stopped it for all — one made
+    /// before any answer too, once its answer named the number.
+    #[test]
+    fn callers_of_one_contract_s_bars_share_its_stream_until_the_last_leaves() {
+        use std::io::Read;
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        hl.hmds_conn = Some(conn);
+        let mut sent = || {
+            let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
+            while let Ok(n @ 1..) = peer.read(&mut buf) {
+                got.extend_from_slice(&buf[..n]);
+            }
+            String::from_utf8_lossy(&got).into_owned()
+        };
+        let ask = |hl: &mut HotLoop, command: ControlCommand| {
+            tx.send(command).unwrap();
+            hl.poll_control_commands();
+        };
+        let bars = |req_id| ControlCommand::SubscribeRealTimeBar {
+            req_id, contract: stock(756733, "SPY"), what_to_show: "TRADES".into(),
+            use_rth: false, filters: Default::default(),
+        };
+        let venue = |hl: &mut HotLoop, xml: String| {
+            let mut msg = b"35=W\x016118=".to_vec();
+            msg.extend_from_slice(xml.as_bytes());
+            msg.push(0x01);
+            hl.hmds.process_hmds_message(&msg, &mut hl.hmds_conn, &hl.shared, &None, &mut hl.hb);
+        };
+        let numbered = |query: &str| format!(
+            "<ResultSetTickerId><id>{query}</id><tickerId>1</tickerId><minTick>0.01</minTick>\
+             <sizeMinTick>1</sizeMinTick><eoq>false</eoq></ResultSetTickerId>",
+        );
+        // One bar on the venue's number 1: a single trade at 10.00.
+        let bar = |hl: &mut HotLoop| {
+            let mut msg = b"35=G\x01\0\0".to_vec();
+            msg.extend_from_slice(&1u32.to_be_bytes());
+            msg.extend_from_slice(&1_790_330_400u32.to_be_bytes());
+            msg.extend_from_slice(&[8, 0x00, 0x7d, 0x00, 0x30, 0x00, 0x3e, 0x90, 0x00]);
+            hl.hmds.process_hmds_message(&msg, &mut hl.hmds_conn, &hl.shared, &None, &mut hl.hb);
+            let mut heard: Vec<u32> = shared.market.drain_real_time_bars().iter().map(|b| b.0).collect();
+            heard.sort_unstable();
+            heard
+        };
+
+        // The names the queries sent went out under, in the order sent.
+        let asked = |frames: String| -> Vec<String> {
+            frames.split("<Query><id>").skip(1).filter_map(|q| q.split('<').next()).map(str::to_string).collect()
+        };
+
+        // Two callers ask before the venue has numbered either query.
+        ask(&mut hl, bars(1));
+        ask(&mut hl, bars(2));
+        let queries = asked(sent());
+        assert_eq!(queries.len(), 2, "both ask");
+        venue(&mut hl, numbered(&queries[0]));
+        // The second leaves before its answer, which then names the same number.
+        ask(&mut hl, ControlCommand::CancelRealTimeBar { req_id: 2 });
+        venue(&mut hl, numbered(&queries[1]));
+        assert!(!sent().contains("ticker:1<"), "the first caller's stream is not withdrawn");
+        // A third arrives once the stream is numbered, and reads it.
+        ask(&mut hl, bars(3));
+        assert!(!sent().contains("<Query>"), "a numbered stream is read, not asked for again");
+        assert_eq!(bar(&mut hl), [1, 3], "each reader hears the bar under its own number");
+
+        ask(&mut hl, ControlCommand::CancelRealTimeBar { req_id: 1 });
+        assert!(!sent().contains("ticker:1<"), "a stream another reader holds is left running");
+        // A refusal of the query the first caller sent is that caller's, and
+        // it has gone: the reader left did not send it.
+        venue(&mut hl, format!("<QueryError><id>{}</id><error>no</error></QueryError>", queries[0]));
+        assert_eq!(bar(&mut hl), [3], "and the reader left is still served");
+        ask(&mut hl, ControlCommand::CancelRealTimeBar { req_id: 3 });
+        assert!(sent().contains("<id>ticker:1</id>"), "the last reader withdraws it");
+
+        // Two ask again, and the first leaves before either is numbered. Its
+        // answer names the number the second is about to be given.
+        ask(&mut hl, bars(4));
+        ask(&mut hl, bars(5));
+        let queries = asked(sent());
+        ask(&mut hl, ControlCommand::CancelRealTimeBar { req_id: 4 });
+        venue(&mut hl, numbered(&queries[0]));
+        assert!(!sent().contains("ticker:1<"), "a stream another caller waits for is not withdrawn");
+        venue(&mut hl, numbered(&queries[1]));
+        assert_eq!(bar(&mut hl), [5], "and that caller is served");
     }
 
     /// A historical withdrawal does not take a live bar stream that happens to
@@ -8681,7 +8766,7 @@ mod tests {
         hl.set_control_rx(rx);
         tx.send(ControlCommand::SubscribeTbt {
             req_id: 7, contract: stock(756733, "SPY"), tbt_type: crate::types::TbtType::AllLast,
-            number_of_ticks: 0, ignore_size: false,
+            number_of_ticks: 0, ignore_size: false, filters: Default::default(),
         })
         .unwrap();
         hl.poll_control_commands();

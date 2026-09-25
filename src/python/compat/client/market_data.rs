@@ -110,7 +110,8 @@ impl EClient {
     /// ticks goes out as the length of the run the stream opens with, and the
     /// size filter as the query's filter term. Neither goes out at its default
     /// — no prelude, sizes included — which is what the venue does on its own.
-    /// Whether the venue honours the size filter is the venue's: one session
+    /// Whether the venue honours the size filter is the venue's, and what it
+    /// sends is passed on as it stands, as a gateway passes it: one session
     /// saw size-only changes still arrive on a stream that asked to leave
     /// them out.
     #[pyo3(signature = (req_id, contract, tick_type, number_of_ticks=0, ignore_size=false))]
@@ -146,9 +147,8 @@ impl EClient {
         // caller described, or gave by id alone, before it asks.
         let shared = self.shared_state()?;
         if let Err(why) = self.core.register_tbt(
-            &shared, &tx, req_id, contract.con_id, &contract.symbol, &contract.sec_type,
-            &contract.exchange, &contract.currency, tbt_type, number_of_ticks.max(0) as u32,
-            ignore_size,
+            &shared, &tx, req_id, contract.into(), contract.lookup_filters(), tbt_type,
+            number_of_ticks.max(0) as u32, ignore_size,
         ) {
             return self.report_refusal(py, req_id, why);
         }
@@ -313,6 +313,12 @@ impl EClient {
     /// `bar_size` has no effect, as on a gateway: a real-time bar is five
     /// seconds, and the venue's request carries no bar size. A gateway reads
     /// the number and does not use it.
+    ///
+    /// Requests for the same bars of one contract — this call's, or the stream
+    /// a historical request kept up to date rides — read one stream, as on a
+    /// gateway: the venue serves it under one number, each request is handed
+    /// every bar under its own id, and a cancel withdraws its own request
+    /// alone. The stream is withdrawn when the last of them leaves.
     ///
     /// `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused

@@ -142,11 +142,16 @@ with every one of them, as a gateway does.
   handed back as the venue names it. A gateway goes on to ask for the
   continuous contract as well, and this client does not.
 
-## Size-only changes on historical ticks
+## Size-only changes
 
-`ignoreSize` on `req_historical_ticks` leaves out a bid/ask change that moves
-only a size. A gateway asks for midpoint ticks that way whatever the flag
-says, and so does this client; trades and aggregated trades are not filtered.
+`ignoreSize` on `req_historical_ticks` and `ignore_size` on
+`req_tick_by_tick_data` ask the venue to leave out a bid/ask change that moves
+only a size. A gateway sends the filter and passes on what the venue answers
+as it stands, and so does this client: nothing is filtered here. On historical
+ticks a gateway asks for midpoint ticks that way whatever the flag says, and so
+does this client; for trades and aggregated trades it is not asked. One
+session saw the venue answer the same with the filter as without it, on
+historical bid/ask ticks and on a bid/ask stream.
 
 ## Arguments that change nothing
 

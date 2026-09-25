@@ -1071,7 +1071,7 @@ def cancel_mkt_data(req_id)
 
 #### `req_tick_by_tick_data`
 
-Request tick-by-tick data.  `number_of_ticks` and `ignore_size` are sent as stated: a count of past ticks goes out as the length of the run the stream opens with, and the size filter as the query's filter term. Neither goes out at its default — no prelude, sizes included — which is what the venue does on its own. Whether the venue honours the size filter is the venue's: one session saw size-only changes still arrive on a stream that asked to leave them out.
+Request tick-by-tick data.  `number_of_ticks` and `ignore_size` are sent as stated: a count of past ticks goes out as the length of the run the stream opens with, and the size filter as the query's filter term. Neither goes out at its default — no prelude, sizes included — which is what the venue does on its own. Whether the venue honours the size filter is the venue's, and what it sends is passed on as it stands, as a gateway passes it: one session saw size-only changes still arrive on a stream that asked to leave them out.
 
 ```python
 def req_tick_by_tick_data(req_id, contract, tick_type, number_of_ticks=0, ignore_size=False)
@@ -1170,7 +1170,7 @@ def cancel_mkt_depth(req_id, is_smart_depth=False)
 
 #### `req_real_time_bars`
 
-Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
+Request real-time 5-second bars.  `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.  Requests for the same bars of one contract — this call's, or the stream a historical request kept up to date rides — read one stream, as on a gateway: the venue serves it under one number, each request is handed every bar under its own id, and a cancel withdraws its own request alone. The stream is withdrawn when the last of them leaves.  `real_time_bars_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_real_time_bars(req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=None)
@@ -1818,7 +1818,7 @@ def cancel_fundamental_data(req_id)
 
 #### `req_historical_ticks`
 
-Request historical tick data.  `ignore_size` leaves out a bid/ask change that moves only a size. A gateway asks for midpoint ticks that way whatever the caller asked, and so does this client; trades are not filtered.  `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
+Request historical tick data.  `ignore_size` asks the venue to leave out a bid/ask change that moves only a size, and what it answers is passed on as it stands, as a gateway passes it: nothing is filtered here. A gateway asks for midpoint ticks that way whatever the caller asked, and so does this client; for trades it is not asked. One session saw the venue answer the same with the filter as without it.  `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is taken and changes nothing a gateway sends; any other key is refused under 10337, another value under 10338, and an entry not written `key=value` under 320. Where the venue has lifted the key checks, a `manual` that does not read as the number nought or one is refused under 321.
 
 ```python
 def req_historical_ticks(req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=False, misc_options=None)

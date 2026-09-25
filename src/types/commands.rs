@@ -362,6 +362,9 @@ pub enum ControlCommand {
         /// Whether the caller asked for changes that move only the size to be
         /// left out.
         ignore_size: bool,
+        /// What tells two contracts on one underlying apart, for the
+        /// lookup that names this one when the caller passed no id.
+        filters: SecDefFilters,
     },
     /// Unsubscribe from tick-by-tick data.
     /// Withdraw one tick stream, named by the request that opened it.

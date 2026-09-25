@@ -1282,7 +1282,7 @@ pub fn cancel_mkt_data(&self, req_id: i64)
 
 #### `req_tick_by_tick_data`
 
-Subscribe to every trade or every quote change on a contract. The feed rides the historical farm, registered there under the name `TickByTick` beside the five-second bars. No separate service is involved. A missing entitlement arrives as the venue's refusal rather than as silence. `number_of_ticks` and `ignore_size` are sent as stated: a count of past ticks goes out as the length of the run the stream opens with, and the size filter as the query's filter term. Neither goes out at its default — no prelude, sizes included — which is what the venue does on its own. Whether the venue honours the size filter is the venue's: one session saw size-only changes still arrive on a stream that asked to leave them out.
+Subscribe to every trade or every quote change on a contract. The feed rides the historical farm, registered there under the name `TickByTick` beside the five-second bars. No separate service is involved. A missing entitlement arrives as the venue's refusal rather than as silence. `number_of_ticks` and `ignore_size` are sent as stated: a count of past ticks goes out as the length of the run the stream opens with, and the size filter as the query's filter term. Neither goes out at its default — no prelude, sizes included — which is what the venue does on its own. Whether the venue honours the size filter is the venue's, and what it sends is passed on as it stands, as a gateway passes it: one session saw size-only changes still arrive on a stream that asked to leave them out.
 
 ```rust
 pub fn req_tick_by_tick_data( &self, req_id: i64, contract: &Contract, tick_type: &str, number_of_ticks: i32, ignore_size: bool, )
@@ -1345,7 +1345,7 @@ pub fn cancel_mkt_depth(&self, req_id: i64)
 
 #### `req_real_time_bars`
 
-Subscribe to real-time 5-second bars. `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it.
+Subscribe to real-time 5-second bars. `bar_size` has no effect, as on a gateway: a real-time bar is five seconds, and the venue's request carries no bar size. A gateway reads the number and does not use it. Requests for the same bars of one contract — this call's, or the stream a historical request kept up to date rides — read one stream, as on a gateway: the venue serves it under one number, each request is handed every bar under its own id, and a cancel withdraws its own request alone. The stream is withdrawn when the last of them leaves.
 
 ```rust
 pub fn req_real_time_bars( &self, req_id: i64, contract: &Contract, _bar_size: i32, what_to_show: &str, use_rth: bool, )
@@ -2210,7 +2210,7 @@ pub fn cancel_histogram_data(&self, req_id: i64)
 
 #### `req_historical_ticks`
 
-Request historical tick data. Named from one end and counted from there: give `start_date_time` for the ticks after a moment or `end_date_time` for the ones before it, and `number_of_ticks` says how far it reaches. Naming both, or neither, is what the venue refuses. `ignore_size` leaves out a bid/ask change that moves only a size. A gateway asks for midpoint ticks that way whatever the caller asked, and so does this client; trades are not filtered.
+Request historical tick data. Named from one end and counted from there: give `start_date_time` for the ticks after a moment or `end_date_time` for the ones before it, and `number_of_ticks` says how far it reaches. Naming both, or neither, is what the venue refuses. `ignore_size` asks the venue to leave out a bid/ask change that moves only a size, and what it answers is passed on as it stands, as a gateway passes it: nothing is filtered here. A gateway asks for midpoint ticks that way whatever the caller asked, and so does this client; for trades it is not asked. One session saw the venue answer the same with the filter as without it.
 
 ```rust
 pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool, )

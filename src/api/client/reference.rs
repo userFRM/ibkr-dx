@@ -699,9 +699,12 @@ impl EClient {
     /// `number_of_ticks` says how far it reaches. Naming both, or neither, is
     /// what the venue refuses.
     ///
-    /// `ignore_size` leaves out a bid/ask change that moves only a size. A
-    /// gateway asks for midpoint ticks that way whatever the caller asked, and
-    /// so does this client; trades are not filtered.
+    /// `ignore_size` asks the venue to leave out a bid/ask change that moves
+    /// only a size, and what it answers is passed on as it stands, as a
+    /// gateway passes it: nothing is filtered here. A gateway asks for
+    /// midpoint ticks that way whatever the caller asked, and so does this
+    /// client; for trades it is not asked. One session saw the venue answer
+    /// the same with the filter as without it.
     #[allow(clippy::too_many_arguments)]
     pub fn req_historical_ticks(
         &self, req_id: i64, contract: &Contract,

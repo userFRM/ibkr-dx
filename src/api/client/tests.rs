@@ -11161,6 +11161,31 @@ fn a_tick_withdrawal_during_its_naming_sends_nothing() {
     assert!(heard.iter().all(|e| !e.starts_with("error:7:")), "and nothing refused: {heard:?}");
 }
 
+/// A tick stream on a future named by description is looked up by its month
+/// and class. The lookup carried the symbol, type, venue and currency alone,
+/// so both were dropped and the venue answered that the description matched
+/// every month listed, which names none.
+#[test]
+fn a_described_tick_stream_is_looked_up_by_its_month_and_class() {
+    use std::io::Read;
+    let (client, rx, _shared) = test_client();
+    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+    rx.engine().ccp_conn = Some(conn);
+    let described = Contract {
+        symbol: "ESTX50".into(), sec_type: "FUT".into(), exchange: "EUREX".into(), currency: "EUR".into(),
+        last_trade_date_or_contract_month: "202612".into(), trading_class: "FESX".into(),
+        ..Default::default()
+    };
+    crate::api::client::tests::reported(&client, || client.req_tick_by_tick_data(7, &described, "AllLast", 0, false)).expect("taken");
+    rx.pump();
+
+    let mut buf = [0u8; 4096];
+    let n = peer.read(&mut buf).unwrap();
+    let lookup = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
+    assert!(lookup.contains("|200=202612|"), "the month the caller named: {lookup}");
+    assert!(lookup.contains("|6058=FESX|"), "and the class: {lookup}");
+}
+
 /// The same for a quote subscription: withdrawn while the engine is still
 /// naming its contract, the lookup's answer opens nothing, and the number is
 /// left holding nothing rather than refused.

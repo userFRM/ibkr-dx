@@ -638,7 +638,8 @@ fn filters_named(cmd: &crate::types::ControlCommand) -> crate::types::SecDefFilt
         | C::FetchHistoricalTicks { filters, .. }
         | C::FetchHistoricalSchedule { filters, .. }
         | C::SubscribeRealTimeBar { filters, .. }
-        | C::SubscribeDepth { filters, .. } => filters.clone(),
+        | C::SubscribeDepth { filters, .. }
+        | C::SubscribeTbt { filters, .. } => filters.clone(),
         _ => crate::types::SecDefFilters::default(),
     }
 }
@@ -685,11 +686,11 @@ fn name_the_contract(cmd: &mut crate::types::ControlCommand, def: &crate::contro
         | C::FetchHistoricalTicks { contract, filters, .. }
         | C::FetchHistoricalSchedule { contract, filters, .. }
         | C::SubscribeRealTimeBar { contract, filters, .. }
-        | C::SubscribeDepth { contract, filters, .. } if by_id => {
+        | C::SubscribeDepth { contract, filters, .. }
+        | C::SubscribeTbt { contract, filters, .. } if by_id => {
             *contract = (&named).into();
             *filters = named.lookup_filters();
         }
-        C::SubscribeTbt { contract, .. } if by_id => *contract = (&named).into(),
         C::FetchHistogramData { sec_type, exchange, .. } if by_id => {
             sec_type.clone_from(&named.sec_type);
             exchange.clone_from(&named.exchange);

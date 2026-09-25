@@ -414,6 +414,7 @@ pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
             number_of_ticks: 0,
             ignore_size: false,
             tbt_type: TbtType::Last,
+            filters: Default::default(),
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1055,6 +1056,7 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
             number_of_ticks: 0,
             ignore_size: false,
             tbt_type: TbtType::Last,
+            filters: Default::default(),
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1158,6 +1160,7 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
             number_of_ticks: 0,
             ignore_size: false,
             tbt_type: TbtType::Last,
+            filters: Default::default(),
         })
         .unwrap();
     let join = run_hot_loop(hot_loop);

@@ -2459,25 +2459,19 @@ impl ClientCore {
         shared: &SharedState,
         control_tx: &Sender<ControlCommand>,
         req_id: i64,
-        con_id: i64,
-        symbol: &str,
-        sec_type: &str,
-        exchange: &str,
-        currency: &str,
+        contract: ContractRef,
+        filters: SecDefFilters,
         tbt_type: TbtType,
         number_of_ticks: u32,
         ignore_size: bool,
     ) -> Result<(), Refusal> {
         shared.admit(control_tx, ControlCommand::SubscribeTbt {
-            contract: ContractRef {
-                con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(),
-                exchange: exchange.to_string(), currency: currency.to_string(),
-                ..Default::default()
-            },
+            contract,
             req_id,
             tbt_type,
             number_of_ticks,
             ignore_size,
+            filters,
         })
     }
 

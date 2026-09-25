@@ -263,7 +263,8 @@ impl EClient {
     /// ticks goes out as the length of the run the stream opens with, and the
     /// size filter as the query's filter term. Neither goes out at its default
     /// — no prelude, sizes included — which is what the venue does on its own.
-    /// Whether the venue honours the size filter is the venue's: one session
+    /// Whether the venue honours the size filter is the venue's, and what it
+    /// sends is passed on as it stands, as a gateway passes it: one session
     /// saw size-only changes still arrive on a stream that asked to leave
     /// them out.
     pub fn req_tick_by_tick_data(
@@ -287,11 +288,8 @@ impl EClient {
                     &self.shared,
                     &self.control_tx,
                     req_id,
-                    contract.con_id,
-                    &contract.symbol,
-                    &contract.sec_type,
-                    &contract.exchange,
-                    &contract.currency,
+                    contract.into(),
+                    contract.lookup_filters(),
                     kind,
                     number_of_ticks.max(0) as u32,
                     ignore_size,
@@ -393,6 +391,12 @@ impl EClient {
     /// `bar_size` has no effect, as on a gateway: a real-time bar is five
     /// seconds, and the venue's request carries no bar size. A gateway reads
     /// the number and does not use it.
+    ///
+    /// Requests for the same bars of one contract — this call's, or the stream
+    /// a historical request kept up to date rides — read one stream, as on a
+    /// gateway: the venue serves it under one number, each request is handed
+    /// every bar under its own id, and a cancel withdraws its own request
+    /// alone. The stream is withdrawn when the last of them leaves.
     pub fn req_real_time_bars(
         &self, req_id: i64, contract: &Contract,
         _bar_size: i32, what_to_show: &str, use_rth: bool,

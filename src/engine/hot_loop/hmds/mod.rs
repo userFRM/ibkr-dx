@@ -128,10 +128,10 @@ pub(crate) struct HmdsState {
     /// The bars still forming, one per request keeping its bars up to date.
     pub(crate) forming_bars: Vec<FormingBar>,
     /// Bar streams withdrawn before the venue had numbered them, by the name
-    /// this client asked under. A withdrawal by that name reaches nothing the
-    /// venue holds, so each is withdrawn again by the number its
-    /// acknowledgement states, as a tick stream's is.
-    pub(crate) rtbar_withdrawn_unnumbered: std::collections::HashSet<String>,
+    /// this client asked under, with what each asked for. A withdrawal by that
+    /// name reaches nothing the venue holds, so each is withdrawn again by the
+    /// number its acknowledgement states, as a tick stream's is.
+    pub(crate) rtbar_withdrawn_unnumbered: std::collections::HashMap<String, RtBarRequest>,
     /// The live five-second bar streams, in the shape their request needs to
     /// go out again. `rtbar_subs` holds the routing for the session that is
     /// running and cannot rebuild a request, so a reconnect had nothing to
@@ -301,6 +301,15 @@ pub(crate) struct RtBarRequest {
     pub use_rth: bool,
 }
 
+impl RtBarRequest {
+    /// The bars it asks for: one contract's, of one kind, in or out of
+    /// regular hours. The venue numbers every query for the same bars the
+    /// same, and serves them as one stream.
+    fn bars(&self) -> (i64, &str, &str, &str, bool) {
+        (self.con_id, &self.sec_type, &self.exchange, &self.what_to_show, self.use_rth)
+    }
+}
+
 /// Whether a held series is folded with the contract's actions before it is
 /// filed, and with which of them.
 ///
@@ -398,7 +407,7 @@ impl HmdsState {
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
-            rtbar_withdrawn_unnumbered: std::collections::HashSet::new(),
+            rtbar_withdrawn_unnumbered: std::collections::HashMap::new(),
             keep_up_to_date_reqs: std::collections::HashSet::new(),
             forming_bars: Vec::new(),
             rtbar_resub: Vec::new(),
@@ -964,13 +973,21 @@ impl HmdsState {
                     else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
                         // A stream withdrawn before this acknowledgement: the
                         // withdrawal by name reached nothing, so it goes again
-                        // by the number stated now, and nothing is routed.
-                        if let Some(asked) = self.rtbar_withdrawn_unnumbered.iter()
+                        // by the number stated now, and nothing is routed —
+                        // unless another request asked for the same bars. The
+                        // venue numbers them the same, so the stream is that
+                        // request's too, whether it reads the number already
+                        // or waits for its own answer to name it.
+                        let withdrawn = self.rtbar_withdrawn_unnumbered.keys()
                             .find(|qid| answers(xml_tag, qid)).cloned()
-                        {
-                            self.rtbar_withdrawn_unnumbered.remove(&asked);
-                            log::info!("bar stream {asked} was withdrawn before it was numbered; withdrawn again as {ticker_id_str}");
-                            self.send_historical_cancel(&ticker_id_str, hmds_conn, hb);
+                            .and_then(|qid| self.rtbar_withdrawn_unnumbered.remove_entry(&qid));
+                        if let Some((asked, bars)) = withdrawn {
+                            if self.rtbar_resub.iter().any(|r| r.bars() == bars.bars()) {
+                                log::info!("bar stream {asked} was withdrawn before it was numbered; {ticker_id_str} is still read by another request");
+                            } else {
+                                log::info!("bar stream {asked} was withdrawn before it was numbered; withdrawn again as {ticker_id_str}");
+                                self.send_historical_cancel(&ticker_id_str, hmds_conn, hb);
+                            }
                             return;
                         }
                         // No unit, no bars: a price counted in a unit nobody
@@ -1730,25 +1747,31 @@ impl HmdsState {
         let timestamp = u32::from_be_bytes([body[6], body[7], body[8], body[9]]);
         let payload_len = body[10] as usize;
         if body.len() < 11 + payload_len { return; }
-        let sub = self.rtbar_subs.iter().find(|(_, _, tid, ..)| *tid == Some(ticker_id));
-        let (req_id, min_tick, size_tick) = match sub {
-            Some((_, rid, _, mt, st)) => (*rid, *mt, *st),
-            None => return,
-        };
         let payload = &body[11..11 + payload_len];
-        if let Some(mut bar) =
-            crate::control::historical::decode_bar_payload(payload, min_tick, size_tick)
-        {
+        // Every request reading the stream is handed the bar under its own
+        // number. The venue numbers every query for one contract's bars the
+        // same, so one stream answers each caller of them; handed to the first
+        // alone, the second caller heard nothing. A request kept up to date can
+        // stand twice under one number, and hears each bar once.
+        let mut served = Vec::new();
+        for (_, req_id, tid, min_tick, size_tick) in &self.rtbar_subs {
+            if *tid != Some(ticker_id) || served.contains(req_id) {
+                continue;
+            }
+            served.push(*req_id);
+            let Some(mut bar) =
+                crate::control::historical::decode_bar_payload(payload, *min_tick, *size_tick)
+            else {
+                continue;
+            };
             bar.timestamp = timestamp;
             // A caller keeping bars up to date asked for its own bar size, so
             // what it hears is the bar it asked for as it stands, not the
             // five-second one this was folded from.
-            if let Some(forming) = self.forming_bars.iter_mut().find(|f| f.req_id == req_id) {
-                let so_far = forming.fold(&bar);
-                shared.market.push_real_time_bar(req_id, so_far);
-                return;
+            match self.forming_bars.iter_mut().find(|f| f.req_id == *req_id) {
+                Some(forming) => shared.market.push_real_time_bar(*req_id, forming.fold(&bar)),
+                None => shared.market.push_real_time_bar(*req_id, bar),
             }
-            shared.market.push_real_time_bar(req_id, bar);
         }
     }
 
@@ -2346,42 +2369,52 @@ fn build_tbt_query(
         hb: &mut HeartbeatState,
     ) {
         self.forming_bars.retain(|f| f.req_id != req_id);
-        let Some(pos) = self.rtbar_subs.iter().position(|(_, rid, ..)| *rid == req_id) else {
-            return;
-        };
-        let (query_id, _, ticker_id, ..) = self.rtbar_subs.remove(pos);
-        // And anything else standing under this number. A request kept up to
-        // date is two queries — the batch and the stream beside it — and the
-        // venue acknowledges both, so two records can stand under one request.
-        // Taking the one this found left the other, and it belonged to no
-        // pending list and carried no flag, so nothing swept it: the number
-        // read as busy for the rest of the session, and a caller asking under
-        // it again was refused for a stream that was not running. The
-        // withdrawal the caller asks for itself takes them all; this one did
-        // not.
-        self.rtbar_subs.retain(|(_, rid, ..)| *rid != req_id);
-        self.rtbar_resub.retain(|r| r.req_id != req_id);
-        self.withdraw_bar_stream(query_id, ticker_id, hmds_conn, hb);
+        self.withdraw_bar_stream(req_id, hmds_conn, hb);
     }
 
-    /// Tell the venue to stop a bar stream: by the number it gave the stream
-    /// where it has given one, and otherwise by the name this client asked
-    /// under — which the venue does not find, so the stream is withdrawn again
-    /// by number when its acknowledgement states one.
+    /// Take a request off the bar stream it reads, and tell the venue to stop
+    /// the stream: by the number it gave the stream where it has given one,
+    /// and otherwise by the name this client asked under — which the venue
+    /// does not find, so the stream is withdrawn again by number when its
+    /// acknowledgement states one. Says whether the request read one.
+    ///
+    /// Everything the request holds under the stream goes, its reconnect
+    /// record with it. A request kept up to date is two queries — the batch
+    /// and the stream beside it — and the venue acknowledges both, so two
+    /// records can stand under one request. Taking one left the other, and
+    /// nothing swept it: the number read as busy for the rest of the session,
+    /// and a caller asking under it again was refused for a stream that was
+    /// not running.
+    ///
+    /// A stream another request still reads stays: withdrawn by its number, it
+    /// stopped for every caller of the contract's bars, not only the one
+    /// leaving.
     pub(crate) fn withdraw_bar_stream(
         &mut self,
-        query_id: String,
-        ticker_id: Option<u32>,
+        req_id: u32,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
-    ) {
+    ) -> bool {
+        let asked = self.rtbar_resub.iter().position(|r| r.req_id == req_id)
+            .map(|at| self.rtbar_resub.remove(at));
+        let Some(pos) = self.rtbar_subs.iter().position(|(_, rid, ..)| *rid == req_id) else {
+            return false;
+        };
+        let (query_id, _, ticker_id, ..) = self.rtbar_subs.remove(pos);
+        self.rtbar_subs.retain(|(_, rid, ..)| *rid != req_id);
         match ticker_id {
+            Some(number) if self.rtbar_subs.iter().any(|(_, _, tid, ..)| *tid == Some(number)) => {
+                log::info!("bar stream {number} is still read by another request; left running for it");
+            }
             Some(number) => self.send_historical_cancel(&number.to_string(), hmds_conn, hb),
             None => {
                 self.send_historical_cancel(&query_id, hmds_conn, hb);
-                self.rtbar_withdrawn_unnumbered.insert(query_id);
+                if let Some(asked) = asked {
+                    self.rtbar_withdrawn_unnumbered.insert(query_id, asked);
+                }
             }
         }
+        true
     }
 
     pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, what_to_show: &str, use_rth: bool, include_expired: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
@@ -3102,9 +3135,33 @@ fn build_tbt_query(
     }
 
     pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, _symbol: &str, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        self.rtbar_resub.retain(|r| r.req_id != req_id);
+        let asked = RtBarRequest {
+            req_id, con_id,
+            sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+            what_to_show: what_to_show.to_string(), use_rth,
+        };
+        // The same bars as a stream the venue already numbered are read off
+        // that stream, as a gateway does, rather than asked for again: the
+        // venue answers every query for them under the one number, and the
+        // stream stays until its last reader leaves.
+        let running = self.rtbar_resub.iter()
+            .filter(|r| r.bars() == asked.bars())
+            .find_map(|r| self.rtbar_subs.iter().find(|(_, rid, tid, ..)| *rid == r.req_id && tid.is_some()))
+            .cloned();
+        self.rtbar_resub.push(asked);
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let query_id = format!("rt_{qid}");
+        // A reader of a running stream is filed under a name of its own, which
+        // it never sends: a refusal naming the query that opened the stream is
+        // that query's. Filed under that name, the reader was told it had
+        // failed, and dropped, while the bars went on.
+        if let Some((_, _, ticker_id, min_tick, size_tick)) = running {
+            log::info!("rtbar req_id={req_id} reads the stream already running as {ticker_id:?}");
+            self.rtbar_subs.push((query_id, req_id, ticker_id, min_tick, size_tick));
+            return;
+        }
         let xml = crate::control::historical::build_realtime_bar_xml(
             &query_id, con_id, what_to_show, use_rth,
             &hist_sec_type(sec_type), &hist_exchange(exchange),
@@ -3120,12 +3177,6 @@ fn build_tbt_query(
             log::info!("Sent rtbar subscribe: req_id={req_id} con_id={con_id} what={what_to_show}");
         }
         self.rtbar_subs.push((query_id, req_id, None, 0.01, 1.0));
-        self.rtbar_resub.retain(|r| r.req_id != req_id);
-        self.rtbar_resub.push(RtBarRequest {
-            req_id, con_id,
-            sec_type: sec_type.to_string(), exchange: exchange.to_string(),
-            what_to_show: what_to_show.to_string(), use_rth,
-        });
     }
 
     pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {

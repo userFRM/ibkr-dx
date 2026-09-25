@@ -554,9 +554,12 @@ impl EClient {
 
     /// Request historical tick data.
     ///
-    /// `ignore_size` leaves out a bid/ask change that moves only a size. A
-    /// gateway asks for midpoint ticks that way whatever the caller asked, and
-    /// so does this client; trades are not filtered.
+    /// `ignore_size` asks the venue to leave out a bid/ask change that moves
+    /// only a size, and what it answers is passed on as it stands, as a
+    /// gateway passes it: nothing is filtered here. A gateway asks for
+    /// midpoint ticks that way whatever the caller asked, and so does this
+    /// client; for trades it is not asked. One session saw the venue answer
+    /// the same with the filter as without it.
     ///
     /// `misc_options` is checked as a gateway checks it: `manual`, `0` or `1`, is
     /// taken and changes nothing a gateway sends; any other key is refused
