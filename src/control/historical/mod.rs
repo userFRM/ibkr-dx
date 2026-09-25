@@ -487,27 +487,44 @@ pub fn normalize_duration(duration: &str) -> String {
 
 /// Build the query the venue reads, as the XML it expects.
 pub fn build_query_xml(req: &HistoricalRequest) -> String {
+    build_stretch_xml(req, &Stretch::whole(req))
+}
+
+/// The name a graph is known by in a query's id and in the service's answers:
+/// the ticker at its venue, and the series.
+pub(crate) fn graph_name(req: &HistoricalRequest) -> String {
+    let exchange = match req.exchange.as_str() {
+        "SMART" => "BEST",
+        e => e,
+    };
+    format!("{}@{} {}", req.symbol, exchange, req.data_type.as_str())
+}
+
+/// Build the query for one stretch of a request's contract's id history.
+pub(crate) fn build_stretch_xml(req: &HistoricalRequest, s: &Stretch) -> String {
     let exchange = match req.exchange.as_str() {
         "SMART" => "BEST",
         e => e,
     };
     let rth = if req.use_rth { "true" } else { "false" };
-    let expired = if req.include_expired { "yes" } else { "no" };
+    let expired = if s.expired { "yes" } else { "no" };
+    let tag = |name: &str, value: &Option<String>| {
+        value.as_ref().map_or(String::new(), |v| format!("<{name}>{v}</{name}>"))
+    };
 
     let data_str = req.data_type.as_str();
     // keepUpToDate uses structured ;;-delimited ID required by CCP gateway parser.
     // One-shot uses simple ID (HMDS accepts it fine).
     let query_id = if req.keep_up_to_date {
-        let graph_name = format!("{}@{} {}", req.symbol, exchange, data_str);
-        format!("{};;{};;1;;true;;0;;I", req.query_id, graph_name)
+        format!("{};;{};;1;;true;;0;;I", req.query_id, graph_name(req))
     } else {
         req.query_id.clone()
     };
 
-    let (end_time_tag, refresh_tag) = if req.keep_up_to_date {
-        (String::new(), "<refresh>5 secs</refresh>")
+    let (end_time, refresh_tag) = if req.keep_up_to_date {
+        (s.end_time.clone(), "<refresh>5 secs</refresh>")
     } else {
-        (format!("<endTime>{}</endTime>", req.end_time), "")
+        (s.end_time.clone().or_else(|| Some(req.end_time.clone())), "")
     };
 
     format!(
@@ -515,6 +532,7 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <ListOfQueries>\
          <Query>\
          <id>{id}</id>\
+         {approx_step}\
          <useRTH>{rth}</useRTH>\
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
@@ -522,25 +540,214 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <expired>{expired}</expired>\
          <type>BarData</type>\
          <data>{data}</data>\
+         {start_time}\
          {end_time}\
+         {underlying}\
+         {listing}\
+         {cutoff}\
          {refresh}\
-         <timeLength>{dur}</timeLength>\
+         {dur}\
          <step>{step}</step>\
          <source>API</source>\
+         {live}\
          <needTotalValue>false</needTotalValue>\
          <wholeDays>false</wholeDays>\
          <delay>auto</delay>\
          </Query>\
          </ListOfQueries>",
         id = query_id,
-        con_id = req.con_id,
+        approx_step = tag("approxStep", &s.approx_step),
+        con_id = s.con_id,
         sec_type = req.sec_type,
         data = data_str,
-        end_time = end_time_tag,
-        dur = req.duration,
+        start_time = tag("startTime", &s.start_time),
+        end_time = tag("endTime", &end_time),
+        underlying = tag("histUnderlying", &s.underlying),
+        listing = tag("histListExch", &s.listing),
+        cutoff = tag("cutoffDate", &s.cutoff_date),
+        dur = tag("timeLength", &s.time_length),
         step = req.bar_size.as_str(),
         refresh = refresh_tag,
+        live = tag("liveContractID", &s.live_con_id.map(|id| id.to_string())),
     )
+}
+
+/// The query for one stretch of a contract's id history, where it differs from
+/// the request it is asked for.
+///
+/// A gateway asks a request whose contract traded under more than one id, or
+/// more than one ticker or listing, as one query per stretch: each under the id
+/// it traded as, bounded to its days, the newest first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Stretch {
+    /// The id it is asked under.
+    pub(crate) con_id: u32,
+    /// The id the caller asked under, stated where it is asked under another.
+    pub(crate) live_con_id: Option<u32>,
+    /// Whether it is asked as a contract that has expired.
+    pub(crate) expired: bool,
+    /// Where it starts, where it is bounded at a start of its own.
+    pub(crate) start_time: Option<String>,
+    /// Where it ends, where that is not where the request ends.
+    pub(crate) end_time: Option<String>,
+    /// How far back it reaches, where it states no start.
+    pub(crate) time_length: Option<String>,
+    /// The first day of the id's that it is asked from.
+    pub(crate) cutoff_date: Option<String>,
+    /// The ticker it traded under, where the history names one.
+    pub(crate) underlying: Option<String>,
+    /// The listing it traded under, where the history names one and a
+    /// gateway does not leave it out.
+    pub(crate) listing: Option<String>,
+    /// The step the first answer stated, on every stretch asked after it.
+    pub(crate) approx_step: Option<String>,
+}
+
+impl Stretch {
+    /// The request asked whole, under the id it names.
+    pub(crate) fn whole(req: &HistoricalRequest) -> Self {
+        Self {
+            con_id: req.con_id,
+            expired: req.include_expired,
+            time_length: Some(req.duration.clone()),
+            ..Default::default()
+        }
+    }
+}
+
+/// The listings a gateway leaves out of a stretch's query where the logon
+/// names none of its own.
+const NO_LISTING: [&str; 3] = ["BASKET", "VALUE", "CORPACT"];
+
+/// The units a time length is stated in, in the order a gateway tries them on
+/// the end of the length, and how long each is.
+const LENGTH_UNITS: [(&str, i64); 8] = [
+    ("S", 1_000), ("min", 60_000), ("h", 3_600_000), ("d", 86_400_000),
+    ("W", 604_800_000), ("m", 2_678_400_000), ("q", 8_035_200_000), ("y", 31_536_000_000),
+];
+
+/// A time length read: how many, and of which unit.
+fn read_length(length: &str) -> Option<(i64, (&'static str, i64))> {
+    let unit = LENGTH_UNITS.iter().copied().find(|(suffix, _)| length.ends_with(suffix))?;
+    let count = length.split_once(' ').map_or(length, |(count, _)| count).parse().ok()?;
+    Some((count, unit))
+}
+
+/// The days a series of days still wants once the newest stretch is in, and
+/// what a later stretch is asked with because of them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DaysWanted {
+    /// How many days of bars are still to come.
+    pub(crate) left: i64,
+    /// The day the series reaches back to, which the last stretch is cut at.
+    pub(crate) from: String,
+    /// The unit the request's time length is stated in, for the length a
+    /// later stretch is asked with.
+    unit: (&'static str, i64),
+}
+
+impl DaysWanted {
+    /// The length a stretch is asked with for the days still wanted: counted
+    /// in calendar days, seven for every five, and stated in the request's own
+    /// unit, rounded up.
+    pub(crate) fn length(&self) -> String {
+        let (suffix, ms) = match self.unit.0 {
+            "min" | "h" => LENGTH_UNITS[0],
+            "q" => LENGTH_UNITS[5],
+            _ => self.unit,
+        };
+        let wanted = self.left * 86_400_000 * 7 / 5;
+        format!("{} {suffix}", (wanted + ms - 1) / ms)
+    }
+}
+
+/// A request asked along its contract's id history: one stretch per id,
+/// ticker or listing the history names within the request, newest first; and,
+/// for a series of days asked along more than one, the days it still wants.
+///
+/// Each is asked under the id it traded as, naming the one the caller asked
+/// under where that is another. The newest is asked as the request is, from
+/// the day it began. Each older one is bounded to its own days, from where the
+/// request reaches back to or the day it began, whichever is later, to the day
+/// after its last or the request's end, whichever is earlier, and is asked as
+/// expired where its id is not the caller's. One whose days all fall outside
+/// the request is not asked. A series of days asked along
+/// more than one stretch counts its days as they arrive: each later stretch is
+/// asked for the days still wanted, back from where it ends, and none once
+/// they are all in.
+pub(crate) fn along(
+    req: &HistoricalRequest, history: &[crate::control::adjustments::IdStretch],
+) -> Result<(Vec<Stretch>, Option<DaysWanted>), String> {
+    let unreadable = || format!(
+        "a request ending {:?} and reaching back {:?} cannot be bounded along the \
+         contract's id history",
+        req.end_time, req.duration,
+    );
+    let ms_day = 86_400_000;
+    let length = read_length(&req.duration);
+    // Where the request ends, and how far back it reaches: a length in days
+    // counted in calendar days, as a gateway counts it.
+    let end = || -> Result<i64, String> {
+        let end = crate::protocol::datetime::request_end(&req.end_time).ok_or_else(unreadable)?;
+        Ok(end.timestamp().as_millisecond())
+    };
+    let back = || -> Result<i64, String> {
+        let (count, (suffix, ms)) = length.ok_or_else(unreadable)?;
+        let count = if suffix == "d" { (count as f64 * 1.4523809523809523) as i64 } else { count };
+        Ok(count * ms)
+    };
+    let end_day = || end().map(|end| end.div_euclid(ms_day) * ms_day);
+    // On GMT, as a gateway states both.
+    let at = |ms: i64| {
+        jiff::Timestamp::from_millisecond(ms).map_or_else(
+            |_| String::new(),
+            |at| at.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d-%H:%M:%S").to_string(),
+        )
+    };
+    let day_of = |ms: i64| at(ms).chars().take(8).collect::<String>();
+    let day_ms = |day: &str| crate::protocol::datetime::ib_datetime_to_unix_millis(&format!("{day}-00:00:00"));
+    let dated = |day: &str| day.len() == 8 && day_ms(day).is_some();
+
+    let mut out = Vec::new();
+    for (n, stretch) in history.iter().enumerate() {
+        if n >= 1 && (stretch.end == "-1" || day_of(end_day()? - back()?) > stretch.end) {
+            continue;
+        }
+        if dated(&stretch.start) && stretch.start > day_of(end_day()?) {
+            continue;
+        }
+        let moved = stretch.con_id != req.con_id;
+        let mut s = Stretch {
+            con_id: stretch.con_id,
+            live_con_id: moved.then_some(req.con_id),
+            expired: req.include_expired || (n >= 1 && moved),
+            time_length: Some(req.duration.clone()),
+            cutoff_date: dated(&stretch.start).then(|| stretch.start.clone()),
+            underlying: (!stretch.symbol.is_empty()).then(|| stretch.symbol.clone()),
+            listing: (!stretch.exchange.is_empty() && !NO_LISTING.contains(&stretch.exchange.as_str()))
+                .then(|| stretch.exchange.clone()),
+            ..Default::default()
+        };
+        if n >= 1 && day_of(end_day()?) > stretch.end {
+            let reach = end()? - back()?;
+            let from = day_ms(&stretch.start).map_or(reach, |start| start.max(reach));
+            let to = (day_ms(&stretch.end).ok_or_else(unreadable)? + ms_day).min(end()?);
+            if from >= to {
+                continue;
+            }
+            s.start_time = Some(at(from));
+            s.end_time = Some(at(to));
+            s.time_length = None;
+        }
+        out.push(s);
+    }
+    let days = match (req.bar_size, length) {
+        (BarSize::Day1, Some((count, unit))) if history.len() > 1 && count * unit.1 / ms_day > 1 => {
+            Some(DaysWanted { left: count * unit.1 / ms_day, from: day_of(end()? - back()?), unit })
+        }
+        _ => None,
+    };
+    Ok((out, days))
 }
 
 /// Build a historical data query message.

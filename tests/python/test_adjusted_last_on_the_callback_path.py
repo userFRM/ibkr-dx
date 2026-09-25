@@ -2,9 +2,10 @@
 
 The venue carries no adjusted series: what it serves is raw trades, and an
 adjusted series is those trades folded with the contract's own corporate
-actions. The engine holds the raw bars until the actions are in hand and then
-folds them; the waiting call `historical_data` hands the series back in one
-piece and the callback path delivers it bar by bar. A caller on the callback
+actions. The engine asks for the actions first, then for the raw bars along the
+ids they state the contract traded under, and folds them; the waiting call
+`historical_data` hands the series back in one piece and the callback path
+delivers it bar by bar. A caller on the callback
 API — which is the API — could not get an adjusted series at all before, and
 can now.
 

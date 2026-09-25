@@ -232,6 +232,35 @@ They are on [Venue behaviour](./venue-behaviour.md).
 Every other call and callback on the canonical list is served on both
 languages. The call-by-call matrix is [generated from the source](./coverage.md).
 
+## Bars along a contract's id history
+
+A contract can trade under more than one id, ticker or listing over its life,
+and the venue states which beside the contract's corporate actions. For
+`TRADES` and `ADJUSTED_LAST` bars of a day or less, this client asks the
+actions first, as a gateway does, and then the bars one stretch of that history
+at a time, the newest first, each under the id it traded as and for its own
+days; the stretches are one series, folded across the joins with the one set of
+actions. The logon token `NOINEFFECTCONCQUERY` changes where the stretches are
+cut, as it does on a gateway.
+
+A stretch the venue refuses fails the request: the caller is told why, and the
+bars of the stretches already in are not delivered. A request that cannot be
+asked along the history — a day in it that cannot be read, or an end or a
+length this client cannot count — is asked as it was made, under the id named,
+and filed as the venue serves it, not folded, as a gateway sends the query it
+was given where it cannot cut the history. Where nothing of the history falls
+within the request, the caller is told the query returned no data; a gateway
+says so where the history is one stretch, and answers nothing where it is more.
+
+A gateway asks every bar query for a stock or a fund this way, whatever series
+it names, and one for another kind of contract where a gateway's lookup
+names that contract; where the venue turns a feature on for the session, it
+asks a request that starts less than a day before now as it was made. It splits a week or a month
+at each split and joins the bars again, and leaves out of a stretch a listing
+the logon names. This client asks every other series, and weeks and months,
+under the id the caller named, and leaves out only the listings a gateway
+leaves out where the logon names none.
+
 ## Smart depth is one request
 
 A book is refused before anything is sent where a gateway refuses it, in its

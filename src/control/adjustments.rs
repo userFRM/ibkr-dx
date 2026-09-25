@@ -205,7 +205,7 @@ pub fn parse_adjustments(body: &str) -> (AdjustedContract, Vec<Adjustment>) {
             // The contract states its own id first, then what the row is for.
             Some("conc") => contract.con_id = values[0].to_string(),
             Some("consym") => contract.symbol = values.last().unwrap_or(&"").to_string(),
-            // Its id, the venue it is listed on, and the date that listing began.
+            // Its id, the venue it was listed on, and the last day it was.
             Some("conexch") => {
                 if let Some(exchange) = values.get(1) {
                     contract.exchange = (*exchange).to_string();
@@ -246,6 +246,315 @@ pub fn parse_adjustments(body: &str) -> (AdjustedContract, Vec<Adjustment>) {
     // one on the same day for the same amount are exactly the fields such a
     // reading throws away. What the venue said twice, it said twice.
     (contract, out)
+}
+
+/// One stretch of a contract's id history: the id it traded under between two
+/// days, and the ticker or the listing it traded under there where the venue
+/// states one.
+///
+/// The bounds are kept as the venue writes them, because the query each
+/// stretch is asked with writes them the same way: eight digits for a day,
+/// `-1` for a bound left open, and nothing for one the row does not carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdStretch {
+    /// The id the contract traded under.
+    pub(crate) con_id: u32,
+    /// The first day it did.
+    pub(crate) start: String,
+    /// The last day it did.
+    pub(crate) end: String,
+    /// The ticker it traded under, where the venue names one.
+    pub(crate) symbol: String,
+    /// The venue it was listed on, where the venue names one.
+    pub(crate) exchange: String,
+}
+
+/// A bound of a stretch, read: before every day, a day, or after every day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Bound {
+    Earliest,
+    Day(jiff::civil::Date),
+    Latest,
+}
+
+impl IdStretch {
+    /// Where it starts: `-1` is before every day, and a start left unstated is
+    /// after every one.
+    fn starts(&self) -> Result<Bound, String> {
+        match self.start.as_str() {
+            "" => Ok(Bound::Latest),
+            "-1" => Ok(Bound::Earliest),
+            day => stated_day(day).map(Bound::Day),
+        }
+    }
+
+    /// Where it ends: `-1` is after every day, and an end left unstated is
+    /// before every one.
+    fn ends(&self) -> Result<Bound, String> {
+        match self.end.as_str() {
+            "" => Ok(Bound::Earliest),
+            "-1" => Ok(Bound::Latest),
+            day => stated_day(day).map(Bound::Day),
+        }
+    }
+}
+
+/// A day the id history states, as eight digits.
+fn stated_day(day: &str) -> Result<jiff::civil::Date, String> {
+    let digits = day.len() == 8 && day.bytes().all(|b| b.is_ascii_digit());
+    digits
+        .then(|| jiff::civil::Date::new(
+            day[0..4].parse().ok()?, day[4..6].parse().ok()?, day[6..8].parse().ok()?,
+        ).ok())
+        .flatten()
+        .ok_or_else(|| format!(
+            "the contract's id history states {day:?} where a day belongs, so the \
+             stretches it traded under cannot be bounded",
+        ))
+}
+
+/// A day written back the way the id history writes it.
+fn write_day(day: jiff::civil::Date) -> String {
+    day.strftime("%Y%m%d").to_string()
+}
+
+/// The day after or before one, or the reason there is none.
+fn step_day(day: jiff::civil::Date, days: i64) -> Result<jiff::civil::Date, String> {
+    day.checked_add(jiff::Span::new().days(days))
+        .map_err(|_| format!("the id history runs past the calendar at {}", write_day(day)))
+}
+
+/// A gateway's order for the stretches, newest first: an open end first, an
+/// open start last, and otherwise the later start first, then the later end.
+fn newest_first(a: &IdStretch, b: &IdStretch) -> std::cmp::Ordering {
+    use std::cmp::Ordering::{Greater, Less};
+    if a.end == "-1" || b.start == "-1" {
+        return Less;
+    }
+    if a.start == "-1" || b.end == "-1" {
+        return Greater;
+    }
+    b.start.cmp(&a.start).then_with(|| b.end.cmp(&a.end))
+}
+
+/// Order the stretches the way a gateway's list sort does for a list this
+/// short: the leading run made ascending, then each later one inserted where a
+/// binary search puts it. The order above is not a total one — two open ends
+/// each come first — so which of two such stretches leads is decided by how
+/// the sort compares them, not by the order alone.
+// ponytail: the short-list path only; a gateway merges runs past 31 stretches,
+// which no id history comes near.
+fn sort_newest_first(list: &mut [IdStretch]) {
+    let n = list.len();
+    if n < 2 {
+        return;
+    }
+    let mut run = 2;
+    if newest_first(&list[1], &list[0]).is_lt() {
+        while run < n && newest_first(&list[run], &list[run - 1]).is_lt() {
+            run += 1;
+        }
+        list[..run].reverse();
+    } else {
+        while run < n && newest_first(&list[run], &list[run - 1]).is_ge() {
+            run += 1;
+        }
+    }
+    for at in run..n {
+        let (mut left, mut right) = (0, at);
+        while left < right {
+            let mid = (left + right) / 2;
+            if newest_first(&list[at], &list[mid]).is_lt() {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+        list[left..=at].rotate_right(1);
+    }
+}
+
+/// The first day a gateway asks a contract's actions from, and folds a request
+/// made through the API from.
+pub(crate) const FOLDED_FROM: &str = "19800101";
+
+/// The contract's id history as the venue states it beside its actions, cut to
+/// the span a gateway folds a request made through the API over — the first of
+/// January 1980 to `until`, today on UTC's calendar — and ordered newest first.
+///
+/// The venue states it as rows under three names: `conc` for the id and the
+/// days it traded under it, `consym` for the ticker an id traded under and the
+/// last day it did, `conexch` for the listing and its last day. Each id's days
+/// are split where its ticker or listing changed, a stretch that stops short of
+/// the next one's start is carried up to the day before it, and one that names
+/// no ticker or listing takes the newer one's.
+///
+/// `NOINEFFECTCONCQUERY` on the logon changes how the span cuts them. Without
+/// it the span's last day is outside it, so a change stated on that day is not
+/// one within it, and an id that runs to that day or past it is left open. With
+/// it the span holds its last day and a stretch keeps the end it states.
+/// `NOCOLLAPSECCHMDSQUERY` stops the stretch that names no ticker or listing
+/// from taking the newer one's.
+///
+/// A row that does not state three values, or whose id is not a number, is not
+/// a stretch and is left out. A day that cannot be read is an error: the
+/// stretches around it cannot be bounded, and asked unbounded they would ask
+/// for bars under an id the contract did not trade under.
+pub(crate) fn id_history(
+    body: &str, until: jiff::civil::Date, features: &[String],
+) -> Result<Vec<IdStretch>, String> {
+    let open_ended = !features.iter().any(|f| f == "NOINEFFECTCONCQUERY");
+    let inherits = !features.iter().any(|f| f == "NOCOLLAPSECCHMDSQUERY");
+    let (lo, hi) = (Bound::Day(stated_day(FOLDED_FROM)?), Bound::Day(until));
+    let within = |day: Bound| if open_ended { lo <= day && day < hi } else { lo <= day && day <= hi };
+
+    // The rows, in the order they are stated.
+    let mut rows = Vec::new();
+    let mut under = None;
+    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if matches!(line, "conc" | "consym" | "conexch") || AdjustmentKind::from_code(line).is_some() {
+            under = Some(line);
+            continue;
+        }
+        let Some(name @ ("conc" | "consym" | "conexch")) = under else { continue };
+        let mut values: Vec<&str> = line.split(',').map(str::trim).collect();
+        // A trailing empty value is not a value.
+        while values.last() == Some(&"") {
+            values.pop();
+        }
+        let [id, second, end] = values[..] else { continue };
+        let Ok(con_id) = id.parse::<u32>() else { continue };
+        let (start, symbol, exchange) = match name {
+            "conc" => (second, "", ""),
+            "consym" => ("", second, ""),
+            _ => ("", "", second),
+        };
+        rows.push(IdStretch {
+            con_id,
+            start: start.to_string(),
+            end: end.to_string(),
+            symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
+        });
+    }
+
+    // The ids the span reaches, and the ticker and listing changes within it.
+    let mut ids: Vec<IdStretch> = Vec::new();
+    let mut changes: Vec<IdStretch> = Vec::new();
+    let mut last_before: Option<IdStretch> = None;
+    for row in &rows {
+        let end = row.ends()?;
+        if row.symbol.is_empty() && row.exchange.is_empty() {
+            let reaches = !(end < lo) && !(hi < row.starts()?);
+            if reaches && !ids.contains(row) {
+                let mut kept = row.clone();
+                if open_ended && !(end < hi) {
+                    kept.end = "-1".to_string();
+                }
+                ids.push(kept);
+            }
+            continue;
+        }
+        let names_one = row.start.is_empty() && (row.symbol.is_empty() != row.exchange.is_empty());
+        if !names_one || end == Bound::Latest {
+            continue;
+        }
+        if (!open_ended || end < hi)
+            && last_before.as_ref().is_none_or(|last| last.ends().is_ok_and(|e| e < end))
+        {
+            last_before = Some(row.clone());
+        }
+        if within(end) {
+            changes.push(row.clone());
+        }
+    }
+    // The last change before the span is the one in force when it opens.
+    if let Some(last) = last_before
+        && !within(last.ends()?)
+    {
+        changes.push(last);
+    }
+
+    let mut out: Vec<IdStretch> = Vec::new();
+    let add = |out: &mut Vec<IdStretch>, s: IdStretch| {
+        let added = !out.contains(&s);
+        if added {
+            out.push(s);
+        }
+        added
+    };
+    let stated_start = |day: Bound| match day {
+        Bound::Day(day) => write_day(day),
+        _ => "-1".to_string(),
+    };
+    for id in &ids {
+        let end = id.ends()?;
+        let mut by_end: std::collections::BTreeMap<Bound, Vec<&IdStretch>> = Default::default();
+        for change in changes.iter().filter(|c| c.con_id == id.con_id) {
+            by_end.entry(change.ends()?).or_default().push(change);
+        }
+        let mut next = id.starts()?;
+        if by_end.is_empty() {
+            if add(&mut out, id.clone()) {
+                continue;
+            }
+        } else {
+            for (day, named) in by_end {
+                let Bound::Day(last) = day else { continue };
+                let symbol = named.iter().rev().find(|c| !c.symbol.is_empty()).map_or("", |c| &c.symbol);
+                let exchange = named.iter().rev().find(|c| !c.exchange.is_empty()).map_or("", |c| &c.exchange);
+                add(&mut out, IdStretch {
+                    con_id: id.con_id,
+                    start: stated_start(next),
+                    end: write_day(last),
+                    symbol: symbol.to_string(),
+                    exchange: exchange.to_string(),
+                });
+                next = Bound::Day(step_day(last, 1)?);
+            }
+        }
+        let rest = if open_ended { !(next > end) } else { next != end };
+        if rest {
+            add(&mut out, IdStretch {
+                con_id: id.con_id,
+                start: stated_start(next),
+                end: id.end.clone(),
+                symbol: String::new(),
+                exchange: String::new(),
+            });
+        }
+    }
+
+    sort_newest_first(&mut out);
+    // A stretch that stops short of the next one's start runs up to the day
+    // before it.
+    let mut before_next: Option<jiff::civil::Date> = None;
+    for stretch in &mut out {
+        let (start, end) = (stretch.starts()?, stretch.ends()?);
+        if let Some(before) = before_next
+            && end != Bound::Latest
+            && start != Bound::Latest
+            && Bound::Day(before) > end
+        {
+            stretch.end = write_day(before);
+        }
+        if let Bound::Day(first) = start {
+            before_next = Some(step_day(first, -1)?);
+        }
+    }
+    if inherits {
+        for at in 1..out.len() {
+            let (newer, older) = out.split_at_mut(at);
+            let (newer, older) = (&newer[at - 1], &mut older[0]);
+            if older.symbol.is_empty() && !newer.symbol.is_empty() {
+                older.symbol = newer.symbol.clone();
+            }
+            if older.exchange.is_empty() && !newer.exchange.is_empty() {
+                older.exchange = newer.exchange.clone();
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// What a price before `date` must be multiplied by to sit on the same scale
@@ -708,6 +1017,100 @@ mod tests {
         assert_eq!(adj[0].currency, "USD");
         assert_eq!(adj[0].pay_date, "20240430");
         assert_eq!(adj[3].date, "20241220", "and they come back in date order");
+    }
+
+    /// A contract's id history is cut to the span it is folded over the way
+    /// the logon says, and ordered newest first.
+    ///
+    /// The history: id 111 traded as ABC until the first of March 2015 (a
+    /// ticker it left before 1980 no longer in force) and as itself until the
+    /// twenty-ninth of May 2020; id 222 from the first of June 2020, stated to
+    /// run to 2030 and listed on NYSE until the fourteenth of June 2024. Each
+    /// row is written by hand from a gateway's rules. Without
+    /// NOINEFFECTCONCQUERY the span's last day is outside it: a listing change
+    /// on that day is not one within it, and an id running to that day or past
+    /// it is left open. With it the span holds its last day and each id keeps
+    /// the end it states. Either way an older stretch runs up to the day before
+    /// the next begins, and one naming no listing takes the newer one's unless
+    /// NOCOLLAPSECCHMDSQUERY is stated. A change before the span is kept only
+    /// where it is the last one: it is what the span opens under. What an id
+    /// has left after its last change is a stretch of its own without the
+    /// token for as long as it does not start after the id's end, and with it
+    /// for as long as it does not start on that end.
+    #[test]
+    fn the_id_history_is_cut_to_the_span_the_way_the_logon_says() {
+        let history = "conc\n222,20200601,20301231\n111,-1,20200529\n\
+                       consym\n111,XYZ,19790101\n111,ABC,20150301\n\
+                       conexch\n222,NYSE,20240614\n\
+                       SS\n20100104,2\n";
+        let until_and_tail = "conc\n444,20220303,20240614\n333,20200101,20220302\n\
+                              consym\n333,SYM,20220301\n";
+        let day = |d: i8| jiff::civil::date(2024, 6, d);
+        let rows = [
+            (&[][..], 14, history, Some(vec![
+                (222, "20200601", "-1", "", ""),
+                (111, "20150302", "20200531", "", ""),
+                (111, "-1", "20150301", "ABC", ""),
+            ])),
+            (&[][..], 15, history, Some(vec![
+                (222, "20240615", "-1", "", ""),
+                (222, "20200601", "20240614", "", "NYSE"),
+                (111, "20150302", "20200531", "", "NYSE"),
+                (111, "-1", "20150301", "ABC", "NYSE"),
+            ])),
+            (&["NOINEFFECTCONCQUERY"][..], 14, history, Some(vec![
+                (222, "20240615", "20301231", "", ""),
+                (222, "20200601", "20240614", "", "NYSE"),
+                (111, "20150302", "20200531", "", "NYSE"),
+                (111, "-1", "20150301", "ABC", "NYSE"),
+            ])),
+            (&["NOINEFFECTCONCQUERY", "NOCOLLAPSECCHMDSQUERY"][..], 14, history, Some(vec![
+                (222, "20240615", "20301231", "", ""),
+                (222, "20200601", "20240614", "", "NYSE"),
+                (111, "20150302", "20200531", "", ""),
+                (111, "-1", "20150301", "ABC", ""),
+            ])),
+            // A ticker left before the span is the one in force when it opens.
+            (&[][..], 14, "conc\n111,-1,-1\nconsym\n111,OLD,19790101\n", Some(vec![
+                (111, "19790102", "-1", "", ""),
+                (111, "-1", "19790101", "OLD", ""),
+            ])),
+            // An id stated to end on the span's last day, and one whose ticker
+            // changed the day before its own last: without the token the first
+            // is left open and the second keeps a stretch of that last day;
+            // with it the first keeps its end and the day is carried into the
+            // stretch before it.
+            (&[][..], 14, until_and_tail, Some(vec![
+                (444, "20220303", "-1", "", ""),
+                (333, "20220302", "20220302", "", ""),
+                (333, "20200101", "20220301", "SYM", ""),
+            ])),
+            (&["NOINEFFECTCONCQUERY"][..], 14, until_and_tail, Some(vec![
+                (444, "20220303", "20240614", "", ""),
+                (333, "20200101", "20220302", "SYM", ""),
+            ])),
+            // Two ids open at the end, one of them at both, and a third dated
+            // before them: the order is not a total one, and the way a gateway
+            // sorts decides which is asked first.
+            (&[][..], 14, "conc\n222,20200601,-1\n111,-1,-1\n100,20100101,20150101\n", Some(vec![
+                (100, "20100101", "20150101", "", ""),
+                (111, "-1", "-1", "", ""),
+                (222, "20200601", "-1", "", ""),
+            ])),
+            // A day that cannot be read bounds nothing.
+            (&[][..], 14, "conc\n222,2020O601,-1\n", None),
+        ];
+        for (features, until, body, wanted) in rows {
+            let features: Vec<String> = features.iter().map(|f| f.to_string()).collect();
+            let got = id_history(body, day(until), &features).ok().map(|stretches| {
+                stretches.into_iter().map(|s| (s.con_id, s.start, s.end, s.symbol, s.exchange))
+                    .collect::<Vec<_>>()
+            });
+            let wanted = wanted.map(|rows| rows.into_iter().map(|(id, s, e, sym, x)| {
+                (id, s.to_string(), e.to_string(), sym.to_string(), x.to_string())
+            }).collect::<Vec<_>>());
+            assert_eq!(got, wanted, "{features:?}, up to the {until}th");
+        }
     }
 
 

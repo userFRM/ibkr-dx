@@ -499,6 +499,33 @@ pub fn bar_epoch_as_asked(secs: i64, end: Option<i64>, format_date: i32, zone: &
     format!("{} {zone}", at.to_zoned(clock).strftime("%Y%m%d %H:%M:%S"))
 }
 
+/// The moment a bar request ends at, as its caller stated it, or now where it
+/// stated none.
+///
+/// A zone may be named after the stamp. Where none is, one joined by a dash is
+/// UTC and one joined by a space is on this machine's clock, which is how each
+/// is read.
+pub(crate) fn request_end(end_date_time: &str) -> Option<jiff::Zoned> {
+    let given = end_date_time.trim();
+    if given.is_empty() {
+        return Some(jiff::Zoned::now());
+    }
+    let (stamp, named) = match given.rsplit_once(' ') {
+        Some((stamp, named)) if named.bytes().any(|b| b.is_ascii_alphabetic()) => {
+            (stamp, Some(named))
+        }
+        _ => (given, None),
+    };
+    let on = match (named, stamp.as_bytes().get(8)) {
+        (Some(named), _) => clock_named(named)?,
+        (None, Some(b'-')) => jiff::tz::TimeZone::UTC,
+        (None, _) => jiff::tz::TimeZone::system(),
+    };
+    let civil = jiff::civil::DateTime::strptime("%Y%m%d %H:%M:%S", stamp.replacen('-', " ", 1))
+        .ok()?;
+    civil.to_zoned(on).ok()
+}
+
 /// The range a bar request named, as stated once its bars have all arrived.
 ///
 /// Not read off the reply. The reply carries a range of its own, which a
@@ -516,31 +543,7 @@ pub fn historical_range(
     zone: &str,
 ) -> Option<(String, String)> {
     let clock = clock_named(zone)?;
-    let end = match end_date_time.trim() {
-        "" => jiff::Zoned::now(),
-        given => {
-            // A zone may be named after the stamp. Where none is, one joined
-            // by a dash is UTC and one joined by a space is on this machine's
-            // clock, which is how each is read.
-            let (stamp, named) = match given.rsplit_once(' ') {
-                Some((stamp, named)) if named.bytes().any(|b| b.is_ascii_alphabetic()) => {
-                    (stamp, Some(named))
-                }
-                _ => (given, None),
-            };
-            let on = match (named, stamp.as_bytes().get(8)) {
-                (Some(named), _) => clock_named(named)?,
-                (None, Some(b'-')) => jiff::tz::TimeZone::UTC,
-                (None, _) => jiff::tz::TimeZone::system(),
-            };
-            let civil = jiff::civil::DateTime::strptime(
-                "%Y%m%d %H:%M:%S",
-                stamp.replacen('-', " ", 1),
-            )
-            .ok()?;
-            civil.to_zoned(on).ok()?
-        }
-    };
+    let end = request_end(end_date_time)?;
     let (count, unit) = duration
         .trim()
         .split_once(' ')

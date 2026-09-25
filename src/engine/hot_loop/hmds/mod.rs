@@ -377,30 +377,18 @@ pub(crate) enum Fold {
 /// waits for the contract's corporate actions. The venue serves no adjusted
 /// series — what it sends is raw trades, and an adjusted one is those folded
 /// with the actions — and every bar dated before a split is on the wrong scale
-/// until the split is known, so the actions are asked for once the series is
-/// whole and ordered, from its first bar's day to today, and the fold is made
-/// before anything is filed.
+/// until the split is known, so the actions are asked for before the bars, as a
+/// gateway asks them, and the fold is made before anything is filed.
 pub(crate) struct HeldSeries {
     /// The caller's request, which the series is filed and delivered under.
     pub(crate) req_id: u32,
     /// Whether the series is to be folded with the contract's actions before
     /// it is filed, and with which of them.
     pub(crate) fold: Fold,
-    /// The venue's id for the contract, which its corporate actions are asked
-    /// for by.
-    pub(crate) con_id: u32,
-    /// The contract's security type and venue, as the caller stated them, for
-    /// the corporate-actions query.
-    pub(crate) sec_type: String,
-    pub(crate) exchange: String,
     /// The raw trade bars so far, in the order they arrived.
     pub(crate) bars: Vec<crate::control::historical::HistoricalBar>,
     /// The zone the bar times are stated in, as the reply states it.
     pub(crate) timezone: String,
-    /// Whether the corporate-actions query has been sent. Sent when the last
-    /// page is in, from the earliest day the series holds: the venue pages a
-    /// long series newest first, so that day is not known until then.
-    pub(crate) actions_asked: bool,
     /// The id of the series' own corporate-actions query, where one went out.
     /// The caller's number is shared with standalone requests for the same
     /// thing, so an answer or a refusal belongs to the hold only if it names
@@ -410,6 +398,33 @@ pub(crate) struct HeldSeries {
     pub(crate) actions: Option<Vec<crate::control::adjustments::Adjustment>>,
     /// Whether the raw series is complete — the last bar has arrived.
     pub(crate) complete: bool,
+    /// What a folded series is still to ask along its contract's id history.
+    pub(crate) along: Along,
+}
+
+/// What a folded series asks along its contract's id history.
+///
+/// A gateway asks the contract's actions before its bars, and their answer
+/// states the ids the contract traded under and the ticker and listing it
+/// traded under on each. The bars are then asked one stretch at a time, newest
+/// first, each under the id it traded as, the next once the last is in, and the
+/// series is whole when the last stretch is: one series, folded across the
+/// joins with the one set of actions.
+#[derive(Debug, Default)]
+pub(crate) struct Along {
+    /// The request as the caller made it, which every stretch is asked from.
+    pub(crate) asked: Option<crate::control::historical::HistoricalRequest>,
+    /// The stretches still to be asked, newest first.
+    pub(crate) stretches: std::collections::VecDeque<crate::control::historical::Stretch>,
+    /// For a series of days asked along more than one stretch, the days it
+    /// still wants.
+    pub(crate) days: Option<crate::control::historical::DaysWanted>,
+    /// Each day such a series already holds, counted once however many bars
+    /// state it.
+    pub(crate) seen: std::collections::HashSet<String>,
+    /// The step the first answer stated, or a day where it stated none, which
+    /// every later stretch states.
+    pub(crate) step: Option<String>,
 }
 
 impl HmdsState {
@@ -848,7 +863,7 @@ impl HmdsState {
                         // long enough to reach five figures of query ids does
                         // hold at the same time.
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| states(&resp.query_id, qid.as_str())) {
-                            let (_, req_id) = self.pending_historical[pos];
+                            let (answered, req_id) = self.pending_historical[pos].clone();
                             let is_complete = resp.is_complete;
                             if let Some(forming) = self.forming_bars.iter_mut().find(|f| f.req_id == req_id)
                                 && forming.seconds == crate::control::historical::BarSize::Day1.seconds()
@@ -879,7 +894,8 @@ impl HmdsState {
                             // keeps its query open for the stream — and is
                             // filed as it came.
                             if self.held.iter().any(|a| a.req_id == req_id) {
-                                self.hold_bars(req_id, resp, hmds_conn, hb, shared, event_tx);
+                                let step = crate::control::xml::tag(xml_tag, "approxStep");
+                                self.hold_bars(req_id, resp, step, hmds_conn, hb, shared, event_tx);
                             } else {
                                 log::debug!("bars for req_id={req_id} with no series held; filed as they came");
                                 // Clone only when someone is listening on the event
@@ -891,12 +907,15 @@ impl HmdsState {
                                 }
                             }
                             if is_complete && !self.keep_up_to_date_reqs.contains(&req_id) {
-                                // By the number rather than by where it was
+                                // By the query rather than by where it was
                                 // when this began: holding the series can end
                                 // the request on its own — a fold that fails
                                 // drops the entry there — and the position is
-                                // then somebody else's or nobody's.
-                                self.pending_historical.retain(|(_, r)| *r != req_id);
+                                // then somebody else's or nobody's. And by the
+                                // query rather than the number: where the end
+                                // of this one asked the next stretch, the
+                                // number now holds that one.
+                                self.pending_historical.retain(|(q, r)| *r != req_id || *q != answered);
                             }
                         } else {
                             // A parsed response whose query_id matches no
@@ -1488,10 +1507,10 @@ impl HmdsState {
                             // The query is echoed back as XML and the actions
                             // arrive beside it on the raw field, a name on its own
                             // line and the rows under it. Matched on the echoed
-                            // id and then checked against the contract that id
-                            // asked about: the venue sends one reply per
-                            // contract, which says which contract an answer is
-                            // about and not which question it answers.
+                            // id and filed under the contract that id asked
+                            // about: the rows name the contract's ids, which
+                            // say what an answer is about and not which
+                            // question it answers.
                             match parsed.get(&96) {
                                 Some(body) => {
                                     // Matched to the question it answers, not
@@ -1517,70 +1536,54 @@ impl HmdsState {
                                     match waiting {
                                         Some(pos) => {
                                             let (qid, answers, asked_about) = self.pending_adjustments[pos].clone();
-                                            // The venue states a contract only
-                                            // where it has an action to state
-                                            // against it, so a contract that
-                                            // has never had one — a future, or
-                                            // a young listing — is answered
-                                            // with the echoed id and nothing
-                                            // else. That is this query's
-                                            // answer, and the contract it is
-                                            // about is the one it was asked
-                                            // about. Held to the test below as
-                                            // it stands, the answer was read as
-                                            // naming the wrong contract: the
-                                            // series waiting to be folded by it
-                                            // was never filed, and a caller
-                                            // asking for a future's trades was
-                                            // never told its bars had ended.
-                                            if contract.con_id.is_empty() {
-                                                contract.con_id = asked_about.to_string();
-                                            }
-                                            // The body names its own contract.
-                                            // One naming a different contract
-                                            // from the one asked about is not
-                                            // this answer, whatever id it
-                                            // carries.
-                                            if contract.con_id.parse::<u32>() == Ok(asked_about) {
-                                                self.pending_adjustments.remove(pos);
-                                                log::debug!(
-                                                    "corporate actions for {}: {} stated",
-                                                    contract.con_id, actions.len(),
-                                                );
-                                                // A bar request waiting for
-                                                // these to fold its raw trades
-                                                // takes them and files the
-                                                // scaled series; the record
-                                                // against the contract is left
-                                                // as before, so a corporate
-                                                // actions call reads it too.
-                                                //
-                                                // Matched on the query the hold
-                                                // itself sent. The caller's
-                                                // number is shared with a
-                                                // standalone request for the
-                                                // same thing, and matched on
-                                                // that alone, the standalone
-                                                // answer folded an unrelated
-                                                // series with another query's
-                                                // actions.
-                                                if let Some(apos) = self.held
-                                                    .iter().position(|a| a.actions_query.as_deref() == Some(qid.as_str()))
-                                                {
-                                                    self.held[apos].actions = Some(actions.clone());
-                                                    shared.reference.note_adjustments(contract, actions, answers);
-                                                    self.try_file_held(answers, hmds_conn, hb, shared, event_tx);
-                                                } else {
-                                                    shared.reference.note_adjustments(contract, actions, answers);
-                                                }
+                                            // The answer is about the contract
+                                            // it was asked about, which is
+                                            // where a gateway files it. Its
+                                            // rows name every id the contract
+                                            // traded under — the one asked
+                                            // about among them or not — and a
+                                            // contract that has never had an
+                                            // action, a future or a young
+                                            // listing, is answered with the
+                                            // echoed id and no row at all.
+                                            // Held to the last id the rows
+                                            // named, the answer for a contract
+                                            // whose id changed was read as
+                                            // naming another one, and the
+                                            // series waiting on it was never
+                                            // filed.
+                                            contract.con_id = asked_about.to_string();
+                                            self.pending_adjustments.remove(pos);
+                                            log::debug!(
+                                                "corporate actions for {}: {} stated",
+                                                contract.con_id, actions.len(),
+                                            );
+                                            // A bar request waiting for
+                                            // these to fold its raw trades
+                                            // takes them, and asks for its
+                                            // bars along the ids they state
+                                            // the contract traded under; the
+                                            // record against the contract is
+                                            // left as before, so a corporate
+                                            // actions call reads it too.
+                                            //
+                                            // Matched on the query the hold
+                                            // itself sent. The caller's
+                                            // number is shared with a
+                                            // standalone request for the
+                                            // same thing, and matched on
+                                            // that alone, the standalone
+                                            // answer folded an unrelated
+                                            // series with another query's
+                                            // actions.
+                                            if let Some(apos) = self.held
+                                                .iter().position(|a| a.actions_query.as_deref() == Some(qid.as_str()))
+                                            {
+                                                self.held[apos].actions = Some(actions.clone());
+                                                shared.reference.note_adjustments(contract, actions, answers);
+                                                self.ask_along(answers, body, hmds_conn, hb, shared);
                                             } else {
-                                                shared.market.note_unread_wire(
-                                                    "historical",
-                                                    format!(
-                                                        "6040=10022 named contract {} where {asked_about} was asked about ({} action(s) dropped)",
-                                                        contract.con_id, actions.len(),
-                                                    ),
-                                                );
+                                                shared.reference.note_adjustments(contract, actions, answers);
                                             }
                                         }
                                         // Nobody is waiting on this id: a late
@@ -2119,8 +2122,6 @@ fn build_tbt_query(
             );
             return false;
         }
-        let qid = self.next_hmds_query_id;
-        self.next_hmds_query_id += 1;
 
         // The adjusted series is not a wire type: the venue has no such data,
         // so what goes out asks for raw trades and the fold onto one scale
@@ -2167,9 +2168,8 @@ fn build_tbt_query(
             }
         };
 
-        let query_id = format!("hist_{qid}");
         let req = crate::control::historical::HistoricalRequest {
-            query_id: query_id.clone(),
+            query_id: String::new(),
             con_id: con_id as u32,
             symbol: symbol.to_string(),
             sec_type: hist_sec_type(sec_type),
@@ -2182,8 +2182,57 @@ fn build_tbt_query(
             keep_up_to_date,
             include_expired,
         };
+        // Every request's pages are held until the last is in, so the series
+        // goes up oldest first whatever order the venue sends the pages in.
+        self.held.push(HeldSeries {
+            req_id,
+            fold,
+            bars: Vec::new(),
+            timezone: String::new(),
+            actions_query: None,
+            actions: None,
+            complete: false,
+            along: Along::default(),
+        });
+        if fold == Fold::None {
+            self.ask_stretch(req_id, &req, &crate::control::historical::Stretch::whole(&req), hmds_conn, hb, shared);
+            return true;
+        }
+        // One that is to be folded asks for the contract's actions first, as a
+        // gateway does, over the range a gateway asks them over for a request
+        // made through the API: the first of January 1980 to today on UTC's
+        // calendar. Their answer states the ids the contract traded under, and
+        // the bars are asked along them once it is in.
+        let today: String = chrono_free_timestamp().chars().take(8).collect();
+        let sent_under = self.send_adjustments_request(
+            req_id, con_id as u32, sec_type, exchange,
+            crate::control::adjustments::FOLDED_FROM, &today, shared, hmds_conn, hb,
+        );
+        // Where the send failed the hold is already gone, let go where that
+        // is stated.
+        if let Some(entry) = self.held.iter_mut().find(|a| a.req_id == req_id) {
+            entry.actions_query = sent_under;
+            entry.along.asked = Some(req);
+            return true;
+        }
+        false
+    }
 
-        let xml = crate::control::historical::build_query_xml(&req);
+    /// Send one stretch of a request's bars, under a name of its own, and
+    /// hold the request's number against it.
+    ///
+    /// The number answers one query at a time: a later stretch takes the
+    /// place of the one before it, so a withdrawal names the query the venue is
+    /// serving, and a page of an earlier stretch is one nothing waits on.
+    fn ask_stretch(
+        &mut self, req_id: u32, req: &crate::control::historical::HistoricalRequest,
+        stretch: &crate::control::historical::Stretch,
+        hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState,
+    ) {
+        let query_id = format!("hist_{}", self.next_hmds_query_id);
+        self.next_hmds_query_id += 1;
+        let req = crate::control::historical::HistoricalRequest { query_id: query_id.clone(), ..req.clone() };
+        let xml = crate::control::historical::build_stretch_xml(&req, stretch);
         // The query as it goes out, when asked for. A request the venue does
         // not answer is only distinguishable from one it never received by
         // what was actually sent.
@@ -2198,35 +2247,129 @@ fn build_tbt_query(
                 (fix::TAG_SENDING_TIME, &ts),
                 (6118, &xml),
             ]);
-            log::info!("Sent historical request: req_id={req_id} con_id={con_id} bar_size={bar_size}");
+            log::info!(
+                "Sent historical request: req_id={req_id} con_id={} bar_size={}",
+                stretch.con_id, req.bar_size.as_str(),
+            );
             hb.last_hmds_sent = Instant::now();
         }
-        self.pending_historical.push((query_id, req_id));
-        // Every request's pages are held until the last is in, so the series
-        // goes up oldest first whatever order the venue sends the pages in. One
-        // that is to be folded also waits there for the contract's actions.
-        self.held.push(HeldSeries {
-            req_id,
-            fold,
-            con_id: con_id as u32,
-            sec_type: sec_type.to_string(),
-            exchange: exchange.to_string(),
-            bars: Vec::new(),
-            timezone: String::new(),
-            actions_asked: false,
-            actions_query: None,
-            actions: None,
-            complete: false,
-        });
+        match self.pending_historical.iter_mut().find(|(_, r)| *r == req_id) {
+            Some(entry) => entry.0 = query_id,
+            None => self.pending_historical.push((query_id, req_id)),
+        }
+    }
+
+    /// Read the contract's id history out of the answer a folded series was
+    /// waiting on, and ask its first stretch.
+    ///
+    /// Bars of a week or a month are asked whole under the id the caller
+    /// named, as before: a gateway asks those along the history too, split at
+    /// every split and joined again bar by bar, which this client does not.
+    /// A request that cannot be asked along the history — a day in it that
+    /// cannot be read, or an end or a length this client cannot count — is
+    /// asked as it was made and filed as the venue serves it, not folded, as a
+    /// gateway sends the query it was given where it cannot cut the history.
+    fn ask_along(
+        &mut self, req_id: u32, body: &str,
+        hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState,
+    ) {
+        use crate::control::historical::{BarSize, Stretch, along};
+        let Some(pos) = self.held.iter().position(|a| a.req_id == req_id) else { return };
+        let Some(req) = self.held[pos].along.asked.clone() else { return };
+        let plan = if req.bar_size.seconds() > BarSize::Day1.seconds() {
+            Ok((vec![Stretch::whole(&req)], None))
+        } else {
+            let today = jiff::Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC).date();
+            crate::control::adjustments::id_history(body, today, &shared.reference.enabled_features())
+                .and_then(|history| {
+                    // An answer that states no id is about the one asked for,
+                    // over every day there is.
+                    let history = if history.is_empty() {
+                        vec![crate::control::adjustments::IdStretch {
+                            con_id: req.con_id, start: "-1".into(), end: "-1".into(),
+                            symbol: String::new(), exchange: String::new(),
+                        }]
+                    } else {
+                        history
+                    };
+                    along(&req, &history)
+                })
+        };
+        let (stretches, days) = match plan {
+            Ok(plan) => plan,
+            Err(why) => {
+                log::warn!("req_id={req_id} is asked as it was made, and not folded: {why}");
+                self.held[pos].fold = Fold::None;
+                (vec![Stretch::whole(&req)], None)
+            }
+        };
+        if stretches.is_empty() {
+            // Nothing of the history falls within the request. A gateway
+            // answers this where the history is one stretch; where it is more,
+            // it notes the chain is empty and answers nothing, and this client
+            // answers both the one way.
+            let why = format!(
+                "HMDS query returned no data: {}", crate::control::historical::graph_name(&req),
+            );
+            log::warn!("req_id={req_id}: {why}");
+            self.held.remove(pos);
+            if self.keep_up_to_date_reqs.remove(&req_id) {
+                self.withdraw_the_stream_half(req_id, hmds_conn, hb);
+            }
+            super::push_hmds_error(shared, req_id, why, true);
+            return;
+        }
+        let along = &mut self.held[pos].along;
+        along.stretches = stretches.into();
+        along.days = days;
+        self.ask_next_stretch(req_id, hmds_conn, hb, shared);
+    }
+
+    /// Ask the next stretch of a held series, where one is still wanted.
+    ///
+    /// Every stretch after the first states the step the first answer stated.
+    /// A series of days asked along more than one stretch asks each later one
+    /// for the days it still wants, back from where the stretch ends, the last
+    /// of them cut at the day the series reaches back to — and asks nothing
+    /// more once they are all in. Answered false when nothing was asked: the
+    /// series is whole.
+    fn ask_next_stretch(
+        &mut self, req_id: u32,
+        hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState,
+    ) -> bool {
+        let Some(entry) = self.held.iter_mut().find(|a| a.req_id == req_id) else { return false };
+        let along = &mut entry.along;
+        let (Some(req), Some(mut stretch)) = (along.asked.clone(), along.stretches.pop_front()) else {
+            return false;
+        };
+        if let Some(step) = &along.step {
+            if let Some(days) = &along.days {
+                if days.left <= 0 {
+                    along.stretches.clear();
+                    return false;
+                }
+                stretch.start_time = None;
+                stretch.time_length = Some(days.length());
+                if along.stretches.is_empty() {
+                    stretch.cutoff_date = Some(days.from.clone());
+                }
+            }
+            stretch.approx_step = Some(step.clone());
+        }
+        self.ask_stretch(req_id, &req, &stretch, hmds_conn, hb, shared);
         true
     }
 
     /// Hold one page of a series, and file the series once its last page is
     /// in — ordered, on one zone, and folded if it was asked for adjusted.
+    ///
+    /// A series asked along its contract's id history is whole once the last
+    /// stretch's last page is: the end of each earlier stretch asks the next.
     fn hold_bars(
         &mut self,
         req_id: u32,
         resp: crate::control::historical::HistoricalResponse,
+        step: Option<&str>,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         shared: &SharedState,
@@ -2235,13 +2378,27 @@ fn build_tbt_query(
         let Some(pos) = self.held.iter().position(|a| a.req_id == req_id) else {
             return;
         };
+        let held = &mut self.held[pos];
         // The zone is stated once beside the bars; the first non-empty one is
         // the series's own.
-        if self.held[pos].timezone.is_empty() && !resp.timezone.is_empty() {
-            self.held[pos].timezone = resp.timezone;
+        if held.timezone.is_empty() && !resp.timezone.is_empty() {
+            held.timezone = resp.timezone;
         }
-        self.held[pos].bars.extend(resp.bars);
-        if resp.is_complete {
+        // The step the first answer states is the one every later stretch
+        // states, a day where it states none.
+        if held.along.step.is_none() {
+            held.along.step = Some(step.unwrap_or("1d").to_string());
+        }
+        // A series of days counts each day it holds against the days wanted.
+        if let Some(days) = &mut held.along.days {
+            for bar in &resp.bars {
+                if held.along.seen.insert(bar.time.chars().take(8).collect()) {
+                    days.left -= 1;
+                }
+            }
+        }
+        held.bars.extend(resp.bars);
+        if resp.is_complete && !self.ask_next_stretch(req_id, hmds_conn, hb, shared) {
             self.held[pos].complete = true;
         }
         // Oldest first, as the reference client delivers them. The venue pages
@@ -2275,43 +2432,11 @@ fn build_tbt_query(
                 );
             }
         }
-        // A series that is to be folded asks for its actions once, when the
-        // last page is in and the first bar is the oldest. Asked on the first
-        // bar to arrive, the range began after a split the series crossed and
-        // came back without it, and the fold ran with nothing to apply — three
-        // years of a contract that split ten for one were handed back raw
-        // under the adjusted name, with no error. It runs to today rather than
-        // to the last bar, because a split after the last bar moves the whole
-        // series.
-        if self.held[pos].complete
-            && self.held[pos].fold != Fold::None
-            && !self.held[pos].actions_asked
-            && let Some(from) = self.held[pos].bars.first()
-                .map(|b| b.time.chars().take(8).collect::<String>())
-        {
-            let today: String =
-                chrono_free_timestamp().chars().take(8).collect();
-            let (con_id, sec_type, exchange) = {
-                let a = &self.held[pos];
-                (a.con_id, a.sec_type.clone(), a.exchange.clone())
-            };
-            self.held[pos].actions_asked = true;
-            let sent_under = self.send_adjustments_request(
-                req_id, con_id, &sec_type, &exchange, &from, &today, shared, hmds_conn, hb,
-            );
-            // The answer, when it comes, names the query and not the request;
-            // this is what tells the series' own answer from a standalone
-            // request that shares the caller's number. Where the send failed
-            // the hold is already gone, let go where that is stated.
-            if let Some(entry) = self.held.iter_mut().find(|a| a.req_id == req_id) {
-                entry.actions_query = sent_under;
-            }
-        }
         self.try_file_held(req_id, hmds_conn, hb, shared, event_tx);
     }
 
-    /// File a held series once it is whole — and, if it is to be folded, once
-    /// the contract's actions are in hand and it is folded.
+    /// File a held series once it is whole, folded where it is to be: its
+    /// bars are asked once the contract's actions are in hand.
     ///
     /// Filed as one complete response, which the dispatch pass delivers bar by
     /// bar and then ends. A fold that cannot be made — an action this client
@@ -2325,16 +2450,7 @@ fn build_tbt_query(
         let Some(pos) = self.held.iter().position(|a| a.req_id == req_id) else {
             return;
         };
-        let entry = &self.held[pos];
-        if !entry.complete {
-            return;
-        }
-        // A series with bars that is to be folded waits for the actions those
-        // bars are scaled by. One with none needs no actions — there is
-        // nothing to scale, and the query is only sent for a first bar that
-        // never came — so it is filed empty rather than held for an answer
-        // nothing asked for, which is what the waiting call does with it.
-        if entry.fold != Fold::None && !entry.bars.is_empty() && entry.actions.is_none() {
+        if !self.held[pos].complete {
             return;
         }
         let entry = self.held.remove(pos);

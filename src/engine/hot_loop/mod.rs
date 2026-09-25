@@ -8430,10 +8430,9 @@ mod tests {
                 hl.hmds.pending_adjustments.swap(0, 1);
             }
             hl.hmds.held.push(hmds::HeldSeries {
-                req_id: 7, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-                bars: Vec::new(), timezone: String::new(), actions_asked: true,
+                req_id: 7, bars: Vec::new(), timezone: String::new(),
                 actions_query: Some("adj_historical".into()), fold: hmds::Fold::Adjusted,
-                actions: None, complete: true,
+                actions: None, complete: true, along: Default::default(),
             });
             let (tx, rx) = std::sync::mpsc::sync_channel(4);
             hl.set_control_rx(rx);
@@ -8485,10 +8484,9 @@ mod tests {
             ("adj_historical".into(), 7, 756733), ("adj_standalone".into(), 7, 265598),
         ];
         hl.hmds.held.push(hmds::HeldSeries {
-            req_id: 7, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-            bars: Vec::new(), timezone: String::new(), actions_asked: true,
+            req_id: 7, bars: Vec::new(), timezone: String::new(),
             actions_query: Some("adj_historical".into()), fold: hmds::Fold::Adjusted,
-            actions: None, complete: true,
+            actions: None, complete: true, along: Default::default(),
         });
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);

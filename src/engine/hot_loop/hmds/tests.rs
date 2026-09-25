@@ -198,8 +198,8 @@ fn segmented_bar_reply_completes_on_eoq_true() {
     let mut conn: Option<Connection> = None;
     hmds.pending_historical.push(("q7".to_string(), 21));
     hmds.held.push(HeldSeries {
-        req_id: 21, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, actions: None, complete: false,
+        req_id: 21, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None, complete: false,
+        along: Default::default(),
     });
 
     hmds.process_hmds_message(&make_bar_msg("q7", false), &mut conn, &shared, &None, &mut hb);
@@ -250,8 +250,8 @@ fn query_error_releases_historical_and_emits_error_and_end_sentinel() {
     // or the caller is answered with the error and then left waiting on a
     // series that will never complete.
     hmds.held.push(HeldSeries {
-        req_id: 11, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, actions: None, complete: false,
+        req_id: 11, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None, complete: false,
+        along: Default::default(),
     });
     hmds.process_hmds_message(&make_bar_msg("hist_1003", false), &mut conn, &shared, &None, &mut hb);
 
@@ -476,10 +476,14 @@ fn adj_bar_msg(query_id: &str, day: &str, close: f64, eoq: bool) -> Vec<u8> {
 /// shape a live session was answered with: the query as XML on tag 6118, the
 /// rows as text on tag 96, a name on its own line and its record under it.
 fn conadj_msg(query_id: &str, con_id: u32, action_rows: &str) -> Vec<u8> {
+    conadj_reply(query_id, &format!("conc\n{con_id},-1,-1\n{action_rows}\n"))
+}
+
+/// The same reply carrying the body given, whole.
+fn conadj_reply(query_id: &str, body: &str) -> Vec<u8> {
     let echoed = format!(
         "<ListOfQueries><ConAdjQuery><id>{query_id}</id></ConAdjQuery></ListOfQueries>",
     );
-    let body = format!("conc\n{con_id},-1,-1\n{action_rows}\n");
     let mut msg = Vec::new();
     msg.extend_from_slice(b"35=U\x016040=10022\x016118=");
     msg.extend_from_slice(echoed.as_bytes());
@@ -489,67 +493,264 @@ fn conadj_msg(query_id: &str, con_id: u32, action_rows: &str) -> Vec<u8> {
     msg
 }
 
-/// The adjusted callback path holds its raw trades until the contract's actions
-/// are in hand, then folds and files them complete on one scale. The bars go up
-/// only once the split that moves them is known, so a caller is never handed a
-/// pre-split price on the post-split scale.
-#[test]
-fn an_adjusted_request_folds_its_raw_trades_before_it_files_them() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
-    peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-
-    // A request for a contract, asked for adjusted, already on the wire as raw
-    // trades: the raw query on `pending_historical`, the hold beside it.
-    hmds.pending_historical.push(("hist_1".to_string(), 42));
-    hmds.held.push(HeldSeries {
-        req_id: 42, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, fold: Fold::Adjusted,
-        actions: None, complete: false,
-    });
-
-    // One complete daily bar, dated before a ten-for-one split.
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
+/// A month of a stock's daily bars asked for through the engine under 42, the
+/// actions it asks for first answered with `body`: the name the bars are then
+/// asked under.
+fn folded_and_answered(
+    hmds: &mut HmdsState, conn: &mut Option<Connection>, peer: &mut std::net::TcpStream,
+    shared: &SharedState, hb: &mut HeartbeatState, what_to_show: &str, body: &str,
+) -> String {
+    hmds.send_historical_request_ex(
+        42, 756733, "", "1 M", "1 day", what_to_show, true, false, false,
+        "NVDA", "STK", "SMART", conn, hb, shared,
     );
-
-    // Nothing is filed: the actions are not in hand, so no bar can be scaled.
-    assert!(
-        shared.reference.drain_historical_data().is_empty(),
-        "a raw bar was handed over before the series was on one scale",
-    );
-    // And the actions were asked for, on the first bar.
-    let sent = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
-    assert!(sent.contains("10020"), "the first bar did not ask for the contract's actions: {sent}");
+    let sent = String::from_utf8_lossy(&read_frame(peer)).to_string();
+    assert!(sent.contains("10020"), "the actions are asked for before the bars: {sent}");
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
         .map(|(q, _, _)| q.clone())
         .expect("the actions query is outstanding under this request");
+    hmds.process_hmds_message(&conadj_reply(&qid, body), conn, shared, &None, hb);
+    let _ = read_frame(peer);
+    hmds.pending_historical.iter().find(|(_, rid)| *rid == 42)
+        .map(|(q, _)| q.clone())
+        .expect("and the bars once they are in")
+}
 
-    // The venue states a ten-for-one split after that bar.
-    hmds.process_hmds_message(
-        &conadj_msg(&qid, 756733, "SS\n20240610,10"), &mut conn, &shared, &None, &mut hb,
+/// One complete page of bars, a bar at each stamp given at the close given,
+/// and the step the answer states where it states one.
+fn page_of_bars(query_id: &str, bars: &[(&str, f64)], step: Option<&str>) -> Vec<u8> {
+    let bars: String = bars.iter().map(|(at, close)| {
+        // A bar of a day is dated, and a shorter one timed.
+        let stamp = if at.contains('-') { "time" } else { "date" };
+        format!(
+            "<Bar><{stamp}>{at}</{stamp}><open>{close}</open><close>{close}</close>\
+             <high>{close}</high><low>{close}</low><weightedAvg>{close}</weightedAvg>\
+             <volume>100</volume><count>5</count></Bar>",
+        )
+    }).collect();
+    let step = step.map_or(String::new(), |s| format!("<approxStep>{s}</approxStep>"));
+    let xml = format!(
+        "<ResultSetBar><id>{query_id}</id><eoq>true</eoq><tz>US/Eastern</tz>{step}<Events>{bars}\
+         </Events></ResultSetBar>",
     );
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"35=W\x016118=");
+    msg.extend_from_slice(xml.as_bytes());
+    msg.push(0x01);
+    msg
+}
 
-    // Now the folded series is filed, complete, on the scale it trades on now.
-    let filed = shared.reference.drain_historical_data();
-    assert_eq!(filed.len(), 1, "the folded series is filed once, complete");
-    assert_eq!(filed[0].0, 42);
-    assert!(filed[0].1.is_complete, "and it says it is the whole answer");
-    let bar = &filed[0].1.bars[0];
-    assert!(
-        (bar.close - 120.888).abs() < 1e-6,
-        "the pre-split close was not put on the split's scale: {}", bar.close,
-    );
-    assert_eq!(bar.volume, 1000, "the shares before the split count for ten times as many");
-    assert!(hmds.held.is_empty(), "the hold is released once folded");
+/// A contract whose id changed is asked along its id history, as a gateway
+/// asks it: the actions first, over the range a gateway asks them over for a
+/// request made through the API; then one query per stretch of the history,
+/// the newest first and from the day its id began, the next once the last is
+/// in — under the id it traded as, naming the caller's id where that is
+/// another, as expired where it is an older id that is not the caller's,
+/// bounded to its own days, naming the ticker and the listing it traded under
+/// where a gateway names them, and stating the step the first answer stated.
+/// The answers are one series, and a split dated after the change moves the
+/// bars of both ids.
+///
+/// Every row is bounded by hand from a gateway's rules:
+///
+/// - Thirty days back from the fourteenth of June 2024 is counted as
+///   forty-three calendar days, to the second of May. The old id's last stated
+///   day, the thirty-first, is carried to the day before the new one began.
+///   Three days are in once the newest answers, so twenty-seven are still
+///   wanted, asked as thirty-eight calendar days; its listing is one a gateway
+///   leaves out.
+/// - Five days of five-minute bars asked under the old id, back from the
+///   fourth of June, reach back seven calendar days, to the twenty-eighth of
+///   May at the hour asked; the old id's stretch is asked from there to the
+///   end of its last day, with no length, under its own ticker and listing.
+/// - Three days asked along two ids, all three of them answered by the newest:
+///   the older is not asked.
+/// - Two ids both stated open at the end are ordered with the older first, as
+///   a gateway's sort orders them, and the whole request is asked under it:
+///   an older stretch left open is not asked.
+/// - A request that ends before the only id it could be asked under began is
+///   answered that nothing is there, and nothing is asked.
+/// - A stretch answered with no bar ends the series all the same.
+/// - Bars of a week are asked whole under the caller's id.
+/// - A request whose end this client cannot read is asked as it was made, and
+///   what comes back is filed as the venue served it.
+#[test]
+fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
+    struct Asked {
+        states: &'static [&'static str],
+        omits: &'static [&'static str],
+        answered: &'static [(&'static str, f64)],
+        step: Option<&'static str>,
+    }
+    let split_after_the_change = "conc\n222,20240603,-1\n111,-1,20240531\nSS\n20240610,2\n";
+    type Filed = Result<&'static [(&'static str, f64, i64)], &'static str>;
+    // What the row is, the caller's id, its end, length and bar, the actions'
+    // answer, each stretch as asked, and what is filed or why it is not.
+    type Row = (&'static str, u32, &'static str, &'static str, &'static str, &'static str, &'static [Asked], Filed);
+    let rows: [Row; 8] = [
+        ("days along two ids", 222, "20240614-20:00:00", "30 D", "1 day",
+         "conc\n222,20240603,-1\n111,-1,20240531\nconexch\n111,VALUE,20240531\nSS\n20240610,2\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<expired>no</expired>",
+                          "<endTime>20240614-20:00:00</endTime>", "<cutoffDate>20240603</cutoffDate>",
+                          "<timeLength>30 d</timeLength>"],
+                omits: &["startTime", "liveContractID", "approxStep"],
+                answered: &[("20240603", 104.0), ("20240607", 106.0), ("20240613", 55.0)],
+                step: None,
+            },
+            Asked {
+                states: &["<contractID>111</contractID>", "<liveContractID>222</liveContractID>",
+                          "<expired>yes</expired>", "<endTime>20240603-00:00:00</endTime>",
+                          "<timeLength>38 d</timeLength>", "<cutoffDate>20240502</cutoffDate>",
+                          "<approxStep>1d</approxStep>"],
+                omits: &["startTime", "histListExch"],
+                answered: &[("20240529", 100.0), ("20240531", 102.0)],
+                step: None,
+            },
+         ], Ok(&[
+            ("20240529", 50.0, 200), ("20240531", 51.0, 200), ("20240603", 52.0, 200),
+            ("20240607", 53.0, 200), ("20240613", 55.0, 100),
+         ])),
+        ("minutes under the old id", 111, "20240604-20:00:00", "5 D", "5 mins",
+         "conc\n222,20240603,-1\n111,-1,20240531\nconsym\n111,FB,20240531\n\
+          conexch\n111,NASDAQ,20240531\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<liveContractID>111</liveContractID>",
+                          "<expired>no</expired>", "<endTime>20240604-20:00:00</endTime>",
+                          "<cutoffDate>20240603</cutoffDate>", "<timeLength>5 d</timeLength>"],
+                omits: &["startTime", "approxStep", "histUnderlying", "histListExch"],
+                answered: &[("20240603-13:30:00", 50.0), ("20240604-19:55:00", 51.0)],
+                step: Some("300"),
+            },
+            Asked {
+                states: &["<contractID>111</contractID>", "<expired>no</expired>",
+                          "<startTime>20240528-20:00:00</startTime>",
+                          "<endTime>20240603-00:00:00</endTime>",
+                          "<histUnderlying>FB</histUnderlying>", "<histListExch>NASDAQ</histListExch>",
+                          "<approxStep>300</approxStep>"],
+                omits: &["liveContractID", "timeLength", "cutoffDate"],
+                answered: &[("20240531-19:55:00", 49.0)],
+                step: None,
+            },
+         ], Ok(&[
+            ("20240531-19:55:00", 49.0, 100), ("20240603-13:30:00", 50.0, 100),
+            ("20240604-19:55:00", 51.0, 100),
+         ])),
+        ("every day in from the newest", 222, "20240614-20:00:00", "3 D", "1 day",
+         "conc\n222,20240612,-1\n111,-1,20240611\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<cutoffDate>20240612</cutoffDate>",
+                          "<timeLength>3 d</timeLength>"],
+                omits: &["liveContractID"],
+                answered: &[("20240612", 10.0), ("20240613", 11.0), ("20240614", 12.0)],
+                step: None,
+            },
+         ], Ok(&[("20240612", 10.0, 100), ("20240613", 11.0, 100), ("20240614", 12.0, 100)])),
+        ("two ids stated open", 222, "20240614-20:00:00", "5 D", "1 day",
+         "conc\n222,20200601,-1\n111,-1,-1\n", &[
+            Asked {
+                states: &["<contractID>111</contractID>", "<liveContractID>222</liveContractID>",
+                          "<expired>no</expired>", "<timeLength>5 d</timeLength>"],
+                omits: &["cutoffDate", "startTime"],
+                answered: &[("20240613", 20.0), ("20240614", 21.0)],
+                step: None,
+            },
+         ], Ok(&[("20240613", 20.0, 100), ("20240614", 21.0, 100)])),
+        ("nothing within the request", 222, "20240531-20:00:00", "5 D", "1 day",
+         "conc\n222,20240603,-1\n", &[], Err("HMDS query returned no data: NEWCO@BEST Last")),
+        ("no bar at all", 222, "20240614-20:00:00", "5 D", "1 day", "conc\n222,-1,-1\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<timeLength>5 d</timeLength>"],
+                omits: &["cutoffDate"],
+                answered: &[],
+                step: None,
+            },
+         ], Ok(&[])),
+        ("weeks", 222, "20240614-20:00:00", "1 Y", "1 week", split_after_the_change, &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<timeLength>1 y</timeLength>"],
+                omits: &["cutoffDate", "liveContractID"],
+                answered: &[("20240614", 60.0)],
+                step: None,
+            },
+         ], Ok(&[("20240614", 60.0, 100)])),
+        ("an end this client cannot read", 222, "20240614 16:00:00 Foo/Bar", "30 D", "1 day",
+         split_after_the_change, &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<timeLength>30 d</timeLength>"],
+                omits: &["cutoffDate", "liveContractID"],
+                answered: &[("20240607", 106.0)],
+                step: None,
+            },
+         ], Ok(&[("20240607", 106.0, 100)])),
+    ];
+    let sent = |peer: &mut std::net::TcpStream| String::from_utf8_lossy(&read_frame(peer)).to_string();
+    for (what, caller, end, duration, bar_size, history, asked, filed) in rows {
+        let (conn, mut peer) = Connection::for_test();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(conn);
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+
+        hmds.send_historical_request_ex(
+            42, caller.into(), end, duration, bar_size, "TRADES", true, false, false,
+            "NEWCO", "STK", "SMART", &mut conn, &mut hb, &shared,
+        );
+        let actions = sent(&mut peer);
+        let today: String = chrono_free_timestamp().chars().take(8).collect();
+        assert!(
+            actions.contains("10020") && actions.contains(&format!("<contractID>{caller}</contractID>"))
+                && actions.contains("<startDate>19800101</startDate>")
+                && actions.contains(&format!("<endDate>{today}</endDate>")),
+            "{what}: the actions go first, from 1980 to today: {actions}",
+        );
+        assert!(hmds.pending_historical.is_empty(), "{what}: and no bar is asked for before they answer");
+        let qid = hmds.pending_adjustments[0].0.clone();
+        hmds.process_hmds_message(&conadj_reply(&qid, history), &mut conn, &shared, &None, &mut hb);
+
+        let mut before = None;
+        for (n, stretch) in asked.iter().enumerate() {
+            let query = sent(&mut peer);
+            for wanted in stretch.states {
+                assert!(query.contains(wanted), "{what}, stretch {n} states {wanted}: {query}");
+            }
+            for unwanted in stretch.omits {
+                assert!(!query.contains(unwanted), "{what}, stretch {n} states no {unwanted}: {query}");
+            }
+            let answering = hmds.pending_historical.iter().find(|(_, rid)| *rid == 42)
+                .map(|(q, _)| q.clone()).expect("the number answers the stretch asked");
+            assert_ne!(before.replace(answering.clone()), Some(answering.clone()), "{what}: a query of its own");
+            assert!(shared.reference.drain_historical_data().is_empty(), "{what}: not whole before the last");
+            hmds.process_hmds_message(
+                &page_of_bars(&answering, stretch.answered, stretch.step), &mut conn, &shared, &None, &mut hb,
+            );
+        }
+
+        let series = shared.reference.drain_historical_data();
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(series.len(), 1, "{what}: the stretches are filed as one series, or ended");
+        assert!(series[0].1.is_complete, "{what}: and it says it is the whole answer");
+        let bars: Vec<(String, f64, i64)> =
+            series[0].1.bars.iter().map(|b| (b.time.clone(), b.close, b.volume)).collect();
+        match filed {
+            Ok(wanted) => {
+                let wanted: Vec<(String, f64, i64)> =
+                    wanted.iter().map(|(at, close, volume)| (at.to_string(), *close, *volume)).collect();
+                assert_eq!(bars, wanted, "{what}: oldest first across the stretches");
+                assert!(errors.is_empty(), "{what}: {errors:?}");
+            }
+            Err(why) => {
+                assert!(bars.is_empty(), "{what}: {bars:?}");
+                assert_eq!(errors.len(), 1, "{what}: {errors:?}");
+                assert_eq!((errors[0].0, errors[0].1, errors[0].2.as_str()), (42, 162, why), "{what}");
+            }
+        }
+        assert!(
+            hmds.pending_historical.is_empty() && hmds.held.is_empty(),
+            "{what}: and nothing more is asked or held",
+        );
+    }
 }
 
 /// A series is folded with the actions dated up to the day it is folded on,
@@ -558,8 +759,6 @@ fn an_adjusted_request_folds_its_raw_trades_before_it_files_them() {
 /// refused by the fold rather than dropped as one after it.
 #[test]
 fn a_series_is_folded_with_the_actions_up_to_today_and_none_after() {
-    use crate::protocol::connection::Connection;
-
     let day = |days: i64| {
         jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date()
             .checked_add(jiff::Span::new().days(days)).unwrap()
@@ -574,28 +773,19 @@ fn a_series_is_folded_with_the_actions_up_to_today_and_none_after() {
         (&["NOINEFFECTCONCQUERY"][..], day(2), Some(1208.88)),
         (&[][..], format!("{}9", day(2)), None),
     ] {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut peer, _) = listener.accept().unwrap();
+        let (conn, mut peer) = Connection::for_test();
         peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-        let mut conn = Some(Connection::new_raw(sock).unwrap());
+        let mut conn = Some(conn);
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
         let mut hb = HeartbeatState::new();
-        hmds.pending_historical.push(("hist_1".to_string(), 42));
-        hmds.held.push(HeldSeries {
-            req_id: 42, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-            bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
-            fold: Fold::Adjusted, actions: None, complete: false,
-        });
-        hmds.process_hmds_message(
-            &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
+        let bars = folded_and_answered(
+            &mut hmds, &mut conn, &mut peer, &shared, &mut hb, "ADJUSTED_LAST",
+            &format!("conc\n756733,-1,-1\nSS\n{dated},10\n"),
         );
-        read_frame(&mut peer);
-        let qid = hmds.pending_adjustments[0].0.clone();
         hmds.process_hmds_message(
-            &conadj_msg(&qid, 756733, &format!("SS\n{dated},10")), &mut conn, &shared, &None, &mut hb,
+            &adj_bar_msg(&bars, "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
         );
         let filed = shared.reference.drain_historical_data().first()
             .and_then(|(_, h)| h.bars.first()).map(|bar| bar.close);
@@ -611,7 +801,7 @@ fn a_series_is_folded_with_the_actions_up_to_today_and_none_after() {
 }
 
 /// A contract with no corporate action to its name is answered with the echoed
-/// query and nothing else, and that answer completes the series waiting on it.
+/// query and nothing else, and that answer is the one its bars are asked on.
 ///
 /// The venue states a contract only where it has a record against it, so a
 /// future is answered with an empty reply. Read as naming the wrong contract,
@@ -620,30 +810,16 @@ fn a_series_is_folded_with_the_actions_up_to_today_and_none_after() {
 /// series had ended.
 #[test]
 fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    hmds.pending_historical.push(("hist_1".to_string(), 42));
-    hmds.held.push(HeldSeries {
-        req_id: 42, con_id: 649180671, sec_type: "FUT".into(), exchange: "CME".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
-        fold: Fold::Adjusted, actions: None, complete: false,
-    });
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240607", 5000.0, true), &mut conn, &shared, &None, &mut hb,
-    );
-    assert!(
-        shared.reference.drain_historical_data().is_empty(),
-        "nothing is filed before the actions are in hand",
+    hmds.send_historical_request_ex(
+        42, 649180671, "", "1 D", "5 mins", "TRADES", true, false, false,
+        "ES", "FUT", "CME", &mut conn, &mut hb, &shared,
     );
     let _ = read_frame(&mut peer);
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
@@ -659,13 +835,21 @@ fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
     msg.extend_from_slice(b"\x0196=200\n\n");
     msg.push(0x01);
     hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+    assert!(hmds.pending_adjustments.is_empty(), "the query is no longer outstanding");
+
+    let bars = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
+    assert!(
+        bars.contains("<contractID>649180671</contractID>") && !bars.contains("cutoffDate"),
+        "the bars are asked whole under the contract asked about: {bars}",
+    );
+    let asked = hmds.pending_historical[0].0.clone();
+    hmds.process_hmds_message(&make_bar_msg(&asked, true), &mut conn, &shared, &None, &mut hb);
 
     let filed = shared.reference.drain_historical_data();
     assert_eq!(filed.len(), 1, "the series is filed on an answer that states no action");
     assert_eq!(filed[0].0, 42);
     assert!(filed[0].1.is_complete, "and it says it is the whole answer");
     assert!(hmds.held.is_empty(), "the hold is released");
-    assert!(hmds.pending_adjustments.is_empty(), "and the query is no longer outstanding");
 }
 
 /// When the venue refuses the actions the adjusted series needs, the request is
@@ -674,27 +858,16 @@ fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
 /// waiting on a fold that will never come.
 #[test]
 fn an_adjusted_request_whose_actions_are_refused_is_a_stated_refusal() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    hmds.pending_historical.push(("hist_1".to_string(), 42));
-    hmds.held.push(HeldSeries {
-        req_id: 42, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, fold: Fold::Adjusted,
-        actions: None, complete: false,
-    });
-
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
+    hmds.send_historical_request_ex(
+        42, 756733, "", "1 M", "1 day", "ADJUSTED_LAST", true, false, false,
+        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
     );
     let _ = read_frame(&mut peer);
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
@@ -706,6 +879,7 @@ fn an_adjusted_request_whose_actions_are_refused_is_a_stated_refusal() {
     );
 
     assert!(hmds.held.is_empty(), "the hold is dropped, not left waiting");
+    assert!(hmds.pending_historical.is_empty(), "and no bar is asked for");
     let errors = shared.reference.drain_historical_errors();
     assert_eq!(errors.len(), 1, "the caller is told why");
     assert_eq!(errors[0].0, 42);
@@ -721,29 +895,20 @@ fn an_adjusted_request_whose_actions_are_refused_is_a_stated_refusal() {
 /// five-second stream beside it. What fails the request fails the stream with
 /// it — the batch refusal says so and withdraws it. A refusal of the actions
 /// the fold is waiting on ends the request just as finally, and left standing
-/// the bars go on arriving under a number the caller has been told failed,
-/// while the entry holding that number refuses every later request under it as
-/// a duplicate of a stream that is not running.
+/// the bars go on arriving under a number the caller has been told failed.
 #[test]
 fn a_kept_up_to_date_request_refused_on_its_actions_takes_its_stream_with_it() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    hmds.pending_historical.push(("hist_1".to_string(), 42));
-    hmds.held.push(HeldSeries {
-        req_id: 42, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
-        fold: Fold::Adjusted, actions: None, complete: false,
-    });
+    hmds.send_historical_request_ex(
+        42, 756733, "", "1 D", "5 mins", "TRADES", true, false, false,
+        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
+    );
     // The stream half, as a request asked to be kept up to date carries one.
     hmds.keep_up_to_date_reqs.insert(42);
     hmds.rtbar_subs.push(("rt_1".to_string(), 42, Some(9001), 0.01, 1.0));
@@ -752,10 +917,6 @@ fn a_kept_up_to_date_request_refused_on_its_actions_takes_its_stream_with_it() {
         daily_session: None,
         bar: crate::types::RealTimeBar::default(), weighted: 0.0,
     });
-
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
-    );
     let _ = read_frame(&mut peer);
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
         .map(|(q, _, _)| q.clone()).expect("the actions query is outstanding");
@@ -770,53 +931,6 @@ fn a_kept_up_to_date_request_refused_on_its_actions_takes_its_stream_with_it() {
     );
     assert!(hmds.rtbar_subs.is_empty(), "and its subscription record stands: {:?}", hmds.rtbar_subs.len());
     assert!(hmds.forming_bars.is_empty(), "and its part-built bar goes on folding");
-    assert!(
-        !hmds.pending_historical.iter().any(|(_, r)| *r == 42),
-        "the number stays reserved, so every later request under it is refused \
-         as a duplicate for the rest of the session",
-    );
-}
-
-/// A series that comes back with no bars has nothing to fold, and the actions
-/// query only goes out on a first bar that never came. It is ended straight
-/// away rather than held for an answer nothing asked for — the empty series the
-/// waiting call hands back, on the callback path.
-#[test]
-fn an_adjusted_request_with_no_bars_ends_without_asking_for_actions() {
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    // Nothing is sent, so no socket is needed.
-    let mut conn: Option<crate::protocol::connection::Connection> = None;
-
-    hmds.pending_historical.push(("hist_1".to_string(), 42));
-    hmds.held.push(HeldSeries {
-        req_id: 42, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, fold: Fold::Adjusted,
-        actions: None, complete: false,
-    });
-
-    // The venue answers the series complete with no bars.
-    let empty = {
-        let xml = "<ResultSetBar><id>hist_1</id><eoq>true</eoq><tz>UTC</tz>\
-                   <Events></Events></ResultSetBar>";
-        let mut msg = Vec::new();
-        msg.extend_from_slice(b"35=W\x016118=");
-        msg.extend_from_slice(xml.as_bytes());
-        msg.push(0x01);
-        msg
-    };
-    hmds.process_hmds_message(&empty, &mut conn, &shared, &None, &mut hb);
-
-    assert!(hmds.held.is_empty(), "nothing is held for a series with nothing to fold");
-    assert!(
-        hmds.pending_adjustments.iter().all(|(_, rid, _)| *rid != 42),
-        "no actions were asked for a series that has none to apply",
-    );
-    let filed = shared.reference.drain_historical_data();
-    assert_eq!(filed.len(), 1, "the empty series is filed complete");
-    assert!(filed[0].1.is_complete);
-    assert!(filed[0].1.bars.is_empty());
 }
 
 /// The vendor states its TRADES series as adjusted for splits, though the
@@ -825,55 +939,27 @@ fn an_adjusted_request_with_no_bars_ends_without_asking_for_actions() {
 /// volatility computed over that step is wrong. Measured against a contract
 /// that split ten for one on 2024-06-10, where the close before was 1208.88
 /// and the close after 121.79. The request asks for the raw trades, and the
-/// venue's answer is held for the contract's actions and folded with the ones
-/// that move the scale before a bar is handed over.
+/// venue's answer is folded with the actions that move the scale before a bar
+/// is handed over.
 #[test]
 fn a_trades_request_is_folded_with_the_actions_that_move_the_scale() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    hmds.send_historical_request_ex(
-        42, 756733, "", "1 D", "1 day", "TRADES", true, false, false,
-        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
-    );
-    let sent = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
-    assert!(sent.contains("hist_1000"), "the bar query went out: {sent}");
-
-    // One complete daily bar, dated before the split.
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1000", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
-    );
-
-    // Nothing is filed: the actions are not in hand, so no bar can be scaled.
-    assert!(
-        shared.reference.drain_historical_data().is_empty(),
-        "a raw bar was handed over before the series was on one scale",
-    );
-    // And the actions were asked for.
-    let sent = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
-    assert!(sent.contains("10020"), "the completed series did not ask for the contract's actions: {sent}");
-    let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
-        .map(|(q, _, _)| q.clone())
-        .expect("the actions query is outstanding under this request");
-
     // The venue states a cash dividend and a ten-for-one split. The dividend
     // is a payment out of the price rather than a restatement of it, so it
     // moves nothing; the split is what the series is folded with.
+    let bars = folded_and_answered(
+        &mut hmds, &mut conn, &mut peer, &shared, &mut hb, "TRADES",
+        "conc\n756733,-1,-1\nCD\n20240305,0.04,USD,20240221,20240306,20240327,R,NA\nSS\n20240610,10\n",
+    );
+    // One complete daily bar, dated before the split.
     hmds.process_hmds_message(
-        &conadj_msg(
-            &qid, 756733,
-            "CD\n20240305,0.04,USD,20240221,20240306,20240327,R,NA\nSS\n20240610,10",
-        ),
-        &mut conn, &shared, &None, &mut hb,
+        &adj_bar_msg(&bars, "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
     );
 
     let filed = shared.reference.drain_historical_data();
@@ -896,39 +982,21 @@ fn a_trades_request_is_folded_with_the_actions_that_move_the_scale() {
 /// path refuses the same shape; this states it for the default series too.
 #[test]
 fn a_trades_request_with_an_action_nobody_can_name_is_refused() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    // Asked under the documented default, which is TRADES.
-    hmds.send_historical_request_ex(
-        42, 756733, "", "1 D", "1 day", "", true, false, false,
-        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
+    // Asked under the documented default, which is TRADES; the venue names an
+    // action this client does not know.
+    let bars = folded_and_answered(
+        &mut hmds, &mut conn, &mut peer, &shared, &mut hb, "",
+        "conc\n756733,-1,-1\nZZ\n20240610,10,,20240522\n",
     );
-    let _ = read_frame(&mut peer);
-
     hmds.process_hmds_message(
-        &adj_bar_msg("hist_1000", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
-    );
-    assert!(
-        shared.reference.drain_historical_data().is_empty(),
-        "a raw bar was handed over before the series was on one scale",
-    );
-    let _ = read_frame(&mut peer);
-    let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
-        .map(|(q, _, _)| q.clone()).expect("the actions query is outstanding");
-
-    // The venue names an action this client does not know.
-    hmds.process_hmds_message(
-        &conadj_msg(&qid, 756733, "ZZ\n20240610,10,,20240522"), &mut conn, &shared, &None, &mut hb,
+        &adj_bar_msg(&bars, "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
     );
 
     assert!(hmds.held.is_empty(), "the hold is dropped, not left waiting");
@@ -979,70 +1047,6 @@ fn a_series_of_another_kind_is_filed_as_the_venue_served_it() {
     assert_eq!(bar.volume, 100, "nor to its count");
 }
 
-/// The venue pages a long series and the pages arrive newest first: the first
-/// page a caller sees is the most recent one, and the oldest bars come last.
-/// The actions a series is folded with are asked for from its earliest day,
-/// and that day is not on the first page. Opened on the first bar to arrive,
-/// the range began after the split and came back without it, and both paths
-/// folded three years of NVDA with nothing to apply — every bar handed back
-/// raw under the adjusted name, and no error anywhere.
-///
-/// Measured against the paper account and reproduced here through the real
-/// engine: two pages, newest first, the split between them.
-#[test]
-fn a_paged_series_asks_for_its_actions_from_its_earliest_day_not_its_first_page() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
-    peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-
-    hmds.pending_historical.push(("hist_1".to_string(), 42));
-    hmds.held.push(HeldSeries {
-        req_id: 42, con_id: 4815747, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, fold: Fold::Adjusted,
-        actions: None, complete: false,
-    });
-
-    // The newest page first, long after the split; then the last page, with a
-    // bar from before it.
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20251215", 180.0, false), &mut conn, &shared, &None, &mut hb,
-    );
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240606", 1209.98, true), &mut conn, &shared, &None, &mut hb,
-    );
-
-    // The actions query opens on the earliest day the series holds, which is
-    // the day of the split's own bar's predecessor — not the first page's.
-    let sent = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
-    assert!(sent.contains("10020"), "the actions were not asked for: {sent}");
-    assert!(
-        sent.contains("<startDate>20240606</startDate>"),
-        "the range opened on the first page rather than the earliest bar, so it \
-         cannot reach the split: {sent}",
-    );
-
-    // Answered with the split, the pre-split bar folds and the later one does not.
-    let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
-        .map(|(q, _, _)| q.clone()).expect("the actions query is outstanding");
-    hmds.process_hmds_message(
-        &conadj_msg(&qid, 4815747, "SS\n20240610,10"), &mut conn, &shared, &None, &mut hb,
-    );
-    let filed = shared.reference.drain_historical_data();
-    assert_eq!(filed.len(), 1);
-    // Oldest first: the pre-split bar leads, folded; the later one is untouched.
-    let closes: Vec<f64> = filed[0].1.bars.iter().map(|b| b.close).collect();
-    assert!((closes[0] - 120.998).abs() < 1e-6, "pre-split bar not folded: {closes:?}");
-    assert!((closes[1] - 180.0).abs() < 1e-9, "post-split bar must be untouched: {closes:?}");
-}
-
 /// One page of a bar reply, stating a zone or, given none, omitting the tag as
 /// the venue's later pages do.
 fn bar_page_msg(query_id: &str, eoq: bool, tz: &str) -> Vec<u8> {
@@ -1075,8 +1079,8 @@ fn a_page_that_states_no_zone_takes_the_one_the_series_stated() {
     let mut conn: Option<crate::protocol::connection::Connection> = None;
     hmds.pending_historical.push(("hist_1".to_string(), 7));
     hmds.held.push(HeldSeries {
-        req_id: 7, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, actions: None, complete: false,
+        req_id: 7, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None, complete: false,
+        along: Default::default(),
     });
 
     hmds.process_hmds_message(&bar_page_msg("hist_1", false, "US/Eastern"), &mut conn, &shared, &None, &mut hb);
@@ -1126,8 +1130,8 @@ fn a_paged_series_is_delivered_oldest_first_whatever_order_the_pages_arrive_in()
     let mut conn: Option<crate::protocol::connection::Connection> = None;
     hmds.pending_historical.push(("hist_1".to_string(), 7));
     hmds.held.push(HeldSeries {
-        req_id: 7, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, actions: None, complete: false,
+        req_id: 7, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None, complete: false,
+        along: Default::default(),
     });
 
     // Newest page first, oldest last, as the venue sends them.
@@ -2129,8 +2133,8 @@ fn an_unreadable_eoq_page_withdraws_the_stream_at_the_venue() {
     hmds.keep_up_to_date_reqs.insert(9);
     hmds.rtbar_subs.push(("hist_1".to_string(), 9, Some(4002), 0.01, 1.0));
     hmds.held.push(HeldSeries {
-        req_id: 9, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
+        req_id: 9, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None,
+        along: Default::default(),
         actions: None, complete: false,
     });
     let xml = "<ResultSetBar><id>hist_1</id><eoq>true</eoq><tz>US/Eastern</tz>\
@@ -2192,9 +2196,9 @@ fn a_series_that_cannot_be_folded_withdraws_the_stream_it_was_asked_for_alongsid
     hmds.keep_up_to_date_reqs.insert(9);
     hmds.rtbar_subs.push(("hist_1".to_string(), 9, Some(4002), 0.01, 1.0));
     hmds.held.push(HeldSeries {
-        req_id: 9, fold: Fold::Adjusted, con_id: 756733, sec_type: "STK".into(),
-        exchange: "SMART".into(), bars: Vec::new(), timezone: String::new(),
-        actions_asked: true, actions_query: None, complete: false,
+        req_id: 9, fold: Fold::Adjusted, bars: Vec::new(), timezone: String::new(),
+        along: Default::default(),
+        actions_query: None, complete: false,
         // An action the venue named and this client cannot classify. It may be
         // one that moves the scale, so the fold refuses rather than hand back
         // a raw price under an adjusted one's name.
@@ -2403,8 +2407,8 @@ fn a_refusal_of_another_query_leaves_a_held_series_alone() {
     hmds.keep_up_to_date_reqs.insert(7);
     hmds.rtbar_subs.push(("rt_2002".to_string(), 7, None, 0.01, 1.0));
     hmds.held.push(HeldSeries {
-        req_id: 7, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, actions: None,
+        req_id: 7, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None,
+        along: Default::default(),
         complete: false,
     });
     hmds.process_hmds_message(&make_bar_msg("hist_2001", false), &mut conn, &shared, &None, &mut hb);
@@ -2442,26 +2446,17 @@ fn a_refusal_of_another_query_leaves_a_held_series_alone() {
 /// query's actions — a different range, or a different contract entirely.
 #[test]
 fn a_standalone_actions_reply_is_not_folded_into_another_request_s_series() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    hmds.pending_historical.push(("hist_1".to_string(), 7));
-    hmds.held.push(HeldSeries {
-        req_id: 7, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
-        fold: Fold::Adjusted, actions: None, complete: false,
-    });
-
-    // The series completes, and the fold asks for its actions under its own id.
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
+    // The fold asks for its actions under its own id.
+    hmds.send_historical_request_ex(
+        7, 756733, "", "1 M", "1 day", "ADJUSTED_LAST", true, false, false,
+        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
     );
     let _ = read_frame(&mut peer);
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 7)
@@ -2476,10 +2471,7 @@ fn a_standalone_actions_reply_is_not_folded_into_another_request_s_series() {
 
     assert_eq!(hmds.held.len(), 1, "the series is still waiting on its own actions");
     assert!(hmds.held[0].actions.is_none(), "and holds no answer from another query");
-    assert!(
-        shared.reference.drain_historical_data().is_empty(),
-        "nothing is filed, folded with another query's actions",
-    );
+    assert!(hmds.pending_historical.is_empty(), "nor are its bars asked on another query's answer");
     assert_eq!(hmds.pending_adjustments.len(), 1, "the answered question is spent");
     assert_eq!(hmds.pending_adjustments[0].0, qid, "and the series' own still waits");
 }
@@ -2489,25 +2481,16 @@ fn a_standalone_actions_reply_is_not_folded_into_another_request_s_series() {
 /// answers are, on the query the hold itself sent.
 #[test]
 fn a_refusal_of_a_standalone_actions_query_leaves_the_fold_alone() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
+    let (conn, mut peer) = Connection::for_test();
     peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
+    let mut conn = Some(conn);
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
 
-    hmds.pending_historical.push(("hist_1".to_string(), 7));
-    hmds.held.push(HeldSeries {
-        req_id: 7, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
-        fold: Fold::Adjusted, actions: None, complete: false,
-    });
-
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
+    hmds.send_historical_request_ex(
+        7, 756733, "", "1 M", "1 day", "ADJUSTED_LAST", true, false, false,
+        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
     );
     let _ = read_frame(&mut peer);
 
@@ -2580,9 +2563,9 @@ fn a_series_whose_actions_could_not_be_asked_for_is_let_go() {
     let mut conn: Option<Connection> = None;
 
     hmds.held.push(HeldSeries {
-        req_id: 21, fold: Fold::Adjusted, con_id: 756733, sec_type: "STK".to_string(),
-        exchange: "SMART".to_string(), bars: Vec::new(), timezone: String::new(),
-        actions_asked: false, actions_query: None, actions: None, complete: true,
+        req_id: 21, fold: Fold::Adjusted, bars: Vec::new(), timezone: String::new(),
+        along: Default::default(),
+        actions_query: None, actions: None, complete: true,
     });
 
     hmds.send_adjustments_request(
@@ -2741,11 +2724,13 @@ fn a_number_already_answering_a_historical_query_is_not_given_another() {
 
     assert_eq!(hmds.held.len(), 1, "the second contract does not join the first's series");
     assert_eq!(
-        hmds.held[0].con_id, 756733,
+        hmds.held[0].along.asked.as_ref().map(|asked| asked.con_id), Some(756733),
         "and the series still holds only the contract that was asked for",
     );
     assert_eq!(
-        hmds.pending_historical.iter().filter(|(_, rid)| *rid == 9).count(), 1,
+        hmds.pending_historical.iter().filter(|(_, rid)| *rid == 9).count()
+            + hmds.pending_adjustments.iter().filter(|(_, rid, _)| *rid == 9).count(),
+        1,
         "only one query is in flight under the number",
     );
     let errors = shared.reference.drain_historical_errors();
@@ -2807,8 +2792,8 @@ fn an_unreadable_page_ends_a_kept_up_to_date_request_still_assembling() {
     hmds.pending_historical.push(("q9".to_string(), 9));
     hmds.keep_up_to_date_reqs.insert(9);
     hmds.held.push(HeldSeries {
-        req_id: 9, fold: Fold::None, con_id: 0, sec_type: String::new(), exchange: String::new(),
-        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None, actions: None, complete: false,
+        req_id: 9, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None, complete: false,
+        along: Default::default(),
     });
     let xml = "<ResultSetBar><id>q9</id><eoq>true</eoq><tz>UTC</tz><Events><Bar><time>20260714-13:30:00</time><open>100.0</open></Bar></Events></ResultSetBar>";
     let mut msg = Vec::new();

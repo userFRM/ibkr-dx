@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,392 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,391 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,7 +72,7 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,211 | No |
+| Rust unit and integration | 3,210 | No |
 | Rust, live | 9 | Yes |
 | Python | 1,181 | No |
 | Python, live | 131 | Yes |
@@ -293,6 +293,15 @@ These are this client's own.
   option stands and refuses an exercise out of the money or a lapse in it.
   This client does not ask for that word: it sends the exercise as given, and
   says so in the log where `override` is false.
+- **Bars are asked along a contract's id history for the folded series of a
+  day or less.** A gateway asks every bar query for a stock or a fund along
+  the ids, tickers and listings the contract traded under, and a week or a
+  month split at each split and joined again bar by bar. This client asks
+  TRADES and ADJUSTED_LAST bars of a day or less along them; every other
+  series, and weeks and months, are asked under the id the caller named.
+  Where nothing of the history falls within a request of more than one
+  stretch, a gateway answers nothing and this client says the query returned
+  no data.
 - **A preview under the number of a working order is refused.** A gateway
   prices it as a new order and leaves the working one alone; this client keys
   both on the number, and does not yet keep the two apart.

@@ -330,14 +330,17 @@ impl EClient {
     /// The venue has no adjusted series to pass through: what it serves is raw
     /// trades, and the two series the vendor states as adjusted — TRADES and
     /// ADJUSTED_LAST — are those folded with the contract's own actions. The
-    /// fold is made once the series is whole and the actions are in hand,
-    /// before a bar is handed to anyone, with the actions dated up to the day
-    /// it is made, that day on UTC's calendar included, as a gateway folds
-    /// them. This call waits and hands the series back in one piece;
-    /// `reqHistoricalData` delivers the same bars one at a time on its
-    /// callbacks. Both ask for the actions by the venue's id for the contract,
-    /// which the venue is asked for first where the contract is named some
-    /// other way.
+    /// actions are asked for first, as a gateway asks them, and their answer
+    /// states the ids the contract traded under: bars of a day or less are
+    /// asked one id at a time, the newest first, each for the days the
+    /// contract traded as it, and joined into one series. The fold is made
+    /// once the series is whole, before a bar is handed to anyone, with the
+    /// actions dated up to the day it is made, that day on UTC's calendar
+    /// included, as a gateway folds them. This call waits and hands the series
+    /// back in one piece; `reqHistoricalData` delivers the same bars one at a
+    /// time on its callbacks. Both ask for the actions by the venue's id for
+    /// the contract, which the venue is asked for first where the contract is
+    /// named some other way.
     #[pyo3(signature = (contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth=1))]
     fn historical_data(
         &self,

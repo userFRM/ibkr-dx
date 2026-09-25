@@ -140,16 +140,13 @@ fn withdrawing_bars_withdraws_their_own_actions_query_and_not_the_callers() {
     let the_folds = hl.hmds.pending_adjustments[1].0.clone();
     hl.hmds.held.push(hmds::HeldSeries {
         req_id: 7,
-        con_id: 756733,
-        sec_type: "STK".into(),
-        exchange: "SMART".into(),
         bars: Vec::new(),
         timezone: String::new(),
-        actions_asked: true,
         actions_query: Some(the_folds.clone()),
         fold: hmds::Fold::Adjusted,
         actions: None,
         complete: true,
+        along: Default::default(),
     });
     hl.hmds.pending_historical.push(("hist_1".into(), 7));
     let _ = sent(&mut peer);
