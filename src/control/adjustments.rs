@@ -204,7 +204,12 @@ pub fn parse_adjustments(body: &str) -> (AdjustedContract, Vec<Adjustment>) {
         match under {
             // The contract states its own id first, then what the row is for.
             Some("conc") => contract.con_id = values[0].to_string(),
-            Some("consym") => contract.symbol = values.last().unwrap_or(&"").to_string(),
+            // Its id, the ticker it traded under, and the last day it did.
+            Some("consym") => {
+                if let Some(symbol) = values.get(1) {
+                    contract.symbol = (*symbol).to_string();
+                }
+            }
             // Its id, the venue it was listed on, and the last day it was.
             Some("conexch") => {
                 if let Some(exchange) = values.get(1) {
@@ -990,6 +995,14 @@ mod tests {
         let (contract, adj) = parse_adjustments(carried);
         assert_eq!(contract.con_id, "756733");
         assert_eq!(adj.len(), 1, "the action in it is read");
+    }
+
+    /// The ticker a contract states is the one its ticker row names, not the
+    /// last day that row says the contract traded under it.
+    #[test]
+    fn the_ticker_is_the_one_the_row_names() {
+        let (contract, _) = parse_adjustments("conc\n222,-1,-1\nconsym\n222,META,20301231\n");
+        assert_eq!(contract.symbol, "META");
     }
 
     /// What a live session was answered with, kept as it arrived.
