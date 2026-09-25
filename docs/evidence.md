@@ -19,9 +19,9 @@ Verification runs against a paper account on IBKR production servers, and the or
 | | |
 | --- | --- |
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
-| Order fields | 158. 127 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
+| Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,350 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,353 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,9 +72,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,193 | No |
+| Rust unit and integration | 3,195 | No |
 | Rust, live | 9 | Yes |
-| Python | 1,157 | No |
+| Python | 1,158 | No |
 | Python, live | 131 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -131,7 +131,7 @@ nothing.
 | --- | :---: | --- |
 | 24 order types | ✅ Supported | The check every placement passes accepts 24, each sent as itself: MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MIT, LIT, MTL, MKT PRT, STP PRT, REL, PASSV REL, PEG MKT, PEG MID, PEG BEST, PEG BENCH, MIDPX, SNAP MKT, SNAP MID, SNAP PRI and BOX TOP. Every one but PEG BEST and BOX TOP is placed against the venue by `tests/ib_paper_compat` or the Python live suites |
 | PEG BEST and BOX TOP | 🔬 Implemented | Built and checked by the order builder's offline tests, `src/engine/hot_loop/order_builder/tests.rs`; no suite here places them against the venue |
-| Order fields | ✅ Supported | An order has 158 fields. 127 are sent. 23 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 1 is not carried by this client, and it says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
+| Order fields | ✅ Supported | An order has 159 fields. 128 are sent. 23 are taken and not sent: a gateway reads them and sends nothing for them on the orders this client places, and neither does this client. 1 is not carried by this client, and it says so on itself rather than being quietly ignored. 6 more are what the venue fills on the way back, which an order does not carry out. One is acted on here rather than sent: an order held back is kept until one in its family transmits, which is what a gateway does with it. A check on every commit fails if a field starts being dropped |
 | Non-US markets | ✅ Supported | Previews accepted on DE, NL, GB, CH, AU, CA, US equities and FX; JP and HK rejected for lot size, which is the exchange rule and is surfaced to the caller |
 | Modify, cancel, global cancel | ✅ Supported | `scripts/sdk_lifecycle.py` (place → modify → cancel) and `scripts/order_round_trip.py` (a limit far from the market on a contract that trades nearly around the clock: placed, repriced, withdrawn); `tests/ib_paper_compat` Phase 9 / 9b |
 | Brackets, OCA, combos | ✅ Supported | Per-leg pricing; leg order validated by server rejection of the inverted spread; `src/bin/capture_combo.rs` |
@@ -177,7 +177,7 @@ stops holding.
 | What is guaranteed | Where it stands |
 | --- | --- |
 | A call never returns success having sent nothing | 86 requests, none silent |
-| A field a caller sets is never quietly ignored | 158 order fields, none dropped |
+| A field a caller sets is never quietly ignored | 159 order fields, none dropped |
 | A field the server sends is never thrown away | What this client has no name for is kept under its tag number — 49 such fields on an equity definition, 46 on a bond |
 
 A fourth is held by a test rather than a measurement: **no wire parser aborts

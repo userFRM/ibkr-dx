@@ -556,6 +556,32 @@ impl HotLoop {
                 }
             }
         }
+        // Conditions stated to include the overnight session are refused, when
+        // the order is placed, unless the logon enables them and the contract
+        // trades on an overnight venue. A gateway asks this of the contract's
+        // definition, so one not yet held is asked for. A replace is not asked.
+        if !existing && !p.order.conditions.is_empty() && p.order.conditions_include_overnight {
+            let enabled = self.shared.reference.enables("CONDINCOVN");
+            if enabled && p.contract.con_id != 0
+                && attached_orders::contract_definition(&self.shared, &p.contract).is_none()
+            {
+                match self.name_order_contract(&mut p.contract.clone(), lookup) {
+                    Ok(true) => {}
+                    Ok(false) => return Step::Waits,
+                    Err(why) => {
+                        self.refuse_order(api_id, op, why);
+                        return Step::Done;
+                    }
+                }
+            }
+            let overnight = attached_orders::contract_definition(&self.shared, &p.contract).is_some_and(|definition| {
+                definition.valid_exchanges.iter().any(|venue| venue == "OVERNIGHT" || venue == "IBEOS")
+            });
+            if !(enabled && overnight) {
+                self.refuse_order(api_id, op, Refusal::stated(10371, "Conditions include overnight is not supported for this instrument or is not enabled for this account."));
+                return Step::Done;
+            }
+        }
         let loaded = if attaching && !existing {
             if loading.is_none() {
                 let (logon_accounts, advisor) = self.shared.reference.login();
@@ -1447,5 +1473,113 @@ impl HotLoop {
                  order was placed to have it recorded. (stated: {time})",
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::sync::{Arc, atomic::AtomicU64, mpsc};
+    use std::time::Duration;
+
+    use crate::bridge::SharedState;
+    use crate::control::contracts::ContractDefinition;
+    use crate::protocol::connection::Connection;
+    use crate::types::model::{Contract, Order};
+    use crate::types::{ControlCommand, OrderCondition, Placement};
+
+    use super::HotLoop;
+
+    /// Conditions that count the overnight session are placed only where the
+    /// logon enables them and the contract trades on an overnight venue;
+    /// anywhere else a gateway refuses them under 10371 and sends nothing. A
+    /// contract whose definition is not held is asked for first. A replace is
+    /// not asked, and the flag on an order with no conditions states nothing.
+    #[test]
+    fn conditions_count_the_overnight_session_only_where_a_gateway_takes_them() {
+        let refused = Some(10371);
+        for (features, venues, held, conditioned, replaced, expected) in [
+            (&[][..], &["SMART", "OVERNIGHT"][..], true, true, false, refused),
+            (&["CONDINCOVN"][..], &["SMART", "ARCA"][..], true, true, false, refused),
+            (&["CONDINCOVN"][..], &["SMART", "OVERNIGHT"][..], true, true, false, None),
+            (&["CONDINCOVN"][..], &["SMART", "IBEOS"][..], true, true, false, None),
+            (&["CONDINCOVN"][..], &["SMART", "OVERNIGHT"][..], false, true, false, None),
+            (&[][..], &["SMART"][..], true, false, false, None),
+            (&[][..], &["SMART", "ARCA"][..], true, true, true, None),
+        ] {
+            let shared = Arc::new(SharedState::new());
+            shared.orders.set_replay_done();
+            shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
+            let definition = ContractDefinition {
+                con_id: 756733,
+                exchange: "SMART".into(),
+                valid_exchanges: venues.iter().map(|v| v.to_string()).collect(),
+                ..Default::default()
+            };
+            if held {
+                shared.reference.cache_contract_definition(definition.clone());
+            }
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            let (connection, mut peer) = Connection::for_test();
+            peer.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            engine.ccp_conn = Some(connection);
+            engine.set_account_id("DU1".into());
+            let (send, receive) = mpsc::channel();
+            engine.set_control_rx(receive);
+            let mut sent = || {
+                let mut wire = String::new();
+                let mut bytes = [0; 16384];
+                while let Ok(n) = peer.read(&mut bytes) {
+                    if n == 0 { break; }
+                    wire.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                }
+                wire.replace('\x01', "|")
+            };
+
+            let place = |overnight: bool| {
+                let mut order = Order::limit("BUY", 1.0, 100.0);
+                if conditioned {
+                    order.conditions.push(OrderCondition::Time {
+                        time: "20260925-20:30:00".into(), is_more: true, is_conjunction_connection: false,
+                    });
+                }
+                order.conditions_include_overnight = overnight;
+                shared.admit(&send, ControlCommand::Place(Box::new(Placement {
+                    order_id: 10,
+                    allocator: Arc::new(AtomicU64::new(11)),
+                    contract: Contract {
+                        con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
+                        exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+                    },
+                    order,
+                    warnings: Vec::new(),
+                }))).unwrap();
+            };
+            let row = (features, venues, held, conditioned, replaced);
+            if replaced {
+                place(false);
+                (0..3).for_each(|_| engine.poll_once());
+                assert!(sent().contains("35=D|"), "{row:?}: working before it is replaced");
+            }
+            place(true);
+            engine.poll_once();
+            if !held {
+                let asked = sent();
+                assert!(asked.contains("35=c|") && !asked.contains("35=D|"), "{row:?}: {asked}");
+                // The venue's answer, cached as every definition it states is.
+                let (lookup, _) = engine.ccp.order_naming.remove(0);
+                shared.reference.cache_contract_definition(definition.clone());
+                engine.ccp.orders_named.push((lookup, super::OrderNamed::Contract(Box::new(definition))));
+            }
+            engine.poll_once();
+            engine.poll_once();
+
+            let wire = sent();
+            let codes: Vec<_> = shared.drain_refused().into_iter().map(|(_, code, _)| code).collect();
+            assert_eq!(codes, expected.into_iter().map(i64::from).collect::<Vec<_>>(), "{row:?}");
+            let sent_as = if replaced { "35=G|" } else { "35=D|" };
+            assert_eq!(wire.contains(sent_as), expected.is_none(), "{row:?}: {wire}");
+            assert_eq!(wire.contains("|8612=1|"), expected.is_none() && conditioned, "{row:?}: {wire}");
+        }
     }
 }

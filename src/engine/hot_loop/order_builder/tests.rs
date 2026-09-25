@@ -1145,6 +1145,36 @@ fn a_conditions_trigger_method_and_percent_go_out_as_stated() {
     assert_eq!(stated("6245="), ["", "-5"], "the percent as stated: {msg}");
 }
 
+/// The three flags an order's conditions carry go out with them, each stated
+/// on or off, on the tags a gateway writes them on: 6128 whether the
+/// conditions ignore regular hours, 8612 whether they count the overnight
+/// session, 6151 whether meeting them cancels the order. Reading them back
+/// cannot tell two of them apart if both sides swap, so the tags are stated
+/// here.
+#[test]
+fn the_condition_flags_go_out_on_the_tags_a_gateway_writes_them_on() {
+    use crate::types::{OrderAttrs, OrderCondition, OrderKind};
+    for (ignore_rth, include_overnight, cancel, expected) in [
+        (true, false, false, ["1", "0", "0"]),
+        (false, true, false, ["0", "1", "0"]),
+        (false, false, true, ["0", "0", "1"]),
+    ] {
+        let msg = send_kind_for_test(
+            OrderKind::Limit { price: 100 * crate::types::PRICE_SCALE },
+            b'1',
+            OrderAttrs {
+                conditions: vec![OrderCondition::Margin { percent: 30, is_more: false, is_conjunction_connection: true }],
+                conditions_ignore_rth: ignore_rth,
+                conditions_include_overnight: include_overnight,
+                conditions_cancel_order: cancel,
+                ..Default::default()
+            },
+        );
+        let stated = |tag: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(tag)).unwrap_or("absent");
+        assert_eq!([stated("6128="), stated("8612="), stated("6151=")], expected, "{msg}");
+    }
+}
+
 #[test]
 fn what_if_wire_carries_the_attributes_and_keeps_its_preview_flag() {
     let msg = send_kind_for_test(
@@ -3236,6 +3266,11 @@ fn what_this_client_writes_about_an_order_it_reads_back() {
         discretionary_amt: crate::types::price_from_f64(0.05),
         trigger_method: 2,
         clearing_account: "CA-1".to_string(),
+        conditions: vec![crate::types::OrderCondition::Time {
+            time: "20260311-09:30:00".into(), is_more: true, is_conjunction_connection: false,
+        }],
+        conditions_ignore_rth: true,
+        conditions_include_overnight: true,
         ..Default::default()
     };
     let mut fields: Vec<(u32, String)> = Vec::new();
@@ -3260,6 +3295,9 @@ fn what_this_client_writes_about_an_order_it_reads_back() {
     assert_eq!(read.discretionary_amt, 0.05, "what it may move by");
     assert_eq!(read.trigger_method, 2, "what triggers it");
     assert_eq!(read.clearing_account, "CA-1", "where it clears");
+    assert!(read.conditions_ignore_rth, "that its conditions ignore regular hours");
+    assert!(read.conditions_include_overnight, "that its conditions count the overnight session");
+    assert!(!read.conditions_cancel_order, "and that meeting them does not cancel it");
 }
 
 /// A block order states tag 9801 as the character `Y`.

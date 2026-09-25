@@ -707,10 +707,12 @@ pub struct OrderAttrs {
     /// for them needs the same grouping a position frame does rather than a
     /// flat parse.
     pub conditions: Vec<OrderCondition>,
-    /// Cancel order if conditions are no longer met (IB tag 6128). Default false.
+    /// Cancel the order when its conditions are met (IB tag 6151). Default false.
     pub conditions_cancel_order: bool,
-    /// Evaluate conditions outside regular trading hours (IB tag 6151). Default false.
+    /// Evaluate conditions outside regular trading hours (IB tag 6128). Default false.
     pub conditions_ignore_rth: bool,
+    /// Evaluate conditions in the overnight session too (IB tag 8612). Default false.
+    pub conditions_include_overnight: bool,
     /// OCA cancellation semantics (IB tag 6209), 1..=4. 0 = not set, which
     /// emits the protocol default 3 (ReduceOnFillNonBlock). Only emitted when
     /// an OCA group is present.
@@ -837,6 +839,7 @@ impl Default for OrderAttrs {
             conditions: Default::default(),
             conditions_cancel_order: Default::default(),
             conditions_ignore_rth: Default::default(),
+            conditions_include_overnight: Default::default(),
             oca_type: Default::default(),
             exercise_action: Default::default(),
             what_if: Default::default(),

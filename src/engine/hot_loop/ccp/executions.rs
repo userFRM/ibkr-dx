@@ -141,6 +141,15 @@ pub(crate) fn read_stated_attributes(
     if let Some(v) = parsed.get(&6671) { order.active_stop_time = v.clone(); }
     // The most a beta hedge may trade, which the venue states back for one.
     if let Some(v) = parsed.get(&6690).and_then(|v| v.parse::<i32>().ok()) { order.hedge_max_size = v; }
+    // The three flags travel with the conditions: a report that states the
+    // conditions states them afresh, and one it leaves out is off, as a gateway
+    // reads it. 6128 is ignore-RTH and 6151 cancel-on-condition here.
+    if parsed.contains_key(&6136) {
+        let on = |tag| parsed.get(&tag).is_some_and(|v| v == "1");
+        order.conditions_ignore_rth = on(6128);
+        order.conditions_include_overnight = on(8612);
+        order.conditions_cancel_order = on(6151);
+    }
     if let Some(v) = parsed.get(&6737) { order.imbalance_only = flag(v); }
     if let Some(v) = parsed.get(&6965) { order.auto_cancel_parent = flag(v); }
     if let Some(v) = parsed.get(&8089) { order.ext_operator = v.clone(); }
@@ -930,12 +939,6 @@ impl CcpState {
         // is placed.
         if parsed.contains_key(&6136) {
             order.conditions = decode_conditions(raw);
-        }
-        if let Some(stated) = parsed.get(&6128) {
-            order.conditions_cancel_order = stated == "1";
-        }
-        if let Some(stated) = parsed.get(&6151) {
-            order.conditions_ignore_rth = stated == "1";
         }
         read_stated_attributes(&mut order, parsed);
 
@@ -2427,8 +2430,6 @@ impl CcpState {
                 // placed again waits for what it waited for the first time
                 // instead of going live at once.
                 conditions: decode_conditions(raw),
-                conditions_cancel_order: parsed.get(&6128).map(|v| v == "1").unwrap_or(false),
-                conditions_ignore_rth: parsed.get(&6151).map(|v| v == "1").unwrap_or(false),
                 action: action.to_string(),
                 total_quantity: total_qty,
                 order_type: if order_type_str.is_empty() { fb_ord_type.to_string() } else { order_type_str.to_string() },

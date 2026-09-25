@@ -168,14 +168,33 @@ def test_every_surface_answers_the_question_with_one_number():
 
 def test_the_most_a_beta_hedge_may_trade_is_a_field_of_an_order():
     """`hedgeMaxSize` is taken, at the reference client's unset value until
-    stated, and `conditionsIncludeOvernight` is absent and says so on use."""
+    stated."""
     order = ibkr_dx.Order()
     assert order.hedgeMaxSize == 2147483647
     order.hedgeMaxSize = 50
     assert (order.hedgeMaxSize, order.hedge_max_size) == (50, 50)
-    try:
-        order.conditionsIncludeOvernight = True
-    except AttributeError:
-        pass
-    else:
-        raise AssertionError("a field this client does not have took a value")
+
+
+def test_conditions_that_count_the_overnight_session_reach_the_check():
+    """`conditionsIncludeOvernight` is carried to the placement, where a logon
+    that does not enable it is refused under 10371 and nothing is sent."""
+    w = _Recorder()
+    c = ibkr_dx.EClient(w)
+    c._test_connect()
+    contract = ibkr_dx.Contract()
+    contract.conId = 756733
+    contract.secType = "STK"
+    contract.exchange = "SMART"
+    order = ibkr_dx.Order()
+    order.action = "BUY"
+    order.totalQuantity = 1
+    order.orderType = "LMT"
+    order.lmtPrice = 100
+    order.tif = "DAY"
+    order.conditions = [ibkr_dx.TimeCondition(time="20260925-20:30:00", isMore=True)]
+    assert order.conditionsIncludeOvernight is False
+    order.conditionsIncludeOvernight = True
+    c.placeOrder(9401, contract, order)
+    c.poll()
+    assert [(req, code) for req, code, _ in w.errors] == [(9401, 10371)], w.errors
+    c.disconnect()

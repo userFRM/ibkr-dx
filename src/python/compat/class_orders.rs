@@ -84,6 +84,8 @@ pub struct Order {
     pub conditions_ignore_rth: bool,
     #[pyo3(get, set)]
     pub conditions_cancel_order: bool,
+    #[pyo3(get, set)]
+    pub conditions_include_overnight: bool,
 
     // ── New fields (ibapi ground truth) ──
     #[pyo3(get, set)]
@@ -377,6 +379,7 @@ impl Clone for Order {
             conditions: self.conditions.clone(),
             conditions_ignore_rth: self.conditions_ignore_rth,
             conditions_cancel_order: self.conditions_cancel_order,
+            conditions_include_overnight: self.conditions_include_overnight,
             // New fields
             account: self.account.clone(),
             active_start_time: self.active_start_time.clone(),
@@ -542,6 +545,7 @@ impl Default for Order {
             conditions: ListField::new(),
             conditions_ignore_rth: false,
             conditions_cancel_order: false,
+            conditions_include_overnight: false,
             // New fields
             account: String::new(),
             active_start_time: String::new(),
@@ -965,6 +969,7 @@ impl Order {
             )?,
             conditions_ignore_rth: a.conditions_ignore_rth,
             conditions_cancel_order: a.conditions_cancel_order,
+            conditions_include_overnight: a.conditions_include_overnight,
             account: a.account.clone(),
             active_start_time: a.active_start_time.clone(),
             active_stop_time: a.active_stop_time.clone(),
@@ -1149,6 +1154,7 @@ impl Order {
             conditions: Vec::new(), // Use convert_conditions(py) + to_api() at call sites that need conditions
             conditions_ignore_rth: self.conditions_ignore_rth,
             conditions_cancel_order: self.conditions_cancel_order,
+            conditions_include_overnight: self.conditions_include_overnight,
             // Forward ibapi-parity fields
             account: self.account.clone(),
             active_start_time: self.active_start_time.clone(),
@@ -1940,6 +1946,7 @@ camel_aliases_copy! {
         get_compete_against_best_offset_alias set_compete_against_best_offset_alias competeAgainstBestOffset compete_against_best_offset f64;
         get_conditions_cancel_order_alias set_conditions_cancel_order_alias conditionsCancelOrder conditions_cancel_order bool;
         get_conditions_ignore_rth_alias set_conditions_ignore_rth_alias conditionsIgnoreRth conditions_ignore_rth bool;
+        get_conditions_include_overnight_alias set_conditions_include_overnight_alias conditionsIncludeOvernight conditions_include_overnight bool;
         get_continuous_update_alias set_continuous_update_alias continuousUpdate continuous_update bool;
         get_deactivate_on_disconnect_alias set_deactivate_on_disconnect_alias deactivateOnDisconnect deactivate_on_disconnect bool;
         get_delta_neutral_aux_price_alias set_delta_neutral_aux_price_alias deltaNeutralAuxPrice delta_neutral_aux_price f64;

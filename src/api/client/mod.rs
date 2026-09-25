@@ -1021,7 +1021,10 @@ impl EClient {
     /// `hedgeMaxSize` (223) is sent on a beta hedge, and odd-lot
     /// quotes (225) are served: generic tick 787 is asked for and its prices,
     /// sizes and venues delivered. `conditionsIncludeOvernight` (226) is
-    /// absent. 226 is the highest level a gateway announces.
+    /// sent with an order's conditions, and refused under 10371 when the order
+    /// is placed where the logon does not enable it or the contract trades on
+    /// no overnight venue.
+    /// 226 is the highest level a gateway announces.
     ///
     /// Below it, a program that believes the number is wrong about the
     /// following, and each is said on use rather than passed over:

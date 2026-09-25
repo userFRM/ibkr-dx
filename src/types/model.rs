@@ -243,6 +243,11 @@ pub struct Order {
     /// Whether meeting them withdraws the order instead of
     /// placing it.
     pub conditions_cancel_order: bool,
+    /// Whether those conditions are measured in the overnight session too.
+    /// Stated with no conditions, it states nothing. A gateway refuses it
+    /// under 10371 when the order is placed, unless the logon enables
+    /// `CONDINCOVN` and the contract trades on `OVERNIGHT` or `IBEOS`.
+    pub conditions_include_overnight: bool,
     // ── ibapi-parity fields ──
     /// Which account to trade for, on tag 1.
     ///
@@ -780,6 +785,7 @@ impl Default for Order {
             conditions: Vec::new(),
             conditions_ignore_rth: false,
             conditions_cancel_order: false,
+            conditions_include_overnight: false,
             // ibapi-parity defaults
             account: String::new(),
             active_start_time: String::new(),
@@ -1194,6 +1200,7 @@ impl Order {
             conditions: self.conditions.clone(),
             conditions_cancel_order: self.conditions_cancel_order,
             conditions_ignore_rth: self.conditions_ignore_rth,
+            conditions_include_overnight: self.conditions_include_overnight,
             // Keep 1..=4; anything else is "unset" and emits the protocol
             // default 3 (ReduceOnFillNonBlock).
             oca_type: match self.oca_type {
@@ -1310,6 +1317,7 @@ impl Order {
             || !self.conditions.is_empty()
             || self.conditions_cancel_order
             || self.conditions_ignore_rth
+            || self.conditions_include_overnight
             || self.oca_type > 0
             || (self.volatility != f64::MAX && self.volatility > 0.0)
             || self.volatility_type > 0
@@ -2461,6 +2469,7 @@ mod tests {
             )),
             ("conditions_cancel_order", |o| o.conditions_cancel_order = true),
             ("conditions_ignore_rth", |o| o.conditions_ignore_rth = true),
+            ("conditions_include_overnight", |o| o.conditions_include_overnight = true),
             ("volatility", |o| o.volatility = 0.25),
             ("volatility_type", |o| o.volatility_type = 2),
             ("percent_offset", |o| o.percent_offset = 0.5),
@@ -2540,7 +2549,7 @@ mod tests {
             good_after: _, good_till: _, good_till_date_ymd: _, oca_group: _, oca_group_str: _,
             oca_type: _, parent_id: _, discretionary_amt: _, sweep_to_fill: _,
             all_or_none: _, trigger_method: _, cash_qty: _, conditions: _,
-            conditions_cancel_order: _, conditions_ignore_rth: _,
+            conditions_cancel_order: _, conditions_ignore_rth: _, conditions_include_overnight: _,
             volatility: _, volatility_type: _, use_price_mgmt_algo: _, duration: _,
             seek_price_improvement: _, manual_order_time: _,
             advanced_error_override: _,

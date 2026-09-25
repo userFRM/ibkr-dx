@@ -6433,7 +6433,8 @@ fn a_single_holding_frame_is_unchanged() {
     assert_eq!(held[0].get(&6064).map(String::as_str), Some("342"));
 }
 
-/// The conditions the venue states an order under are read back off it.
+/// The conditions the venue states an order under are read back off it, and
+/// the flags that go with them.
 ///
 /// Captured from a session: the report for a resting order carrying one price
 /// condition. Nothing read these, so an order this session did not place came
@@ -6463,6 +6464,18 @@ fn an_order_states_the_conditions_it_waits_on() {
         }
         other => panic!("a price condition was stated, not {other:?}"),
     }
+
+    // The flags beside them are stated afresh with them: one the report does
+    // not state is off, whatever an earlier report said.
+    let parsed = report.split('\x01').filter_map(|f| f.split_once('='))
+        .map(|(tag, v)| (tag.parse::<u32>().unwrap(), v.to_string())).collect();
+    let mut order = crate::types::model::Order {
+        conditions_ignore_rth: true, conditions_include_overnight: true, conditions_cancel_order: true,
+        ..Default::default()
+    };
+    super::executions::read_stated_attributes(&mut order, &parsed);
+    assert!(!order.conditions_ignore_rth && !order.conditions_cancel_order, "both stated off");
+    assert!(!order.conditions_include_overnight, "and the overnight flag, not stated, is off");
 }
 
 /// Two conditions on one order are both read.

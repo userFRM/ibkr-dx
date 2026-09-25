@@ -309,7 +309,7 @@ model arrives or the call is cancelled.
 
 ## Order fields
 
-An order carries 158 fields. 127 go out under a tag. 23 are taken and not
+An order carries 159 fields. 128 go out under a tag. 23 are taken and not
 sent: a gateway reads each and sends nothing for it on the orders this client
 places, and neither does this client. 1 is not carried by this client, and
 it says so on itself rather than being quietly dropped. 6 more are what the
@@ -421,7 +421,7 @@ and model and the applicable allocation group. The selected account's holdings
 cannot supply those quantities. Requests are not refused locally for this
 limit; callers whose child quantities depend on group or model holdings must
 supply explicitly sized parent and child orders. **226** is the highest level
-a gateway announces; `conditionsIncludeOvernight` at that level is absent.
+a gateway announces; `conditionsIncludeOvernight` at that level is carried.
 
 The complete preset-values answer and an entire attached family still need
 venue confirmation. Offline tests cover the readers, construction, pricing,

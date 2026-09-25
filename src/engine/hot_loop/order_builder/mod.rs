@@ -2606,26 +2606,27 @@ fn push_order_attrs(
         fields.push((152, format_price(attrs.cash_qty).to_string()));
     }
     // Condition tags:
-    // 6123 conid, 6124 exchange, 6125 price, 6126 operator, 6128 cancel-on-condition,
+    // 6123 conid, 6124 exchange, 6125 price, 6126 operator, 6128 ignore-RTH,
     // 6136 list size, 6137 conjunction, 6166 strike, 6168 expiry, 6169
     // security type, 6220 multiplier, 6222 type, 6223 time, 6224 send-email,
     // 6226 email text, 6227 TWS actions, 6241 inactive, 6245 percentage,
-    // 6246 execution pattern, 6263 volume, 6151 ignore-RTH, 8569 amount,
-    // 6947 a type discriminator (NOT a timezone).
+    // 6246 execution pattern, 6263 volume, 6151 cancel-on-condition, 8569 amount,
+    // 8612 include-overnight, 6947 a type discriminator (NOT a timezone).
     //
     if !attrs.conditions.is_empty() {
         let cond_strs = build_condition_strings(&attrs.conditions);
         fields.push((6136, cond_strs[0].clone())); // first element is count
-        // 6128 cancels the order when its condition fails; 6151 lets the
-        // conditions ignore regular hours. Both tag numbers carry different
-        // fields on other messages, so the meaning they have elsewhere does not
-        // apply here. This pairing and this order are what an order message
-        // takes; the other way round was tried and was wrong.
-        if attrs.conditions_cancel_order {
-            fields.push((6128, "1".to_string()));
-        }
-        if attrs.conditions_ignore_rth {
-            fields.push((6151, "1".to_string()));
+        // The three flags go with the conditions, each stated on or off, as a
+        // gateway writes them: 6128 lets the conditions ignore regular hours,
+        // 8612 counts the overnight session, and 6151 cancels the order when
+        // they are met. Both 6128 and 6151 carry different fields on other
+        // messages, so the meaning they have elsewhere does not apply here.
+        for (tag, on) in [
+            (6128, attrs.conditions_ignore_rth),
+            (8612, attrs.conditions_include_overnight),
+            (6151, attrs.conditions_cancel_order),
+        ] {
+            fields.push((tag, if on { "1" } else { "0" }.to_string()));
         }
         // Per-condition tags start at index 1, 11 strings per condition
         for i in 0..attrs.conditions.len() {

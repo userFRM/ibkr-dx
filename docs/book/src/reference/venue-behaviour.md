@@ -309,6 +309,20 @@ not permitted by returning the order inactive, with no text. This client
 refuses such an order before it is sent instead, with the reason on the error
 callback.
 
+## Conditions in the overnight session
+
+`conditionsIncludeOvernight` asks for an order's conditions to be measured in
+the overnight session too. It travels with the conditions, beside
+`conditionsIgnoreRth` and `conditionsCancelOrder`, each stated on or off as a
+gateway writes them, and states nothing on an order that has none. As a
+gateway does, this client refuses it under 10371 when the order is placed,
+*"Conditions include overnight is not supported for this instrument or is not
+enabled for this account."*, unless the logon enables `CONDINCOVN` and the
+contract's valid exchanges include `OVERNIGHT` or `IBEOS`; a contract whose
+definition is not yet held is looked up first. A replace is sent without that
+check. A report that states the conditions is read for all three flags, one it
+leaves out being off, as a gateway reads it, and `open_order` carries them.
+
 ## What a crypto order needs
 
 A crypto is quoted around the clock and priced and sized differently from a

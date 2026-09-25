@@ -325,6 +325,7 @@ fn clone_child(parent: &Order, api_id: i64, context: &ChildContext<'_>) -> Order
     child.conditions.clear();
     child.conditions_ignore_rth = false;
     child.conditions_cancel_order = false;
+    child.conditions_include_overnight = false;
     child.oca_group = context.oca_group.into();
     child.oca_type = if parent.oca_type == 0 { 3 } else { parent.oca_type };
     child.sl_order_id = UNSET_ID;
@@ -797,6 +798,7 @@ mod tests {
         }];
         parent.conditions_ignore_rth = true;
         parent.conditions_cancel_order = true;
+        parent.conditions_include_overnight = true;
         let children = build_children(&parent, &preset, &context());
         assert_eq!(children.iter().map(|c| c.order.order_id).collect::<Vec<_>>(), [21, 22]);
         assert_eq!(children[0].prices.stop, 99.0);
@@ -814,6 +816,7 @@ mod tests {
             assert!(child.order.manual_order_time.is_empty());
             assert!(child.order.conditions.is_empty());
             assert!(!child.order.conditions_ignore_rth && !child.order.conditions_cancel_order);
+            assert!(!child.order.conditions_include_overnight);
             assert!(child.order.pt_order_type.is_empty());
             assert!(child.order.sl_order_type.is_empty());
         }
