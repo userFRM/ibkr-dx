@@ -191,7 +191,10 @@ it:
   option's trading class, multiplier and last trading day.
 - The present value of dividends is that of the payments the underlying's
   schedule states over the option's life, discounted at the currency's rate
-  for the option's term.
+  for the option's term. The currency's rates are the venue's answer to the
+  query a contract's payments are asked with, naming the currency (`div USD`):
+  each entry is written as a payment is, its date the day the rate runs to and
+  its amount the percentage, and a gateway reads it that way.
 
 It is rebuilt at most once a second, on the clock's seconds, and a request is
 sent it when any figure differs from the last one that request was sent. What
@@ -211,7 +214,10 @@ gateway takes, as [Limits](./limits.md) says.
   sent, which starts unset.
 - The option price is the side's price as the model takes it in, to single
   precision: a bid of 4.74 is 4.739999771118164. A warrant's or a structured
-  product's is per contract.
+  product's is per contract. The model takes a bid or an ask in only with a
+  size, and a last only where it or its size is above nought, so a side the
+  quote has nothing on states no price: a frozen quote states one as -1 with
+  no size, or a last of nought.
 - The greeks are this client's option model's at that volatility, the model for
   volatilities worked from prices where any the venue states for the option,
   or its chain parameters, say so. They are worked from the underlying's price
@@ -222,8 +228,14 @@ gateway takes, as [Limits](./limits.md) says.
   greeks are replaced only by four that can be worked out. The time runs to the
   option's last trading day at the time of day its definition states (read as
   a gateway reads it, so 2400 is the next day's midnight), or at the end of
-  that day's last liquid session, on the zone its sessions are stated on, and
-  the model reads the clock once a minute. The currency's rates are counted
+  that day's last liquid session, on the zone its sessions are stated on, or,
+  where neither states it, to that date alone, which the model reads as four
+  in the afternoon on that zone. The venue states the time of day as four
+  digits (1615 on SPY, 1500 central time on SPXW), on SPY's and AAPL's options
+  only for an expiry two to three weeks off or nearer, and the sessions about a
+  week ahead, so a later SPY expiry runs to 16:00 and not to its 16:15 close,
+  on a gateway as here.
+  The model reads the clock once a minute. The currency's rates are counted
   from the day they were taken in.
 - They are rebuilt at most once every two seconds, for the options something
   new was stated for. A side is put to every request watching the option when

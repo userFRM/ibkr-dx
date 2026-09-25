@@ -1365,9 +1365,10 @@ mod news_tests {
     /// what the venue states: the volatility the venue states for the side
     /// (736 for the bid and the ask, 737 for the last) over a year of trading
     /// days, never sent as worked from prices, the side's price narrowed to
-    /// single precision (per contract for a warrant), the underlying's price
-    /// from the chain parameters, the present value of the dividends the
-    /// option's life covers at the currency's rate for its term, and greeks
+    /// single precision (per contract for a warrant) where the quote states
+    /// that side, the underlying's price from the chain parameters, the
+    /// present value of the dividends the option's life covers at the
+    /// currency's rate for its term, and greeks
     /// from the model at the side's volatility, up to when its time runs out.
     /// Nothing until the option's sessions are in hand, and nothing for an
     /// option on anything but a share; rebuilt once every two seconds; put to
@@ -1378,7 +1379,9 @@ mod news_tests {
     fn an_options_bid_ask_and_last_ticks_are_worked_as_a_gateway_works_them() {
         use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
         use crate::control::contracts::{ContractSchedule, OptionRight, ScheduleSession};
-        use crate::protocol::tick_decoder::{O_ASK_PRICE, O_BID_PRICE, O_BID_SIZE, O_LAST_PRICE};
+        use crate::protocol::tick_decoder::{
+            O_ASK_PRICE, O_ASK_SIZE, O_BID_PRICE, O_BID_SIZE, O_LAST_PRICE,
+        };
         const UNSTATED: f64 = f64::MAX;
         const DAY: i64 = 86_400_000;
         let ms = |at: &str| at.parse::<jiff::Timestamp>().unwrap().as_millisecond();
@@ -1434,11 +1437,13 @@ mod news_tests {
             rates: Rates,
             expiry: &'static str,
             date_only: bool,
+            frozen: bool,
         }
         let an_option = Row {
             what: "an option", sec_type: "OPT", per_contract: 1.0, under: "STK",
             last_trade_time: "1615", real_expiration: "", liquid: &[], chain: ("SPY", 5),
             rates: Rates::AtStart, expiry: "2026-10-01T16:15:00-04:00", date_only: false,
+            frozen: false,
         };
         let rows = [
             an_option,
@@ -1472,6 +1477,7 @@ mod news_tests {
                 chain: ("XSP", 7), ..an_option
             },
             Row { what: "an option on an index", under: "IND", ..an_option },
+            Row { what: "a frozen quote stating no side", frozen: true, ..an_option },
         ];
         for (at_row, row) in rows.into_iter().enumerate() {
             let what = row.what;
@@ -1595,10 +1601,21 @@ mod news_tests {
                 ]),
                 &mut context, &shared, &None,
             );
-            farm.handle_tick_data(
-                &super::decode_publish_tests::framed_35p(9, &[(O_BID_PRICE, 2, 474), (O_ASK_PRICE, 2, 477)]),
-                &mut context, &shared, &None,
-            );
+            // A frozen record states a side it has nothing on as a price with
+            // no size: -1 for the bid and the ask, nought for the last, as the
+            // venue sent one for an option under market data type 2.
+            let quote = if row.frozen {
+                context.market.register_server_tag(552_915, instrument);
+                b"8=O\x019=0070\x0135=P\x01\x01\x80\x00\x08o\xd3\x04\xe4$\x00\x0c\xe4,\x00X\x00\x00\
+                  \x08o\xd3\x1d\x03G\xa7\x015(<D\x00L\x00T\x00`\x00\x00\x08o\xd3\x14\x004\x00l\x00\
+                  \xa4\x00\xa8\x00\x018349=D8EED6C1\x01".to_vec()
+            } else {
+                super::decode_publish_tests::framed_35p(9, &[
+                    (O_BID_PRICE, 2, 474), (O_BID_SIZE, 2, 5),
+                    (O_ASK_PRICE, 2, 477), (O_ASK_SIZE, 2, 5),
+                ])
+            };
+            farm.handle_tick_data(&quote, &mut context, &shared, &None);
             farm.publish_option_ticks(at(2), &context, &mut conn, &shared, &mut hb);
             assert!(taken().is_empty(), "{what}: nothing before the option's sessions are in hand");
             let wanted: &[u32] = if row.under == "STK" { &[700_001] } else { &[] };
@@ -1634,7 +1651,8 @@ mod news_tests {
             };
             let from_prices = row.chain.1 & 2 != 0;
             let side = |kind, per_day: f64, price: f64| worked_as(from_prices, kind, per_day, price);
-            let (bid, ask) = (narrowed(4.74), narrowed(4.77));
+            let (bid, ask) =
+                if row.frozen { (f64::NAN, f64::NAN) } else { (narrowed(4.74), narrowed(4.77)) };
             let first = [
                 side(Bid, 0.006734, bid),
                 side(Ask, 0.006766, ask),

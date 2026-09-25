@@ -373,8 +373,8 @@ impl EWrapper {
         _theta: Option<f64>, _und_price: Option<f64>,
     ) {}
 
-    /// One venue's option chain for an underlying: the
-    /// expiries and strikes it lists.
+    /// One venue's option chain for an underlying and trading class: the
+    /// expiries and strikes it lists for that class.
     fn security_definition_option_parameter(
         &self, _req_id: i64, _exchange: &str, _underlying_con_id: i64,
         _trading_class: &str, _multiplier: &str, _expirations: Py<PyAny>, _strikes: Py<PyAny>,

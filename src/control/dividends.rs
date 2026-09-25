@@ -2,9 +2,10 @@
 //!
 //! The venue keeps a schedule per contract — one entry per ex-date, with the
 //! amount, the currency it is paid in, and what it is paid out of — and it
-//! answers a text query with that schedule and the term rates beside it. That
-//! is not the corporate-actions feed: the actions feed states what has
-//! happened to a contract, and this states what it is going to pay.
+//! answers a text query with that schedule, or, asked about a currency, with
+//! the currency's rates, each entry stated as a payment is. That is not the
+//! corporate-actions feed: the actions feed states what has happened to a
+//! contract, and this states what it is going to pay.
 //!
 //! It is the input the option model is missing. A tree that folds a whole
 //! year's dividends into one continuous yield reproduces the price it was
@@ -96,22 +97,24 @@ pub fn parse(xml: &str) -> Schedule {
     Schedule { tax_adjustment, payments, term_rates: term_rates(xml) }
 }
 
-/// The rates, read as a gateway reads them: a rate stating no date leaves the
-/// currency with no rates at all, a rate stating no amount is nought, and the
-/// rates before an amount that is not a number stand without the rest.
+/// The rates, read as a gateway reads a currency's answer: every entry it
+/// states, a `div` or a `rate`, is a rate to the date it names. The venue
+/// states a currency's rates as `div` entries, each dated and amounted as a
+/// payment is. An entry stating no date leaves the currency with no rates at
+/// all, and one whose amount is not stated, or is not a number, is nought.
 fn term_rates(xml: &str) -> Vec<(String, f64)> {
     let mut rates = Vec::new();
-    for rate in crate::control::xml::elements(xml, "rate") {
+    let entries = [
+        crate::control::xml::elements(xml, "div"),
+        crate::control::xml::elements(xml, "rate"),
+    ];
+    for rate in entries.concat() {
         let Some(date) = crate::control::xml::tag(rate, "date").map(str::trim) else {
             return Vec::new();
         };
-        let amount = match crate::control::xml::tag(rate, "amt") {
-            None => 0.0,
-            Some(stated) => match stated.trim().parse::<f64>() {
-                Ok(amount) => amount,
-                Err(_) => break,
-            },
-        };
+        let amount = crate::control::xml::tag(rate, "amt")
+            .and_then(|stated| stated.trim().parse::<f64>().ok())
+            .unwrap_or(0.0);
         rates.push((date.get(..8).unwrap_or(date).to_string(), amount));
     }
     rates
@@ -213,7 +216,9 @@ mod tests {
     ///
     /// The amounts are what the tree drops the underlying by and the ex-dates
     /// are where it drops them, so a field read short here is a price wrong by
-    /// a dividend.
+    /// a dividend. A currency's answer states its rates the way a contract's
+    /// states its payments, each entry a date and a percentage: read for
+    /// rates of another shape, the model had no rate at all.
     #[test]
     fn the_schedule_reads_back_as_the_venue_states_it() {
         let answer = "\
@@ -223,15 +228,9 @@ mod tests {
             <div><date>20260619</date><payDate>20260630</payDate>\
             <recDate>20260622</recDate><curr>USD</curr><amt>1.77</amt><dt>I</dt></div>\
             </dividends>\
-            <taxAdjRatio>0.85</taxAdjRatio>\
-            <termrates><rate><date>20261016</date><amt>4.33</amt></rate>\
-            <rate><date>20261218</date><amt>4.41</amt></rate></termrates>";
+            <taxAdjRatio>0.85</taxAdjRatio>";
         let read = parse(answer);
         assert_eq!(read.tax_adjustment, 0.85);
-        assert_eq!(
-            read.term_rates,
-            [("20261016".to_string(), 4.33), ("20261218".to_string(), 4.41)],
-        );
         assert_eq!(read.payments.len(), 2, "{:?}", read.payments);
         assert_eq!(read.payments[0].ex_date, "20260320");
         assert_eq!(read.payments[0].pay_date, "20260331");
@@ -240,6 +239,21 @@ mod tests {
         assert_eq!(read.payments[0].amount, 1.81);
         assert_eq!(read.payments[0].distribution_type, "I");
         assert_eq!(read.payments[1].amount, 1.77);
+
+        // A currency's, as the venue answered `div USD`.
+        let rates = parse(include_str!("fixtures/currency_rates.xml")).term_rates;
+        assert_eq!(rates.len(), 26, "{rates:?}");
+        assert_eq!(rates[0], ("20260924".to_string(), 4.31177));
+        assert_eq!(rates[1], ("20261001".to_string(), 4.3209));
+        assert_eq!(rates[25], ("20560928".to_string(), 4.59466));
+        // A rate is read the same way, and an amount that is not a number is
+        // nought, as one not stated is, with the rest standing.
+        let rates = parse(
+            "<termrates><rate><date>20261016</date><amt>-</amt></rate>\
+             <rate><date>20261218</date><amt>4.41</amt></rate></termrates>",
+        )
+        .term_rates;
+        assert_eq!(rates, [("20261016".to_string(), 0.0), ("20261218".to_string(), 4.41)]);
     }
 
     /// A contract that pays nothing says so, and that is an answer.

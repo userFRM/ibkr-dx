@@ -550,12 +550,13 @@ impl FarmState {
     /// the option.
     ///
     /// Built as a gateway builds them: at the volatility the venue states for
-    /// the side, over a year of trading days, with the side's price narrowed
-    /// as a gateway narrows the prices its model takes in, the underlying's
-    /// price the chain parameters state, and greeks worked out by the model at
-    /// that volatility. A side's greeks are replaced only by four finite ones.
-    /// Nothing is built until the option's time, its underlying's dividends
-    /// and the underlying's price are in hand.
+    /// the side, over a year of trading days, with the side's price, where
+    /// the quote states that side, narrowed as a gateway narrows the prices
+    /// its model takes in, the underlying's price the chain parameters state,
+    /// and greeks worked out by the model at that volatility. A side's greeks
+    /// are replaced only by four finite ones. Nothing is built until the
+    /// option's time, its underlying's dividends and the underlying's price
+    /// are in hand.
     fn build_option_sides(
         &mut self,
         now: i64,
@@ -596,17 +597,26 @@ impl FarmState {
             let dividends = dividends_from(&inputs.payments, today, midnight_today, clock, &host);
             let years = crate::options::time_to_expiry(inputs.expiry - clock, inputs.date_only);
             let quote = context.quote(*instrument);
-            let price = |flag: u8, price: i64| {
-                if option.quoted & flag == 0 {
+            // A side the quote states is taken in where it stands, as a
+            // gateway's model takes it: the bid and the ask with a size, the
+            // last where it or its size is above nought. A frozen record
+            // states a side it has nothing on as a price with no size, -1 for
+            // the bid and the ask and nought for the last.
+            let price = |flag: u8, stands: bool, price: i64| {
+                if option.quoted & flag == 0 || !stands {
                     return f64::NAN;
                 }
                 // As a gateway's model takes the quote in: to single precision.
                 (price as f64 / crate::types::model::PRICE_SCALE_F) as f32 as f64
             };
             let prices = [
-                price(crate::bridge::PRICING_BID, quote.bid),
-                price(crate::bridge::PRICING_ASK, quote.ask),
-                price(crate::bridge::PRICING_LAST, quote.last),
+                price(crate::bridge::PRICING_BID, quote.bid_size != 0, quote.bid),
+                price(crate::bridge::PRICING_ASK, quote.ask_size != 0, quote.ask),
+                price(
+                    crate::bridge::PRICING_LAST,
+                    quote.last > 0 || quote.last_size > 0,
+                    quote.last,
+                ),
             ];
             // Never sent as worked from prices: a gateway sends a side with
             // the attribute of the last of that side it sent the request,

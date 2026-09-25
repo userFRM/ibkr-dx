@@ -463,7 +463,7 @@ def trading_schedule(contract, end_date_time, duration_str, use_rth)
 
 #### `option_chains`
 
-Every venue's option chain for an underlying, returned rather than delivered on a callback: expiries and strikes, per venue.
+Every venue's option chain for an underlying, returned rather than delivered on a callback: expiries and strikes, per venue and trading class.
 
 ```python
 def option_chains(underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id)
@@ -3141,7 +3141,7 @@ The venue's model for an option: the volatility its price implies, the greeks, a
 
 #### `security_definition_option_parameter`
 
-One venue's option chain for an underlying: the expiries and strikes it lists.
+One venue's option chain for an underlying and trading class: the expiries and strikes it lists for that class.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

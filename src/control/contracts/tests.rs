@@ -771,11 +771,41 @@ fn parse_matching_symbols_response_basic() {
     assert_eq!(matches[1].con_id, 481863646);
 }
 
-/// One reply, two underlyings, and two classes under the first of them.
-/// A scope states only what it changes from the one before it, and the
-/// expirations belong to the record rather than to either class.
+/// A chain answer names each scope it lists — its venue, trading class and
+/// multiplier — and states that scope's own expirations and strikes under it.
+/// Answered together, SPX states twenty expirations and SPXW forty-two: read
+/// as the record's, both classes had all sixty-one, and a contract built from
+/// an SPX date that only SPXW lists is not one the venue can define. A record
+/// that lists no strikes defines no contract, and is answered with nothing.
 #[test]
 fn parse_option_chain_response_reads_every_scope_of_every_record() {
+    let answer = include_str!("../fixtures/option_chain.txt").trim_end().replace('|', "\x01");
+    let scopes = parse_option_chain_response(answer.as_bytes()).expect("a chain answer");
+    let read: Vec<_> = scopes
+        .iter()
+        .map(|s| {
+            let scope = (s.exchange.as_str(), s.trading_class.as_str(), s.multiplier.as_str());
+            (scope, s.expirations.len(), s.strikes.len())
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (("IBUSOPT", "SPX", "100"), 20, 562),
+            (("IBUSOPT", "SPXW", "100"), 42, 734),
+            (("BEST", "SPX", "100"), 20, 562),
+            (("BEST", "SPXW", "100"), 42, 734),
+        ],
+    );
+    let ends = |dates: &[String]| (dates[0].clone(), dates[dates.len() - 1].clone());
+    assert_eq!(ends(&scopes[0].expirations), ("20261015".into(), "20311218".into()));
+    assert_eq!(ends(&scopes[1].expirations), ("20260925".into(), "20270930".into()));
+    assert_eq!((scopes[1].strikes[0], scopes[1].strikes[733]), (2600.0, 10800.0));
+    assert!(scopes.iter().all(|s| s.symbol == "SPX" && s.underlying_con_id == 416_904));
+
+    // Three underlyings in one reply. A scope states only what it changes from
+    // the one before it, and each venue and class keeps the dates stated under
+    // it.
     let msg = fix::fix_build(
         &[
             (TAG_MSG_TYPE, "U"),
@@ -784,31 +814,37 @@ fn parse_option_chain_response_reads_every_scope_of_every_record() {
             (6455, "2"),
             // First underlying, listed on two venues.
             (TAG_SYMBOL, "AAPL"),
-            (6775, "20260116/20260220/20260320/EXPW=20260109"),
-            (6777, "20260320"),
-            (6971, "20260109"),
             (6346, "265598"),
             (TAG_EXCHANGE, "SMART"),
             (TAG_IB_TRADING_CLASS, "AAPL"),
             (TAG_MULTIPLIER, "100"),
+            (6775, "20260116/20260220/20260320/EXPW=20260109"),
+            (6777, "20260320"),
+            (6971, "20260109"),
             (6997, "140.0;145.0;150.0"),
             (TAG_EXCHANGE, "CBOE"),
-            (TAG_IB_TRADING_CLASS, "AAPL1"),
+            (6971, "20260109"),
             (6997, "145.0;150.0"),
             // Second underlying.
             (TAG_SYMBOL, "SPX"),
-            (6778, "20260220"),
             (TAG_EXCHANGE, "CBOE"),
             (TAG_IB_TRADING_CLASS, "SPXW"),
             (TAG_MULTIPLIER, "100"),
+            (6971, "20260220"),
+            (6778, "20260320"),
             (6997, "5000.0;5100.0"),
+            // Third underlying, listing no strikes.
+            (TAG_SYMBOL, "XSP"),
+            (TAG_EXCHANGE, "CBOE"),
+            (TAG_IB_TRADING_CLASS, "XSP"),
+            (6775, "20260116"),
         ],
         1,
     );
 
     let scopes = parse_option_chain_response(&msg).unwrap();
 
-    assert_eq!(scopes.len(), 3, "two classes on AAPL and one on SPX");
+    assert_eq!(scopes.len(), 3, "two venues on AAPL, one on SPX and none on XSP");
     assert_eq!(scopes[0].symbol, "AAPL");
     assert_eq!(scopes[0].exchange, "SMART");
     assert_eq!(scopes[0].trading_class, "AAPL");
@@ -820,14 +856,18 @@ fn parse_option_chain_response_reads_every_scope_of_every_record() {
         "the chain itself, without the keyed bucket, and each date once",
     );
     assert_eq!(scopes[1].exchange, "CBOE");
-    assert_eq!(scopes[1].trading_class, "AAPL1");
-    assert_eq!(scopes[1].multiplier, "100", "carried over from the class before it");
+    assert_eq!(scopes[1].trading_class, "AAPL");
+    assert_eq!(scopes[1].multiplier, "100", "carried over from the venue before it");
     assert_eq!(scopes[1].strikes, vec![145.0, 150.0]);
-    assert_eq!(scopes[1].expirations, scopes[0].expirations, "both classes of one record");
+    assert_eq!(scopes[1].expirations, vec!["20260109"], "its own, and not the venue before it");
     assert_eq!(scopes[2].symbol, "SPX");
     assert_eq!(scopes[2].trading_class, "SPXW");
     assert_eq!(scopes[2].strikes, vec![5000.0, 5100.0]);
-    assert_eq!(scopes[2].expirations, vec!["20260220"], "and nothing of the record before it");
+    assert_eq!(
+        scopes[2].expirations,
+        vec!["20260220"],
+        "nothing of the record before it, nor the date the record states as its own",
+    );
 }
 
 /// A value that does not hold a date in the compound shape is still read
@@ -839,9 +879,9 @@ fn parse_option_chain_expirations_fall_back_to_a_plain_list() {
             (TAG_MSG_TYPE, "U"),
             (TAG_SUB_PROTOCOL, "139"),
             (TAG_SYMBOL, "AAPL"),
-            (6775, "20260116,20260220"),
             (TAG_EXCHANGE, "SMART"),
             (TAG_IB_TRADING_CLASS, "AAPL"),
+            (6775, "20260116,20260220"),
             (6997, "140.0"),
         ],
         1,

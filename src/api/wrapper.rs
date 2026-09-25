@@ -296,8 +296,8 @@ pub trait Wrapper {
     /// Calendar events, as JSON.
     fn wsh_event_data(&mut self, req_id: i64, data_json: &str) {
     }
-    /// One venue's option chain for an underlying: the
-    /// expiries and strikes it lists.
+    /// One venue's option chain for an underlying and trading class: the
+    /// expiries and strikes it lists for that class.
     fn security_definition_option_parameter(
         &mut self, req_id: i64, exchange: &str, underlying_con_id: i64,
         trading_class: &str, multiplier: &str, expirations: &[String], strikes: &[f64],

@@ -158,7 +158,10 @@ On all of them:
 - A gateway sends a snapshot a computation only once all eight figures are
   stated, and holds an option's snapshot until 10 to 12 have arrived. Neither is
   done here: a snapshot is sent them as a stream is, and ends without them.
-- On a frozen feed they are the live model's.
+- On a frozen feed a gateway works them from a model it keeps for the frozen
+  quote, and what that model states is not established here. Here 13 and 83
+  are the live model's, and 10 to 12 (80 to 82) take the frozen quote's sides
+  where it states any.
 
 On 13 and 83: before the venue states any model, mid or last volatility for an
 option, a gateway takes one from the option chain's volatility curve at the
@@ -687,9 +690,12 @@ moves while a caller reads it; a slot handed out reads as an empty quote until
 its first tick, wherever it falls. What a caller meets is the venue's
 allowance of quote lines, stated on the logon and counted against open
 streams: a subscription past it is refused under 101, *Max number of tickers
-has been reached* (100 lines on a paper login). Orders, fills, holdings and
-news each take a slot as well, and nothing bounds how many of those a session
-holds.
+has been reached* (100 lines on a paper login). The series an option's model
+asks for beside a caller's — five on each option, one on its underlying — take
+no line: on a paper login the venue served five hundred of them beside a
+hundred option lines and refused none. Whether a gateway counts them against
+its own allowance is not established. Orders, fills, holdings and news each
+take a slot as well, and nothing bounds how many of those a session holds.
 
 Slots are reused: cancelling a market-data subscription gives its slot back,
 and a contract nothing holds any more frees its own.

@@ -3388,7 +3388,7 @@ Calendar events, as JSON.
 
 #### `security_definition_option_parameter`
 
-One venue's option chain for an underlying: the expiries and strikes it lists.
+One venue's option chain for an underlying and trading class: the expiries and strikes it lists for that class.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

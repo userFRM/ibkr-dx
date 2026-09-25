@@ -560,7 +560,8 @@ impl EClient {
     }
 
     /// Every venue's option chain for an underlying, returned rather
-    /// than delivered on a callback: expiries and strikes, per venue.
+    /// than delivered on a callback: expiries and strikes, per venue and
+    /// trading class.
     fn option_chains(
         &self,
         py: Python<'_>,

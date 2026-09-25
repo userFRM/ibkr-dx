@@ -2069,10 +2069,10 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
 
 /// The strikes a scope lists, as one delimited value.
 const TAG_CHAIN_STRIKES: u32 = 6997;
-/// The tags a record states its expirations on. Regular and non-regular
+/// The tags a scope states its expirations on. Regular and non-regular
 /// expirations are both expirations of the chain that was asked for, so all
-/// four are read into the one list.
-const TAG_CHAIN_EXPIRATIONS: [u32; 4] = [6775, 6777, 6778, 6971];
+/// three are read into the scope's one list.
+const TAG_CHAIN_EXPIRATIONS: [u32; 3] = [6775, 6777, 6971];
 /// Opens a keyed bucket inside an expiration value. What comes before the
 /// first one is the chain itself.
 const EXPIRATION_BUCKET_MARKER: &str = "/EXP";
@@ -2082,7 +2082,7 @@ const EXPIRATION_BUCKET_MARKER: &str = "/EXP";
 static EXPIRATION_FORM_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// One (exchange, trading class, multiplier) scope of an option chain: the
-/// strikes listed under it, and the expirations of the record it belongs to.
+/// expirations and the strikes listed under it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OptionChainScope {
     /// Its ticker.
@@ -2093,7 +2093,7 @@ pub struct OptionChainScope {
     pub trading_class: String,
     /// How many units one contract is worth.
     pub multiplier: String,
-    /// Every expiry this venue lists.
+    /// Every expiry this venue lists for this class.
     pub expirations: Vec<String>,
     /// Every strike it lists.
     pub strikes: Vec<f64>,
@@ -2108,9 +2108,8 @@ pub struct OptionChainScope {
 /// Parse an option chain reply.
 ///
 /// The venue answers a chain request with one record per underlying, delimited
-/// by the symbol tag, and each record names every scope it lists strikes under.
-/// The expirations belong to the record rather than to one of its scopes, so
-/// they are stamped onto all of them once the record is complete.
+/// by the symbol tag, and each record names every scope it lists strikes under
+/// and states that scope's own expirations under it.
 pub fn parse_option_chain_response(data: &[u8]) -> Option<Vec<OptionChainScope>> {
     let tags = tag_sequence(data);
 
@@ -2133,11 +2132,17 @@ pub fn parse_option_chain_response(data: &[u8]) -> Option<Vec<OptionChainScope>>
 
 /// One record of a chain reply. A scope states only what it changes, so the
 /// keys carry forward until the record names them again, and a strike list
-/// closes the scope it was stated under.
+/// closes the scope it was stated under. Expirations are kept by the venue,
+/// class and multiplier they were stated under, as a gateway keeps them, and
+/// each scope is given its own. A record that lists no strikes defines no
+/// contract, and a gateway answers nothing for it.
 fn parse_chain_record(symbol: &str, tags: &[(u32, String)], out: &mut Vec<OptionChainScope>) {
     let first = out.len();
     let mut scope = OptionChainScope { symbol: symbol.to_string(), ..Default::default() };
-    let mut expirations = Vec::new();
+    let mut expirations: Vec<([String; 3], Vec<String>)> = Vec::new();
+    let key = |scope: &OptionChainScope| {
+        [scope.exchange.clone(), scope.trading_class.clone(), scope.multiplier.clone()]
+    };
 
     for (tag, val) in tags {
         match *tag {
@@ -2151,19 +2156,28 @@ fn parse_chain_record(symbol: &str, tags: &[(u32, String)], out: &mut Vec<Option
                 let strikes = val.split(';').filter_map(|s| s.trim().parse().ok()).collect();
                 out.push(OptionChainScope { strikes, ..scope.clone() });
             }
-            tag if TAG_CHAIN_EXPIRATIONS.contains(&tag) => collect_expirations(val, &mut expirations),
+            tag if TAG_CHAIN_EXPIRATIONS.contains(&tag) => {
+                let under = key(&scope);
+                let at = match expirations.iter().position(|(stated, _)| *stated == under) {
+                    Some(at) => at,
+                    None => {
+                        expirations.push((under, Vec::new()));
+                        expirations.len() - 1
+                    }
+                };
+                collect_expirations(val, &mut expirations[at].1);
+            }
             _ => {}
         }
     }
 
-    // A record that listed no strikes still states expirations, and those are
-    // half of what was asked for. They are reported under the keys the record
-    // did name rather than dropped.
-    if out.len() == first && !expirations.is_empty() {
-        out.push(scope);
-    }
     for scope in &mut out[first..] {
-        scope.expirations = expirations.clone();
+        let own = key(scope);
+        scope.expirations = expirations
+            .iter()
+            .find(|(stated, _)| *stated == own)
+            .map(|(_, dates)| dates.clone())
+            .unwrap_or_default();
     }
 }
 
