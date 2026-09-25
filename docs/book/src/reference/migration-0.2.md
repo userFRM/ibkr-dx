@@ -74,9 +74,10 @@ share a limit of 64 commands per engine lap. A caller that limits admission
 must still allow the transmitting order or cancellation that releases its
 staged orders.
 
-Rust `order_id_floor()` reads one above the largest request-compatible order id
-the venue has named, without waiting. `next_shared_id_within(timeout)` adds a
-bound to the replay wait and observes `EClientConfig.cancel`.
+Rust `order_id_floor()` reads the ID `next_valid_id` would state, without
+waiting; `next_shared_id()` answers the request-compatible one.
+`next_shared_id_within(timeout)` adds a bound to the replay wait and observes
+`EClientConfig.cancel`.
 `next_order_id()` and `reserve_order_ids()` remain answering calls; an exercise
 that asks the engine to assign its number returns immediately and is numbered
 after replay.

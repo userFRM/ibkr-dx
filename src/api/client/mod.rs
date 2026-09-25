@@ -704,6 +704,10 @@ fn caller_auth(config: &EClientConfig, gateway: &GatewayConfig) -> crate::gatewa
 
 impl EClient {
     /// Connect to IB and start the engine.
+    ///
+    /// The session states `next_valid_id` once, as a gateway states it to a
+    /// client that has just connected: the [`process_msgs`](EClient::process_msgs)
+    /// read after the venue has named what the account is working delivers it.
     pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
         Self::connect_inner(config, None)
     }
@@ -859,6 +863,10 @@ impl EClient {
             return Err(logon_taken_back());
         }
         let _ = start.send(());
+        // As a gateway states it to a client that has just connected: once,
+        // in its place in the session's order, after the venue has named what
+        // the account is working.
+        self.req_ids();
         Ok(self)
     }
 

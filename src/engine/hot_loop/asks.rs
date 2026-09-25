@@ -119,10 +119,15 @@ impl Asks {
                 _ => "",
             };
             let downloaded = shared.portfolio_for(account).account_download_complete();
-            // Ended under it: refused, as a call made then is refused.
+            // Ended under it: refused, as a call made then is refused. Not the
+            // next valid id: a connect asks it on no caller's behalf, a gateway
+            // answers no connect with an error, and the session's end is
+            // already said where the connection is lost.
             if over {
-                let why = Refusal::not_connected("Not connected");
-                shared.push_refused(held.origin(), i64::from(why.code), why.message);
+                if !matches!(held.ask, Ask::NextValidId) {
+                    let why = Refusal::not_connected("Not connected");
+                    shared.push_refused(held.origin(), i64::from(why.code), why.message);
+                }
                 *left -= 1;
                 continue;
             }

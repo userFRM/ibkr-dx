@@ -572,9 +572,10 @@ pub struct Order {
     pub professional_customer: bool,
     /// The profit-taking leg's id.
     ///
-    /// Assigned to the child created from the selected order preset. A stated
-    /// id requires the `PRESET` type; `i32::MAX` leaves the id unstated.
-    pub pt_order_id: i32,
+    /// Assigned to the child created from the selected order preset, and
+    /// numbered as `order_id` is. A stated id requires the `PRESET` type;
+    /// `i32::MAX` leaves the id unstated.
+    pub pt_order_id: i64,
     /// The profit-taking leg's type.
     ///
     /// `PRESET` uses the account's selected order preset and requires a child
@@ -664,9 +665,10 @@ pub struct Order {
     pub short_sale_slot: i32,
     /// The stop-loss leg's id.
     ///
-    /// Assigned to the child created from the selected order preset. A stated
-    /// id requires the `PRESET` type; `i32::MAX` leaves the id unstated.
-    pub sl_order_id: i32,
+    /// Assigned to the child created from the selected order preset, and
+    /// numbered as `order_id` is. A stated id requires the `PRESET` type;
+    /// `i32::MAX` leaves the id unstated.
+    pub sl_order_id: i64,
     /// The stop-loss leg's type.
     ///
     /// `PRESET` uses the account's selected order preset and requires a child
@@ -859,7 +861,7 @@ impl Default for Order {
             post_only: false,
             post_to_ats: i32::MAX,
             professional_customer: false,
-            pt_order_id: i32::MAX,
+            pt_order_id: i32::MAX as i64,
             pt_order_type: String::new(),
             randomize_price: false,
             randomize_size: false,
@@ -885,7 +887,7 @@ impl Default for Order {
             settling_firm: String::new(),
             shareholder: String::new(),
             short_sale_slot: 0,
-            sl_order_id: i32::MAX,
+            sl_order_id: i32::MAX as i64,
             sl_order_type: String::new(),
             smart_combo_routing_params: Vec::new(),
             soft_dollar_tier_name: String::new(),

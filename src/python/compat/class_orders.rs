@@ -249,7 +249,7 @@ pub struct Order {
     #[pyo3(get, set)]
     pub professional_customer: bool,
     #[pyo3(get, set)]
-    pub pt_order_id: i32,
+    pub pt_order_id: i64,
     #[pyo3(get, set)]
     pub pt_order_type: String,
     #[pyo3(get, set)]
@@ -305,7 +305,7 @@ pub struct Order {
     #[pyo3(get, set)]
     pub short_sale_slot: i32,
     #[pyo3(get, set)]
-    pub sl_order_id: i32,
+    pub sl_order_id: i64,
     #[pyo3(get, set)]
     pub sl_order_type: String,
     #[pyo3(get, set)]
@@ -624,7 +624,7 @@ impl Default for Order {
             post_only: false,
             post_to_ats: i32::MAX,
             professional_customer: false,
-            pt_order_id: i32::MAX,
+            pt_order_id: i32::MAX as i64,
             pt_order_type: String::new(),
             randomize_price: false,
             randomize_size: false,
@@ -650,7 +650,7 @@ impl Default for Order {
             settling_firm: String::new(),
             shareholder: String::new(),
             short_sale_slot: 0,
-            sl_order_id: i32::MAX,
+            sl_order_id: i32::MAX as i64,
             sl_order_type: String::new(),
             smart_combo_routing_params: ListField::new(),
             soft_dollar_tier: TierField::new(),
@@ -1978,7 +1978,7 @@ camel_aliases_copy! {
         get_post_only_alias set_post_only_alias postOnly post_only bool;
         get_post_to_ats_alias set_post_to_ats_alias postToAts post_to_ats i32;
         get_professional_customer_alias set_professional_customer_alias professionalCustomer professional_customer bool;
-        get_pt_order_id_alias set_pt_order_id_alias ptOrderId pt_order_id i32;
+        get_pt_order_id_alias set_pt_order_id_alias ptOrderId pt_order_id i64;
         get_randomize_price_alias set_randomize_price_alias randomizePrice randomize_price bool;
         get_randomize_size_alias set_randomize_size_alias randomizeSize randomize_size bool;
         get_ref_futures_con_id_alias set_ref_futures_con_id_alias refFuturesConId ref_futures_con_id i32;
@@ -1998,7 +1998,7 @@ camel_aliases_copy! {
         get_scale_subs_level_size_alias set_scale_subs_level_size_alias scaleSubsLevelSize scale_subs_level_size i32;
         get_seek_price_improvement_alias set_seek_price_improvement_alias seekPriceImprovement seek_price_improvement Option<bool>;
         get_short_sale_slot_alias set_short_sale_slot_alias shortSaleSlot short_sale_slot i32;
-        get_sl_order_id_alias set_sl_order_id_alias slOrderId sl_order_id i32;
+        get_sl_order_id_alias set_sl_order_id_alias slOrderId sl_order_id i64;
         get_starting_price_alias set_starting_price_alias startingPrice starting_price f64;
         get_stock_range_lower_alias set_stock_range_lower_alias stockRangeLower stock_range_lower f64;
         get_stock_range_upper_alias set_stock_range_upper_alias stockRangeUpper stock_range_upper f64;

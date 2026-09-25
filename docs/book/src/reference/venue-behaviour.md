@@ -204,9 +204,14 @@ on a gateway as here. How long either waits for the model is on
 
 The next order ID is retained per account and API client ID. Rust uses client
 0; Python uses the `client_id` / `clientId` stated at connect. The saved counter
-raises `next_valid_id` and the request-compatible `order_id_floor` at connect,
-and venue replay can raise them further. Orders absent from that replay still
-leave their saved counter behind.
+raises `next_valid_id` and Rust `order_id_floor`, which reads the same ID, at
+connect, and venue replay can raise them further. Orders absent from that
+replay still leave their saved counter behind.
+
+Both surfaces state `next_valid_id` once a session has connected, after the
+venue has named the orders the account is working: Python before `connect()`
+returns, Rust on the first `process_msgs` read after that naming. `req_ids()`
+states it again.
 
 `next_order_id()` reserves under an exclusive file lock and writes the raised
 counter before returning. Bracket helpers reserve their consecutive IDs in one
@@ -240,6 +245,13 @@ Rust sets `EClientConfig.gateway.order_id_file = Some(path.into())`. Python sets
 disables persistence; Rust `None` and Python `configure(order_id_file=None)`
 restore the environment/default selection.
 
+Entries are keyed by the SHA-256 digest of the account, in lowercase hex, so
+the file holds no account number. A file keyed by the account itself, as
+earlier versions wrote it, is rewritten under the digests when a session opens
+it, keeping every counter; an earlier version then no longer finds its entries.
+The digest is not a secret: anyone holding the file can find an account's entry
+by digesting candidate account numbers.
+
 To move the counter, stop all processes using it, move the JSON file and set
 all of them to its new path. The client creates parent directories and keeps
 `.lock` and `.tmp` siblings for locking and replacement. Writes are synced
@@ -259,6 +271,17 @@ released by the last child's transmit flag. The bracket helper uses the same
 group, so individually added children join it. The parent has no OCA group;
 scale-generated children retain their scale group. Replacement retains the
 original parent reference and group.
+
+## A modification in flight
+
+A replacement reads `PendingSubmit`, as a gateway states an order it has sent
+and the venue has not acknowledged, until the venue accepts it and the order
+reads its working status again. The caller is told on the venue's pending
+report, which follows the send, not at the send itself. That report, and the
+one ahead of a change the venue makes itself (the exits of a bracket once its
+parent fills), changes no status: the order is stated again as it stands. An
+order whose state this session lost with a dropped connection takes its status
+from the report instead.
 
 ## Refused modifications
 

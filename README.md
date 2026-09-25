@@ -190,8 +190,10 @@ Callbacks arrive on the thread that runs `client.run()`, or on the one that
 calls `client.poll()`. The three that
 `connect()` announces — `connect_ack`, `managed_accounts` and `next_valid_id` —
 are fired on the calling thread before it returns. In Rust, `process_msgs`
-delivers callbacks on the thread that calls it. Requests and cancels return
-after admission; their answers and refusals arrive in session order. See
+delivers callbacks on the thread that calls it; after `connect`, it delivers
+`next_valid_id` once the venue has named the orders the account is working.
+Requests and cancels return after admission; their answers and refusals arrive
+in session order. See
 [Moving to 0.2](https://userfrm.github.io/ibkr-dx/reference/migration-0.2.html)
 for the request, shutdown and settings changes.
 
@@ -885,7 +887,9 @@ Order IDs survive restarts in `ibkr-dx/order-ids.json` under the user's data
 directory: `$XDG_DATA_HOME` (or `~/.local/share`) on Linux,
 `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows.
 The file keeps a separate next ID for each account and API client ID (Rust
-uses client 0). `next_order_id()` saves a reservation under an exclusive lock
+uses client 0), keyed by the SHA-256 digest of the account rather than the
+account number; a file keyed by account numbers is rewritten that way when a
+session opens it. `next_order_id()` saves a reservation under an exclusive lock
 before returning; a fresh session starts above that counter and venue replay.
 A storage failure warns once in the log and leaves trading available with the
 session's in-memory counter and replay floor.
@@ -1023,7 +1027,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,258 | No |
+| Rust, unit and integration | 3,261 | No |
 | Python | 1,156 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |

@@ -12,11 +12,37 @@ type Counters = BTreeMap<String, BTreeMap<i32, u64>>;
 
 pub(super) struct SavedIds {
     path: PathBuf,
-    account: String,
+    /// What the account's counters are filed under.
+    key: String,
     client: i32,
     /// The next id as this session last read or wrote it. The saved counter
     /// only rises, so a number below it needs no write.
     next: u64,
+}
+
+/// What an account's counters are filed under: the SHA-256 digest of the
+/// account, in lowercase hex, so the file does not name the account.
+fn key(account: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(account.as_bytes()))
+}
+
+/// File what a file written before the keys were digests holds under each
+/// account's digest, keeping the higher counter where both are held. Answers
+/// whether there was any.
+fn migrate(counters: &mut Counters) -> bool {
+    let named: Vec<String> = counters.keys()
+        .filter(|held| !(held.len() == 64 && held.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))))
+        .cloned().collect();
+    for account in &named {
+        let ids = counters.remove(account).unwrap_or_default();
+        let filed = counters.entry(key(account)).or_default();
+        for (client, next) in ids {
+            let held = filed.entry(client).or_insert(next);
+            *held = (*held).max(next);
+        }
+    }
+    !named.is_empty()
 }
 
 /// Every counter the file holds. Read without the lock: the file is only
@@ -29,7 +55,7 @@ fn read(path: &Path) -> io::Result<Counters> {
     }
 }
 
-/// Created readable by its owner alone: the file names the accounts.
+/// Created readable by its owner alone.
 fn private() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
@@ -59,10 +85,10 @@ impl SavedIds {
         // process holding the old file after its replacement.
         lock.lock()?;
         let mut counters = read(&self.path)?;
-        let next =
-            counters.entry(self.account.clone()).or_default().entry(self.client).or_insert(1);
+        let migrated = migrate(&mut counters);
+        let next = counters.entry(self.key.clone()).or_default().entry(self.client).or_insert(1);
         let raised = change(*next).max(*next);
-        if raised != *next {
+        if raised != *next || migrated {
             *next = raised;
             let mut temporary = self.path.as_os_str().to_owned();
             temporary.push(".tmp");
@@ -94,22 +120,26 @@ impl OrderState {
     ///
     /// A file that cannot be read leaves the session on memory and venue
     /// replay; one that can be read floors the session even where it cannot
-    /// be written.
+    /// be written. A file that still names accounts is rewritten under their
+    /// digests before the session goes on.
     pub(crate) fn open_order_ids(&self, path: Option<&Path>, account: &str) -> u64 {
         let client = self.api_client_id();
+        let mut next = 1;
         let store = path.and_then(|path| match read(path) {
-            Ok(counters) => Some(SavedIds {
-                next: counters.get(account).and_then(|ids| ids.get(&client)).copied().unwrap_or(1),
-                path: path.to_owned(),
-                account: account.to_owned(),
-                client,
-            }),
+            Ok(mut counters) => {
+                let migrated = migrate(&mut counters);
+                let key = key(account);
+                let saved = counters.get(&key).and_then(|ids| ids.get(&client)).copied();
+                let mut store = SavedIds { next: saved.unwrap_or(1), path: path.to_owned(), key, client };
+                let written = if migrated { store.update(|next| next) } else { Ok(()) };
+                next = store.next.max(1);
+                written.map_err(|error| fall_back(path, &error)).ok().map(|()| store)
+            }
             Err(error) => {
                 fall_back(path, &error);
                 None
             }
         });
-        let next = store.as_ref().map_or(1, |store| store.next.max(1));
         *self.saved_ids.lock().unwrap() = store;
         self.saved_before.store(next - 1, Ordering::Release);
         if next > 1 {

@@ -12348,6 +12348,13 @@ fn a_fresh_api_id_does_not_modify_another_orders_venue_id() {
 
 fn attached_preset_client() -> (EClient, Engine, Arc<SharedState>) {
     let (client, rx, shared) = test_client();
+    attach_from_the_selected_preset(&shared);
+    (client, rx, shared)
+}
+
+/// A selected share preset that attaches both legs, on SPY as its contract
+/// definition states it.
+pub(crate) fn attach_from_the_selected_preset(shared: &SharedState) {
     shared.reference.cache_contract_definition(ContractDefinition {
         con_id: 756733, exchange: "SMART".into(), order_type_key: "STK".into(),
         order_type_rules: vec![("STP".into(), 1), ("LMT".into(), 1), ("OCA".into(), 1)],
@@ -12359,7 +12366,6 @@ fn attached_preset_client() -> (EClient, Engine, Arc<SharedState>) {
         request_key, key: "s=STK".into(), attributes: "a=1".into(), error: None,
         fields: vec![(4074, "1".into()), (4075, "1".into()), (4076, "7".into()), (4083, "2".into())],
     });
-    (client, rx, shared)
 }
 
 #[test]
@@ -12491,7 +12497,7 @@ fn attached_combo_registration_separates_family_quotes_and_replacements() {
         for (index, contract) in contracts.iter().enumerate() {
             let order = crate::types::model::Order {
                 override_percentage_constraints: true, action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
-                sl_order_id: 9402 + index as i32 * 10, sl_order_type: "PRESET".into(),
+                sl_order_id: 9402 + index as i64 * 10, sl_order_type: "PRESET".into(),
                 ..Default::default()
             };
             let id = 9401 + index as i64 * 10;
@@ -12650,6 +12656,33 @@ fn a_fresh_engine_keeps_the_saved_order_id() {
         let (client, _, _) = saved_session(account, api_client, Some(&path));
         assert_eq!(client.next_order_id(), expected, "{account}, client {api_client}");
     }
+}
+
+/// The file names no account: each account's counters are filed under its
+/// SHA-256 digest, and a file that named accounts is rewritten that way when a
+/// session opens it, with every counter it held still in force. Where a
+/// version of each shares the file, the higher counter is kept, whichever
+/// held it.
+#[test]
+fn the_order_id_file_names_no_account() {
+    let scratch = Scratch::new("order-id-keys");
+    let path = scratch.0.join("ids.json");
+    std::fs::write(&path, br#"{"DU123":{"0":90},"DU456":{"7":5},
+        "47615248605063c98f2d2cf2fb0a09aea7b033adbe5717e90aef52e97984da45":{"0":103},
+        "2b44600fa8aa8631daebaeb3dcce4e2f91f3d02a5708691a4700f45e92c25c48":{"7":3}}"#).unwrap();
+    let (client, _, _) = saved_session("DU123", 0, Some(&path));
+    let saved: std::collections::BTreeMap<String, std::collections::BTreeMap<i32, u64>> =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved, [
+        ("2b44600fa8aa8631daebaeb3dcce4e2f91f3d02a5708691a4700f45e92c25c48".to_string(), [(7, 5)].into()),
+        ("47615248605063c98f2d2cf2fb0a09aea7b033adbe5717e90aef52e97984da45".to_string(), [(0, 103)].into()),
+    ].into());
+    assert_eq!(client.next_order_id(), 103);
+    for (account, api_client, expected) in [("DU123", 0, 104), ("DU456", 7, 5), ("DU789", 0, 1)] {
+        let (client, _, _) = saved_session(account, api_client, Some(&path));
+        assert_eq!(client.next_order_id(), expected, "{account}, client {api_client}");
+    }
+    assert!(!String::from_utf8(std::fs::read(&path).unwrap()).unwrap().contains("DU"));
 }
 
 /// Where the counter cannot be saved, the session goes on numbering from

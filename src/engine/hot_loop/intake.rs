@@ -41,8 +41,8 @@ impl ControlCommand {
     fn own(&self) -> impl Iterator<Item = u64> {
         let ids = match self {
             Self::Place(p) => [Some(p.order_id),
-                (p.order.pt_order_id != i32::MAX).then_some(p.order.pt_order_id as u64),
-                (p.order.sl_order_id != i32::MAX).then_some(p.order.sl_order_id as u64)],
+                (p.order.pt_order_id != crate::client_core::attached_checks::UNSET_ID).then_some(p.order.pt_order_id as u64),
+                (p.order.sl_order_id != crate::client_core::attached_checks::UNSET_ID).then_some(p.order.sl_order_id as u64)],
             Self::CancelOrder { order_id, .. } => [Some(*order_id), None, None],
             Self::Exercise(e) => [e.allocator.is_none().then_some(e.order_id), None, None],
             Self::Bracket(b) => [Some(b.parent_id), Some(b.parent_id + 1), Some(b.parent_id + 2)],

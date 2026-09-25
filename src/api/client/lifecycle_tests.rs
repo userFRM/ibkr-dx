@@ -199,3 +199,29 @@ fn a_replay_wait_accepts_a_bound_beyond_the_platform_clock() {
     shared.orders.note_the_venue_named(41);
     assert_eq!(client.next_shared_id_within(Some(Duration::MAX)), Ok(42));
 }
+
+/// A connect states the next valid id, as a gateway states it to a client
+/// that has just connected, and the floor reads the same id. A session that
+/// ends before the id can be stated reports no error for it: the caller asked
+/// nothing.
+#[test]
+fn a_connect_states_the_next_valid_id() {
+    for (ends, expected) in [(false, &["next_valid_id:1787685160171346"][..]), (true, &[][..])] {
+        let (client, rx, shared) = super::tests::test_client();
+        let (start, _starting) = std::sync::mpsc::channel();
+        let client = client.finish_connect(start).unwrap();
+        if ends {
+            shared.reference.set_session_over("the test ended it");
+        } else {
+            shared.orders.set_replay_done();
+            shared.orders.note_the_venue_named(1_787_685_160_171_345);
+        }
+        super::tests::the_engine_answers(&rx, &shared);
+        let mut wrapper = crate::api::wrapper::tests::RecordingWrapper::default();
+        client.process_msgs(&mut wrapper);
+        assert_eq!(wrapper.events, expected, "ended: {ends}");
+        if !ends {
+            assert_eq!(client.order_id_floor(), 1_787_685_160_171_346);
+        }
+    }
+}

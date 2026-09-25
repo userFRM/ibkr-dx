@@ -519,9 +519,8 @@ impl Context {
             // PendingCancel.
             //
             // A report stating the order is working moves it out of
-            // PendingCancel. A remark on an order arrives as a pending cancel
-            // with the acceptance immediately behind it, and a cancel the
-            // venue declines leaves the order working.
+            // PendingCancel: a cancel the venue declines leaves the order
+            // working.
             //
             // A replayed report is excluded. Recent activity is replayed when
             // a session opens, and a replayed working status predates any

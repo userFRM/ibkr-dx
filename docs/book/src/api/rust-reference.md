@@ -17,7 +17,7 @@
 
 #### `connect`
 
-Connect to IB and start the engine.
+Connect to IB and start the engine. The session states `next_valid_id` once, as a gateway states it to a client that has just connected: the `process_msgs` read after the venue has named what the account is working delivers it.
 
 ```rust
 pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error>>
@@ -1104,7 +1104,7 @@ pub fn next_shared_id_within( &self, timeout: Option<std::time::Duration>, ) -> 
 
 #### `order_id_floor`
 
-One past the highest id the venue has named an order under that a request can also carry, read without waiting. A gateway gives its client the next valid id only once it has read the account's orders, and raises it past every new order. This is that floor as it stands at the read: it rises as the venue names what the account is working, before the read that delivers those orders, and again after every reconnect. A caller allocating ids clears it at each allocation. The saved counter also raises it at connect; it is one where neither the saved counter nor the venue names a prior id.
+The id `next_valid_id` would state now, read without waiting. A gateway gives its client the next valid id only once it has read the account's orders, and raises it past every new order. This is that floor as it stands at the read: it rises as the venue names what the account is working, before the read that delivers those orders, and again after every reconnect. A caller allocating ids clears it at each allocation. The saved counter also raises it at connect; it is one where neither the saved counter nor the venue names a prior id. A read, not a reservation. `next_shared_id` answers the floor a request can also carry.
 
 ```rust
 pub fn order_id_floor(&self) -> i64

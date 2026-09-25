@@ -533,8 +533,7 @@ impl EClient {
         }
     }
 
-    /// One past the highest id the venue has named an order under that a
-    /// request can also carry, read without waiting.
+    /// The id `next_valid_id` would state now, read without waiting.
     ///
     /// A gateway gives its client the next valid id only once it has read the
     /// account's orders, and raises it past every new order. This is that
@@ -542,9 +541,11 @@ impl EClient {
     /// account is working, before the read that delivers those orders, and
     /// again after every reconnect. A caller allocating ids clears it at each
     /// allocation. The saved counter also raises it at connect; it is one
-    /// where neither the saved counter nor the venue names a prior id.
+    /// where neither the saved counter nor the venue names a prior id. A read,
+    /// not a reservation. [`next_shared_id`](Self::next_shared_id) answers the
+    /// floor a request can also carry.
     pub fn order_id_floor(&self) -> i64 {
-        self.shared.orders.narrow_id_watermark() as i64 + 1
+        self.stated_next_id() as i64
     }
 
     /// Take `n` consecutive ids in one step.

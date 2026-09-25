@@ -19,10 +19,12 @@ checks against the real account.
 is established and `client.account_id` is populated. There is nothing further to
 wait for.
 
-`req_ids` does not ask the venue anything. It calls `next_valid_id` on your
-wrapper right there, with one past the highest id the account is working an
-order under. The venue names that working set unprompted at every connect, from
-every session, not only this one. Nothing is reserved by the call; the
+`connect` states the next order id once, as a gateway does: the first
+`process_msgs` read after the venue has named what the account is working calls
+`next_valid_id` on your wrapper, with one past the highest id the account is
+working an order under. `req_ids` states it again without asking the venue
+anything. The venue names that working set unprompted at every connect, from
+every session, not only this one. Nothing is reserved by either; the
 reservation happens when you place.
 
 ## Limits

@@ -1096,7 +1096,7 @@ mod tests {
             let shared = SharedState::new();
             shared.orders.push_order_info(7, info(terminal));
 
-            for open in ["Submitted", "PreSubmitted", "PendingCancel", "PendingReplace"] {
+            for open in ["Submitted", "PreSubmitted", "PendingCancel", "PendingSubmit"] {
                 shared.orders.push_order_info(7, info(open));
                 assert_eq!(
                     shared.orders.get_order_info(7).unwrap().order_state.status, terminal,
@@ -1130,7 +1130,7 @@ mod tests {
             last_exec: api::Execution::default(),
         });
 
-        for open in ["Submitted", "PreSubmitted", "PendingCancel", "PendingReplace"] {
+        for open in ["Submitted", "PreSubmitted", "PendingCancel", "PendingSubmit"] {
             shared.orders.push_order_info(7, info(open));
             let cached = shared.orders.get_order_info(7).unwrap();
             assert_eq!(

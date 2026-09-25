@@ -3,6 +3,9 @@
 use crate::error_codes::{DUPLICATE_ORDER_ID, REQUEST_NOT_READ, Refusal};
 use crate::types::model::Order;
 
+/// The id an attached leg states when it states none.
+pub(crate) const UNSET_ID: i64 = i32::MAX as i64;
+
 /// `PRESET`, compared without case as a gateway compares it: the long s (`ſ`)
 /// upper-cases to `S` as well.
 fn is_preset(kind: &str) -> bool {
@@ -14,9 +17,9 @@ fn is_preset(kind: &str) -> bool {
 }
 
 pub(crate) fn requested(order: &Order) -> bool {
-    order.sl_order_id != i32::MAX
+    order.sl_order_id != UNSET_ID
         || !order.sl_order_type.is_empty()
-        || order.pt_order_id != i32::MAX
+        || order.pt_order_id != UNSET_ID
         || !order.pt_order_type.is_empty()
 }
 
@@ -27,13 +30,13 @@ pub(crate) fn check_ids(
     mut existing: impl FnMut(i64) -> bool,
     mut reusable: impl FnMut(i64) -> bool,
 ) -> Result<(), Refusal> {
-    let profit = (order.pt_order_id != i32::MAX).then_some(i64::from(order.pt_order_id));
-    let stop = (order.sl_order_id != i32::MAX).then_some(i64::from(order.sl_order_id));
+    let profit = (order.pt_order_id != UNSET_ID).then_some(order.pt_order_id);
+    let stop = (order.sl_order_id != UNSET_ID).then_some(order.sl_order_id);
     for id in [Some(parent), profit, stop].into_iter().flatten() {
         if existing(id) {
             continue;
         }
-        if id == 0 || id == i64::from(i32::MAX) || id == i64::from(i32::MIN) {
+        if id == 0 || id == UNSET_ID || id == i64::from(i32::MIN) {
             return Err(Refusal::stated(10149, format!("Invalid order id: {id}")));
         }
         if id <= highest && !reusable(id) {
@@ -61,7 +64,7 @@ pub(crate) fn check_selectors(order: &Order, disabled: bool) -> Result<(), Refus
         ("Stop Loss", order.sl_order_id, &order.sl_order_type),
         ("Profit Taker", order.pt_order_id, &order.pt_order_type),
     ] {
-        if (id != i32::MAX) != is_preset(kind) {
+        if (id != UNSET_ID) != is_preset(kind) {
             return Err(unread(&format!("Invalid value for {name} order-id or order-type")));
         }
     }
@@ -100,7 +103,7 @@ mod tests {
     fn ids_are_checked_parent_then_profit_then_stop() {
         let mut order = family();
         order.pt_order_id = 0;
-        order.sl_order_id = i32::MIN;
+        order.sl_order_id = i32::MIN.into();
         for (parent, expected) in [(0, "Invalid order id: 0"), (10, "Invalid order id: 0")] {
             let refusal = check_ids(parent, &order, 0, |_| false, |_| false).unwrap_err();
             assert_eq!((refusal.code, refusal.message.as_str()), (10149, expected));
@@ -160,7 +163,7 @@ mod tests {
             (refusal.code, refusal.message.as_str()),
             (320, "Error reading request: Invalid value for Stop Loss order-id or order-type")
         );
-        order.sl_order_id = i32::MAX;
+        order.sl_order_id = UNSET_ID;
         assert_eq!(
             check_selectors(&order, false).unwrap_err().message,
             "Error reading request: Invalid value for Profit Taker order-id or order-type"

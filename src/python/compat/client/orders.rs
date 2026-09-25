@@ -873,6 +873,36 @@ w = W()",
         });
     }
 
+    /// A family numbered from the ids this session hands out is placed under
+    /// them, however wide the account's ids have grown: the children take an
+    /// id as the parent does.
+    #[test]
+    fn attached_children_take_the_ids_the_session_hands_out() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, rx, shared, _wrapper) = wired_client(py);
+            crate::api::client::tests::attach_from_the_selected_preset(&shared);
+            shared.orders.set_replay_done();
+            shared.orders.note_the_venue_named(1_787_685_160_171_345);
+            let [parent, stop, profit] = [(); 3].map(|_| client.take_order_id(py));
+            let order = Py::new(py, Order {
+                override_percentage_constraints: true,
+                lmt_price: 100.0,
+                sl_order_type: "PRESET".into(),
+                pt_order_type: "PRESET".into(),
+                ..bracket_order(true, 0)
+            }).unwrap();
+            order.bind(py).setattr("slOrderId", stop).unwrap();
+            order.bind(py).setattr("ptOrderId", profit).unwrap();
+            client.place_order(py, parent as i64, &bracket_contract(), &order.borrow(py)).unwrap();
+            let sent: Vec<u64> = rx.try_iter().filter_map(|command| match command {
+                ControlCommand::Order(request @ OrderRequest::SubmitEx { .. }) => Some(request.order_id()),
+                _ => None,
+            }).collect();
+            assert_eq!(sent, [parent, stop, profit]);
+        });
+    }
+
     /// An order held back for a later transmit was never given to the venue,
     /// so a withdrawal of everything forgets it rather than sending a cancel
     /// the venue would refuse — left held, it would go out behind the next

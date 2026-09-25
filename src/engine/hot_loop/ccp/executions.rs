@@ -1622,7 +1622,15 @@ impl CcpState {
         // recovered as working either.
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
-        let status = status_of(ord_status, clord_id, parsed);
+        // A report of a change on its way (150=6) moves nothing, as a gateway
+        // reads it: the venue sends one ahead of accepting a replace, and ahead
+        // of revising an order itself. An order whose state is known is stated
+        // again as it stands; one whose state is not is recovered from the
+        // report below.
+        let status = match context.order(clord_id) {
+            Some(held) if exec_type == "6" && held.status != crate::types::OrderStatus::Uncertain => held.status,
+            _ => status_of(ord_status, clord_id, parsed),
+        };
         let replayed = |tag: u32| {
             parsed.get(&tag).map(|v| v.eq_ignore_ascii_case("Y")).unwrap_or(false)
         };
@@ -1940,10 +1948,9 @@ impl CcpState {
                 parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
         }
 
-        // A replace is acknowledged as 39=5, reached through 39=6 first: a
-        // modify runs PendingCancel then Replaced. Confirmed live.
-        // A pending cancel does not outrank the working states, so the
-        // acknowledgement applies the ordinary way. An order already working
+        // A replace is acknowledged as 39=5, behind a 150=6 that moved
+        // nothing. A pending cancel does not outrank the working states, so
+        // the acknowledgement applies the ordinary way. An order already working
         // when the modify is accepted changes no status, and the caller is still
         // told the change was made.
         //

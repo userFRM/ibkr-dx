@@ -1,3 +1,4 @@
+use super::attached_checks::UNSET_ID;
 use super::attached_prices::{
     OrderPrice, PriceContext, PriceSide, UNSET_PRICE, resolve_adjusted_price,
     resolve_attached_price, resolve_profit_price,
@@ -306,9 +307,9 @@ pub(crate) fn build_children(
     children
 }
 
-fn clone_child(parent: &Order, api_id: i32, context: &ChildContext<'_>) -> Order {
+fn clone_child(parent: &Order, api_id: i64, context: &ChildContext<'_>) -> Order {
     let mut child = parent.clone();
-    child.order_id = if api_id == i32::MAX { 0 } else { i64::from(api_id) };
+    child.order_id = if api_id == UNSET_ID { 0 } else { api_id };
     child.parent_id = context.parent_api_id;
     child.action = match parent.side() {
         Ok(crate::types::Side::Buy) => "SELL".into(),
@@ -326,8 +327,8 @@ fn clone_child(parent: &Order, api_id: i32, context: &ChildContext<'_>) -> Order
     child.conditions_cancel_order = false;
     child.oca_group = context.oca_group.into();
     child.oca_type = if parent.oca_type == 0 { 3 } else { parent.oca_type };
-    child.sl_order_id = i32::MAX;
-    child.pt_order_id = i32::MAX;
+    child.sl_order_id = UNSET_ID;
+    child.pt_order_id = UNSET_ID;
     child.sl_order_type.clear();
     child.pt_order_type.clear();
     child
@@ -852,7 +853,7 @@ mod tests {
         let mut parent = parent();
         parent.sl_order_type = "OTHER".into();
         parent.pt_order_type = "OTHER".into();
-        parent.sl_order_id = i32::MAX;
+        parent.sl_order_id = UNSET_ID;
         parent.transmit = false;
         parent.tif = "OPG".into();
         parent.oca_type = 1;

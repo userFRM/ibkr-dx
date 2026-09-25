@@ -347,8 +347,10 @@ against the combination in ways not all established here.
 account preset. Rust uses `sl_order_id` / `sl_order_type` and `pt_order_id` /
 `pt_order_type`; Python uses `slOrderId` / `slOrderType` and `ptOrderId` /
 `ptOrderType`. State a child id with `PRESET`, compared without case. The default
-integer leaves the id unstated. These are fields of `Order`; the call gains no
-argument.
+integer leaves the id unstated. A child id is numbered as the order id is, so an
+id from `next_order_id()` or `next_valid_id` serves a child as it serves a
+parent; as with a parent, a new child under an id at or below one already used
+is refused with 103. These are fields of `Order`; the call gains no argument.
 
 The engine loads the contract and preset while unrelated requests continue.
 `order_presets()` returns the list's key, attributes and last-change triples;

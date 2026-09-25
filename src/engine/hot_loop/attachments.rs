@@ -341,8 +341,8 @@ mod tests {
     fn an_unstated_child_id_is_reported_as_zero_and_only_its_first_order_is_kept() {
         let (mut engine, shared, send, mut peer) = engine();
         let ControlCommand::Place(mut parent) = placement(true, false) else { unreachable!() };
-        parent.order.sl_order_id = i32::MAX;
-        parent.order.pt_order_id = i32::MAX;
+        parent.order.sl_order_id = crate::client_core::attached_checks::UNSET_ID;
+        parent.order.pt_order_id = crate::client_core::attached_checks::UNSET_ID;
         parent.order.sl_order_type = "selected".into();
         parent.order.pt_order_type = "selected".into();
         shared.admit(&send, ControlCommand::Place(parent)).unwrap();

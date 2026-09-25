@@ -336,36 +336,54 @@ fn what_if_test_state() -> (CcpState, Context, SharedState) {
     (CcpState::new(), context, SharedState::new())
 }
 
-/// A replace is acknowledged as 39=5, and the gateway sends 39=6 first.
-/// Captured live against a paper account, a modify runs PendingCancel then
-/// Replaced. The monotonic guard ranks PendingCancel above the working
-/// states, so the acknowledgement looked like a stale frame: the caller was
-/// told the order was cancelling and never told the replacement was live.
+/// A change on its way is stated as a gateway states it, and its acceptance
+/// is not dropped as a stale frame.
+///
+/// The venue sends 150=6 39=6 ahead of accepting a replace, and ahead of
+/// revising an order itself (a bracket's exits once the parent fills), then
+/// 150=5 39=5. A gateway moves nothing on the first: a replace this session
+/// sent reads as sent and not yet acknowledged until the venue accepts it, and
+/// an order the venue revises on its own stays as it was. Read off 39=6, both
+/// were told the order was being cancelled.
 #[test]
-fn a_replace_acknowledgement_is_not_dropped_as_a_stale_frame() {
-    let (mut ccp, mut context, shared) = ord_status_test_state();
-
-    // The order is working, then the replace puts a cancel in flight.
-    ccp.handle_exec_report(&exec_report_frame(&[(150, "0"), (39, "0")]), b"",
-        &mut context, &shared, &None, "");
-    ccp.handle_exec_report(&exec_report_frame(&[(150, "6"), (39, "6")]), b"",
-        &mut context, &shared, &None, "");
-    assert_eq!(context.order(42).map(|o| o.status),
-        Some(crate::types::OrderStatus::PendingCancel), "the cancel is in flight");
-    let _ = shared.orders.drain_open_orders();
-
-    ccp.handle_exec_report(&exec_report_frame(&[(150, "5"), (39, "5")]), b"",
-        &mut context, &shared, &None, "");
-
-    assert_eq!(
-        context.order(42).map(|o| o.status),
-        Some(crate::types::OrderStatus::Submitted),
-        "the replacement is working, not still cancelling",
-    );
-    assert!(
-        shared.orders.drain_open_orders().iter().any(|(id, _)| *id == 42),
-        "and the caller is told, rather than the frame being dropped",
-    );
+fn a_change_on_its_way_is_stated_as_a_gateway_states_it() {
+    use std::io::Read;
+    for (replaced, expected) in [
+        (true, ["PendingSubmit", "Submitted"]),
+        (false, ["Submitted", "Submitted"]),
+    ] {
+        let (mut context, shared) = working_order_state();
+        let mut ccp = CcpState::new();
+        let revision = if replaced { "42.1" } else { "42.0" };
+        if replaced {
+            let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            let mut conn = Some(conn);
+            context.modify_ex(42, 101 * PRICE_SCALE, 100, false, b'2', b'0', 0);
+            crate::engine::hot_loop::order_builder::drain_and_send_orders(
+                &mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false,
+                &shared, false, &None, &mut 64,
+            );
+            let mut buf = [0; 4096];
+            let n = peer.read(&mut buf).unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"));
+        }
+        for reply in [[(150, "6"), (20, "3"), (39, "6")], [(150, "5"), (20, "0"), (39, "5")]] {
+            let mut report = exec_report_frame(&[
+                (11, revision), (6008, "756733"), (38, "100"), (44, "101"),
+                (14, "0"), (151, "100"), (100, "ARCA"), (198, "ARCA:1"),
+            ]);
+            report.extend(reply.map(|(tag, value)| (tag, value.to_string())));
+            if reply[0].1 == "5" && replaced {
+                report.insert(41, "42.0".into());
+            }
+            ccp.handle_exec_report(&report, b"", &mut context, &shared, &None, "DU1");
+        }
+        let told: Vec<_> = shared.orders.drain_order_updates().into_iter()
+            .map(|update| crate::types::order_status::order_status_str(update.status)).collect();
+        assert_eq!(told, expected, "replaced here: {replaced}");
+        assert_eq!(context.order(42).map(|o| o.status), Some(crate::types::OrderStatus::Submitted));
+    }
 }
 
 /// The recovery-push terminator carries `11='*'`, which parses to the
