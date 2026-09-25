@@ -809,9 +809,11 @@ And two things this client does not read or fire:
 A program written against the TWS API keeps its calls, its callbacks and its
 order objects; its imports and its connect call change — the Python
 [Quick start](#quick-start) is one. In Python, both naming conventions resolve
-on every type and method: `reqMktData` and `req_mkt_data`, `secType` and
-`sec_type`, `conId` and `con_id`, and the TWS API's module layout resolves
-under `ibkr_dx` (`ibkr_dx.client`, `ibkr_dx.wrapper`, `ibkr_dx.contract`, …).
+on `EClient`, `EWrapper` and the records a call or callback hands over:
+`reqMktData` and `req_mkt_data`, `secType` and `sec_type`, `conId` and
+`con_id`; the classes a program only builds, such as `ExecutionFilter`, carry
+the TWS API's spelling alone. The TWS API's module layout resolves under
+`ibkr_dx` (`ibkr_dx.client`, `ibkr_dx.wrapper`, `ibkr_dx.contract`, …).
 
 Where this client answers differently from a gateway,
 [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) says so, case
@@ -1030,7 +1032,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
 | Rust, unit and integration | 3,201 | No |
-| Python | 1,170 | No |
+| Python | 1,181 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

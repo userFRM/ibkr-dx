@@ -658,6 +658,11 @@ impl EClient {
         super::contract::by_reference_name(slf.as_any(), name, REFERENCE_ALIASES)
     }
 
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        super::contract::reference_dir::<Self>(slf.as_any(), REFERENCE_ALIASES)
+    }
+
     /// Disconnect from IB.
     fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
         let (_turn, _reading) = self.lifecycle_turn(py);
@@ -1171,8 +1176,8 @@ fn answered_by_the_base(py: Python<'_>, f: &Py<PyAny>, alias: &str) -> bool {
 }
 
 /// The reference client's spelling of a callback name: its words run together
-/// with each after the first capitalised.
-fn ibapi_name(snake: &str) -> String {
+/// with each after the first capitalised. A field's is built the same way.
+pub(super) fn ibapi_name(snake: &str) -> String {
     // Three it spells with its letters run together instead. Built the ordinary
     // way `real_time_bar` is `realTimeBar`, which that client does not declare,
     // so a wrapper written against it declares `realtimeBar`, nothing answers to
@@ -3214,25 +3219,33 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn a_symbol_match_answered_to_the_caller_states_the_words_and_the_issuer() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, _w) = wired_client(py);
-            // Seeded before the question is asked, which is the only way to
-            // exercise the waiting with no venue on the other end.
-            let req_id = super::ask::peek_ask_id(&shared) as u32;
-            shared.reference.push_matching_symbols(req_id, vec![
-                crate::control::contracts::SymbolMatch {
-                    con_id: 0, symbol: "APPLE".into(),
-                    sec_type: crate::control::contracts::SecurityType::Bond,
-                    currency: "USD".into(), primary_exchange: String::new(),
-                    description: "Apple Inc".into(), derivative_types: Vec::new(),
-                    issuer_id: "e1234567".into(),
-                },
-            ]);
+            let (client, rx, shared, _w) = wired_client(py);
+            let answering = std::thread::spawn(move || {
+                // Answered under the number the question went out under, as a
+                // venue answers it. The number the next question will take is
+                // anyone's until it is taken, and a test asking at the same
+                // time can take it first.
+                let asked = rx.recv_timeout(std::time::Duration::from_secs(15)).expect("no question went out");
+                let ControlCommand::FetchMatchingSymbols { req_id, .. } = asked else {
+                    panic!("asked {asked:?}");
+                };
+                shared.reference.push_matching_symbols(req_id, vec![
+                    crate::control::contracts::SymbolMatch {
+                        con_id: 0, symbol: "APPLE".into(),
+                        sec_type: crate::control::contracts::SecurityType::Bond,
+                        currency: "USD".into(), primary_exchange: String::new(),
+                        description: "Apple Inc".into(), derivative_types: Vec::new(),
+                        issuer_id: "e1234567".into(),
+                    },
+                ]);
+            });
 
             let g = pyo3::types::PyDict::new(py);
             g.set_item("client", &client).unwrap();
             let found = py
                 .eval(c"client.matching_symbols('APPLE')[0].contract", Some(&g), None)
                 .unwrap();
+            answering.join().unwrap();
 
             let words: String = found.getattr("description").unwrap().extract().unwrap();
             assert_eq!(words, "Apple Inc", "the venue's own words for what it found");
@@ -3253,20 +3266,25 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn a_schedule_answered_to_the_caller_states_the_window_it_covers() {
         Python::initialize();
         Python::attach(|py| {
-            let (client, _rx, shared, _w) = wired_client(py);
-            // Seeded before the question is asked, which is the only way to
-            // exercise the waiting with no venue on the other end.
-            let req_id = super::ask::peek_ask_id(&shared) as u32;
-            shared.reference.push_historical_schedule(req_id, crate::types::HistoricalScheduleResponse {
-                query_id: String::new(),
-                timezone: "US/Eastern".into(),
-                start_date_time: "20260907-00:00:00".into(),
-                end_date_time: "20260911-23:59:59".into(),
-                sessions: vec![crate::types::ScheduleSession {
-                    ref_date: "20260908".into(),
-                    open_time: "20260908-09:30:00".into(),
-                    close_time: "20260908-16:00:00".into(),
-                }],
+            let (client, rx, shared, _w) = wired_client(py);
+            let answering = std::thread::spawn(move || {
+                // Answered under the number the question went out under: see
+                // the symbol match above.
+                let asked = rx.recv_timeout(std::time::Duration::from_secs(15)).expect("no question went out");
+                let ControlCommand::FetchHistoricalSchedule { req_id, .. } = asked else {
+                    panic!("asked {asked:?}");
+                };
+                shared.reference.push_historical_schedule(req_id, crate::types::HistoricalScheduleResponse {
+                    query_id: String::new(),
+                    timezone: "US/Eastern".into(),
+                    start_date_time: "20260907-00:00:00".into(),
+                    end_date_time: "20260911-23:59:59".into(),
+                    sessions: vec![crate::types::ScheduleSession {
+                        ref_date: "20260908".into(),
+                        open_time: "20260908-09:30:00".into(),
+                        close_time: "20260908-16:00:00".into(),
+                    }],
+                });
             });
 
             let g = pyo3::types::PyDict::new(py);
@@ -3280,6 +3298,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 .unwrap()
                 .extract()
                 .unwrap();
+            answering.join().unwrap();
 
             assert_eq!(answered.0, "20260907-00:00:00", "where the stretch the venue answered begins");
             assert_eq!(answered.1, "20260911-23:59:59", "and where it ends");

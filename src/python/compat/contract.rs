@@ -216,6 +216,44 @@ pub(super) fn by_reference_name(
     }
 }
 
+/// What a `__dir__` lists: what the object carries, and each name class `T`
+/// carries again under the reference client's spelling of it. Only
+/// `__getattr__` answers those, and the plain listing does not name what only
+/// that hook answers, so an editor completing from it offered none of the
+/// names a program written against that client reads.
+///
+/// That spelling is the table's where it names one, the one the class already
+/// carries where it carries one, and otherwise the words run together. Only a
+/// name that reaches what it spells is listed.
+pub(super) fn reference_dir<T: pyo3::PyTypeInfo>(
+    obj: &Bound<'_, PyAny>,
+    aliases: &[(&str, &str)],
+) -> PyResult<Vec<String>> {
+    let py = obj.py();
+    let mut listed: Vec<String> = py.get_type::<PyAny>().call_method1("__dir__", (obj,))?.extract()?;
+    let letters = |name: &str| name.replace('_', "").to_lowercase();
+    let mut spelled: std::collections::HashSet<String> = listed
+        .iter()
+        .filter(|name| name.chars().any(|c| c.is_ascii_uppercase()))
+        .map(|name| letters(name))
+        .collect();
+    for (theirs, ours) in aliases {
+        listed.push((*theirs).to_string());
+        spelled.insert(letters(ours));
+    }
+    for carried in py.get_type::<T>().dir()?.iter() {
+        let carried: String = carried.extract()?;
+        if carried.starts_with('_') || !carried.contains('_') || spelled.contains(&letters(&carried)) {
+            continue;
+        }
+        let theirs = super::client::ibapi_name(&carried);
+        if reference_name(obj, &theirs, aliases)?.as_deref() == Some(carried.as_str()) {
+            listed.push(theirs);
+        }
+    }
+    Ok(listed)
+}
+
 /// A write under either spelling, for a `__setattr__`: the field the reference
 /// spelling names where there is one, else the name as written, which raises
 /// as the plain write would where the class carries no such field.

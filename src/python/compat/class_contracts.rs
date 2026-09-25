@@ -1,7 +1,7 @@
 //! The contract classes a caller works in, as the Python API names them.
 
 // The other families, and the two helpers every class here uses.
-use super::contract::{by_reference_name, enum_code, enum_member, set_by_reference_name, set_from_keywords};
+use super::contract::{by_reference_name, reference_dir, enum_code, enum_member, set_by_reference_name, set_from_keywords};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::sync::OnceLock;
@@ -852,6 +852,15 @@ pub struct ContractDetails {
     pub time_zone_id: String,
 }
 
+/// Same field, different word: the reference client writes one `t`, calls the
+/// bond remark a plain note, and orders the words of the fund's follow-on
+/// minimum the other way round.
+const DETAILS_WORDS: &[(&str, &str)] = &[
+    ("putable", "puttable"),
+    ("notes", "bond_notes"),
+    ("fundSubsequentMinimumPurchase", "fund_minimum_subsequent_purchase"),
+];
+
 #[pymethods]
 impl ContractDetails {
     /// Answer to the name the reference client gives a field as well as the
@@ -865,35 +874,18 @@ impl ContractDetails {
     /// Only reached when the attribute was not found, so it costs nothing on
     /// the names this class defines.
     fn __getattr__(slf: Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
-        by_reference_name(
-            slf.as_any(),
-            name,
-            &[
-                // Same field, different word: the reference client writes one
-                // `t`, calls the bond remark a plain note, and orders the words
-                // of the fund's follow-on minimum the other way round.
-                ("putable", "puttable"),
-                ("notes", "bond_notes"),
-                ("fundSubsequentMinimumPurchase", "fund_minimum_subsequent_purchase"),
-            ],
-        )
+        by_reference_name(slf.as_any(), name, DETAILS_WORDS)
     }
 
     /// The same names, written to: a field set under the reference client's
     /// spelling lands on this client's field.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
-        set_by_reference_name(
-            slf.as_any(),
-            name, &value,
-            &[
-                // Same field, different word: the reference client writes one
-                // `t`, calls the bond remark a plain note, and orders the words
-                // of the fund's follow-on minimum the other way round.
-                ("putable", "puttable"),
-                ("notes", "bond_notes"),
-                ("fundSubsequentMinimumPurchase", "fund_minimum_subsequent_purchase"),
-            ],
-        )
+        set_by_reference_name(slf.as_any(), name, &value, DETAILS_WORDS)
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), DETAILS_WORDS)
     }
 
     #[getter]
@@ -1294,6 +1286,11 @@ impl SmartComponentPy {
         set_by_reference_name(slf.as_any(), name, &value, &[])
     }
 
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
+    }
+
     #[new]
     #[pyo3(signature = ())]
     fn new() -> Self { Self::default() }
@@ -1338,6 +1335,11 @@ impl ContractDescription {
     /// spelling lands on this client's field.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
         set_by_reference_name(slf.as_any(), name, &value, &[])
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
     }
 
     #[new]
@@ -1438,6 +1440,11 @@ impl DepthMktDataDescriptionPy {
     /// spelling lands on this client's field.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
         set_by_reference_name(slf.as_any(), name, &value, &[])
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
     }
 
     #[new]

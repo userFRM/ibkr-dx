@@ -1,7 +1,7 @@
 //! What the venue reports back: fills, their cost, bars, and news.
 
 // The other families, and the two helpers every class here uses.
-use super::contract::{by_reference_name, enum_code, enum_member, set_by_reference_name};
+use super::contract::{by_reference_name, reference_dir, enum_code, enum_member, set_by_reference_name};
 use pyo3::prelude::*;
 
 use super::camel_aliases_copy;
@@ -63,6 +63,11 @@ impl BarData {
     /// spelling lands on this client's field.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
         set_by_reference_name(slf.as_any(), name, &value, &[])
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
     }
 
     #[new]
@@ -189,6 +194,11 @@ impl Execution {
         set_by_reference_name(slf.as_any(), name, &value, &[])
     }
 
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
+    }
+
     #[getter]
     fn get_opt_exercise_or_lapse_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         enum_member(py, "OptionExerciseType", self.opt_exercise_or_lapse_type)
@@ -262,18 +272,27 @@ impl FamilyCodePy {
     /// Answer to the name the reference client gives a field as well as the
     /// name this one gives it.
     fn __getattr__(slf: Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
-        by_reference_name(slf.as_any(), name, &[])
+        by_reference_name(slf.as_any(), name, FAMILY_CODE_SPELLING)
     }
 
     /// The same names, written to.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
-        set_by_reference_name(slf.as_any(), name, &value, &[])
+        set_by_reference_name(slf.as_any(), name, &value, FAMILY_CODE_SPELLING)
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), FAMILY_CODE_SPELLING)
     }
 
     #[new]
     #[pyo3(signature = ())]
     fn new() -> Self { Self::default() }
 }
+
+/// The reference client writes the account's `ID` in capitals, which the
+/// words run together do not.
+const FAMILY_CODE_SPELLING: &[(&str, &str)] = &[("accountID", "account_id")];
 
 /// ibapi-compatible HistoricalSession class.
 ///
@@ -303,6 +322,11 @@ impl HistoricalSessionPy {
     /// The same names, written to.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
         set_by_reference_name(slf.as_any(), name, &value, &[])
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
     }
 
     #[new]

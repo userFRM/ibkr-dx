@@ -2,7 +2,7 @@
 
 // The other families, and the two helpers every class here uses.
 use super::{class_contracts::*, class_conditions::*};
-use super::contract::{by_reference_name, set_by_reference_name, set_from_keywords};
+use super::contract::{by_reference_name, reference_dir, set_by_reference_name, set_from_keywords};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use std::sync::OnceLock;
@@ -1380,6 +1380,11 @@ impl OrderAllocation {
         set_by_reference_name(slf.as_any(), name, &value, &[])
     }
 
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
+    }
+
     #[new]
     #[pyo3(signature = ())]
     fn new() -> Self { Self::default() }
@@ -1561,6 +1566,11 @@ impl OrderState {
     /// spelling lands on this client's field.
     fn __setattr__(slf: Bound<'_, Self>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
         set_by_reference_name(slf.as_any(), name, &value, &[])
+    }
+
+    /// The same names, listed: `dir()` names them beside this client's.
+    fn __dir__(slf: Bound<'_, Self>) -> PyResult<Vec<String>> {
+        reference_dir::<Self>(slf.as_any(), &[])
     }
 
     #[new]

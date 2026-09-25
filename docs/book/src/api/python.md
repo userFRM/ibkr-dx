@@ -4,8 +4,14 @@
 The same `EClient` also carries [the calls that answer](#calls-that-answer) and
 [the calls beyond the documented API](../reference/beyond-the-api.md).
 
-Both naming conventions resolve on every type and method: `reqMktData` and
-`req_mkt_data`, `secType` and `sec_type`, `conId` and `con_id`.
+On `EClient`, `EWrapper` and the records a call or callback hands over, both
+naming conventions resolve: `reqMktData` and `req_mkt_data`, `secType` and
+`sec_type`, `conId` and `con_id`. `dir()` lists both, so an editor or a notebook
+completing from it offers either. The plain Python classes a program only
+builds — `ExecutionFilter`, `ScannerSubscription`, `WshEventData`, `OrderCancel`,
+`RealTimeBar`, `ScanData`, `FamilyCode` and `HistoricalSession` — carry the
+reference client's spelling alone, as that client's own do; the family codes and
+sessions a callback hands over answer to both.
 
 `ibkr_dx.configure()` carries what a gateway would hold in a configuration file:
 the session time zone, the build announced at logon, which executions arrive
