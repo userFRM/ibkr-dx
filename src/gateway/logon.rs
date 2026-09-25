@@ -50,6 +50,10 @@ pub(super) struct LogonAck {
     /// reading: every session the venue names then counts as another client,
     /// so this one gives the account up rather than taking it.
     pub logged_in_at: String,
+    /// How far the venue's clock was ahead of this machine's as the stamp above
+    /// arrived. Learned when the session is built instead, seconds later once
+    /// the farms are connected, the venue's clock read that far behind.
+    pub venue_ahead_millis: Option<i64>,
     pub heartbeat_interval: u64,
     pub server_session_id: String,
     pub ccp_token: String,
@@ -260,6 +264,7 @@ impl LogonAck {
                 && ack.logged_in_at.is_empty()
             {
                 ack.logged_in_at = v.clone();
+                ack.venue_ahead_millis = crate::protocol::datetime::ahead_of_this_clock_millis(v);
                 log::info!("the venue stamps this logon {}", ack.logged_in_at);
             }
 
@@ -1472,6 +1477,13 @@ mod tests {
         assert_eq!(ack.accounts, ["DU111111"]);
         assert_eq!(ack.heartbeat_interval, 45);
         assert_eq!(ack.logged_in_at, "20260101-12:00:00");
+        // How far the venue's clock is ahead, as the stamp was read.
+        let here = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        assert!(
+            ack.venue_ahead_millis.is_some_and(|ahead| (ahead - (1_767_268_800_000 - here)).abs() < 2_000),
+            "{:?}", ack.venue_ahead_millis,
+        );
     }
 
     /// The ACK inside a compressed envelope is an answered logon whatever the

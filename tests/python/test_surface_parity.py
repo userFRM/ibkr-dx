@@ -221,16 +221,16 @@ def test_nothing_builds_an_order_for_python_by_hand():
 
 
 def test_what_cannot_be_read_is_refused_rather_than_emptied():
-    """The three the caller fills carry Python objects, and an object this
-    client cannot read is a refusal.
+    """The legs and the conditions the caller fills carry Python objects, and
+    an object this client cannot read is a refusal.
 
-    Read as absent, a combination leg goes out unpriced and a tag the protocol
-    does not carry stops being refused for stating it — the silent transform
-    these gates exist to prevent, reintroduced by the code that fills them.
+    Read as absent, a combination leg goes out unpriced and a condition goes
+    unstated — the silent transform these gates exist to prevent, reintroduced
+    by the code that fills them. An option list is written as its entries'
+    text, as the reference client writes it, and read as a gateway reads it.
     """
     source = (ROOT / "src/python/compat/class_orders.rs").read_text()
-    for converter in ("convert_order_combo_legs", "convert_misc_options",
-                      "convert_conditions"):
+    for converter in ("convert_order_combo_legs", "convert_conditions"):
         at = source.index(f"pub fn {converter}(")
         body = source[at:source.index("\n    }\n", at)]
         assert "Result<" in body.split("{", 1)[0], f"{converter} cannot report a failure"

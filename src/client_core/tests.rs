@@ -2848,7 +2848,8 @@ fn a_slot_the_engine_gave_back_is_not_answered_from_the_cache() {
 /// order — nothing filled, its whole quantity outstanding, a status of its own
 /// invention, and slot zero, which is a real slot and not this order's. The
 /// next replace was then refused for naming another contract, and a partly
-/// filled order came back as untouched.
+/// filled order came back as untouched. Its permanent id is the venue's number
+/// for it, not this session's.
 #[test]
 fn a_replayed_order_is_recorded_as_the_venue_states_it() {
     let core = ClientCore::new();
@@ -2858,7 +2859,7 @@ fn a_replayed_order_is_recorded_as_the_venue_states_it() {
         order: ApiOrder {
             order_id: 4242, action: "BUY".into(), total_quantity: 100.0,
             order_type: "LMT".into(), lmt_price: 100.0, filled_quantity: 30.0,
-            ..Default::default()
+            perm_id: 9000, ..Default::default()
         },
         order_state: ApiOrderState { status: "Submitted".into(), ..Default::default() },
         last_exec: Default::default(),
@@ -2868,13 +2869,16 @@ fn a_replayed_order_is_recorded_as_the_venue_states_it() {
         order_id: 4242, action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 101.0, ..Default::default()
     };
-    core.restate_order(Some(&shared), 4242, ApiContract::default(), revision, 7);
+    core.keep_the_book(&shared, crate::bridge::OrderBook::Taken(Box::new(crate::bridge::TakenOrder {
+        order_id: 4242, contract: ApiContract::default(), order: revision, instrument: 7, restated: true,
+    })));
 
     let tracked = core.open_orders.lock().unwrap().get(&4242).cloned().expect("recorded");
     assert_eq!(tracked.instrument, 7, "on the slot the call named");
     assert_eq!(tracked.filled, 30.0, "with what the venue says has filled");
     assert_eq!(tracked.remaining, 70.0, "and what is left of it");
     assert_eq!(tracked.status, "Submitted", "under the venue's own status");
+    assert_eq!(tracked.order.perm_id, 9000, "under the number the venue holds it under");
     assert_eq!(
         tracked.before_the_replace.as_ref().map(|o| o.lmt_price), Some(100.0),
         "and the terms the venue holds, for a refusal to put back",

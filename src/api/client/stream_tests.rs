@@ -733,6 +733,7 @@ fn a_working_status_echoed_behind_the_finishing_fill_is_dropped_at_the_push() {
         status(79, OrderStatus::Filled, 1.0, 0.0, 10.0),
     );
     shared.orders.push_completed_order(CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 79,
         instrument: 0,
         status: OrderStatus::Filled,

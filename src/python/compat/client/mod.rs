@@ -175,12 +175,13 @@ pub struct EClient {
     /// send them again, so without this a second request is answered with none
     /// of them and the account reads as having completed nothing. The Rust
     /// surface keeps the same
-    /// archive for the same reason.
+    /// archive for the same reason, each with the venue's own name for it.
     #[allow(clippy::type_complexity)]
     pub(crate) completed: Mutex<Vec<(
         crate::types::model::Contract,
         crate::types::model::Order,
         crate::types::model::OrderState,
+        String,
     )>>,
     /// Shared subscription tracking and dispatch preparation.
     pub(crate) core: ClientCore,
@@ -262,6 +263,20 @@ pub(crate) fn wire_con_id(what: &str, con_id: i64) -> PyResult<u32> {
 pub(crate) fn wire_text(what: &str, value: &str) -> PyResult<()> {
     crate::api::client::wire_text(what, value)
         .map_err(|refusal| PyRuntimeError::new_err(refusal.message))
+}
+
+/// A free-form option list as the reference client writes it: `tag=value;`
+/// for an entry naming both, and its own text for any other, which a gateway
+/// then reads as it reads any entry.
+pub(crate) fn written_option_list<'py>(entries: impl IntoIterator<Item = Bound<'py, PyAny>>) -> PyResult<String> {
+    let mut written = String::new();
+    for entry in entries {
+        match (entry.getattr("tag"), entry.getattr("value")) {
+            (Ok(tag), Ok(value)) => written += &format!("{}={};", tag.str()?, value.str()?),
+            _ => written.push_str(&entry.str()?.to_cow()?),
+        }
+    }
+    Ok(written)
 }
 
 /// The client id, given under this client's spelling or the reference
@@ -1363,14 +1378,7 @@ impl EClient {
         &self, py: Python<'_>, list: &crate::client_core::OptionList, options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<Option<crate::error_codes::Refusal>> {
         let Some(options) = options.filter(|o| !o.is_empty()) else { return Ok(None) };
-        let mut written = String::new();
-        for entry in &options {
-            let entry = entry.bind(py);
-            match (entry.getattr("tag"), entry.getattr("value")) {
-                (Ok(tag), Ok(value)) => written += &format!("{}={};", tag.str()?, value.str()?),
-                _ => written.push_str(&entry.str()?.to_cow()?),
-            }
-        }
+        let written = written_option_list(options.iter().map(|entry| entry.bind(py).clone()))?;
         let features = self.shared_state()
             .map(|shared| shared.reference.enabled_features())
             .unwrap_or_default();

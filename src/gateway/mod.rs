@@ -1105,6 +1105,7 @@ fn reconnect_ccp_attempt(
     // The connection carries the venue's own stamp, absent if the
     // acknowledgement states none.
     let mut venue_stamp: Option<String> = None;
+    let mut venue_ahead_millis: Option<i64> = None;
 
     // TLS + DH key exchange
     let addr = format!("{host}:{port}")
@@ -1357,6 +1358,8 @@ fn reconnect_ccp_attempt(
                 // the same last-wins hazard the read above works around, and
                 // the next tag read here may not be as forgiving.
                 venue_stamp = fields.get(&52).cloned();
+                venue_ahead_millis = venue_stamp.as_deref()
+                    .and_then(crate::protocol::datetime::ahead_of_this_clock_millis);
                 // And what rode in with it. The venue pushes what it holds
                 // the moment the logon is answered, so the envelope carrying
                 // the acknowledgement carries the session's own traffic beside
@@ -1408,6 +1411,7 @@ fn reconnect_ccp_attempt(
     // again on every later attempt unless the session remembers it.
     conn.connected_host = Some(host.to_string());
     conn.logged_in_at = venue_stamp;
+    conn.venue_ahead_millis = venue_ahead_millis;
     Ok(conn)
 }
 
@@ -2344,6 +2348,7 @@ impl Gateway {
             mut accounts,
             advisor,
             mut logged_in_at,
+            venue_ahead_millis,
             heartbeat_interval,
             server_session_id,
             ccp_token,
@@ -2394,6 +2399,7 @@ impl Gateway {
         if !logged_in_at.is_empty() {
             ccp_conn.logged_in_at = Some(logged_in_at.clone());
         }
+        ccp_conn.venue_ahead_millis = venue_ahead_millis;
         // The init burst, seeded into the connection's buffer so the hot loop
         // reads the account data it carries.
         ccp_conn.seed_buffer(&init_data);

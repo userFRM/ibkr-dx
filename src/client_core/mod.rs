@@ -3407,7 +3407,18 @@ impl ClientCore {
     pub fn keep_the_book(&self, shared: &SharedState, entry: crate::bridge::OrderBook) {
         match entry {
             crate::bridge::OrderBook::Taken(taken) => {
-                let crate::bridge::TakenOrder { order_id, contract, order, instrument, restated } = *taken;
+                let crate::bridge::TakenOrder { order_id, contract, mut order, instrument, restated } = *taken;
+                // The order as a gateway holds and states it: under its type's
+                // own name, on the account it went out for, and with the
+                // number it went to the venue under as its permanent id, from
+                // the moment it is sent. For an order the venue named at
+                // connect, that is the number the venue holds it under, not
+                // this session's number for it.
+                if let Some(named) = order.order_type_named() {
+                    order.order_type = named.to_string();
+                }
+                order.account = shared.account_name(&order.account);
+                order.perm_id = shared.orders.perm_id(order_id).unwrap_or(order_id as i64);
                 self.learn_order_identity(shared, order_id);
                 self.cache_contract(contract.con_id, contract.clone());
                 if restated {

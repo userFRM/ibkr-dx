@@ -1204,7 +1204,7 @@ impl EClient {
                 // Copied before anything is called back: a callback may ask
                 // for these again, and the lock is not re-entrant.
                 let completed = self.completed.lock().unwrap().clone();
-                for (contract, order, state) in &completed {
+                for (contract, order, state, _) in &completed {
                     // Kept whole in the archive and filtered on the way out.
                     if api_only && !shared.orders.was_entered_through_an_api(
                         order.order_id.max(0) as u64, order.perm_id.max(0) as u64,

@@ -1161,9 +1161,12 @@ pub fn parse_secdef_response(
     if let Some(v) = tags.get(&TAG_IB_ORDER_TYPES) {
         def.order_types = v.split(',').map(|s| s.to_string()).collect();
     }
+    // The first record's, as the exchange is: a reply describing a contract
+    // on each exchange it trades on states a key per exchange, and the last
+    // one answered the contract's own exchange with another exchange's list.
     if let Some((_, key)) = tag_sequence(data).into_iter()
         .take_while(|(tag, _)| !matches!(*tag, 6019 | 6344 | 6432 | 6622 | 6766))
-        .filter(|(tag, _)| *tag == TAG_IB_ORDER_TYPE_KEY).last()
+        .find(|(tag, _)| *tag == TAG_IB_ORDER_TYPE_KEY)
     {
         def.order_type_key = key;
     }

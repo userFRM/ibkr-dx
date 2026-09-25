@@ -4992,6 +4992,7 @@ fn a_queued_fill_survives_a_completed_orders_read() {
         cum_qty: 10 * crate::types::QTY_SCALE, avg_price: 150 * PRICE_SCALE,
     });
     shared.orders.push_completed_order(crate::types::CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 77, instrument: 0, status: OrderStatus::Filled,
         filled_qty: 10 * crate::types::QTY_SCALE, timestamp_ns: 0,
     });
@@ -6210,6 +6211,37 @@ fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
         "genuinely-inactive order must remain in the open-order snapshot after dispatch");
     assert!(!w.events.iter().any(|e| e.starts_with("open_order:83:")),
         "rejected order must not resurrect into the open-order snapshot after dispatch");
+}
+
+/// An order is stated as a gateway holds it from the moment it is sent, before
+/// the venue has said anything about it: under its type's own name, on the
+/// account it went out for, and with the number it went to the venue under as
+/// its permanent id.
+#[test]
+fn an_order_is_stated_as_a_gateway_holds_it_before_the_venue_answers() {
+    #[derive(Default)]
+    struct Heard(Vec<(i64, String, String, i64, String)>);
+    impl Wrapper for Heard {
+        fn open_order(
+            &mut self, order_id: i64, _c: &Contract, order: &ApiOrder,
+            state: &crate::types::model::OrderState,
+        ) {
+            self.0.push((
+                order_id, order.order_type.clone(), order.account.clone(), order.perm_id,
+                state.status.clone(),
+            ));
+        }
+    }
+    let (client, rx, shared) = test_client();
+    shared.set_session_account("DU123");
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LIMIT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), transmit: true, ..Default::default()
+    };
+    client.try_place_order(91, &spy(), &order).unwrap();
+    let mut heard = Heard::default();
+    client.req_all_open_orders(); the_engine_answers(&rx, &shared); client.process_msgs(&mut heard);
+    assert_eq!(heard.0, [(91, "LMT".to_string(), "DU123".to_string(), 91, "PendingSubmit".to_string())]);
 }
 
 /// A cancel the venue refused leaves the order working, and the record says so.
@@ -8376,6 +8408,7 @@ fn a_dispatch_loop_waits_for_the_question_that_is_reading() {
 fn completed_orders_are_still_there_when_they_are_asked_for_again() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_completed_order(crate::types::CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
         filled_qty: 100, timestamp_ns: 0,
     });
@@ -8413,6 +8446,7 @@ fn an_order_the_venue_has_finished_with_is_not_reported_as_working() {
     // The venue finishes it. The dispatch pass that would move the local
     // record has not run.
     shared.orders.push_completed_order(crate::types::CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 44, instrument: 0, status: crate::types::OrderStatus::Filled,
         filled_qty: 100, timestamp_ns: 0,
     });
@@ -8477,6 +8511,7 @@ fn an_order_named_permanently_after_it_was_answered_replaces_its_earlier_copy() 
         last_exec: Default::default(),
     };
     let finished = || crate::types::CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
         filled_qty: 100, timestamp_ns: 0,
     };
@@ -8520,20 +8555,25 @@ fn an_order_named_permanently_after_it_was_answered_replaces_its_earlier_copy() 
 /// quantity, and the bridge drops the completion it had queued. The archive is
 /// the copy a caller reads after that queue has emptied, so an order the venue
 /// has taken back has to leave it too — otherwise the same order is listed as
-/// working and as finished at the same time, for the rest of the session.
+/// working and as finished at the same time, for the rest of the session. The
+/// order is its number under the venue's own name for it: another order that
+/// finished under the same number stays.
 #[test]
 fn a_completed_order_the_venue_takes_back_leaves_the_archive() {
     let (client, _rx, shared) = test_client();
-    shared.orders.push_completed_order(crate::types::CompletedOrder {
-        order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
-        filled_qty: 100, timestamp_ns: 0,
-    });
+    for venue_order in ["00a0b0c0.0000d0e0.0000e001", "00a0b0c0.0000d0e0.0000e002"] {
+        shared.orders.push_completed_order(crate::types::CompletedOrder {
+            venue_order: venue_order.into(), stated: None, held: None,
+            order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
+            filled_qty: 100, timestamp_ns: 0,
+        });
+    }
 
     let mut w = RecordingWrapper::default();
     completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut w);
-    assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 1);
+    assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 2);
 
-    shared.orders.push_order_correction(31, crate::bridge::RichOrderInfo {
+    shared.orders.push_order_correction(31, "00a0b0c0.0000d0e0.0000e002", crate::bridge::RichOrderInfo {
         contract: Default::default(),
         order: crate::types::model::Order { order_id: 31, ..Default::default() },
         order_state: Default::default(),
@@ -8544,9 +8584,107 @@ fn a_completed_order_the_venue_takes_back_leaves_the_archive() {
     completed_orders_asked_and_answered(&client, false); client.process_msgs(&mut after);
     assert_eq!(
         after.events.iter().filter(|e| *e == "completed_order").count(),
-        0,
-        "the order the venue took back is still reported as finished: {:?}",
+        1,
+        "the order the venue took back is still reported as finished, or the other with it: {:?}",
         after.events,
+    );
+}
+
+/// The venue's answer to what the account has finished, as it arrived on a
+/// paper account where a program had numbered its orders from the same point
+/// more than once, reduced to the orders under two numbers and the record that
+/// ends it: seven orders, five under one number and two under the other.
+pub(crate) const A_FINISHED_ANSWER: &str = "\
+8=FIX.4.1|9=000461|35=8|34=000375|43=N|97=Y|52=20260924-14:02:28|11=C1787685160171345|17=10001.1790258548.2|150=4|20=3|39=4|167=CS|55=SPY|6210=BEST|38=1|99=763|6117=763|32=0|31=0.00|14=0|151=0|6=0|54=2|37=00a0b0c0.0000d0e0.0000a001.0003|1=DU123|60=20260924-14:02:28|6571=20260924-14:02:28|6596=20261231-21:00:00|40=3|59=1|6008=756733|15=USD|6004=BEST|6116=0|6122=c|6107=1787685160171343.0|636=N|6205=1|6236=STOP|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB|6817=20260924-14:02:08|10=058|
+8=FIX.4.1|9=000385|35=8|34=000376|43=N|97=Y|52=20260924-14:04:18|11=C1787685160171345|17=10001.1790258658.2|150=4|20=3|39=4|167=CS|55=SPY|6210=BEST|38=1|44=612.57|32=0|31=0.00|14=0|151=0|6=0|54=1|37=00a0b0c0.0000d0e0.0000a002.0004|1=DU123|60=20260924-14:04:18|6571=20260924-14:04:18|40=2|59=0|6008=756733|15=USD|6004=BEST|6122=c|6205=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB|6817=20260924-14:04:10|10=068|
+8=FIX.4.1|9=000403|35=8|34=000379|43=N|97=Y|52=20260924-14:04:54|11=C1787685160171345|17=10001.1790258694.2|150=4|20=3|39=4|167=CS|55=SPY|6210=BEST|38=1|44=1|32=0|31=0.00|14=0|151=0|6=0|54=1|37=00a0b0c0.0000d0e0.0000a003.0002|1=DU123|60=20260924-14:04:54|6571=20260924-14:04:53|6596=20270101-05:00:00|40=2|59=1|6008=756733|15=USD|6004=BEST|6122=c|6433=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB|6817=20260924-14:04:53|10=176|
+8=FIX.4.1|9=000435|35=8|34=000380|43=N|97=Y|52=20260924-14:10:15|11=1787685160171345.0|17=10001.1790259015.2|150=8|20=3|103=0|39=8|167=CS|55=SPY|6210=BEST|38=100|44=612.86|32=0|31=0.00|14=0|151=100|6=0|54=1|37=00a0b0c0.0000d0e0.0000a004.0001|1=DU123|58=Post to ATS only allowed for not-held orders|60=20260924-14:10:15|6571=20260924-14:10:15|40=E2M|59=0|6008=756733|15=USD|6004=BEST|8405=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB|8411=100|8412=0.02|10=183|
+8=FIX.4.1|9=000416|35=8|34=000492|43=N|97=Y|52=20260924-15:01:48|11=1787685160171345.0|17=10001.1790262108.5|150=2|20=3|39=2|167=CS|55=SPY|6210=ARCA|38=604|44=0.00|32=0|31=0.00|14=604|151=0|6=764.38|54=2|37=00a0b0c0.0000d0e0.0000a005.0001|1=DU123|60=20260924-15:01:48|6571=20260924-15:01:48|40=1|59=0|6008=756733|15=USD|6004=ARCA|6122=c|6205=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB|6816=20260924-15:01:48|8109=20260924-15:01:48|10=011|
+8=FIX.4.1|9=000519|35=8|34=000518|43=N|97=Y|52=20260925-09:55:06|11=1787685160171371.0|17=10001.1790330106.5|150=4|20=3|39=4|167=FUT|55=MES|6210=CME|38=0|99=6229.75|6117=6229.75|32=0|31=0.00|14=0|151=0|6=0|54=2|37=00a0b0c0.0000d0e0.0000b001.0001|1=DU123|200=202612|541=20261218|60=20260925-09:55:06|6571=20260925-09:55:06|583=1787685160171369|6209=ReduceOnFillNonBlock|40=3|6058=MES|59=1|6008=815824257|15=USD|6004=CME|6116=0|6122=c|6107=1787685160171369.0|636=N|6205=1|6236=STOP|198=NONE|6115=0|6035=MESZ6|6419=IB|6817=20260925-09:55:04|10=017|
+8=FIX.4.1|9=000416|35=8|34=000635|43=N|97=Y|52=20260925-15:01:02|11=1787685160171371.0|17=10001.1790348462.0|150=2|20=3|39=2|167=CS|55=SPY|6210=NYSE|38=486|44=0.00|32=0|31=0.00|14=486|151=0|6=768.86|54=2|37=00a0b0c0.0000d0e0.0000b002.0001|1=DU123|60=20260925-15:01:02|6571=20260925-15:01:00|40=1|59=0|6008=756733|15=USD|6004=NYSE|6122=c|6205=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB|6816=20260925-15:01:00|8109=20260925-15:01:01|10=063|
+8=FIX.4.1|9=000163|35=8|34=000645|43=N|52=20260925-17:15:45|11=*|17=10001.1790356545.0|150=0|20=3|39=0|55=*|38=0|32=0|31=0.00|14=0|151=0|6=0|54=1|37=*|60=20260925-17:15:45|40=2|59=0|10=241|";
+
+/// Every order the venue states finished comes back, however many were sent
+/// under one number, and an order working under one of those numbers goes on
+/// working.
+///
+/// A number is free again once its order is done, so a program that numbers
+/// its orders again from the same point sends a later order under an earlier
+/// one's number. On the account this answer was taken from, two numbers name
+/// seven orders on two contracts, of different types, finished at different
+/// times. Held by the number, each came back as one order, the last to be
+/// stated, and the other five were never delivered; and the answer's orders
+/// under the number of an order the venue was working were read as that
+/// order's reports, so the working order was reported finished. What tells
+/// them apart is the venue's own name for each, which every report on an
+/// order states the same.
+#[test]
+fn every_order_the_venue_has_finished_comes_back_though_numbers_repeat() {
+    // An order the venue is working under one of those numbers, named as the
+    // venue names a working order when the session opens.
+    const WORKING: &str = "8=FIX.4.1|9=000418|35=8|34=000279|43=N|52=20260925-17:15:36|11=1787685160171371.0|17=10001.1790356536.0|150=0|20=3|39=0|167=CS|55=SPY|100=ARCA|207=ARCA|6210=BEST|38=1|44=616.76|32=0|31=0.00|14=0|151=1|6=0|54=1|37=00a0b0c0.0000d0e0.0000b003.0001|1=DU123|60=20260925-17:15:36|6571=20260925-17:15:27|40=2|59=0|6008=756733|15=USD|6004=BEST|6122=c|6205=1|198=ARCA:00a0b0c0.0000f0f0.0000f001[1]=1@616.76(0)|6115=0|6088=Socket|6035=SPY|6419=IB|10=063|";
+    let (client, rx, shared) = test_client();
+    {
+        let mut engine = rx.engine();
+        let engine = &mut *engine;
+        let read = |frame: &str, engine: &mut crate::engine::hot_loop::HotLoop| {
+            engine.ccp.process_ccp_message(
+                frame.replace('|', "\x01").as_bytes(), &mut None, &mut engine.context, &shared,
+                &None, &mut crate::engine::hot_loop::HeartbeatState::new(), "DU123",
+            );
+        };
+        read(WORKING, engine);
+        engine.ccp.completed_orders_open = true;
+        for frame in A_FINISHED_ANSWER.lines() {
+            read(frame, engine);
+        }
+    }
+    #[derive(Default)]
+    struct Heard {
+        completed: Vec<(i64, String, String, String)>,
+        working: Vec<(i64, String)>,
+        statuses: Vec<(i64, String)>,
+    }
+    impl Wrapper for Heard {
+        fn completed_order(&mut self, contract: &Contract, order: &Order, state: &crate::types::model::OrderState) {
+            self.completed.push((order.perm_id, contract.symbol.clone(), state.completed_time.clone(), state.status.clone()));
+        }
+        fn open_order(&mut self, order_id: i64, _: &Contract, _: &Order, state: &crate::types::model::OrderState) {
+            self.working.push((order_id, state.status.clone()));
+        }
+        fn order_status(
+            &mut self, order_id: i64, status: &str, _: f64, _: f64, _: f64, _: i64, _: i64, _: f64, _: i64, _: &str, _: f64,
+        ) {
+            self.statuses.push((order_id, status.to_string()));
+        }
+    }
+    let mut heard = Heard::default();
+    client.process_msgs(&mut heard);
+    shared.orders.set_replay_done();
+    client.req_open_orders();
+    the_engine_answers(&rx, &shared);
+    client.process_msgs(&mut heard);
+
+    heard.completed.sort();
+    let order = |perm_id: i64, symbol: &str, time: &str, status: &str| {
+        (perm_id, symbol.to_string(), time.to_string(), status.to_string())
+    };
+    assert_eq!(heard.completed, [
+        order(1787685160171345, "SPY", "20260924-14:02:28", "Cancelled"),
+        order(1787685160171345, "SPY", "20260924-14:04:18", "Cancelled"),
+        order(1787685160171345, "SPY", "20260924-14:04:54", "Cancelled"),
+        order(1787685160171345, "SPY", "20260924-14:10:15", "Inactive"),
+        order(1787685160171345, "SPY", "20260924-15:01:48", "Filled"),
+        order(1787685160171371, "MES", "20260925-09:55:06", "Cancelled"),
+        order(1787685160171371, "SPY", "20260925-15:01:02", "Filled"),
+    ], "each order the venue finished, once");
+    assert_eq!(
+        heard.working, [(1787685160171371, "Submitted".to_string())],
+        "and the order working under one of those numbers is still working",
+    );
+    assert!(
+        heard.statuses.iter().all(|(_, status)| status == "Submitted"),
+        "and nothing said it finished: {:?}", heard.statuses,
     );
 }
 
@@ -10725,6 +10863,50 @@ fn a_withdrawal_by_permanent_id_waits_for_the_venue_to_name_the_working_set() {
     );
 }
 
+/// A withdrawal by permanent id reaches the order held under that number
+/// where two records carry it.
+///
+/// A number is free again once its order is done, so two records can carry
+/// one permanent id: the order working under the number, and another one
+/// held here that went to the venue under the same number. A gateway holds
+/// one order under a number and reaches that one. Taken as the first record
+/// the book yielded, the withdrawal went to whichever the hash order put
+/// first, so it is asked of many books here. Where the engine holds the order
+/// behind only one of the records, that is the order: the other record has
+/// outlasted the order it was kept for.
+#[test]
+fn a_withdrawal_by_permanent_id_reaches_the_order_held_under_that_number() {
+    for (held, withdrawn) in [(None, 777_001), (Some(4243), 4243)].into_iter().cycle().take(64) {
+        let (client, rx, shared) = test_client();
+        shared.orders.set_replay_done();
+        if let Some(order_id) = held {
+            let mut engine = rx.engine();
+            let instrument = engine.context.register_instrument(756733);
+            engine.context.insert_order(crate::types::Order::new(
+                order_id, instrument, crate::types::Side::Buy, 100 * crate::types::QTY_SCALE,
+                100 * crate::types::PRICE_SCALE, b'2', b'0', 0,
+            ));
+        }
+        for order_id in [4243, 777_001] {
+            shared.orders.push_order_info(order_id, crate::bridge::RichOrderInfo {
+                contract: spy(),
+                order: Order {
+                    order_id: order_id as i64, perm_id: 777_001, action: "BUY".into(),
+                    total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 100.0,
+                    ..Default::default()
+                },
+                order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
+                last_exec: Default::default(),
+            });
+        }
+        client.cancel_order_by_perm_id(777_001);
+        assert!(
+            matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::Cancel { order_id, .. })) if order_id == withdrawn),
+            "the withdrawal names the order held under the number, {withdrawn}",
+        );
+    }
+}
+
 /// Withdrawing a held parent takes what hangs from it out of the hold.
 ///
 /// The children stayed held under the cancelled parent's number: when the
@@ -10777,6 +10959,7 @@ fn asking_for_the_api_orders_alone_leaves_out_the_ones_typed_in() {
             shared.orders.note_api_numbered(order_id);
         }
         shared.orders.push_completed_order(crate::types::CompletedOrder {
+            venue_order: String::new(), stated: None, held: None,
             order_id, instrument: 0, status: crate::types::OrderStatus::Filled,
             filled_qty: crate::types::QTY_SCALE, timestamp_ns: 0,
         });
@@ -10819,6 +11002,7 @@ fn asking_for_the_api_orders_alone_leaves_out_the_ones_typed_in() {
     });
     shared.orders.note_api_numbered(93);
     shared.orders.push_completed_order(crate::types::CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 93, instrument: 0, status: crate::types::OrderStatus::Filled,
         filled_qty: crate::types::QTY_SCALE, timestamp_ns: 0,
     });
@@ -10847,6 +11031,7 @@ fn a_completed_order_names_the_client_that_placed_it() {
         last_exec: Default::default(),
     });
     shared.orders.push_completed_order(crate::types::CompletedOrder {
+        venue_order: String::new(), stated: None, held: None,
         order_id: 86, instrument: 0, status: crate::types::OrderStatus::Filled,
         filled_qty: crate::types::QTY_SCALE, timestamp_ns: 0,
     });

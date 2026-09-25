@@ -659,7 +659,13 @@ impl MarketDataState {
         // difference between a stated clock at the end of the range and this
         // machine's is not representable, and wrapping it puts the session on
         // a clock neither side named.
-        self.clock_skew_millis.store(venue_millis.saturating_sub(local_millis()), Ordering::Relaxed);
+        self.note_venue_ahead_by(venue_millis.saturating_sub(local_millis()));
+    }
+
+    /// The same, where how far the venue's clock is ahead of this machine's
+    /// was read as the venue stated it.
+    pub fn note_venue_ahead_by(&self, millis: i64) {
+        self.clock_skew_millis.store(millis, Ordering::Relaxed);
         self.stamps.note_written();
     }
 

@@ -215,12 +215,6 @@ fn execution_key(parsed: &std::collections::HashMap<u32, String>, clord_id: u64)
     }
 }
 
-/// Convert a FIX OrderID hex string (e.g. "00cf16ed.000225ed.69ca0941.0001") to a
-/// stable i64 permId.
-/// Uses FNV-1a hash of the first 3 dot-segments (the stable prefix) so that permId
-/// remains constant across modifications (the last segment increments on each modify).
-/// Extract the value of a single FIX tag from a raw message.
-/// `prefix` should include the tag number and `=` (e.g. `b"6256="`).
 /// Where to book a fill whose order this session does not track.
 ///
 /// Both the contract and the side come off the report, and both are required:
@@ -337,18 +331,192 @@ pub(crate) fn stated_order_id(field: &str) -> Option<u64> {
     Some(id)
 }
 
-pub(crate) fn perm_id_from_fix_order_id(s: &str) -> i64 {
-    // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
-    let stable = match s.rmatch_indices('.').next() {
-        Some((idx, _)) if s[..idx].contains('.') => &s[..idx],
-        _ => s, // no dots or only one segment — hash entire string
-    };
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in stable.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+/// The number an order goes to the venue under, as a report names it on tag
+/// 11: without the leading C a cancel carries or the L of a position the broker
+/// liquidated, and without the revision after the dot. It is the order's
+/// permanent id, as a gateway states one: the number it sent the order under.
+pub(crate) fn wire_name(parsed: &std::collections::HashMap<u32, String>) -> Option<u64> {
+    parsed.get(&11).and_then(|s| {
+        let stripped = s.strip_prefix('C').or_else(|| s.strip_prefix('L')).unwrap_or(s);
+        stated_order_id(stripped.split('.').next().unwrap_or(stripped))
+    })
+}
+
+/// The venue's own name for an order: tag 37 without its revision, the first
+/// three segments, which every report on one order states the same while the
+/// last one counts its revisions. A number is free again once its order is
+/// done, so two orders can go to the venue under one number, and this is what
+/// tells them apart. Empty where the report states none.
+pub(crate) fn venue_order(parsed: &std::collections::HashMap<u32, String>) -> String {
+    let Some(stated) = parsed.get(&37) else { return String::new() };
+    match stated.match_indices('.').nth(2) {
+        Some((at, _)) => stated[..at].to_string(),
+        None => stated.clone(),
     }
-    (h >> 1) as i64
+}
+
+/// Where the venue's name for an order counts it: the third segment, a
+/// hexadecimal count, under the first two. The venue counts the orders it
+/// creates from one count that only rises, so of two orders under the same
+/// first two segments the one counted lower was created first. `None` for a
+/// name that is not three segments or counts nothing.
+fn venue_count(venue_order: &str) -> Option<(&str, u64)> {
+    let (under, count) = venue_order.rsplit_once('.')?;
+    if !under.contains('.') {
+        return None;
+    }
+    Some((under, u64::from_str_radix(count, 16).ok()?))
+}
+
+/// How far apart two readings of the venue's clock can be here and still name
+/// one instant: the venue stamps its reports to the second, and this client
+/// learns the venue's clock from a stamp to the second.
+const ONE_INSTANT_MS: i64 = 2_000;
+
+/// Whether the venue counts an order at or below the highest count it had
+/// stated, under the same first two segments, when this session sent one: an
+/// order it created before that one.
+fn counted_by(venue_order: &str, counted: &std::collections::HashMap<String, u64>) -> bool {
+    venue_count(venue_order)
+        .is_some_and(|(under, count)| counted.get(under).is_some_and(|highest| count <= *highest))
+}
+
+/// Whether a report is about an order the venue created before this session
+/// sent one: counted by then, or stamped well before the send, every time the
+/// report states for the order and the event, on tags 60, 6571 and 6817, being
+/// more than an instant earlier. A count above the highest stated by then says
+/// nothing: an order that finished before the session opened is not restated
+/// then, and can count above every order stated since. A report stating no
+/// time says nothing either.
+fn created_before(
+    parsed: &std::collections::HashMap<u32, String>,
+    venue_order: &str,
+    sent_at_millis: i64,
+    counted: &std::collections::HashMap<String, u64>,
+) -> bool {
+    counted_by(venue_order, counted)
+        || [60, 6571, 6817].iter()
+            .filter_map(|tag| parsed.get(tag))
+            .filter_map(|stated| crate::protocol::datetime::ib_datetime_to_unix_millis(stated))
+            .max()
+            .is_some_and(|latest| latest + ONE_INSTANT_MS <= sent_at_millis)
+}
+
+/// Where a report says the order is working: tag 100, then 207, then the
+/// destination it was routed to on 6004, the first the report states.
+fn stated_exchange(parsed: &std::collections::HashMap<u32, String>) -> Option<String> {
+    [100, 207, 6004].iter()
+        .filter_map(|tag| parsed.get(tag))
+        .find(|stated| !stated.is_empty())
+        .cloned()
+}
+
+/// The contract a report names, over the definition this session holds for
+/// it where it holds one: a report states a subset of a definition.
+fn stated_contract(
+    parsed: &std::collections::HashMap<u32, String>,
+    exchange: String,
+    con_id: i64,
+    shared: &SharedState,
+) -> api::Contract {
+    let stated = |tag: u32| parsed.get(&tag).cloned().unwrap_or_default();
+    let sec_type = stated(167);
+    let sec_type = match sec_type.as_str() {
+        "CS" | "COMMON" => "STK",
+        "FOR" | "CASH" => "CASH",
+        other => other,
+    }.to_string();
+    let (symbol, currency, local_symbol) = (stated(55), stated(15), stated(6035));
+    match (con_id != 0).then(|| shared.reference.get_contract(con_id)).flatten() {
+        Some(mut cached) => {
+            if !symbol.is_empty() { cached.symbol = symbol; }
+            if !sec_type.is_empty() { cached.sec_type = sec_type; }
+            if !exchange.is_empty() { cached.exchange = exchange; }
+            if !currency.is_empty() { cached.currency = currency; }
+            if !local_symbol.is_empty() { cached.local_symbol = local_symbol; }
+            cached
+        }
+        None => api::Contract {
+            con_id, symbol, sec_type, exchange, currency, local_symbol, ..Default::default()
+        },
+    }
+}
+
+/// The execution a report states, on the order it is booked to here under
+/// `order_id`.
+///
+/// `action` is the order's side, `client_id` the client that placed it and
+/// `submitter` who entered it, each as the order this is read against says.
+fn stated_execution(
+    parsed: &std::collections::HashMap<u32, String>,
+    raw: &[u8],
+    order_id: u64,
+    perm_id: i64,
+    action: &str,
+    client_id: i32,
+    submitter: String,
+) -> api::Execution {
+    api::Execution {
+        model_code: stated_model(parsed),
+        // What the report stated that nothing here names. A report
+        // carries far more than any one client reads, and what is not
+        // read is kept rather than dropped.
+        unnamed_fields: unnamed_execution_fields(raw),
+        exec_id: parsed.get(&17).cloned().unwrap_or_default(),
+        time: parsed.get(&60).cloned().unwrap_or_default(),
+        acct_number: parsed.get(&1).cloned().unwrap_or_default(),
+        exchange: parsed.get(&30).cloned().unwrap_or_default(),
+        // The venue's word for the side, read off the report as the
+        // order's action is. Read off the order this session tracks, an
+        // execution restated for an order it never tracked — one that
+        // finished before a restart — stated no side at all.
+        side: match action {
+            "BUY" => "BOT",
+            "SELL" | "SSHORT" => "SLD",
+            _ => "",
+        }.to_string(),
+        shares: qty_to_f64(parse_qty_tag(parsed.get(&32)).unwrap_or(0)),
+        price: parsed.get(&31).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        order_id: order_id as i64,
+        // The order's permanent number and the client that placed it,
+        // as the report states them. Left at zero, a restated execution
+        // named no client, and a request filtered by client matched
+        // none of them.
+        perm_id,
+        client_id: i64::from(client_id),
+        // Who entered it, which is the order's own and is stated on
+        // the report the fill came on.
+        submitter,
+        // Read off the report, which restates it every time, rather
+        // than looked up against the order this client remembers: a
+        // fill on an order placed in another session is still
+        // labelled, and this client remembers no such order.
+        order_ref: parsed.get(&6010).cloned().unwrap_or_default(),
+        // The execution record describes this report, so an absent
+        // cumulative is zero here rather than the cached total.
+        cum_qty: parsed.get(&14).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        avg_price: parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        last_liquidity: parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0),
+        // Not a field of its own: the broker says it liquidated the
+        // position by naming the order with a leading L rather than by
+        // setting anything. Read as a flag it was never set at all, and
+        // a caller could not tell a liquidation from any other fill.
+        liquidation: i32::from(parsed.get(&11).is_some_and(|s| s.starts_with('L'))),
+        // What the instrument's economic value is reckoned by, where it
+        // has one, and what the reckoning is multiplied by.
+        ev_rule: parsed.get(&6858).cloned().unwrap_or_default(),
+        // The multiplier is the tag beside the rule, and the venue
+        // states it as a number. It was read off 6892, which the venue
+        // states as text — so it parsed to nothing and every fill
+        // carried a multiplier of zero. A contract whose value follows
+        // something other than its own price is then valued at nothing.
+        ev_multiplier: parsed.get(&6859)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0.0),
+        // The price on this report may yet be revised.
+        pending_price_revision: parsed.get(&8497)
+            .is_some_and(|v| flag(v)),
+    }
 }
 
 /// The update that says an order's state is no longer known. Emitted when the
@@ -721,7 +889,8 @@ impl CcpState {
     ///
     /// Every event in an order's life arrives as its own report, so the same
     /// order arrives several times. The last one wins, which is the one
-    /// carrying its final state.
+    /// carrying its final state. The same order is the same number under the
+    /// same venue name: two orders sent under one number are two orders.
     fn file_finished_order(
         &mut self,
         parsed: &std::collections::HashMap<u32, String>,
@@ -733,7 +902,10 @@ impl CcpState {
         // What the earlier reports about this order already said. Each report
         // states what changed and leaves the rest out, so a record rebuilt
         // from nothing every time keeps only the last report's fields.
-        let at = self.finished_orders.iter().position(|held| held.order_id == clord_id);
+        let venue_order = venue_order(parsed);
+        let at = self.finished_orders.iter().position(|held| {
+            held.order_id == clord_id && held.venue_order == venue_order
+        });
         let was = at.map(|at| &self.finished_orders[at]);
         let kept = |stated: Option<&String>, before: Option<&str>| -> String {
             stated
@@ -824,13 +996,10 @@ impl CcpState {
                 .and_then(|s| s.parse().ok())
                 .or_else(|| was.map(|w| w.order.client_id).filter(|id| *id != 0))
                 .unwrap_or(0),
-            // The venue's own permanent name for the order where it states
-            // one. The key this is assembled under is this session's, and
-            // answering it as the permanent id said the venue had named
-            // something it had not.
-            perm_id: parsed
-                .get(&37)
-                .map(|stated| perm_id_from_fix_order_id(stated))
+            // The number the order went to the venue under, which is the
+            // permanent id a gateway states for it.
+            perm_id: wire_name(parsed)
+                .map(|id| id as i64)
                 .filter(|id| *id != 0)
                 .or_else(|| was.map(|w| w.order.perm_id).filter(|id| *id != 0))
                 .unwrap_or(0),
@@ -986,6 +1155,11 @@ impl CcpState {
         };
         let merged = super::FinishedOrder {
             order_id: clord_id,
+            venue_order: if venue_order.is_empty() {
+                was.map(|w| w.venue_order.clone()).unwrap_or_default()
+            } else {
+                venue_order
+            },
             contract,
             order,
             status,
@@ -1003,7 +1177,8 @@ impl CcpState {
         // the bound is on the orders the answer has taken, not on the records
         // waiting to be handed over, because a handover empties those and the
         // next order was simply taken beside them.
-        if !self.orders_in_this_answer.contains(&clord_id)
+        let taken = (clord_id, merged.venue_order.clone());
+        if !self.orders_in_this_answer.contains(&taken)
             && self.orders_in_this_answer.len() >= super::FINISHED_ORDERS_HELD
         {
             if !self.the_answer_is_full {
@@ -1035,7 +1210,9 @@ impl CcpState {
         while self.finished_orders.len() >= super::FINISHED_ORDERS_HELD
             && let Some(at) = self.finished_orders
                 .iter()
-                .position(|held| !self.orders_in_this_answer.contains(&held.order_id))
+                .position(|held| {
+                    !self.orders_in_this_answer.contains(&(held.order_id, held.venue_order.clone()))
+                })
         {
             let given_up = self.finished_orders.remove(at);
             log::debug!(
@@ -1044,7 +1221,7 @@ impl CcpState {
                 given_up.order_id,
             );
         }
-        self.orders_in_this_answer.insert(clord_id);
+        self.orders_in_this_answer.insert(taken);
         self.finished_orders.push(merged);
     }
 
@@ -1087,18 +1264,20 @@ impl CcpState {
             // own number the venue happened to use as a permanent name could
             // not be cached as open again.
             let known_as = held.order.order_id.max(0) as u64;
-            shared.orders.push_order_info(known_as, crate::bridge::RichOrderInfo {
-                contract: held.contract,
-                order: held.order,
-                order_state: held.state,
-                last_exec: Default::default(),
-            });
+            shared.orders.note_the_venue_named(known_as);
+            // Handed over whole, with the venue's own name for it, rather than
+            // through the record kept under its number: the venue can have
+            // finished two orders under one number, and the record under a
+            // number is the order this session holds under it now.
             shared.orders.refile_completed_order(crate::types::CompletedOrder {
                 order_id: known_as,
+                venue_order: held.venue_order,
                 instrument: 0,
                 status: held.status,
                 filled_qty: held.filled,
                 timestamp_ns: 0,
+                stated: Some(Box::new((held.contract, held.order, held.state))),
+                held: None,
             });
         }
     }
@@ -1259,11 +1438,7 @@ impl CcpState {
             // an order to the exclusion of another, so the one it is claimed
             // for is the one the reference claims unowned orders for.
             shared.reference.push_order_bound(
-                parsed
-                    .get(&37)
-                    .map(|stated| perm_id_from_fix_order_id(stated))
-                    .filter(|id| *id != 0)
-                    .unwrap_or(0),
+                wire_name(parsed).map_or(0, |id| id as i64),
                 0,
                 clord_id as i64,
             );
@@ -1421,11 +1596,8 @@ impl CcpState {
         // Format B (paper account, observed live): tag 11 carries the
         // originating orderId directly with `.0` suffix, tags 6119/6121
         // absent — the existing tag-11 split below already gives the right
-        // value. The unwrap_or_else fallback handles both.
-        let wire_name = parsed.get(&11).and_then(|s| {
-            let stripped = s.strip_prefix('C').or_else(|| s.strip_prefix('L')).unwrap_or(s);
-            stated_order_id(stripped.split('.').next().unwrap_or(stripped))
-        });
+        // value. The fallback to tag 11 below handles both.
+        let wire_name = wire_name(parsed);
         let recovery_origin_order_id: Option<u64> = if parsed.get(&150).map(|s| s.as_str()) == Some("0")
             && parsed.get(&39).map(|s| s.as_str()) == Some("0")
             && !wire_name.is_some_and(|wire| context.order(wire).is_some())
@@ -1443,19 +1615,7 @@ impl CcpState {
         {
             self.remember_the_venues_name_for(wire, origin, context);
         }
-        let clord_id = recovery_origin_order_id.unwrap_or_else(|| {
-            parsed.get(&11).and_then(|s| {
-                // A cancel names the order with a leading C, and a position the
-                // broker liquidated with a leading L. Only the first was taken
-                // off, so every report on a liquidated position parsed to no
-                // order at all and the fill reached nobody: a forced
-                // liquidation was the one fill a caller could not
-                let stripped = s.strip_prefix('C').or_else(|| s.strip_prefix('L')).unwrap_or(s);
-                // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
-                let base = stripped.split('.').next().unwrap_or(stripped);
-                stated_order_id(base)
-            }).unwrap_or(0)
-        });
+        let clord_id = recovery_origin_order_id.unwrap_or(wire_name.unwrap_or(0));
         // And read back, so a report naming the order the venue's way reaches
         // the order this session is tracking — but only where nothing is
         // working under that number already. The venue's permanent name for
@@ -1471,8 +1631,56 @@ impl CcpState {
             (None, None) => self.wire_name_to_order.get(&clord_id).copied().unwrap_or(clord_id),
             _ => clord_id,
         };
-
+        // The order's permanent id: the number it first went to the venue
+        // under, which a gateway keeps for the order's whole life. A report
+        // names the request it answers, and a withdrawal or a revision this
+        // session sends for an order the venue named at connect goes out under
+        // this session's number for it, so the report's own number stands only
+        // for an order nothing has named yet. The record kept under the number
+        // is read for the order held under it alone: it can be an earlier
+        // order's, and it states that order's.
+        let perm_id = (context.order(clord_id).is_some() && recovery_origin_order_id.is_none())
+            .then(|| shared.orders.perm_id(clord_id))
+            .flatten()
+            .unwrap_or_else(|| wire_name.map_or(0, |id| id as i64));
+        // The venue's own name for the order this report is about, and whether
+        // that is another order than the one this session holds, or saw
+        // finish, under the same number. A number is free again once its order
+        // is done, so a report restating the past can be about an order sent
+        // under it before. Read as the held order's, such a report finished
+        // the order working under the number, its fills were booked against
+        // that order, and it never reached a caller as the order it is.
+        //
+        // The order held here is every name the reports about what is
+        // happening to it have stated for it, and a restated report stating
+        // another name is another order's; one stating no name says nothing
+        // against them. Until the venue has named it, it is the order this
+        // session sent, which the venue created after every order it had
+        // counted by then: an order it counts at or below those, or stamps
+        // well before the send, is another. A report about what is happening
+        // now is about the order working under its number, unless it states
+        // none of the order's names and the venue counted the order it names
+        // before the send: that is an order created before.
+        let venue_order = venue_order(parsed);
+        if let Some((under, count)) = venue_count(&venue_order) {
+            match context.venue_counts.get_mut(under) {
+                Some(highest) => *highest = (*highest).max(count),
+                None => { context.venue_counts.insert(under.to_string(), count); }
+            }
+        }
+        let marked_resend = [97, 43].iter()
+            .any(|tag| parsed.get(tag).is_some_and(|v| v.eq_ignore_ascii_case("Y")));
+        let named = context.venue_orders.get(&clord_id).filter(|_| !venue_order.is_empty());
+        let another_order = match (context.order(clord_id), named, context.placed_at.get(&clord_id)) {
+            (None, ..) => marked_resend
+                && shared.orders.finished_under(clord_id).is_some_and(|named| named != venue_order),
+            (_, Some(named), _) if named.contains(&venue_order) => false,
+            (_, Some(_), _) if marked_resend => true,
+            (_, _, Some((sent, counted))) if marked_resend => created_before(parsed, &venue_order, *sent, counted),
+            (_, _, placed) => placed.is_some_and(|(_, counted)| counted_by(&venue_order, counted)),
+        };
         if shared.reference.enables("ADVREJECT")
+            && !another_order
             && context.order(clord_id).is_some()
             && context.last_clord.get(&clord_id).map(|name| revision_of(name)).unwrap_or(0) == 0
             && parsed.get(&11).map(|name| revision_of(name)).unwrap_or(0) == 0
@@ -1485,14 +1693,16 @@ impl CcpState {
         if let Some(key) = parsed.get(&6531) {
             crate::client_core::attached_orders::note_family_key(key);
         }
-        shared.orders.note_attached_order_metadata(clord_id, crate::bridge::AttachedOrderMetadata {
-            family_key: parsed.get(&6531).cloned(),
-            parent: parsed.get(&6107).cloned(),
-            use_parent_price: parsed.get(&6704).map(|value| value == "1"),
-            profit_offset: parsed.get(&6446).and_then(|value| value.parse().ok()),
-            api_order_id: parsed.get(&6121).and_then(|value| value.parse().ok()),
-            api_client_id: parsed.get(&6119).and_then(|value| value.parse().ok()),
-        });
+        if !another_order {
+            shared.orders.note_attached_order_metadata(clord_id, crate::bridge::AttachedOrderMetadata {
+                family_key: parsed.get(&6531).cloned(),
+                parent: parsed.get(&6107).cloned(),
+                use_parent_price: parsed.get(&6704).map(|value| value == "1"),
+                profit_offset: parsed.get(&6446).and_then(|value| value.parse().ok()),
+                api_order_id: parsed.get(&6121).and_then(|value| value.parse().ok()),
+                api_client_id: parsed.get(&6119).and_then(|value| value.parse().ok()),
+            });
+        }
 
         // An order placed through an API carries the number that API gave it,
         // and one typed in by hand carries none. That is the whole of what
@@ -1531,30 +1741,56 @@ impl CcpState {
         // the book still holds. A fill retires an order from the book, so a
         // bust or a correction for it afterwards reads as an order nobody here
         // placed — filed as history, it took back nothing, and the position
-        // the correction was undoing stayed where it was.
+        // the correction was undoing stayed where it was. That is a report of
+        // what is happening now: one the venue marks as restating the past is
+        // history for any order not held here, whatever went out under its
+        // number. Taken live because the number had gone out, an earlier
+        // order under it was filed as the order sent, and one the venue had
+        // finished long before was worked.
         // The id every report about one order names it by. The recovery push
         // states an order under the number an API gave it, which is right for
         // an order this session must be able to address — and wrong here,
         // because only some of an order's reports carry it, so its first
         // report and its last would be filed as two different orders.
-        let history_id = parsed
-            .get(&11)
-            .and_then(|stated| {
-                let stripped = stated.strip_prefix('C').or_else(|| stated.strip_prefix('L'))
-                    .unwrap_or(stated);
-                let base = stripped.split('.').next().unwrap_or(stripped);
-                stated_order_id(base)
-            })
-            .unwrap_or(clord_id);
+        let history_id = wire_name.unwrap_or(clord_id);
         if self.completed_orders_open
             && clord_id != 0
-            && context.order(clord_id).is_none()
-            && !shared.orders.the_order_went_out(clord_id)
+            && (another_order
+                || (context.order(clord_id).is_none()
+                    && (marked_resend || !shared.orders.the_order_went_out(clord_id))))
         {
             let finished = status_of(
                 parsed.get(&39).map(String::as_str).unwrap_or(""), clord_id, parsed,
             );
             self.file_finished_order(parsed, raw, history_id, finished, shared);
+            return;
+        }
+        // Outside such an answer, what another order's restated report adds is
+        // the execution it states, where it states one: one of the day's
+        // executions, on an order nothing here holds.
+        if another_order {
+            let shares = parse_qty_tag(parsed.get(&32)).unwrap_or(0);
+            if matches!(parsed.get(&150).map(String::as_str), Some("F" | "1" | "2" | "G" | "H")) && shares > 0 {
+                let action = match parsed.get(&54).map(String::as_str) {
+                    Some("1") => "BUY",
+                    Some("2") => "SELL",
+                    Some("5") => "SSHORT",
+                    _ => "",
+                };
+                shared.orders.push_restated_execution(
+                    stated_contract(
+                        parsed,
+                        stated_exchange(parsed).unwrap_or_default(),
+                        parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0),
+                        shared,
+                    ),
+                    stated_execution(
+                        parsed, raw, history_id, history_id as i64, action,
+                        parsed.get(&6119).and_then(|v| v.parse().ok()).unwrap_or(0),
+                        parsed.get(&109).cloned().unwrap_or_default(),
+                    ),
+                );
+            }
             return;
         }
 
@@ -1598,7 +1834,7 @@ impl CcpState {
                     avg_price: crate::types::price_from_f64(
                         parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
                     ),
-                    perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
+                    perm_id,
                     parent_id: parent_stated(parsed, clord_id),
                     timestamp_ns: context.now_ns(),
                 };
@@ -1625,19 +1861,36 @@ impl CcpState {
         // recovered as working either.
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
-        // A report of a change on its way (150=6) moves nothing, as a gateway
-        // reads it: the venue sends one ahead of accepting a replace, and ahead
-        // of revising an order itself. An order whose state is known is stated
-        // again as it stands; one whose state is not is recovered from the
-        // report below.
+        let status_report = parsed.get(&20).map(String::as_str) == Some("3");
+        // A status report stating a change on its way is taken as a gateway
+        // takes it: the order acknowledged, for the revision the report names
+        // or a later one, wherever it stood short of being withdrawn or done.
+        // Held to the order of states a replace in flight has here, the caller
+        // went on being told the replace was pending where a gateway states
+        // the order acknowledged.
+        let acknowledges_a_change = status_report && ord_status == "6" && !marked_resend
+            && parsed.get(&11).map(|named| revision_of(named))
+                .is_none_or(|named| named >= context.modify_versions.get(&clord_id).copied().unwrap_or(0))
+            && context.order(clord_id).is_some_and(|o| !o.status.is_terminal()
+                && !matches!(o.status, crate::types::OrderStatus::PendingCancel | crate::types::OrderStatus::Uncertain));
+        // A report of a change on its way (150=6) otherwise moves nothing, as
+        // a gateway reads it: the venue sends one ahead of accepting a replace,
+        // and ahead of revising an order itself. An order whose state is known
+        // is stated again as it stands; one whose state is not is recovered
+        // from the report below.
+        //
+        // Nor does a new order's report move an order being withdrawn. The
+        // venue can acknowledge an order it had said nothing about after the
+        // withdrawal has gone, and a gateway takes an acknowledgement only
+        // from an order not yet withdrawn: it states the order as being
+        // withdrawn until the withdrawal is answered.
         let status = match context.order(clord_id) {
+            Some(_) if acknowledges_a_change => crate::types::OrderStatus::PreSubmitted,
             Some(held) if exec_type == "6" && held.status != crate::types::OrderStatus::Uncertain => held.status,
+            Some(held) if exec_type == "0" && !status_report
+                && held.status == crate::types::OrderStatus::PendingCancel => held.status,
             _ => status_of(ord_status, clord_id, parsed),
         };
-        let replayed = |tag: u32| {
-            parsed.get(&tag).map(|v| v.eq_ignore_ascii_case("Y")).unwrap_or(false)
-        };
-        let marked_resend = replayed(97) || replayed(43);
         // The sentinel is dropped further down, but this recovery insert runs
         // first — without the guard, a `11='*'` terminator registers a conId
         // and inserts the reserved order id 0 before being "discarded".
@@ -1660,7 +1913,8 @@ impl CcpState {
         // after a fill, and the tracked record is gone by then — retired when
         // the order finished — so its absence reads as "never seen" and the
         // echo would insert it as live, with none of the fill on it.
-        let already_finished = shared.orders.recently_completed(clord_id);
+        let already_finished = shared.orders.finished_under(clord_id)
+            .is_some_and(|named| named == venue_order);
         // The venue naming an order it holds, rather than answering something
         // this session sent. Kept, because the name it states is the
         // authority the recorded one is reconciled against below.
@@ -1713,7 +1967,23 @@ impl CcpState {
             && clord_id != 0 && (!already_finished || restates_a_trade)
             && (context.order(clord_id).is_none() || unknown);
         if recovering {
+            // The venue names a working order under a number another order
+            // finished under: the number is this order's now, and what was
+            // kept under it is the order's before.
+            if shared.orders.finished_under(clord_id)
+                .is_some_and(|named| named != venue_order)
+            {
+                shared.orders.number_taken_by_another_order(clord_id);
+            }
             self.recover_order(parsed, clord_id, prior, context, shared);
+        }
+        // The venue's own names for the order held under this number, as the
+        // reports about what is happening to it state them.
+        if !marked_resend && !venue_order.is_empty() && context.order(clord_id).is_some() {
+            let named = context.venue_orders.entry(clord_id).or_default();
+            if !named.contains(&venue_order) {
+                named.push(venue_order.clone());
+            }
         }
 
         // Drop the sentinel/end-of-stream record (ClOrdID="*"/"0"/absent → parses
@@ -1875,7 +2145,6 @@ impl CcpState {
             return;
         }
 
-        let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
         let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         // Tag 32, the quantity of this print, held fixed-point. A fractional
         // order fills in fractions, so the decimal is carried rather than
@@ -2104,6 +2373,9 @@ impl CcpState {
         // half of the same defect.
         let applied = if withdrawn_before_the_refusal && restatement_reason == "102" {
             false
+        } else if acknowledges_a_change {
+            context.set_order_status_forced(clord_id, status);
+            true
         } else {
             context.update_order_status(clord_id, status, is_resend)
         };
@@ -2182,7 +2454,6 @@ impl CcpState {
         let mut announce: Option<crate::types::OrderUpdate> = None;
         if status_changed
             && let Some(order) = context.order(clord_id).copied() {
-                let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
                 // Tag 583 is the link id this engine sends the OCA group on, not
                 // a parent order. Hashing it produced a stable non-zero value
                 // shared by every order in a group, none of which has a parent,
@@ -2258,7 +2529,6 @@ impl CcpState {
         // Enrich order/contract caches block
         {
             let account = parsed.get(&1).cloned().unwrap_or_default();
-            let symbol = parsed.get(&55).cloned().unwrap_or_default();
             // Where the order is working, taken in the order the venue states
             // it: tag 100 first, then 207, then 6004 as the destination it was
             // routed to; failing all three, this client
@@ -2270,21 +2540,14 @@ impl CcpState {
             // is filed, the two paths answered the same question differently
             // and whichever touched an order last decided which venue the
             // caller was told it was working on.
-            let exchange = parsed.get(&100).cloned()
-                .filter(|e| !e.is_empty())
-                .or_else(|| parsed.get(&207).cloned().filter(|e| !e.is_empty()))
-                .or_else(|| parsed.get(&6004).cloned().filter(|e| !e.is_empty()))
+            let exchange = stated_exchange(parsed)
                 .or_else(|| {
                     context.order(clord_id).copied()
                         .map(|o| context.market.order_routing(o.instrument).1)
                         .filter(|e| !e.is_empty())
                 })
                 .unwrap_or_default();
-            let sec_type = parsed.get(&167).cloned().unwrap_or_default();
-            let currency = parsed.get(&15).cloned().unwrap_or_default();
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let local_symbol = parsed.get(&6035).cloned().unwrap_or_default();
-            let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
             let total_qty: f64 = parsed.get(&38).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ord_type_tag = parsed.get(&40).map(|s| s.as_str()).unwrap_or("");
             let limit_price: f64 = parsed.get(&44).and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -2293,31 +2556,11 @@ impl CcpState {
             let outside_rth = parsed.get(&6433).map(|s| s == "1").unwrap_or(false);
             let clearing_intent = parsed.get(&6419).cloned().unwrap_or_default();
             let auto_cancel_date = parsed.get(&6596).cloned().unwrap_or_default();
-            let exec_exchange = parsed.get(&30).cloned().unwrap_or_default();
-            let transact_time = parsed.get(&60).cloned().unwrap_or_default();
-            let avg_px: f64 = parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             // Absent is not zero. This value is written into a row that
             // persists, so a later report that omits the tag — a pending
             // cancel, say — would otherwise wipe a real filled quantity back
             // to nothing, which is the symptom this is correcting.
             let cum_qty: Option<f64> = parsed.get(&14).and_then(|s| s.parse().ok());
-            let last_liq: i32 = parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-            let sec_type_str = match sec_type.as_str() {
-                "CS" | "COMMON" => "STK",
-                "FUT" => "FUT",
-                "OPT" => "OPT",
-                "FOR" | "CASH" => "CASH",
-                "IND" => "IND",
-                "FOP" => "FOP",
-                "WAR" => "WAR",
-                "BAG" => "BAG",
-                "BOND" => "BOND",
-                "CMDTY" => "CMDTY",
-                "NEWS" => "NEWS",
-                "FUND" => "FUND",
-                _ => &sec_type,
-            };
 
             let order_type_str = crate::types::ord_type_api_name(
                 ord_type_tag,
@@ -2359,35 +2602,7 @@ impl CcpState {
                 0
             };
 
-            let contract = if resolved_con_id != 0 {
-                if let Some(mut cached) = shared.reference.get_contract(resolved_con_id) {
-                    if !symbol.is_empty() { cached.symbol = symbol.clone(); }
-                    if !sec_type_str.is_empty() { cached.sec_type = sec_type_str.to_string(); }
-                    if !exchange.is_empty() { cached.exchange = exchange.clone(); }
-                    if !currency.is_empty() { cached.currency = currency.clone(); }
-                    if !local_symbol.is_empty() { cached.local_symbol = local_symbol.clone(); }
-                    cached
-                } else {
-                    api::Contract {
-                        con_id: resolved_con_id,
-                        symbol: symbol.clone(),
-                        sec_type: sec_type_str.to_string(),
-                        exchange: exchange.clone(),
-                        currency: currency.clone(),
-                        local_symbol: local_symbol.clone(),
-                        ..Default::default()
-                    }
-                }
-            } else {
-                api::Contract {
-                    symbol: symbol.clone(),
-                    sec_type: sec_type_str.to_string(),
-                    exchange: exchange.clone(),
-                    currency: currency.clone(),
-                    local_symbol: local_symbol.clone(),
-                    ..Default::default()
-                }
-            };
+            let contract = stated_contract(parsed, exchange, resolved_con_id, shared);
 
             let (fb_tif, fb_ord_type) = if let Some(ctx_order) = context.order(clord_id) {
                 let t = decode_tif(ctx_order.tif);
@@ -2524,67 +2739,9 @@ impl CcpState {
                 ..Default::default()
             };
 
-            let last_exec = api::Execution {
-                model_code: stated_model(parsed),
-                // What the report stated that nothing above names. A report
-                // carries far more than any one client reads, and what is not
-                // read is kept rather than dropped.
-                unnamed_fields: unnamed_execution_fields(raw),
-                exec_id: exec_id.to_string(),
-                time: transact_time,
-                acct_number: account,
-                exchange: exec_exchange,
-                // The venue's word for the side, read off the report as the
-                // action above is. Read off the order this session tracks, an
-                // execution restated for an order it never tracked — one that
-                // finished before a restart — stated no side at all.
-                side: match action {
-                    "BUY" => "BOT",
-                    "SELL" | "SSHORT" => "SLD",
-                    _ => "",
-                }.to_string(),
-                shares: qty_to_f64(last_shares),
-                price: last_px,
-                order_id: clord_id as i64,
-                // The order's permanent number and the client that placed it,
-                // as the report states them. Left at zero, a restated execution
-                // named no client, and a request filtered by client matched
-                // none of them.
-                perm_id,
-                client_id: i64::from(order.client_id),
-                // Who entered it, which is the order's own and is stated on
-                // the report the fill came on.
-                submitter: order.submitter.clone(),
-                // Read off the report, which restates it every time, rather
-                // than looked up against the order this client remembers: a
-                // fill on an order placed in another session is still
-                // labelled, and this client remembers no such order.
-                order_ref: parsed.get(&6010).cloned().unwrap_or_default(),
-                // The execution record describes this report, so an absent
-                // cumulative is zero here rather than the cached total.
-                cum_qty: cum_qty.unwrap_or(0.0),
-                avg_price: avg_px,
-                last_liquidity: last_liq,
-                // Not a field of its own: the broker says it liquidated the
-                // position by naming the order with a leading L rather than by
-                // setting anything. Read as a flag it was never set at all, and
-                // a caller could not tell a liquidation from any other fill.
-                liquidation: i32::from(parsed.get(&11).is_some_and(|s| s.starts_with('L'))),
-                // What the instrument's economic value is reckoned by, where it
-                // has one, and what the reckoning is multiplied by.
-                ev_rule: parsed.get(&6858).cloned().unwrap_or_default(),
-                // The multiplier is the tag beside the rule, and the venue
-                // states it as a number. It was read off 6892, which the venue
-                // states as text — so it parsed to nothing and every fill
-                // carried a multiplier of zero. A contract whose value follows
-                // something other than its own price is then valued at nothing.
-                ev_multiplier: parsed.get(&6859)
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0.0),
-                // The price on this report may yet be revised.
-                pending_price_revision: parsed.get(&8497)
-                    .is_some_and(|v| flag(v)),
-            };
+            let last_exec = stated_execution(
+                parsed, raw, clord_id, perm_id, action, order.client_id, order.submitter.clone(),
+            );
 
             if con_id != 0 {
                 // An execution report states a subset of a definition: it names
@@ -2631,7 +2788,7 @@ impl CcpState {
             // the caller reads. The recovery test beside this one keeps the
             // same condition for the same reason.
             if restates_a_trade && !marked_resend && !restated_twice {
-                shared.orders.push_order_correction(clord_id, info);
+                shared.orders.push_order_correction(clord_id, &venue_order, info);
             } else {
                 // A late duplicate of an earlier partial must not rewrite a
                 // completed order back to open. The cache is what
@@ -2717,10 +2874,13 @@ impl CcpState {
                 // nothing to be refused by.
                 shared.orders.push_completed_order(CompletedOrder {
                     order_id: clord_id,
+                    venue_order: venue_order.clone(),
                     instrument: tracked.map_or(0, |o| o.instrument),
                     status,
                     filled_qty: tracked.map_or(0, |o| o.filled),
                     timestamp_ns: context.now_ns(),
+                    stated: None,
+                    held: None,
                 });
                 context.retire_order(clord_id);
             }
@@ -2964,10 +3124,15 @@ impl CcpState {
         if let Some(status) = finished_by_the_refusal {
             shared.orders.push_completed_order(CompletedOrder {
                 order_id: oid,
+                venue_order: context.venue_orders.get(&oid)
+                    .and_then(|named| named.last().cloned())
+                    .unwrap_or_default(),
                 instrument,
                 status,
                 filled_qty: context.order(oid).map_or(0, |o| o.filled),
                 timestamp_ns: context.now_ns(),
+                stated: None,
+                held: None,
             });
             context.retire_order(oid);
             // Restated, not removed. What the order was is what the

@@ -84,6 +84,21 @@ pub struct Context {
     /// it appeared on the wire. Used as the OrigClOrdID on cancel/modify so that
     /// legacy orders recorded without a `.{ver}` suffix still match.
     pub(crate) last_clord: HashMap<OrderId, String>,
+    /// The venue's own names for each order held, as the reports about what is
+    /// happening to it state them.
+    ///
+    /// A number is free again once its order is done, so a report restating
+    /// the past can be about another order sent under the number of one held
+    /// here, and this is what tells the two apart.
+    pub(crate) venue_orders: HashMap<OrderId, Vec<String>>,
+    /// The highest count the venue's names for orders have stated, under each
+    /// first two segments they carry.
+    pub(crate) venue_counts: HashMap<String, u64>,
+    /// When this session last sent an order under each number, on the venue's
+    /// clock in milliseconds, and the counts the venue had stated by then:
+    /// until the venue names the order, what tells it from an earlier one
+    /// under the same number.
+    pub(crate) placed_at: HashMap<OrderId, (i64, HashMap<String, u64>)>,
     /// Where an order was sent, as it was stated on the wire when it went.
     ///
     /// A replace restates the destination, and it read that from the slot the
@@ -157,6 +172,9 @@ impl Context {
             pending_orders: OrderBuffer::new(),
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
+            venue_orders: HashMap::new(),
+            venue_counts: HashMap::new(),
+            placed_at: HashMap::new(),
             order_destination: HashMap::new(),
             submitted: HashMap::new(),
             cancel_attempts: HashMap::new(),
@@ -598,6 +616,8 @@ impl Context {
         self.remove_order(order_id);
         self.modify_versions.remove(&order_id);
         self.last_clord.remove(&order_id);
+        self.venue_orders.remove(&order_id);
+        self.placed_at.remove(&order_id);
         self.order_destination.remove(&order_id);
         self.submitted.remove(&order_id);
         self.cancel_attempts.remove(&order_id);

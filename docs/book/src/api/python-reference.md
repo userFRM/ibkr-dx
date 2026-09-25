@@ -893,7 +893,7 @@ def cancel_order(order_id, order_cancel=None)
 
 #### `cancel_order_by_perm_id`
 
-Cancel an order identified by `permId` — stable across sessions, unlike the local order id. The cancel frame is orderId-only, so the local id is looked up from the open-order cache; fails if `perm_id` is not tracked.
+Cancel an order identified by `permId` — stable across sessions, unlike the local order id. The cancel frame is orderId-only, so the local id is looked up from the open-order cache; fails if `perm_id` is not tracked. Where more than one working order's record carries it, the order held under that number is the one withdrawn, as a gateway holds one order under a number, and of those records the one whose order the engine holds.
 
 ```python
 def cancel_order_by_perm_id(perm_id)
@@ -901,7 +901,7 @@ def cancel_order_by_perm_id(perm_id)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `perm_id` | `int` | Permanent order ID assigned by the server. |
+| `perm_id` | `int` | The order's permanent id: the number it goes to the venue under. |
 
 ---
 
@@ -975,7 +975,7 @@ def req_all_open_orders()
 
 #### `req_auto_open_orders`
 
-Binding orders entered elsewhere to this client.  Served for client 0. Any other client is refused, as a gateway refuses a client other than 0: asked to bind, with 321, as a request that fails validation; asked not to, with 327. On a gateway, client 0's flag turns binding on or off; here what binding asks for is the default, since this session is told about every order on the account, whoever entered it. So `b_auto_bind` changes nothing whichever way it is set, and nothing goes to the venue.  `order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
+Binding orders entered elsewhere to this client.  Served for client 0. Any other client is refused, as a gateway refuses a client other than 0: asked to bind, with 321, as a request that fails validation; asked not to, with 327. On a gateway, client 0's flag turns binding on or off; here what binding asks for is the default, since this session is told about every order on the account, whoever entered it. So `b_auto_bind` changes nothing whichever way it is set, and nothing goes to the venue.  `order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing its permanent id, the number the session that placed it sent it under, with the order id it is reached under here.
 
 ```python
 def req_auto_open_orders(b_auto_bind)
@@ -2622,7 +2622,7 @@ Where an order stands now. Fires on every change, and again on each fill. `fille
 | `filled` | `float` | Cumulative filled quantity. |
 | `remaining` | `float` | Remaining quantity. |
 | `avg_fill_price` | `float` | Average fill price. |
-| `perm_id` | `int` | Permanent order ID assigned by the server. |
+| `perm_id` | `int` | The order's permanent id: the number it goes to the venue under. |
 | `parent_id` | `int` | Parent order ID (0 if no parent). |
 | `last_fill_price` | `float` | Price of the last fill. |
 | `client_id` | `int` | API client ID for order ownership and the saved order-id counter. |

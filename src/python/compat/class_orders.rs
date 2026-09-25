@@ -864,17 +864,6 @@ impl Order {
             .collect()
     }
 
-    /// The caller's own tags on an order.
-    ///
-    /// This protocol carries no field for them, so an order stating any is
-    /// refused rather than sent without them — which is what the refusal needs
-    /// them read for.
-    pub fn convert_misc_options(
-        &self, py: Python<'_>,
-    ) -> Result<Vec<crate::types::model::TagValue>, String> {
-        tag_values(self.order_misc_options.bound(py).iter(), "option")
-    }
-
     /// The parameters of the algo the order runs under.
     ///
     /// A Python list, so reading it needs the interpreter, which the
@@ -1230,7 +1219,7 @@ impl Order {
             opt_out_smart_routing: self.opt_out_smart_routing,
             // Python objects, so reading them needs the interpreter this does
             // not hold. Filled at the call site from `convert_order_combo_legs`
-            // and `convert_misc_options`, beside the conditions, and a test
+            // and the written option list, beside the conditions, and a test
             // holds every field to being filled in one place or the other.
             order_combo_legs: Vec::new(),
             order_misc_options: Vec::new(),

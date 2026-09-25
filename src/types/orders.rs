@@ -79,7 +79,8 @@ pub struct OrderUpdate {
     /// What the order has paid on average so far, as the report states it.
     /// Zero when nothing has filled.
     pub avg_price: Price,
-    /// Order id assigned by the venue, stable across sessions.
+    /// The order's permanent id: the number it went to the venue under,
+    /// which it keeps for its life and across sessions.
     pub perm_id: i64,
     /// The order it is a child of, where the venue states one.
     pub parent_id: i64,
@@ -1785,6 +1786,9 @@ impl OrderBuffer {
 pub struct CompletedOrder {
     /// The order.
     pub order_id: OrderId,
+    /// The venue's own name for the order, which tells it from another order
+    /// sent under the same number. Empty where the venue stated none.
+    pub venue_order: String,
     /// The contract it was on.
     pub instrument: InstrumentId,
     /// What it finished as.
@@ -1793,6 +1797,15 @@ pub struct CompletedOrder {
     pub filled_qty: Qty,
     /// When, in nanoseconds since the epoch.
     pub timestamp_ns: u64,
+    /// The order as the venue stated it finished, where the completion
+    /// carries that itself: the venue's answer to what the account has
+    /// finished states each order whole, and the record held under the
+    /// order's number can be another order's.
+    pub stated: Option<Box<(model::Contract, model::Order, model::OrderState)>>,
+    /// The record held under the order's number, for a completion that does
+    /// not carry the venue's own: taken with the completion off the queue, or
+    /// moved onto it while queued when another order takes the number.
+    pub held: Option<Box<(model::Contract, model::Order, model::OrderState)>>,
 }
 
 #[cfg(test)]

@@ -363,14 +363,18 @@ impl EClient {
 
     /// Cancel an order identified by `permId` — stable across sessions.
     ///
-    /// `permId` is the broker-assigned identifier returned in `order_status`
-    /// callbacks and surfaced in account tools. Useful for cancelling an order
-    /// placed in a prior session, where the local `order_id` is not retained.
+    /// `permId` is the number an order goes to the venue under, as `open_order`
+    /// and `order_status` state it. Useful for cancelling an order placed in a
+    /// prior session, where the local `order_id` is not retained.
     ///
     /// The withdrawal names an order by its number, so the engine looks the
     /// number up from `permId` among the orders the venue is working, once it
     /// has named them, and withdraws it as [`cancel_order`](Self::cancel_order)
-    /// does. A `perm_id` no working order carries is refused under no number.
+    /// does. Where more than one record of a working order carries it, the
+    /// order held under that number is the one withdrawn, as a gateway holds
+    /// one order under a number, and of those records the one whose order the
+    /// engine holds. A `perm_id` no working order carries is refused under no
+    /// number.
     pub fn cancel_order_by_perm_id(&self, perm_id: i64) {
         let asked = || -> Result<(), Refusal> {
             self.refuse_if_trading_is_over("a withdrawal")?;
@@ -642,8 +646,10 @@ impl EClient {
         // copy it cannot reach. Applied before the arrivals below, an order
         // taken back and then finished again keeps the new record and loses
         // the superseded one.
-        for order_id in self.shared.orders.drain_order_corrections() {
-            archive.retain(|(_, order, _)| order.order_id != order_id as i64);
+        for (order_id, venue_order) in self.shared.orders.drain_order_corrections() {
+            archive.retain(|(_, order, _, named)| {
+                order.order_id != order_id as i64 || *named != venue_order
+            });
             // And the eviction armed for it when it finished. A bust or a
             // correction puts the order back to a working quantity, and an
             // eviction still standing took its record away on the next read —
@@ -652,31 +658,38 @@ impl EClient {
         }
         for order in self.shared.orders.drain_completed_orders() {
             let status_str = crate::types::order_status::order_status_str(order.status);
-            let entry = if let Some(info) = self.shared.orders.get_order_info(order.order_id) {
-                let mut state = info.order_state;
+            // The order as the venue's answer stated it, where the completion
+            // carries that, and otherwise the record held under its number as
+            // the completion was taken. The number is not the order: the venue
+            // can have finished two under one, and the record under it is
+            // whichever this session holds.
+            let carried = order.stated.is_some();
+            let record = order.stated.or(order.held).map(|record| *record);
+            let entry = if let Some((contract, mut held, mut state)) = record {
                 state.status = status_str.into();
                 // The contract as the venue was told it where the order was
                 // placed here — the record carries the legs and the hedge the
                 // caller stated, which no definition of one contract carries —
                 // and the venue's own, enriched from the definition cache,
                 // where it was not.
-                let placed_on = self.core.open_orders.lock().unwrap()
-                    .get(&order.order_id).map(|placed| placed.contract.clone());
+                let placed_on = (!carried)
+                    .then(|| self.core.open_orders.lock().unwrap()
+                        .get(&order.order_id).map(|placed| placed.contract.clone()))
+                    .flatten();
                 let contract = match placed_on {
                     Some(contract) => contract,
-                    None if info.contract.con_id != 0 => self.core
-                        .get_contract(info.contract.con_id, &self.shared)
-                        .unwrap_or(info.contract),
-                    None => info.contract,
+                    None if contract.con_id != 0 => self.core
+                        .get_contract(contract.con_id, &self.shared)
+                        .unwrap_or(contract),
+                    None => contract,
                 };
                 // The client that placed it, where the venue names none: the
                 // venue states no client on this wire, and the record of a
                 // placement made here knows whose it was.
-                let mut order = info.order;
-                if order.client_id == 0 {
-                    order.client_id = self.core.placing_client(&self.shared, order.order_id as u64);
+                if held.client_id == 0 {
+                    held.client_id = self.core.placing_client(&self.shared, held.order_id as u64);
                 }
-                (contract, order, state)
+                (contract, held, state, order.venue_order)
             } else {
                 (
                     Contract::default(),
@@ -685,17 +698,21 @@ impl EClient {
                         status: status_str.into(),
                         ..Default::default()
                     },
+                    order.venue_order,
                 )
             };
             // Replaced where this order is already in the archive, not added
             // beside it. The venue restates an order it has already stated
             // once the memory of it has aged out, and pushed again the caller
             // was handed the same order twice. The caller's own number for it
-            // decides, as it does in the queue this was read off.
-            match archive.iter().position(|(_, held, _)| held.order_id == entry.1.order_id
+            // decides, as it does in the queue this was read off, under the
+            // venue's own name for it: two orders the venue finished under one
+            // number are two orders.
+            match archive.iter().position(|(_, held, _, named)| held.order_id == entry.1.order_id
                 && (held.perm_id == entry.1.perm_id
                     || held.perm_id == 0
-                    || entry.1.perm_id == 0))
+                    || entry.1.perm_id == 0)
+                && *named == entry.3)
             {
                 Some(at) => archive[at] = entry,
                 None => archive.push(entry),
@@ -723,8 +740,9 @@ impl EClient {
     ///
     /// [`Wrapper::order_bound`](crate::api::wrapper::Wrapper::order_bound) does not follow from this call. It is fired once
     /// for each order the venue restates when the session opens that this
-    /// session did not place, pairing the venue's permanent id with the order
-    /// id it is reached under here.
+    /// session did not place, pairing its permanent id, the number the session
+    /// that placed it sent it under, with the order id it is reached under
+    /// here.
     pub fn req_auto_open_orders(&self, b_auto_bind: bool) {
         if self.shared.orders.api_client_id() == 0 { return; }
         self.refuse_session(&if b_auto_bind {

@@ -976,13 +976,31 @@ impl HotLoop {
         if self.shared.orders.replay_settled().is_none() {
             return Step::Waits;
         }
-        let found = self
+        let carrying: Vec<u64> = self
             .shared
             .orders
             .drain_open_orders()
             .into_iter()
-            .find(|(_, info)| info.order.perm_id == perm_id)
-            .map(|(order_id, _)| order_id);
+            .filter(|(_, info)| info.order.perm_id == perm_id)
+            .map(|(order_id, _)| order_id)
+            .collect();
+        // One order under a number, as a gateway holds its orders. Where more
+        // than one record carries the number, it names the order a report
+        // under that number reaches: the one held under the number itself, or
+        // the one the venue's name for it was learned for. Taken as the first
+        // record the book happened to yield, the withdrawal reached either.
+        // And of those, the one the engine holds: a record can outlast the
+        // order it was kept for.
+        let number = perm_id as u64;
+        let named: Vec<u64> = [Some(number), self.ccp.the_order_named(number)]
+            .into_iter()
+            .flatten()
+            .filter(|order_id| carrying.contains(order_id))
+            .chain(carrying.iter().copied())
+            .collect();
+        let found = named.iter().copied()
+            .find(|order_id| self.context.order(*order_id).is_some())
+            .or_else(|| named.first().copied());
         let Some(order_id) = found else {
             let why = Refusal::stated(
                 NO_SUCH_ORDER,

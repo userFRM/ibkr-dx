@@ -372,6 +372,9 @@ pub struct Connection {
     /// When the logon that built this connection was answered, in the spelling
     /// the venue uses when it names somebody else's session.
     pub logged_in_at: Option<String>,
+    /// How far the venue's clock was ahead of this machine's as that answer
+    /// arrived: its stamp less this machine's clock when it was read.
+    pub venue_ahead_millis: Option<i64>,
     /// Another session that already held this account when this connection was
     /// made, as the venue named it: address, login time, and whether this
     /// session is held to reading only.
@@ -455,6 +458,7 @@ impl Connection {
             read_iv: Vec::new(),
             connected_host: None,
             logged_in_at: None,
+            venue_ahead_millis: None,
             competing: None,
             heartbeat_secs: None,
             market_data_allowance: 40,
@@ -887,6 +891,7 @@ impl Connection {
             read_iv: Vec::new(),
             connected_host: None,
             logged_in_at: None,
+            venue_ahead_millis: None,
             competing: None,
             heartbeat_secs: None,
             market_data_allowance: 40,
@@ -1367,6 +1372,7 @@ mod tests {
             read_iv: Vec::new(),
             connected_host: None,
             logged_in_at: None,
+            venue_ahead_millis: None,
             competing: None,
             heartbeat_secs: None,
             market_data_allowance: 40,
@@ -1584,6 +1590,7 @@ mod tests {
             read_iv: Vec::new(),
             connected_host: None,
             logged_in_at: None,
+            venue_ahead_millis: None,
             competing: None,
             heartbeat_secs: None,
             market_data_allowance: 40,
@@ -2061,6 +2068,7 @@ mod tests {
             read_iv: Vec::new(),
             connected_host: None,
             logged_in_at: None,
+            venue_ahead_millis: None,
             competing: None,
             heartbeat_secs: None,
             market_data_allowance: 40,

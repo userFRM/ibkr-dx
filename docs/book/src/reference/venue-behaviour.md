@@ -317,6 +317,57 @@ session. The file then provides no reservation guarantee for that session.
 Removing the file or disabling persistence also removes the floor for orders
 the venue no longer replays.
 
+## One number, more than one order
+
+A number whose order the venue withdrew or refused is free again at the venue,
+so a program that numbers its orders from the same point more than once sends a
+later order under an earlier one's number, and the account then holds several
+orders under one number. The venue names each with a name of its own, which
+every report on the order repeats, and each is kept as the order it is:
+
+- `reqCompletedOrders` answers with every order the venue states finished, each
+  carrying the number as its permanent id, so two of them can share one. While
+  that answer is open, every report the venue marks as restating the past is
+  filed with it unless it is about an order this session holds, whatever this
+  session once sent under its number.
+- A report the venue marks as restating the past is about the order this
+  session holds under its number where it states one of the names the venue
+  has given that order on its reports of what is happening to it, and about
+  another order where it states another name. One stating no name is read as
+  though the venue had not named the order. Before the venue has named an
+  order this session sent, as it does not name a market-on-close order in
+  regular hours until it is withdrawn, the report is about another order where
+  the venue counts that order at or below the highest count it had stated when
+  this session sent its own, or where every time it states for the order and
+  the event is more than two seconds before this session sent it, on the
+  venue's clock. The venue counts the orders it creates from one count that
+  only rises, the third segment of its name for an order under the first two,
+  so an order counted there was created before this one went out. A count
+  above that says nothing: an order that finished before the session opened
+  is not restated then, so it can count above every order the venue had named
+  by the send. Under a number this session holds no order under, such a report
+  outside that answer is another order's where it names another order than the
+  one this session saw finish under the number in the last five minutes.
+- A report of what is happening now is about the order this session holds
+  under its number unless it states none of the names the venue has given that
+  order and the venue counts it at or below the highest count it had stated
+  when this session sent it, which makes it an order created before.
+- A report about another order is filed with the completed orders while that
+  answer is open, or, outside it, kept as one of the day's executions where it
+  states one. It reaches the order under the number in neither case.
+- An order the venue names as working under a number an earlier order finished
+  under is taken as that number's order.
+- A new order under a number an earlier order used is refused with error 103,
+  `Duplicate order id: N`, only as a gateway refuses one: a gateway refuses
+  under 103 a new order whose number is not above a mark it keeps for each
+  client from one session to the next, raised by every order that client
+  places and every working order it states to it, and not by the executions
+  the venue restates. An order the session holds under that number is
+  modified as usual.
+- `cancel_order_by_perm_id` withdraws the order held under the number, where
+  more than one working order's record carries it; of the records carrying it,
+  the one whose order the engine holds.
+
 ## Attached cancellation groups
 
 A child placed with `parent_id` / `parentId` uses the known parent's decimal
@@ -329,14 +380,17 @@ original parent reference and group.
 
 ## A modification in flight
 
-A replacement reads `PendingSubmit`, as a gateway states an order it has sent
-and the venue has not acknowledged, until the venue accepts it and the order
-reads its working status again. The caller is told on the venue's pending
-report, which follows the send, not at the send itself. That report, and the
-one ahead of a change the venue makes itself (the exits of a bracket once its
-parent fills), changes no status: the order is stated again as it stands. An
-order whose state this session lost with a dropped connection takes its status
-from the report instead.
+A replacement reads `PendingSubmit` once it is sent, as a gateway holds an
+order it has sent and the venue has not acknowledged; nothing is said at the
+send itself. The venue's pending report follows, as a status report, and a
+gateway reads it as the order acknowledged: the caller is told `PreSubmitted`,
+and the working status again once the venue accepts the change. The report
+ahead of a change the venue makes itself (the exits of a bracket once its
+parent fills) reads the same way. A pending report for a revision earlier than
+the one last sent, or on an order being withdrawn, changes no status, and one
+sent as an execution report rather than a status report changes none either:
+the order is stated again as it stands. An order whose state this session lost
+with a dropped connection takes its status from the report instead.
 
 ## Refused modifications
 

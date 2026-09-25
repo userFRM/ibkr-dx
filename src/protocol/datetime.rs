@@ -125,6 +125,17 @@ pub fn ib_datetime_to_unix(stamped: &str) -> Option<i64> {
     ib_datetime_to_unix_millis(stamped).map(|ms| ms.div_euclid(1_000))
 }
 
+/// How far the clock that wrote a stamp is ahead of this machine's, read as the
+/// stamp arrives: its instant less this machine's clock now. Read later, the
+/// difference is short by however long the stamp waited.
+pub fn ahead_of_this_clock_millis(stamped: &str) -> Option<i64> {
+    let stated = ib_datetime_to_unix_millis(stamped)?;
+    let here = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64);
+    Some(stated.saturating_sub(here))
+}
+
 /// Read the venue's timestamp back to unix milliseconds (UTC).
 ///
 /// The same stamp as [`ib_datetime_to_unix`] reads, keeping the fractional

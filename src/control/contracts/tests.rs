@@ -1100,6 +1100,13 @@ fn each_definition_selects_its_own_order_type_table() {
     assert_eq!(definitions[1].order_type_key, "future");
     assert_eq!(definitions[1].order_types, ["MKT", "STPLMT", "TRAIL"]);
     assert_eq!(definitions[1].order_type_rules[1], ("STPLMT".into(), 3));
+
+    // One contract described on each exchange it trades on is one definition,
+    // on its own exchange and under that exchange's list.
+    let data = b"35=d\x0155=ABC\x01167=CS\x016008=42\x01207=BEST\x016430=smart\x0155=ABC\x01167=CS\x016008=42\x01207=NYSE\x016430=nyse\x016432=2\x016430=smart\x016431=LMT/1,SCALE/1\x016430=nyse\x016431=LMT/1\x01";
+    let definitions = parse_secdef_responses(data, false);
+    assert_eq!(definitions.len(), 1);
+    assert_eq!((definitions[0].exchange.as_str(), &definitions[0].order_types[..]), ("SMART", &["LMT".to_string(), "SCALE".to_string()][..]));
 }
 
 #[test]

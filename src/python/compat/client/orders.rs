@@ -87,15 +87,14 @@ impl EClient {
 
         let session = self.order_session();
         let mut api_order = order.to_api();
-        api_order.order_misc_options = match order.convert_misc_options(py) {
-            Ok(options) => options,
-            Err(why) => return self.refuse_placement(py, order_id, Refusal::validation(why)),
-        };
-        if let Err(why) = ClientCore::read_option_list(
-            &crate::client_core::ORDER_OPTIONS,
-            &ClientCore::written_options(&api_order.order_misc_options), &session.features,
-        ) {
-            return self.refuse_placement(py, order_id, why);
+        let written = super::written_option_list(order.order_misc_options.bound(py).iter())?;
+        match ClientCore::read_option_list(&crate::client_core::ORDER_OPTIONS, &written, &session.features) {
+            Ok(read) => {
+                api_order.order_misc_options = read.into_iter()
+                    .map(|(tag, value)| crate::types::model::TagValue { tag: tag.into(), value: value.into() })
+                    .collect();
+            }
+            Err(why) => return self.refuse_placement(py, order_id, why),
         }
         if let Err(why) = ClientCore::validate_order_destination(&contract.exchange) {
             return self.refuse_placement(py, order_id, why.into());
@@ -405,6 +404,10 @@ impl EClient {
     /// Cancel an order identified by `permId` — stable across sessions, unlike
     /// the local order id. The cancel frame is orderId-only, so the local id is
     /// looked up from the open-order cache; fails if `perm_id` is not tracked.
+    /// Where more than one working order's record carries it, the order held
+    /// under that number is the one withdrawn, as a gateway holds one order
+    /// under a number, and of those records the one whose order the engine
+    /// holds.
     fn cancel_order_by_perm_id(&self, py: Python<'_>, perm_id: i64) -> PyResult<()> {
         if let Err(why) = self.core.refuse_if_readonly("a cancel") {
             return self.report_refusal(py, -1, Refusal::validation(why));
@@ -543,8 +546,8 @@ impl EClient {
     ///
     /// `order_bound` does not follow from this call. It is fired once for each
     /// order the venue restates when the session opens that this session did
-    /// not place, pairing the venue's permanent id with the order id it is
-    /// reached under here.
+    /// not place, pairing its permanent id, the number the session that placed
+    /// it sent it under, with the order id it is reached under here.
     #[pyo3(signature = (b_auto_bind))]
     fn req_auto_open_orders(&self, b_auto_bind: bool) -> PyResult<()> {
         // Nothing goes to the wire. The request is refused for any client id
@@ -701,8 +704,10 @@ impl EClient {
             // this is the copy it cannot reach. Applied before the
             // arrivals below, an order taken back and then finished again
             // keeps the new record and loses the superseded one.
-            for order_id in shared.orders.drain_order_corrections() {
-                archive.retain(|(_, order, _)| order.order_id != order_id as i64);
+            for (order_id, venue_order) in shared.orders.drain_order_corrections() {
+                archive.retain(|(_, order, _, named)| {
+                    order.order_id != order_id as i64 || *named != venue_order
+                });
                 // And the eviction armed for it when it finished. A bust or a
                 // correction puts the order back to a working quantity, and an
                 // eviction still standing took its record away on the next pass —
@@ -711,14 +716,22 @@ impl EClient {
             }
             for co in shared.orders.drain_completed_orders() {
                 let status_str = crate::types::order_status::order_status_str(co.status);
-                let rich_info = shared.orders.get_order_info(co.order_id);
-                let tracked = self.core.open_orders.lock().unwrap().get(&co.order_id).cloned();
+                // The order as the venue's answer stated it, where the
+                // completion carries that, and otherwise the record held under
+                // its number as the completion was taken, as on the other
+                // surface. The number is not the order: the venue can have
+                // finished two under one, and the record under it is whichever
+                // this session holds.
+                let tracked = co.stated.is_none()
+                    .then(|| self.core.open_orders.lock().unwrap().get(&co.order_id).cloned())
+                    .flatten();
+                let rich_info = co.stated.or(co.held).map(|record| *record);
                 // The state the venue stated where it stated one, under the
                 // status this client names it by, which is canonical rather
                 // than whatever the stored state last held.
                 let state = crate::types::model::OrderState {
                     status: status_str.into(),
-                    ..rich_info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default()
+                    ..rich_info.as_ref().map(|(_, _, state)| state.clone()).unwrap_or_default()
                 };
                 // The venue's own order where it stated one, as on the
                 // other surface, with the client that placed it where the
@@ -726,8 +739,8 @@ impl EClient {
                 let (contract, mut order) = match (tracked, rich_info) {
                     // The record's contract carries the legs and the hedge
                     // the caller stated, which no definition carries.
-                    (Some(o), Some(info)) => (o.contract, info.order),
-                    (None, Some(info)) => (info.contract, info.order),
+                    (Some(o), Some((_, order, _))) => (o.contract, order),
+                    (None, Some((contract, order, _))) => (contract, order),
                     (Some(o), None) => (o.contract, o.order),
                     (None, None) => (
                         crate::types::model::Contract::default(),
@@ -754,15 +767,18 @@ impl EClient {
                 // Replaced where this order is already in the archive, as
                 // on the other surface: the venue restates an order once
                 // the memory of it has aged out, and pushed again the
-                // caller was handed the same order twice.
-                match archive.iter().position(|(_, held, _): &(_, crate::types::model::Order, _)| {
+                // caller was handed the same order twice. Under the venue's
+                // own name for it: two orders the venue finished under one
+                // number are two orders.
+                match archive.iter().position(|(_, held, _, named): &(_, crate::types::model::Order, _, String)| {
                     held.order_id == order.order_id
                         && (held.perm_id == order.perm_id
                             || held.perm_id == 0
                             || order.perm_id == 0)
+                        && *named == co.venue_order
                 }) {
-                    Some(at) => archive[at] = (contract, order, state),
-                    None => archive.push((contract, order, state)),
+                    Some(at) => archive[at] = (contract, order, state, co.venue_order),
+                    None => archive.push((contract, order, state, co.venue_order)),
                 }
                 // Bound `order_cache` growth: terminal entries are no
                 // longer needed once what they carried has been read out.
@@ -1396,11 +1412,11 @@ w = W()",
 
     /// One venue order is answered once, whatever it is named along the way.
     ///
-    /// The venue names an order permanently at some point in its life, not
-    /// from its first report. A caller released before that happened holds a
-    /// copy under no permanent name, and the answer that arrives afterwards
-    /// carries the same order with one — the later answer supersedes the
-    /// earlier, it does not join it.
+    /// A record can hold an order under no permanent id, where nothing has
+    /// named the order's number to it yet. A caller released then holds a copy
+    /// under none, and the answer that arrives afterwards carries the same
+    /// order with one — the later answer supersedes the earlier, it does not
+    /// join it.
     #[test]
     fn an_order_named_permanently_after_it_was_answered_replaces_its_earlier_copy() {
         Python::initialize();
@@ -1415,6 +1431,7 @@ w = W()",
                 last_exec: Default::default(),
             };
             let finished = || crate::types::CompletedOrder {
+                venue_order: String::new(), stated: None, held: None,
                 order_id: 31, instrument: 0, status: crate::types::OrderStatus::Filled,
                 filled_qty: 100, timestamp_ns: 0,
             };
@@ -1453,6 +1470,76 @@ w = W()",
             assert_eq!(
                 answers(&client), 1,
                 "the one order read as two once the venue had named it",
+            );
+        });
+    }
+
+    /// Every order the venue states finished comes back on this surface too,
+    /// however many were sent under one number: its archive is its own, and
+    /// held by the number it kept one order per number.
+    #[test]
+    fn every_order_the_venue_has_finished_comes_back_though_numbers_repeat() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, rx, shared, wrapper) = wired_client(py);
+            client.req_completed_orders(false).unwrap();
+            {
+                let mut engine = rx.engine();
+                let engine = &mut *engine;
+                engine.ccp.completed_orders_open = true;
+                for frame in crate::api::client::tests::A_FINISHED_ANSWER.lines() {
+                    engine.ccp.process_ccp_message(
+                        frame.replace('|', "\x01").as_bytes(), &mut None, &mut engine.context,
+                        &shared, &None, &mut crate::engine::hot_loop::HeartbeatState::new(), "DU123",
+                    );
+                }
+            }
+            let heard = || {
+                client.dispatch_once(py, &shared).unwrap();
+                let calls = wrapper.bind(py).getattr("calls").unwrap();
+                let mut heard: Vec<(i64, String)> = (0..calls.len().unwrap())
+                    .map(|i| calls.get_item(i).unwrap())
+                    .filter(|call| {
+                        let name = call.get_item(0).unwrap().extract::<String>().unwrap();
+                        name == "completed_order" || name == "completedOrder"
+                    })
+                    .map(|call| (
+                        call.get_item(2).unwrap().getattr("permId").unwrap().extract().unwrap(),
+                        call.get_item(3).unwrap().getattr("completedTime").unwrap().extract().unwrap(),
+                    ))
+                    .collect();
+                calls.call_method0("clear").unwrap();
+                heard.sort();
+                heard
+            };
+            let order = |perm_id: i64, time: &str| (perm_id, time.to_string());
+            assert_eq!(heard(), [
+                order(1787685160171345, "20260924-14:02:28"),
+                order(1787685160171345, "20260924-14:04:18"),
+                order(1787685160171345, "20260924-14:04:54"),
+                order(1787685160171345, "20260924-14:10:15"),
+                order(1787685160171345, "20260924-15:01:48"),
+                order(1787685160171371, "20260925-09:55:06"),
+                order(1787685160171371, "20260925-15:01:02"),
+            ], "each order the venue finished, once");
+
+            // The venue takes one of them back: the other under its number
+            // stays finished.
+            shared.orders.push_order_correction(
+                1787685160171371, "00a0b0c0.0000d0e0.0000b002",
+                crate::bridge::RichOrderInfo {
+                    contract: Default::default(), order: Default::default(),
+                    order_state: Default::default(), last_exec: Default::default(),
+                },
+            );
+            client.req_completed_orders(false).unwrap();
+            shared.push_call_record(crate::bridge::Record::Answer(
+                crate::bridge::Answer::CompletedOrders { api_only: false },
+            ));
+            assert_eq!(
+                heard().into_iter().filter(|(perm_id, _)| *perm_id == 1787685160171371).collect::<Vec<_>>(),
+                [order(1787685160171371, "20260925-09:55:06")],
+                "the order taken back leaves, and the other under its number stays",
             );
         });
     }

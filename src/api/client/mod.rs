@@ -314,8 +314,10 @@ pub struct EClient {
     /// The queue they arrive on empties as it is read and the venue does not
     /// send them again, so what has been read once is kept here: asked a
     /// second time, this client answered with none of them, which reads as an
-    /// account that completed nothing today.
-    pub(crate) completed: Mutex<Vec<(ApiContract, ApiOrder, crate::types::model::OrderState)>>,
+    /// account that completed nothing today. Each is kept with the venue's
+    /// own name for it, which tells it from another order finished under the
+    /// same number.
+    pub(crate) completed: Mutex<Vec<(ApiContract, ApiOrder, crate::types::model::OrderState, String)>>,
     pub(crate) core: ClientCore,
     pub(crate) session_token_bytes: Vec<u8>,
     pub(crate) session: crate::auth::resume::ResumableSession,

@@ -452,10 +452,11 @@ impl HotLoop {
         hot_loop.set_ccp_heartbeat_interval(gateway.heartbeat_interval);
         hot_loop.farm_conn = Some(farm_conn);
         // The venue stamps the logon answer with its own clock. How far that
-        // is from this machine's is learned here, and a caller asking what
-        // time the venue says it is reads this machine's clock shifted by it.
-        if let Some(stamped) = &ccp_conn.logged_in_at {
-            hot_loop.shared.market.note_venue_time(stamped);
+        // is from this machine's was learned as the answer arrived, and a
+        // caller asking what time the venue says it is reads this machine's
+        // clock shifted by it.
+        if let Some(ahead) = ccp_conn.venue_ahead_millis {
+            hot_loop.shared.market.note_venue_ahead_by(ahead);
         }
         hot_loop.ccp_conn = Some(ccp_conn);
         // This connection has not named what it has working yet, and the
@@ -587,8 +588,8 @@ impl HotLoop {
         // As `for_session`: the difference between the clocks is learned from
         // the logon stamp, and the bound that naming is waited on starts when
         // the connection is taken.
-        if let Some(stamped) = &ccp_conn.logged_in_at {
-            hl.shared.market.note_venue_time(stamped);
+        if let Some(ahead) = ccp_conn.venue_ahead_millis {
+            hl.shared.market.note_venue_ahead_by(ahead);
         }
         hl.ccp_conn = Some(ccp_conn);
         hl.shared.orders.replay_is_pending();
@@ -2616,8 +2617,8 @@ impl HotLoop {
         // has said nothing about the venue's clock — so the difference already
         // learned stands, which is a far better answer than none, and the two
         // machines have not moved apart in the seconds a reconnect takes.
-        if let Some(stamped) = conn.logged_in_at.as_deref() {
-            self.shared.market.note_venue_time(stamped);
+        if let Some(ahead) = conn.venue_ahead_millis {
+            self.shared.market.note_venue_ahead_by(ahead);
         }
         // This session's logon is now the newer one. Left at the first, every
         // later reconnect would find its own previous logon listed as a
@@ -4445,7 +4446,7 @@ mod tests {
 
         // A reconnect the venue stamped nothing on, which this wire permits.
         let (conn, _peer) = crate::protocol::connection::Connection::for_test();
-        assert!(conn.logged_in_at.is_none());
+        assert!(conn.venue_ahead_millis.is_none());
         hl.reconnect_ccp(conn);
         assert!(
             (shared.market.venue_time_millis() - 1_786_795_200_000).abs() < 2_000,
@@ -4455,7 +4456,7 @@ mod tests {
         // One that does carry a stamp states the clock anew, and the session
         // answers from that connection's from then on.
         let (mut conn, _peer_stamped) = crate::protocol::connection::Connection::for_test();
-        conn.logged_in_at = Some("20260815-13:30:00".to_string());
+        conn.venue_ahead_millis = crate::protocol::datetime::ahead_of_this_clock_millis("20260815-13:30:00");
         hl.reconnect_ccp(conn);
         assert!(
             (shared.market.venue_time_millis() - 1_786_800_600_000).abs() < 2_000,
@@ -7299,7 +7300,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let (farm_conn, _farm_peer) = crate::protocol::connection::Connection::for_test();
         let (mut ccp_conn, _ccp_peer) = crate::protocol::connection::Connection::for_test();
-        ccp_conn.logged_in_at = Some("20260904-09:30:00".to_string());
+        ccp_conn.venue_ahead_millis = crate::protocol::datetime::ahead_of_this_clock_millis("20260904-09:30:00");
         let (_hl, _tx) = HotLoop::with_connections(
             shared.clone(), None, "DU1".into(), farm_conn, ccp_conn, None, None,
         );

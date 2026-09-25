@@ -23,9 +23,10 @@ Connect, take an id, place, read status, cancel, disconnect.
 are quantities, `avg_fill_price` is the average of what has filled so far. An
 order that rests will sit at `Submitted` until you cancel it.
 
-The `perm_id` on that callback is derived by this client from the identifier the
-venue gives the order. It is stable for the life of the order, including across
-a modify. It is not a number the venue states on the wire.
+The `perm_id` on that callback is the number the order goes to the venue
+under, as a gateway states it, which for this order is its own order id. It is
+stated from the moment the order is sent and stays the same for the life of the
+order, including across a modify.
 
 ## Limits
 

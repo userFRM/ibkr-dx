@@ -1026,7 +1026,7 @@ pub fn cancel_order( &self, order_id: i64, order_cancel: impl Into<crate::types:
 
 #### `cancel_order_by_perm_id`
 
-Cancel an order identified by `permId` — stable across sessions. `permId` is the broker-assigned identifier returned in `order_status` callbacks and surfaced in account tools. Useful for cancelling an order placed in a prior session, where the local `order_id` is not retained. The withdrawal names an order by its number, so the engine looks the number up from `permId` among the orders the venue is working, once it has named them, and withdraws it as `cancel_order` does. A `perm_id` no working order carries is refused under no number.
+Cancel an order identified by `permId` — stable across sessions. `permId` is the number an order goes to the venue under, as `open_order` and `order_status` state it. Useful for cancelling an order placed in a prior session, where the local `order_id` is not retained. The withdrawal names an order by its number, so the engine looks the number up from `permId` among the orders the venue is working, once it has named them, and withdraws it as `cancel_order` does. Where more than one record of a working order carries it, the order held under that number is the one withdrawn, as a gateway holds one order under a number, and of those records the one whose order the engine holds. A `perm_id` no working order carries is refused under no number.
 
 ```rust
 pub fn cancel_order_by_perm_id(&self, perm_id: i64)
@@ -1034,7 +1034,7 @@ pub fn cancel_order_by_perm_id(&self, perm_id: i64)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `perm_id` | `i64` | Permanent order ID assigned by the server. |
+| `perm_id` | `i64` | The order's permanent id: the number it goes to the venue under. |
 
 ---
 
@@ -1150,7 +1150,7 @@ pub fn req_completed_orders(&self, api_only: bool)
 
 #### `req_auto_open_orders`
 
-Automatically bind future orders to this client. What binding asks for is the default here: this session is told about every order on the account, whoever entered it. Nothing goes to the venue. On a gateway, client 0's flag turns binding on or off; here every session is already told about every order, so `b_auto_bind` changes nothing. Any client but 0 is refused, as a gateway refuses one: asked to bind, with 321, as a request that fails validation; asked not to, with 327. `Wrapper::order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
+Automatically bind future orders to this client. What binding asks for is the default here: this session is told about every order on the account, whoever entered it. Nothing goes to the venue. On a gateway, client 0's flag turns binding on or off; here every session is already told about every order, so `b_auto_bind` changes nothing. Any client but 0 is refused, as a gateway refuses one: asked to bind, with 321, as a request that fails validation; asked not to, with 327. `Wrapper::order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing its permanent id, the number the session that placed it sent it under, with the order id it is reached under here.
 
 ```rust
 pub fn req_auto_open_orders(&self, b_auto_bind: bool)
@@ -2759,7 +2759,7 @@ Where an order stands now. Fires on every change, and again on each fill. `fille
 | `filled` | `f64` | Cumulative filled quantity. |
 | `remaining` | `f64` | Remaining quantity. |
 | `avg_fill_price` | `f64` | Average fill price. |
-| `perm_id` | `i64` | Permanent order ID assigned by the server. |
+| `perm_id` | `i64` | The order's permanent id: the number it goes to the venue under. |
 | `parent_id` | `i64` | Parent order ID (0 if no parent). |
 | `last_fill_price` | `f64` | Price of the last fill. |
 | `client_id` | `i64` | API client ID for order ownership and the saved order-id counter. |
@@ -3336,7 +3336,7 @@ The permanent id an order was given, paired with the id this client used.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `perm_id` | `i64` | Permanent order ID assigned by the server. |
+| `perm_id` | `i64` | The order's permanent id: the number it goes to the venue under. |
 | `client_id` | `i64` | API client ID for order ownership and the saved order-id counter. |
 | `order_id` | `i64` | Order identifier. Must be unique per session. |
 

@@ -461,9 +461,9 @@ pub enum ControlCommand {
         /// What the withdrawal states about itself.
         stated: crate::types::model::OrderCancel,
     },
-    /// Withdraw the working order the venue knows by this permanent number.
+    /// Withdraw the working order that carries this permanent id.
     CancelOrderByPermId {
-        /// The venue's permanent number for it.
+        /// Its permanent id: the number it went to the venue under.
         perm_id: i64,
     },
     /// Withdraw every order: what the engine holds, and every order the

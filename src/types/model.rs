@@ -557,8 +557,11 @@ pub struct Order {
     /// How far a relative order sits from its reference, as a
     /// percentage.
     pub percent_offset: f64,
-    /// Order id assigned by the venue, stable across sessions where the
-    /// caller's number is not.
+    /// The order's permanent id: the number it went to the venue under,
+    /// which it keeps for its life and across sessions where the caller's
+    /// number is not. A number whose order was withdrawn or refused is free
+    /// again at the venue, so two orders the account has finished can carry
+    /// the same one.
     ///
     /// **Reported by the venue, not sent.** It arrives on the echo of
     /// an order and on the reports that follow it, and an order going
@@ -1644,7 +1647,8 @@ pub struct Execution {
     pub shares: f64,
     /// At what price.
     pub price: f64,
-    /// Order id assigned by the venue, stable across sessions.
+    /// The order's permanent id: the number it went to the venue under,
+    /// which it keeps for its life and across sessions.
     pub perm_id: i64,
     /// Which client placed the order.
     pub client_id: i64,

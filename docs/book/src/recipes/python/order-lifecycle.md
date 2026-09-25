@@ -44,12 +44,15 @@ matching, so a filter written the way you write an order action works.
 
 ## permId
 
-The `perm_id` on `order_status` is derived by this client from the identifier
-the venue gives the order. It is stable for the life of the order, which is what
-step 5 checks: a modify keeps the same order, so it keeps the same permId.
-
-It is not a number the venue states on the wire. Do not expect it to match an
-identifier from another system, and do not persist it as one.
+The `perm_id` on `order_status` is the number the order goes to the venue
+under, as a gateway states it: for an order placed here, the number this client
+sent it under, and for one another session placed, the number that session sent
+it under. It is stable for the life of the order, which is what step 5 checks: a
+modify keeps the same order, so it keeps the same permId. A modify or a cancel
+of an order another session placed keeps that session's number too. It is not a
+key on its own: a number whose order was withdrawn or refused is free again at
+the venue, so orders the account finished under a number used twice share a
+permId, and `completed_order` delivers each of them.
 
 ## Limits
 

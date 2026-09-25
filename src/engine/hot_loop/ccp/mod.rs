@@ -42,6 +42,9 @@ const FINISHED_ORDERS_HELD: usize = 4_096;
 pub(crate) struct FinishedOrder {
     /// The id every report about this order names it by.
     pub(crate) order_id: u64,
+    /// The venue's own name for it, which tells it from another order sent
+    /// under the same number.
+    pub(crate) venue_order: String,
     /// The contract, as far as the reports have stated it.
     pub(crate) contract: crate::types::model::Contract,
     /// The order itself, the same way.
@@ -162,10 +165,6 @@ const EXEC_ID_WINDOW: usize = 1024;
 /// working, and an order that finished long ago needs none.
 const WIRE_NAME_WINDOW: usize = 4_096;
 
-/// Convert a FIX OrderID hex string (e.g. "00cf16ed.000225ed.69ca0941.0001") to a
-/// stable i64 permId.
-/// Uses FNV-1a hash of the first 3 dot-segments (the stable prefix) so that permId
-/// remains constant across modifications (the last segment increments on each modify).
 /// Extract the value of a single FIX tag from a raw message.
 /// `prefix` should include the tag number and `=` (e.g. `b"6256="`).
 fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
@@ -836,7 +835,7 @@ pub(crate) struct CcpState {
     /// it, and that is one thing that happened, not thousands.
     the_answer_is_full: bool,
     /// Every order this answer has taken, handed over or still being
-    /// assembled.
+    /// assembled, by its number and the venue's own name for it.
     ///
     /// The bound is on the answer, not on what is waiting to be handed over: a
     /// handover empties the records and the next order was taken beside them,
@@ -844,7 +843,7 @@ pub(crate) struct CcpState {
     /// was handed over. Kept here, an order already taken is still merged as
     /// the venue states more about it, and only an order the answer has never
     /// seen is left out.
-    orders_in_this_answer: std::collections::HashSet<u64>,
+    orders_in_this_answer: std::collections::HashSet<(u64, String)>,
     /// A caller asked what the venue has finished before the session's own
     /// replay was over, so the question is held until it is.
     ///
@@ -1251,9 +1250,10 @@ impl CcpState {
     pub(crate) fn hold_a_finished_order_for_test(
         &mut self, order_id: u64, status: crate::types::OrderStatus,
     ) {
-        self.orders_in_this_answer.insert(order_id);
+        self.orders_in_this_answer.insert((order_id, String::new()));
         self.finished_orders.push(FinishedOrder {
             order_id,
+            venue_order: String::new(),
             contract: Default::default(),
             order: crate::types::model::Order { order_id: order_id as i64, ..Default::default() },
             status,

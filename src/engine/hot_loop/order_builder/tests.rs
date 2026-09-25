@@ -894,6 +894,17 @@ fn synthesize_pending_cancel_updates_and_notifies() {
     assert_eq!(updates[0].status, OrderStatus::PendingCancel);
     assert_eq!(updates[0].filled_qty, 3.0);
     assert_eq!(updates[0].remaining_qty, 7.0);
+    assert_eq!(updates[0].perm_id, 7, "under the number it went out under");
+
+    // One the venue named at connect is under the venue's number for it.
+    context.insert_order(order(9, 0, OrderStatus::Submitted));
+    shared.orders.push_order_info(9, crate::bridge::RichOrderInfo {
+        order: crate::types::model::Order { perm_id: 9000, ..Default::default() },
+        order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
+        contract: Default::default(), last_exec: Default::default(),
+    });
+    synthesize_pending_cancel(&mut context, &shared, 9, &None);
+    assert_eq!(shared.orders.drain_order_updates()[0].perm_id, 9000);
 }
 
 #[test]
@@ -2996,7 +3007,7 @@ mod outside_rth_polarity_tests {
             21,
             instrument,
             Side::Buy,
-            100,
+            100 * crate::types::QTY_SCALE,
             crate::types::OrderKind::Limit { price: 100 * crate::types::PRICE_SCALE },
             b'0',
             &attrs,
@@ -3010,6 +3021,7 @@ mod outside_rth_polarity_tests {
         for tag in [
             "6403=100",
             "6445=50",
+            "6534=100",
             "6405=0.05",
             "6446=0.1",
             "6526=60",

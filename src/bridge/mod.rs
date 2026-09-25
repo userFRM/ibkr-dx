@@ -121,6 +121,7 @@ mod order_replay_tests {
     fn the_replay_does_not_resurrect_an_order_that_finished() {
         let s = OrderState::new();
         s.push_completed_order(crate::types::CompletedOrder {
+            venue_order: String::new(), stated: None, held: None,
             order_id: 7, instrument: 0, status: OrderStatus::Filled,
             filled_qty: 1, timestamp_ns: 0,
         });
@@ -148,6 +149,7 @@ mod order_replay_tests {
         let s = OrderState::new();
         s.push_order_update(update(7, OrderStatus::Filled, 1.0, 0.0));
         s.push_completed_order(crate::types::CompletedOrder {
+            venue_order: String::new(), stated: None, held: None,
             order_id: 7, instrument: 0, status: OrderStatus::Filled,
             filled_qty: 1, timestamp_ns: 0,
         });
@@ -930,6 +932,7 @@ mod tests {
 
     fn completed(order_id: u64) -> CompletedOrder {
         CompletedOrder {
+            venue_order: String::new(), stated: None, held: None,
             order_id, instrument: 0, status: crate::types::OrderStatus::Filled,
             filled_qty: 100, timestamp_ns: 0,
         }
@@ -940,23 +943,45 @@ mod tests {
     /// The venue can undo a trade that finished an order, which puts the order
     /// back to working. Only the memory that refuses a replay was cleared, so a
     /// completion already queued still went out afterwards and the caller was
-    /// told the same order was both open and finished.
+    /// told the same order was both open and finished. Another order that
+    /// finished under the same number is not the one corrected.
     #[test]
     fn a_correction_withdraws_a_completion_nobody_has_read_yet() {
         let shared = SharedState::new();
-        shared.orders.push_completed_order(completed(9));
+        for venue_order in ["00a0b0c0.0000d0e0.0000e001", "00a0b0c0.0000d0e0.0000e002"] {
+            shared.orders.push_completed_order(CompletedOrder { venue_order: venue_order.into(), ..completed(9) });
+        }
         shared.orders.push_completed_order(completed(10));
 
-        shared.orders.push_order_correction(9, RichOrderInfo {
+        shared.orders.push_order_correction(9, "00a0b0c0.0000d0e0.0000e001", RichOrderInfo {
             contract: Default::default(),
             order: Default::default(),
             order_state: Default::default(),
             last_exec: Default::default(),
         });
 
-        let seen: Vec<u64> = shared.orders.drain_completed_orders()
-            .into_iter().map(|c| c.order_id).collect();
-        assert_eq!(seen, vec![10], "the corrected order is not reported as finished: {seen:?}");
+        let seen: Vec<(u64, String)> = shared.orders.drain_completed_orders()
+            .into_iter().map(|c| (c.order_id, c.venue_order)).collect();
+        assert_eq!(
+            seen, [(9, "00a0b0c0.0000d0e0.0000e002".to_string()), (10, String::new())],
+            "the corrected order is not reported as finished, and the other is: {seen:?}",
+        );
+    }
+
+    /// A completion that states no venue name is no repeat of one that does.
+    ///
+    /// A record this session makes for an order the venue never named, as the
+    /// refusal of a cancel files one, states none. Read as naming every order
+    /// under its number, it had the next order to finish under that number
+    /// refused as a repeat, and that order was never reported finished.
+    #[test]
+    fn a_completion_naming_no_venue_order_is_no_repeat_of_a_named_one() {
+        let shared = SharedState::new();
+        shared.orders.push_completed_order(completed(9));
+        shared.orders.push_completed_order(CompletedOrder {
+            venue_order: "00a0b0c0.0000d0e0.0000a101".into(), ..completed(9)
+        });
+        assert_eq!(shared.orders.drain_completed_orders().len(), 2);
     }
 
     /// The replay flag belongs to the connection that earned it.
@@ -1202,7 +1227,7 @@ mod tests {
         shared.orders.push_completed_order(completed(7));
         shared.orders.remove_order_info(7);
 
-        shared.orders.push_order_correction(7, info("PartiallyFilled"));
+        shared.orders.push_order_correction(7, "", info("PartiallyFilled"));
         assert_eq!(
             shared.orders.get_order_info(7).unwrap().order_state.status, "PartiallyFilled",
             "a correction is not a replay",
@@ -1226,7 +1251,7 @@ mod tests {
                 for _ in 0..250_000 {
                     let corrected = info("Submitted");
                     gate.wait();
-                    shared.orders.push_order_correction(7, corrected);
+                    shared.orders.push_order_correction(7, "", corrected);
                     gate.wait();
                 }
             });

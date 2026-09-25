@@ -923,7 +923,7 @@ impl EClient {
                 // Copied before anything is called back: a callback may ask
                 // for these again, and the lock is not re-entrant.
                 let completed = self.completed.lock().unwrap().clone();
-                for (contract, order, state) in &completed {
+                for (contract, order, state, _) in &completed {
                     // Kept whole in the archive and filtered on the way out,
                     // so the same session can ask for all of them and for the
                     // numbered ones and be answered correctly either way.
@@ -1624,7 +1624,7 @@ mod delivered_size_tests {
         // The venue saying the order is unknown still removes a working row.
         shared.orders.remove_order_info(7);
         assert!(shared.orders.get_order_info(7).is_none());
-        shared.orders.push_order_correction(7, reopened);
+        shared.orders.push_order_correction(7, "", reopened);
 
         ccp.handle_exec_report(
             &report("2", "F", "fill-2", "100"), b"", &mut context, &shared, &None, "",

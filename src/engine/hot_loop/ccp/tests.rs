@@ -339,18 +339,20 @@ fn what_if_test_state() -> (CcpState, Context, SharedState) {
 /// A change on its way is stated as a gateway states it, and its acceptance
 /// is not dropped as a stale frame.
 ///
-/// The venue sends 150=6 39=6 ahead of accepting a replace, and ahead of
-/// revising an order itself (a bracket's exits once the parent fills), then
-/// 150=5 39=5. A gateway moves nothing on the first: a replace this session
-/// sent reads as sent and not yet acknowledged until the venue accepts it, and
-/// an order the venue revises on its own stays as it was. Read off 39=6, both
-/// were told the order was being cancelled.
+/// The venue sends 150=6 39=6 as a status report ahead of accepting a
+/// replace, and ahead of revising an order itself (a bracket's exits once the
+/// parent fills), then 150=5 39=5. A gateway reads the first for the state it
+/// states, the order acknowledged, whoever asked for the change, and the
+/// second as the order working again. Held to the order of states a replace
+/// in flight has here, a replace this session sent was stated as still
+/// pending; read off 39=6 as a cancel, both were told the order was being
+/// cancelled.
 #[test]
 fn a_change_on_its_way_is_stated_as_a_gateway_states_it() {
     use std::io::Read;
     for (replaced, expected) in [
-        (true, ["PendingSubmit", "Submitted"]),
-        (false, ["Submitted", "Submitted"]),
+        (true, ["PreSubmitted", "Submitted"]),
+        (false, ["PreSubmitted", "Submitted"]),
     ] {
         let (mut context, shared) = working_order_state();
         let mut ccp = CcpState::new();
@@ -1130,9 +1132,9 @@ fn a_finished_option_order_names_its_right_as_a_letter() {
     ccp.deliver_finished_orders(&shared);
 
     let filed = shared.orders.drain_completed_orders();
-    assert!(filed.iter().any(|o| o.order_id == 555), "the order is filed as finished");
-    let row = shared.orders.get_order_info(555).expect("the record a caller reads back");
-    assert_eq!(row.contract.right, "C", "a call is published as one");
+    let row = filed.iter().find(|o| o.order_id == 555).expect("the order is filed as finished");
+    let (contract, _, _) = row.stated.as_deref().expect("with the record a caller reads back");
+    assert_eq!(contract.right, "C", "a call is published as one");
 }
 
 /// The price an adjustable stop converts at is read back.
@@ -2763,17 +2765,55 @@ fn a_finished_order_is_written_down_before_it_is_announced() {
     assert_eq!(kinds, ["fill", "status"], "what traded, then where the order stands");
 }
 
-/// The order id hash on tag 37 is a separate concern and must keep working.
+/// An order's permanent id is the number it went to the venue under, as a
+/// gateway states it, whatever the venue's own reference for it is, and it
+/// keeps that id for its whole life: an order the venue named at connect keeps
+/// the venue's number when this session withdraws it under its own. A later
+/// order under the same number is not that order: kept under the number, the
+/// record of the order before stated its permanent id for the next one.
 #[test]
-fn the_order_id_still_produces_a_stable_perm_id() {
+fn the_permanent_id_is_the_number_the_order_went_out_under() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
     let frame = exec_report_frame(&[
-        (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"),
-        (37, "0256d0f1.0001417e.6a6982d2.0001"),
+        (11, "42.0"), (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"),
+        (37, "00a0b0c0.0000d0e0.0000c001.0001"),
     ]);
     ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
     let updates = shared.orders.drain_order_updates();
-    assert_ne!(updates[0].perm_id, 0, "the order id still yields a permId");
+    assert_eq!(updates[0].perm_id, 42);
+    assert_eq!(shared.orders.get_order_info(42).map(|info| info.order.perm_id), Some(42));
+
+    let mut ccp = CcpState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    for frame in [
+        exec_report_frame(&[
+            (11, "9000.0"), (6121, "42"), (150, "0"), (39, "0"),
+            (6008, "756733"), (55, "SPY"), (54, "1"), (38, "100"),
+            (40, "2"), (44, "100"), (59, "0"), (100, "ARCA"), (198, "ARCA:1"),
+            (37, "00a0b0c0.0000d0e0.0000c002.0001"),
+        ]),
+        exec_report_frame(&[
+            (11, "C42"), (41, "9000.0"), (150, "4"), (39, "4"), (38, "100"),
+            (37, "00a0b0c0.0000d0e0.0000c002.0002"),
+        ]),
+    ] {
+        ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "DU1");
+    }
+    let updates = shared.orders.drain_order_updates();
+    assert_eq!(updates.last().map(|u| (u.status, u.perm_id)), Some((crate::types::OrderStatus::Cancelled, 9000)));
+    assert_eq!(shared.orders.get_order_info(42).map(|info| info.order.perm_id), Some(9000));
+
+    // The venue names another order working under 42.
+    let named = exec_report_frame(&[
+        (11, "42.0"), (150, "0"), (39, "0"), (20, "3"), (6008, "756733"), (55, "SPY"),
+        (54, "2"), (38, "5"), (40, "2"), (44, "101"), (59, "0"), (100, "ARCA"), (198, "ARCA:2"),
+        (37, "00a0b0c0.0000d0e0.0000c003.0001"),
+    ]);
+    ccp.handle_exec_report(&named, b"", &mut context, &shared, &None, "DU1");
+    let updates = shared.orders.drain_order_updates();
+    assert_eq!(updates.last().map(|u| u.perm_id), Some(42), "{updates:?}");
+    assert_eq!(shared.orders.get_order_info(42).map(|info| info.order.perm_id), Some(42));
 }
 
 /// The recovered side is not confined to the recovered record: every later
@@ -4242,14 +4282,10 @@ fn reports_naming_one_order_two_ways_are_still_one_order() {
     // the venue files it under: that name belongs to no client, and published
     // as an order id it raises the mark this session issues its own above.
     assert_eq!(finished[0].order_id, 4471, "the number an API gave it");
-    assert!(
-        shared.orders.get_order_info(9000).is_none(),
-        "and not under the venue's own permanent name",
-    );
-    let info = shared.orders.get_order_info(4471).expect("its fields, under that number");
-    assert_eq!(info.order.action, "SELL");
-    assert_eq!(info.contract.symbol, "IBM");
-    assert_eq!(info.order.order_id, 4471);
+    let (contract, order, _) = finished[0].stated.as_deref().expect("its fields, under that number");
+    assert_eq!(order.action, "SELL");
+    assert_eq!(contract.symbol, "IBM");
+    assert_eq!(order.order_id, 4471);
 }
 
 /// The last event of a finished order's life is the one the caller is handed.
@@ -4291,21 +4327,20 @@ fn the_last_event_of_a_finished_order_is_the_one_that_stands() {
     // quantity, the price or any term the first event stated once. Rebuilt
     // from nothing, the record kept only what that event repeated — and a
     // side nobody stated is not a buy.
-    let info = shared.orders.get_order_info(987_654_321).expect("the order is recorded");
-    assert_eq!(info.order.total_quantity, 100.0, "the quantity the first event stated");
-    assert_eq!(info.order.order_type, "LMT", "and its type, spelled the way a caller reads it");
-    assert_eq!(info.order.lmt_price, 150.0, "and its price");
-    assert_eq!(info.order.tif, "GTC", "and how long it stood, also spelled that way");
-    assert!(info.order.outside_rth, "and that it ran outside regular hours");
-    assert_eq!(info.order.oca_group, "grp-7", "and the group it cancelled with");
-    assert_eq!(info.order.order_ref, "mine", "and the reference its caller gave it");
-    assert_eq!(info.order.good_after_time, "20260901-09:30:00", "and when it became live");
-    assert_eq!(info.order.action, "SELL", "the side the first event stated");
-    assert_eq!(info.contract.symbol, "IBM", "and the symbol");
-    assert_eq!(info.contract.exchange, "NYSE", "and where it traded");
-
     let finished = shared.orders.drain_completed_orders();
     assert_eq!(finished.len(), 1, "one order, not one per event: {finished:?}");
+    let (contract, order, _) = finished[0].stated.as_deref().expect("the order is recorded");
+    assert_eq!(order.total_quantity, 100.0, "the quantity the first event stated");
+    assert_eq!(order.order_type, "LMT", "and its type, spelled the way a caller reads it");
+    assert_eq!(order.lmt_price, 150.0, "and its price");
+    assert_eq!(order.tif, "GTC", "and how long it stood, also spelled that way");
+    assert!(order.outside_rth, "and that it ran outside regular hours");
+    assert_eq!(order.oca_group, "grp-7", "and the group it cancelled with");
+    assert_eq!(order.order_ref, "mine", "and the reference its caller gave it");
+    assert_eq!(order.good_after_time, "20260901-09:30:00", "and when it became live");
+    assert_eq!(order.action, "SELL", "the side the first event stated");
+    assert_eq!(contract.symbol, "IBM", "and the symbol");
+    assert_eq!(contract.exchange, "NYSE", "and where it traded");
     assert_eq!(
         finished[0].status,
         crate::types::OrderStatus::Filled,
@@ -4328,49 +4363,60 @@ fn the_last_event_of_a_finished_order_is_the_one_that_stands() {
 ///
 /// The window is narrowed to what that path would otherwise have recovered,
 /// so a report for an order this session is working is never diverted by it.
+/// A report the venue marks as restating the past is history whether or not
+/// this session once sent an order under its number: read as live because the
+/// number had gone out here, an earlier order under it took the path above.
 #[test]
 fn what_the_venue_has_finished_is_filed_rather_than_worked() {
-    let (mut ccp, mut context, shared) = ord_status_test_state();
-    ccp.completed_orders_open = true;
+    for sent_here in [false, true] {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        ccp.completed_orders_open = true;
+        if sent_here {
+            shared.orders.note_the_order_went_out(987_654_321);
+        }
 
-    // An order this session never placed, finished, on a contract it has
-    // never seen.
-    let mut frame = exec_report_frame(&[
-        (39, "2"), (150, "F"), (32, "100"), (31, "150.00"), (14, "100"), (151, "0"),
-        (54, "1"), (38, "100"), (55, "IBM"), (167, "CS"), (15, "USD"), (6008, "8314"),
-        (40, "2"), (44, "150.00"), (1, "DU111111"),
-    ]);
-    frame.insert(11, "987654321".to_string());
-    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+        // An order this session is not working, finished, on a contract it has
+        // never seen.
+        let mut frame = exec_report_frame(&[
+            (39, "2"), (150, "F"), (32, "100"), (31, "150.00"), (14, "100"), (151, "0"),
+            (54, "1"), (38, "100"), (55, "IBM"), (167, "CS"), (15, "USD"), (6008, "8314"),
+            (40, "2"), (44, "150.00"), (1, "DU111111"), (97, "Y"),
+        ]);
+        frame.insert(11, "987654321".to_string());
+        ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
 
-    assert!(
-        context.market.instrument_by_con_id(8314).is_none(),
-        "a finished order registers no contract",
-    );
-    assert!(
-        context.order(987_654_321).is_none(),
-        "and opens no order in the book a withdrawal walks",
-    );
-    // Nothing is handed over yet: an order's reports are not always adjacent,
-    // so the answer is assembled and given whole when the venue says it has
-    // finished.
-    assert!(shared.orders.drain_completed_orders().is_empty(), "not until the venue is done");
-    assert!(shared.orders.completed_orders_ended() == 0, "not yet");
+        assert!(
+            context.market.instrument_by_con_id(8314).is_none(),
+            "sent here {sent_here}: a finished order registers no contract",
+        );
+        assert!(
+            context.order(987_654_321).is_none(),
+            "and opens no order in the book a withdrawal walks",
+        );
+        // Nothing is handed over yet: an order's reports are not always adjacent,
+        // so the answer is assembled and given whole when the venue says it has
+        // finished.
+        assert!(
+            shared.orders.drain_completed_orders().is_empty(),
+            "sent here {sent_here}: not until the venue is done",
+        );
+        assert!(shared.orders.completed_orders_ended() == 0, "not yet");
 
-    // And the sentinel says the venue has said everything.
-    let mut end = exec_report_frame(&[(39, "2"), (55, "*")]);
-    end.insert(11, "0".to_string());
-    ccp.handle_exec_report(&end, b"", &mut context, &shared, &None, "");
-    assert!(!ccp.completed_orders_open, "the window is shut");
-    assert!(shared.orders.completed_orders_ended() > 0, "and the caller is released");
+        // And the sentinel says the venue has said everything.
+        let mut end = exec_report_frame(&[(39, "2"), (55, "*")]);
+        end.insert(11, "0".to_string());
+        ccp.handle_exec_report(&end, b"", &mut context, &shared, &None, "");
+        assert!(!ccp.completed_orders_open, "the window is shut");
+        assert!(shared.orders.completed_orders_ended() > 0, "and the caller is released");
 
-    let finished = shared.orders.drain_completed_orders();
-    assert_eq!(finished.len(), 1, "it is filed as finished: {finished:?}");
-    assert_eq!(finished[0].order_id, 987_654_321);
-    let info = shared.orders.get_order_info(987_654_321).expect("with what it was");
-    assert_eq!(info.contract.symbol, "IBM");
-    assert_eq!(info.order.action, "BUY");
-    assert_eq!(info.order.total_quantity, 100.0);
+        let finished = shared.orders.drain_completed_orders();
+        assert_eq!(finished.len(), 1, "it is filed as finished: {finished:?}");
+        assert_eq!(finished[0].order_id, 987_654_321);
+        let (contract, order, _) = finished[0].stated.as_deref().expect("with what it was");
+        assert_eq!(contract.symbol, "IBM");
+        assert_eq!(order.action, "BUY");
+        assert_eq!(order.total_quantity, 100.0);
+    }
 }
 
 /// The report that fills an order states its new status on the same
@@ -4779,46 +4825,60 @@ fn a_rejection_that_answers_the_replace_is_not_cached_as_the_orders_state() {
     );
 }
 
-/// And history replayed behind a cancel is not the order's state either.
+/// And history replayed behind a cancel is not the order's state either, nor
+/// is the venue's late acknowledgement of the order.
 ///
 /// A session opens by replaying recent activity, and a working report from
 /// before a cancel was sent cannot move the order out of PendingCancel — the
 /// status guard says so. The cache did not read that verdict, so it filed the
 /// replayed status anyway, and a caller asking what it had working was told
 /// Submitted about an order the engine was holding as pending cancel.
+///
+/// The venue can also acknowledge an order it had said nothing about after
+/// the withdrawal has gone: a market-on-close order in regular hours draws no
+/// report until it is withdrawn, and then a new order's report arrives ahead
+/// of the cancel's. A gateway takes an acknowledgement only from an order not
+/// yet withdrawn, so it goes on stating the order as being withdrawn. Read as
+/// the order working, the caller was told PreSubmitted between PendingCancel
+/// and Cancelled.
 #[test]
 fn a_working_report_the_status_guard_refused_is_not_cached_as_the_orders_state() {
-    let mut ccp = CcpState::new();
-    let mut context = Context::new();
-    let shared = SharedState::new();
-    let instrument = context.register_instrument(756733);
-    context.insert_order(crate::types::Order::new(
-        42, instrument, Side::Buy, 100 * crate::types::QTY_SCALE, 100 * PRICE_SCALE, b'2', b'0', 0,
-    ));
-    assert!(context.update_order_status(42, crate::types::OrderStatus::Submitted, false));
-    assert!(context.update_order_status(42, crate::types::OrderStatus::PendingCancel, false));
+    for (what, report) in [
+        // 97=Y marks a report that restates history. 150=0/39=0 is a working
+        // order, which the venue names PreSubmitted.
+        ("replayed", &[(11, "42"), (150, "0"), (39, "0"), (97, "Y")][..]),
+        // The late acknowledgement, as the venue sent it on a withdrawn
+        // market-on-close order: no exchange, and no reference beside it.
+        ("acknowledged late", &[(11, "42.0"), (150, "0"), (39, "0"), (20, "0"), (198, "NONE")]),
+    ] {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 100 * crate::types::QTY_SCALE, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        assert!(context.update_order_status(42, crate::types::OrderStatus::PendingCancel, false));
 
-    // 97=Y marks a report that restates history. 150=0/39=0 is a working
-    // order, which the venue names PreSubmitted.
-    let replayed = crate::protocol::fix::fix_build(&[
-        (fix::TAG_MSG_TYPE, fix::MSG_EXEC_REPORT),
-        (11, "42"), (150, "0"), (39, "0"), (97, "Y"),
-    ], 1);
-    ccp.process_ccp_message(
-        &replayed, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1",
-    );
+        let mut fields = vec![(fix::TAG_MSG_TYPE, fix::MSG_EXEC_REPORT)];
+        fields.extend_from_slice(report);
+        let frame = crate::protocol::fix::fix_build(&fields, 1);
+        ccp.process_ccp_message(
+            &frame, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1",
+        );
 
-    assert_eq!(
-        context.order(42).map(|o| o.status),
-        Some(crate::types::OrderStatus::PendingCancel),
-        "the guard kept the order where it was",
-    );
-    let cached = shared.orders.get_order_info(42);
-    assert!(
-        cached.as_ref().is_none_or(|i| i.order_state.status != "PreSubmitted"),
-        "and the cache says the same thing: {:?}",
-        cached.map(|i| i.order_state.status.clone()),
-    );
+        assert_eq!(
+            context.order(42).map(|o| o.status),
+            Some(crate::types::OrderStatus::PendingCancel),
+            "{what}: the order is still being withdrawn",
+        );
+        let cached = shared.orders.get_order_info(42);
+        assert!(
+            cached.as_ref().is_none_or(|i| i.order_state.status != "PreSubmitted"),
+            "{what}: and the cache says the same thing: {:?}",
+            cached.map(|i| i.order_state.status.clone()),
+        );
+    }
 }
 
 // /: in the UP portfolio snapshot the average cost is
@@ -5997,17 +6057,300 @@ fn a_late_partial_does_not_reopen_a_completed_order() {
     );
 }
 
+/// An order the venue names as working under a number an earlier order
+/// finished under is the number's order, and the earlier order's replay does
+/// not reach it.
+///
+/// A number is free again once its order is done, and a session opens with the
+/// day's executions replayed ahead of the naming of what is working. Read by
+/// the number, the replayed fill that finished the earlier order said the
+/// number was done, so the order working under it was never taken into the
+/// book a withdrawal walks nor listed as open; and replayed again on a
+/// reconnect, that fill was booked against the working order. The venue's own
+/// name for each order is what tells them apart.
+#[test]
+fn an_order_working_under_a_finished_orders_number_is_that_numbers_order() {
+    let mut ccp = CcpState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    let report = |pairs: &[(u32, &str)]| -> std::collections::HashMap<u32, String> {
+        pairs.iter().map(|(tag, value)| (*tag, value.to_string())).collect()
+    };
+    // The earlier order's fill, replayed: it filled all it was for.
+    let finished = report(&[
+        (11, "7001.0"), (150, "2"), (39, "2"), (20, "0"), (97, "Y"), (17, "exec-A"),
+        (32, "100"), (31, "150.00"), (14, "100"), (151, "0"), (54, "1"), (38, "100"),
+        (55, "IBM"), (167, "CS"), (15, "USD"), (6008, "8314"), (40, "2"), (44, "150.00"),
+        (37, "00a0b0c0.0000d0e0.0000e001.0001"),
+    ]);
+    // The order working under the same number now, as the venue names it.
+    let working = report(&[
+        (11, "7001.0"), (150, "0"), (39, "0"), (20, "3"), (17, "10001.1.0"),
+        (32, "0"), (14, "0"), (151, "100"), (54, "2"), (38, "100"), (55, "IBM"),
+        (167, "CS"), (15, "USD"), (6008, "8314"), (40, "2"), (44, "160.00"),
+        (100, "NYSE"), (198, "NYSE:1"), (37, "00a0b0c0.0000d0e0.0000e003.0001"),
+    ]);
+
+    ccp.handle_exec_report(&finished, b"", &mut context, &shared, &None, "");
+    ccp.handle_exec_report(&working, b"", &mut context, &shared, &None, "");
+
+    assert_eq!(
+        context.order(7001).map(|o| (o.side, o.status)),
+        Some((Side::Sell, crate::types::OrderStatus::Submitted)),
+        "the working order is in the book a withdrawal walks",
+    );
+    assert!(
+        shared.orders.drain_open_orders().iter().any(|(id, info)| *id == 7001 && info.order.action == "SELL"),
+        "and it is listed as open",
+    );
+    let filed: Vec<_> = shared.orders.drain_completed_orders().into_iter()
+        .map(|done| done.stated.or(done.held).map(|record| (record.1.action, record.1.total_quantity)))
+        .collect();
+    assert_eq!(
+        filed, [Some(("BUY".to_string(), 100.0))],
+        "and the earlier order is still filed as it finished",
+    );
+    let _ = shared.orders.drain_restated_executions();
+
+    // A reconnect replays the day's executions again.
+    ccp.handle_exec_report(&finished, b"", &mut context, &shared, &None, "");
+
+    assert_eq!(
+        context.order(7001).map(|o| (o.filled, o.status)),
+        Some((0, crate::types::OrderStatus::Submitted)),
+        "the earlier order's fill is not the working order's",
+    );
+    assert!(
+        shared.orders.drain_restated_executions().iter()
+            .any(|(contract, execution)| execution.exec_id == "exec-A" && contract.symbol == "IBM"),
+        "and it is still one of the day's executions",
+    );
+}
+
+/// An order this session sent that the venue has said nothing about is not
+/// the earlier order its number went out under.
+///
+/// A market-on-close order in regular hours draws no report until it is
+/// withdrawn, so nothing names it while the venue restates an earlier order
+/// under the same number: in the answer to what the account has finished, or
+/// in the day's executions replayed on a reconnect. Read as the working
+/// order's, the earlier order's cancellation reported it cancelled and took it
+/// out of the book while the venue was still working it, and the earlier
+/// order's fills, a sale, were booked against it. The venue counts the orders
+/// it creates, and one counted at or below an order it had named when this
+/// session sent its own is another order, finished a second before the send,
+/// whether the venue restates it or reports it now. And an order it stamps as
+/// placed, and last acted on, well before the send is another whatever it
+/// counts: one that finished before the session opened is not restated then,
+/// so it can count above every order the venue had named by the send, and read
+/// by its count alone, its fills were booked against the order sent.
+#[test]
+fn an_order_the_venue_has_not_named_is_not_an_earlier_order_under_its_number() {
+    use crate::types::{OrderKind, OrderRequest, OrderStatus};
+    let report = |pairs: &[&[(u32, &str)]]| -> std::collections::HashMap<u32, String> {
+        pairs.concat().iter().map(|(tag, value)| (*tag, value.to_string())).collect()
+    };
+    let spy: &[(u32, &str)] = &[(55, "SPY"), (167, "CS"), (15, "USD"), (6008, "756733")];
+    let restated: &[(u32, &str)] = &[(97, "Y")];
+    let a_second_ago = crate::protocol::datetime::unix_to_ib_utc_dash(
+        crate::protocol::datetime::ib_datetime_to_unix(&crate::protocol::datetime::chrono_free_timestamp())
+            .expect("this machine's clock") - 1,
+    );
+    let a_second_ago = a_second_ago.as_str();
+    // The earlier orders, as the venue restates them: a stop withdrawn and a
+    // sale of 604 filled.
+    let withdrawn = |at: &str| report(&[spy, restated, &[
+        (11, "C42"), (41, "42.0"), (150, "4"), (39, "4"), (20, "3"), (54, "2"), (38, "1"),
+        (40, "3"), (99, "763"), (32, "0"), (14, "0"), (151, "0"),
+        (37, "00a0b0c0.0000d0e0.0000a001.0003"), (60, at), (6571, at), (6817, at),
+    ]]);
+    let sold = |at: &str, fill: &[(u32, &str)]| report(&[spy, restated, &[
+        (11, "42.0"), (20, "0"), (54, "2"), (38, "604"), (40, "1"), (31, "764.38"), (6, "764.38"),
+        (37, "00a0b0c0.0000d0e0.0000a005.0001"), (60, at), (6571, at),
+    ], fill]);
+    let sentinel = report(&[&[(11, "*"), (150, "0"), (39, "0"), (20, "3"), (55, "*"), (37, "*")]]);
+    // A working order the venue named when the session opened, created after
+    // the earlier orders.
+    let working = report(&[spy, &[
+        (11, "43.0"), (150, "0"), (39, "0"), (20, "3"), (54, "1"), (38, "1"), (40, "2"), (44, "700"),
+        (32, "0"), (14, "0"), (151, "1"), (100, "ARCA"), (37, "00a0b0c0.0000d0e0.0000a006.0001"),
+    ]]);
+    struct Case {
+        what: &'static str,
+        before: Vec<std::collections::HashMap<u32, String>>,
+        answering: bool,
+        restated: Vec<std::collections::HashMap<u32, String>>,
+        filed: Vec<(OrderStatus, Option<String>)>,
+        executions: Vec<(String, String, f64)>,
+    }
+    let the_sale = || vec![
+        sold(a_second_ago, &[(150, "1"), (39, "1"), (17, "exec-1"), (32, "40"), (14, "40"), (151, "564")]),
+        sold(a_second_ago, &[(150, "2"), (39, "2"), (17, "exec-2"), (32, "564"), (14, "604"), (151, "0")]),
+    ];
+    let its_fills = vec![("exec-1".to_string(), "SLD".to_string(), 40.0), ("exec-2".to_string(), "SLD".to_string(), 564.0)];
+    let day_before = "20260924-14:02:28";
+    let cases = [
+        Case {
+            what: "the day before, nothing named before the send",
+            before: vec![], answering: true,
+            restated: vec![withdrawn(day_before), sentinel.clone()],
+            filed: vec![(OrderStatus::Cancelled, Some("SELL".into()))], executions: vec![],
+        },
+        Case {
+            what: "the day before, replayed",
+            before: vec![], answering: false,
+            restated: vec![
+                sold(day_before, &[(150, "1"), (39, "1"), (17, "exec-1"), (32, "40"), (14, "40"), (151, "564")]),
+                sold(day_before, &[(150, "2"), (39, "2"), (17, "exec-2"), (32, "564"), (14, "604"), (151, "0")]),
+            ],
+            filed: vec![], executions: its_fills.clone(),
+        },
+        Case {
+            what: "a second before the send, a later order named",
+            before: vec![working.clone()], answering: true,
+            restated: vec![withdrawn(a_second_ago), sentinel.clone()],
+            filed: vec![(OrderStatus::Cancelled, Some("SELL".into()))], executions: vec![],
+        },
+        Case {
+            what: "a second before the send, a later order named, replayed",
+            before: vec![working.clone()], answering: false,
+            restated: the_sale(),
+            filed: vec![], executions: its_fills.clone(),
+        },
+        Case {
+            what: "a second before the send, a later order named, reported now",
+            before: vec![working.clone()], answering: false,
+            restated: the_sale().into_iter().map(|mut frame| { frame.remove(&97); frame }).collect(),
+            filed: vec![], executions: its_fills.clone(),
+        },
+        Case {
+            what: "the day before, counted above every order named, replayed",
+            before: vec![working.clone()], answering: false,
+            restated: vec![sold(day_before, &[
+                (150, "2"), (39, "2"), (17, "exec-3"), (32, "5"), (14, "5"), (151, "0"),
+                (37, "00a0b0c0.0000d0e0.0000a009.0001"),
+            ])],
+            filed: vec![], executions: vec![("exec-3".to_string(), "SLD".to_string(), 5.0)],
+        },
+    ];
+    for case in cases {
+        let what = case.what;
+        let (conn, _peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        let instrument = context.register_instrument(756733);
+        context.set_routing(instrument, "STK", "SMART");
+        for frame in &case.before {
+            ccp.handle_exec_report(frame, b"", &mut context, &shared, &None, "DU1");
+        }
+        // A buy of one, sent now, which the venue has not answered.
+        context.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: 42, instrument, con_id: 756733, side: Side::Buy, qty: QTY_SCALE,
+            kind: OrderKind::Limit { price: 700 * PRICE_SCALE }, tif: 0,
+            attrs: crate::types::OrderAttrs::default(),
+        });
+        crate::engine::hot_loop::order_builder::drain_and_send_orders(
+            &mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared, false,
+            &None, &mut 64,
+        );
+        ccp.completed_orders_open = case.answering;
+        for frame in &case.restated {
+            ccp.handle_exec_report(frame, b"", &mut context, &shared, &None, "DU1");
+        }
+
+        assert_eq!(
+            context.order(42).map(|o| (o.side, o.filled, o.status)),
+            Some((Side::Buy, 0, OrderStatus::PendingSubmit)),
+            "{what}: the order sent is still working, with nothing filled",
+        );
+        assert_eq!(context.position(instrument), 0.0, "{what}: and nothing traded");
+        let filed: Vec<_> = shared.orders.drain_completed_orders().into_iter()
+            .map(|done| (done.status, done.stated.map(|stated| stated.1.action)))
+            .collect();
+        assert_eq!(filed, case.filed, "{what}: the earlier order is filed as it finished");
+        let executions: Vec<_> = shared.orders.drain_restated_executions().into_iter()
+            .map(|(_, execution)| (execution.exec_id, execution.side, execution.shares))
+            .collect();
+        assert_eq!(executions, case.executions, "{what}: the earlier order's fills are the day's executions");
+    }
+}
+
+/// Every name the venue states for the order held under a number, on a report
+/// about what is happening to it now, is that order's, and a report stating
+/// one of them is about that order whatever this session makes of the clock.
+///
+/// Kept as the first such report stated it, a restated report under a name a
+/// later one gave was read as another order's, and the fill it restated was
+/// never booked against the order it filled. Read against when the order was
+/// sent, on a reading of the venue's clock a few seconds ahead of its stamps,
+/// the order's own restated fill was taken for an earlier order's. A restated
+/// report stating no name says nothing against the names the order has, and
+/// is read as about an order the venue has not named: read as naming none of
+/// them, the order's restated fill was never booked against it.
+#[test]
+fn every_name_a_report_states_for_the_held_order_is_that_orders() {
+    use crate::types::{OrderKind, OrderRequest};
+    for (what, ahead, name) in [
+        ("a later name", 3, Some("00a0b0c0.0000d0e0.0000c202.0001")),
+        ("no name", 0, None),
+    ] {
+        let (conn, _peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        let instrument = context.register_instrument(756733);
+        context.set_routing(instrument, "STK", "SMART");
+        let stamped = crate::protocol::datetime::chrono_free_timestamp().to_string();
+        let now = crate::protocol::datetime::ib_datetime_to_unix(&stamped).expect("this machine's clock");
+        shared.market.note_venue_millis((now + ahead) * 1_000);
+        context.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: 42, instrument, con_id: 756733, side: Side::Buy, qty: QTY_SCALE,
+            kind: OrderKind::Limit { price: 100 * PRICE_SCALE }, tif: 0,
+            attrs: crate::types::OrderAttrs::default(),
+        });
+        crate::engine::hot_loop::order_builder::drain_and_send_orders(
+            &mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared, false,
+            &None, &mut 64,
+        );
+        let at: &[(u32, &str)] = &[(60, &stamped), (6571, &stamped)];
+        let mut restated_fill = exec_report_frame(&[&[
+            (150, "2"), (39, "2"), (20, "0"), (97, "Y"), (17, "exec-1"), (32, "1"), (31, "100"),
+            (14, "1"), (151, "0"), (54, "1"), (38, "1"),
+        ], at].concat());
+        if let Some(name) = name {
+            restated_fill.insert(37, name.to_string());
+        }
+        for frame in [
+            exec_report_frame(&[&[(150, "0"), (39, "0"), (20, "0"), (37, "00a0b0c0.0000d0e0.0000c201.0001")], at].concat()),
+            exec_report_frame(&[&[(150, "0"), (39, "0"), (20, "3"), (37, "00a0b0c0.0000d0e0.0000c202.0001")], at].concat()),
+            restated_fill,
+        ] {
+            ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "DU1");
+        }
+
+        assert_eq!(context.position(instrument), 1.0, "{what}: the restated fill is the held order's");
+    }
+}
+
 /// A terminal report the venue resends is the one it already sent. The
 /// order was retired when it finished, so the replay finds nothing tracked
 /// and files the completion again — with no contract and nothing filled,
 /// contradicting the terminal status the caller was already given. The
 /// completion is remembered from the first time; the replay adds nothing.
+///
+/// Another order finishing under the same number is not that repeat: a number
+/// is free again once its order is done, and the venue's own name for the
+/// order says which one finished.
 #[test]
 fn a_replayed_terminal_report_does_not_file_the_completion_again() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
     ccp.handle_exec_report(
         &exec_report_frame(&[
             (150, "2"), (39, "2"), (32, "100"), (31, "100.00"), (151, "0"), (17, "E1"),
+            (37, "00a0b0c0.0000d0e0.0000e001.0001"),
         ]), b"",
         &mut context, &shared, &None, "",
     );
@@ -6019,13 +6362,26 @@ fn a_replayed_terminal_report_does_not_file_the_completion_again() {
     ccp.handle_exec_report(
         &exec_report_frame(&[
             (150, "2"), (39, "2"), (32, "100"), (31, "100.00"), (151, "0"), (17, "E1"),
-            (97, "Y"),
+            (97, "Y"), (37, "00a0b0c0.0000d0e0.0000e001.0002"),
         ]), b"",
         &mut context, &shared, &None, "",
     );
     assert!(
         shared.orders.drain_completed_orders().is_empty(),
         "the completion is filed once, not once per delivery of it",
+    );
+
+    // Another order under the number fills.
+    ccp.handle_exec_report(
+        &exec_report_frame(&[
+            (150, "2"), (39, "2"), (32, "40"), (31, "101.00"), (151, "0"), (17, "E2"),
+            (37, "00a0b0c0.0000d0e0.0000e002.0001"),
+        ]), b"",
+        &mut context, &shared, &None, "",
+    );
+    assert_eq!(
+        shared.orders.drain_completed_orders().len(), 1,
+        "an order that finished under a number used before is filed as the order it is",
     );
 }
 
@@ -7857,6 +8213,7 @@ fn a_replayed_frame_does_not_reopen_a_refused_order() {
     // completions evicts this one.
     for id in 1000u64..(1000 + 65_536) {
         shared.orders.push_completed_order(crate::types::CompletedOrder {
+            venue_order: String::new(), stated: None, held: None,
             order_id: id,
             instrument: 0,
             status: crate::types::OrderStatus::Filled,
@@ -10085,7 +10442,7 @@ fn a_correction_that_reopens_an_order_puts_it_back_in_the_book() {
             "{undone:?}: and a withdrawal has no name to send it under",
         );
         assert_eq!(
-            shared.orders.drain_order_corrections(), vec![42],
+            shared.orders.drain_order_corrections(), vec![(42, String::new())],
             "{undone:?}: the caller is still told the order finished",
         );
     }
@@ -10121,7 +10478,7 @@ fn a_repeated_correction_does_not_reopen_a_finished_order() {
     ]);
     ccp.handle_exec_report(&corrected, b"", &mut context, &shared, &None, "");
     assert!(context.order(42).is_some(), "the correction reopened the order");
-    assert_eq!(shared.orders.drain_order_corrections(), vec![42]);
+    assert_eq!(shared.orders.drain_order_corrections(), vec![(42, String::new())]);
     let _ = shared.orders.drain_fills();
 
     // The quantity it gave back is filled again, and the order finishes.

@@ -255,6 +255,7 @@ pub(crate) fn drain_and_send_orders(
         // the acceptance and the refusal of that replacement then read as
         // belonging to nothing.
         let restating = matches!(&order_req, OrderRequest::Modify { .. });
+        let placing = matches!(&order_req, OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. });
         // Prices go out as stated. The venue rejects a price off the
         // contract's tick grid rather than adjusting it, so snapping here would
         // substitute a price the caller never gave.
@@ -996,6 +997,14 @@ pub(crate) fn drain_and_send_orders(
                 for id in &written {
                     shared.orders.note_the_order_went_out(*id);
                 }
+                // And, for an order placed, when on the venue's clock and what
+                // the venue had counted by then: until the venue names it, a
+                // report restating an order created before this under the same
+                // number is that earlier order's.
+                if placing {
+                    let sent = (shared.market.venue_time_millis(), context.venue_counts.clone());
+                    context.placed_at.extend(written.iter().map(|id| (*id, sent.clone())));
+                }
             }
             Err(e) => {
                 // The caller is told, which is the whole of — it was
@@ -1306,7 +1315,9 @@ fn synthesize_pending_cancel(
             // the same figure already holds this.
             remaining_qty: qty_to_f64(order.qty.saturating_sub(order.filled)),
             avg_price: 0,
-            perm_id: 0,
+            // The number it went to the venue under, as every status states
+            // it, including one the venue has said nothing about yet.
+            perm_id: shared.orders.perm_id(order_id).unwrap_or(order_id as i64),
             parent_id: 0,
             timestamp_ns: context.now_ns(),
         };
@@ -1611,6 +1622,23 @@ fn send_order_ex(
                 *value = stated.to_string();
             }
         }
+    }
+    // The most a ladder holds, which a gateway states as the order's quantity
+    // in whole units, any fraction dropped, on a ladder sized by its
+    // components, for a type that can be one. The venue refuses a ladder
+    // placed without it.
+    // ponytail: a gateway also leaves it off where the contract's order types
+    // on its exchange name no ladder, which only a definition says and this
+    // path holds none; check it here once one is held at placement.
+    if let Some(scale) = attrs.scale.as_deref()
+        && (scale.init_level_size > 0 || scale.subs_level_size > 0)
+        && {
+            use crate::types::OrderKind as K;
+            matches!(kind, K::Limit { .. } | K::Rel { .. } | K::PassiveRel { .. } | K::PegMkt { .. }
+                | K::PegMid { .. } | K::PegBest { .. } | K::Mit { .. } | K::Adaptive { .. } | K::Algo { .. })
+        }
+    {
+        fields.push((6534, (qty / crate::types::QTY_SCALE).to_string()));
     }
     // A ladder stated as a table, which a gateway states on a new order only
     // and after everything else: how many levels, then each level's price and

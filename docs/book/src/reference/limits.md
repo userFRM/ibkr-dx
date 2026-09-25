@@ -56,9 +56,14 @@ of type states the new type whole and nothing of the old one. A trail moved
 between a percentage and an amount states the unit it is now in, and a trail
 naming both is refused under 320, *Error reading request: Cannot specify
 Trailing Amount and Trailing Percent at the same time*, as a gateway refuses it
-while it reads the order. A ladder stated as a table is stated on its
+while it reads the order — a gateway answers every order it cannot read under
+320, this one included. A ladder stated as a table is stated on its
 placement alone, as a gateway states it, and a replace states its restart
-instead.
+instead. A ladder sized by its components states the most it holds, the
+order's quantity in whole units, on its placement, as a gateway states it; the
+venue refuses a ladder placed without it (*Message must contain field # 6534*).
+Whether a gateway states it again on a replace is not established here, and
+this client does not.
 
 What a gateway refuses in a replace is refused here in its words: a new
 one-cancels-all group on an order that has one, under 10326 (*OCA group
@@ -99,11 +104,24 @@ there is no placement here to restate them from.
 
 ## Market-on-close acknowledgement
 
-The observed MOC placement received no order report until cancellation about
-31 seconds later, when a New report and then Cancelled arrived. The client
-cannot report venue acceptance before the venue states it. Whether a gateway
-receives an earlier report under the same account, order fields and session
-features remains unsettled; no acknowledgement timing change is claimed.
+A market-on-close order placed during regular hours draws nothing from the
+venue until it is withdrawn: no acknowledgement and no status. A gateway
+states an order to a program when the venue reports on it, when the venue
+names it at connect and when a program asks for the open orders, so it says
+nothing in that wait, and neither does this client. Asked for the open orders
+meanwhile, both list the order as `PendingSubmit`, under the number it went
+out under as its permanent id. Withdrawn, the order reads `PendingCancel`
+until `Cancelled`: the venue then acknowledges the order ahead of answering the
+withdrawal, and a gateway takes an acknowledgement only from an order not yet
+withdrawn, so it states the order as being withdrawn, and so does this client.
+
+Placed before the open, the same order is acknowledged at once with the
+venue's warning that it will not reach the exchange until the open. What a
+gateway states for that warning is not established here: it is expected to be
+a 399, *Order Message:* followed by its own description of the order and the
+warning, and a gateway placing such an order before the open would settle it.
+This client does not state it: the description a gateway writes there is not
+reproduced here.
 
 ## A trailing stop limit by percentage
 
@@ -118,9 +136,17 @@ settle it.
 A gateway refuses a midpoint peg on an exchange whose order types include
 neither form of it, and a peg to best where they do not include the midpoint
 form it rests on, under 387 and *Unsupported order type for this exchange and
-security type.* This client sends both and the venue answers, for the reason
-above: the lists are read here, but how each is keyed to an exchange is not
-established.
+security type.* This client sends both and the venue answers. The lists are
+read here, each contract under the one its own exchange's record names, as
+`order_types` states it, and an order is not checked against them.
+
+## A contract's least size
+
+A contract dealt in whole units whose definition states no least size, such as
+a stock that trades in lots of a hundred, is described here with a `min_size`
+of nought and the lot as its `size_increment` and `suggested_size_increment`.
+What a gateway states for such a contract is not established here. A gateway's
+contract details for 7203 on TSEJ and 700 on SEHK would settle it.
 
 ## Alternate exercise transport
 
@@ -548,8 +574,9 @@ The Rust client takes a free-form list on an order and on `req_mkt_data_ex`,
 whose final argument is `mkt_data_options: &[TagValue]`. Pass `&[]` for no
 options. Python's `req_mkt_data_ex` appends `mkt_data_options=None` after
 `mode_9887` and checks it as `req_mkt_data` does. From Python, `None` is no
-list, and an entry that is not a tag and a value is written as its own text, as the reference client writes it — refused under 320 where that text is
-not `key=value`.
+list, and an entry that is not a tag and a value is written as its own text,
+on an order as on a request, as the reference client writes it — refused
+under 320 where that text is not `key=value`.
 
 The checks are the ones a gateway makes on a list written in the text
 encoding ib_async uses. On the protobuf encoding the reference client moves
@@ -573,13 +600,13 @@ or `1` where the checks stand, are answered under their own numbers, 10337 and
 
 On a login holding one account, a gateway states that account on every order
 whatever the order names, and so does this client; the open order reads back
-the account the venue states. On a login holding several, the order goes out
-on the account it names, and so do its replacements and its withdrawal; one
-naming none is refused, *You must specify an account.* The withdrawal of an
-order the venue named at connect goes out on the account the venue states it
-is on. An exercise on such a login is refused naming none (*The account code
-is required for this operation.*) or one the login does not hold (*Invalid
-account code 'U9'.*).
+that account from the moment the order is sent, as a gateway's does. On a login
+holding several, the order goes out on the account it names, and so do its
+replacements and its withdrawal; one naming none is refused, *You must specify
+an account.* The withdrawal of an order the venue named at connect goes out on
+the account the venue states it is on. An exercise on such a login is refused
+naming none (*The account code is required for this operation.*) or one the
+login does not hold (*Invalid account code 'U9'.*).
 
 A login holds several accounts, as a gateway decides it, where the venue lets
 accounts be added to it as it runs, where the first account its logon names is
@@ -614,12 +641,16 @@ whether 204 can go.
 
 A gateway takes each order type under several names, in any case, and so does
 this client: `LIMIT` is `LMT`, `STOP LIMIT` is `STP LMT`, `PEG PRIM` is a
-relative order. Four names are this client's own and a gateway does not know
-them: `MIDPX`, `PEG MIDPT`, `SNAP MIDPT` and `SNAP PRI`, taken as `MIDPRICE`,
-`PEG MID`, `SNAP MID` and `SNAP PRIM`. A name this client does not place is
-refused under 387, *Unsupported order type:* followed by the name and that it
-is not an order type this client places; what a gateway answers for a name
-that is no order type is not established here.
+relative order. An order is stated back under its type's own name, as a
+gateway states it: one placed as `LIMIT` reads back `LMT`, and one placed as
+`STOP LIMIT` reads back `STP LMT`. A relative order reads back `REL`; a
+gateway setting can have it say `PEG PRIM` there instead. Four names are this
+client's own and a gateway does not know them: `MIDPX`, `PEG MIDPT`,
+`SNAP MIDPT` and `SNAP PRI`, taken as `MIDPRICE`, `PEG MID`, `SNAP MID` and
+`SNAP PRIM`. A name this client does not place is refused under 387,
+*Unsupported order type:* followed by the name and that it is not an order type
+this client places; what a gateway answers for a name that is no order type is
+not established here.
 
 Five order types a gateway takes are not placed by this client — trailing
 market-if-touched and limit-if-touched, the retail price improvement order,

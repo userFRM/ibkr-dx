@@ -125,7 +125,7 @@ PARAM_DOCS: dict[str, str] = {
     "filled": "Cumulative filled quantity.",
     "remaining": "Remaining quantity.",
     "avg_fill_price": "Average fill price.",
-    "perm_id": "Permanent order ID assigned by the server.",
+    "perm_id": "The order's permanent id: the number it goes to the venue under.",
     "parent_id": "Parent order ID (0 if no parent).",
     "last_fill_price": "Price of the last fill.",
     "why_held": "Reason the order is held (e.g. `\"locate\"`).",

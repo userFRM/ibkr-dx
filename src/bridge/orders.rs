@@ -134,16 +134,18 @@ pub struct OrderState {
     /// The completion queue empties on read, and what is read out of it is
     /// kept by the caller's side for as long as the session lasts — so
     /// removing a queued completion cannot reach one already read. This is how
-    /// the correction reaches it: the id goes out on the same path the
-    /// completion did, and whoever holds the archive drops it.
-    order_corrections: Mutex<Vec<u64>>,
+    /// the correction reaches it: the id and the venue's name for the order go
+    /// out on the same path the completion did, and whoever holds the archive
+    /// drops it.
+    order_corrections: Mutex<Vec<(u64, String)>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
     order_cache: Mutex<HashMap<u64, Arc<RichOrderInfo>>>,
-    /// Orders that reached a terminal state, and when. The cache row is evicted
-    /// when an order completes, so the cached status alone cannot say an order
-    /// is done — a replayed frame would find nothing to refuse and insert it as
-    /// open.
-    pub(super) completed: Mutex<HashMap<u64, Instant>>,
+    /// Orders that reached a terminal state, and when, with the venue's own
+    /// name for the order that finished under each number. The cache row is
+    /// evicted when an order completes, so the cached status alone cannot say
+    /// an order is done — a replayed frame would find nothing to refuse and
+    /// insert it as open.
+    pub(super) completed: Mutex<HashMap<u64, (Instant, String)>>,
     /// Every number the venue has finished an order under this session, and
     /// every number it has said names no order it holds.
     ///
@@ -530,9 +532,26 @@ impl OrderState {
         self.completed_orders_asked.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Take every completed order waiting, leaving none.
+    /// Take every completed order waiting, leaving none, each that does not
+    /// carry the venue's own record with the one held under its number.
+    ///
+    /// Taken together, under the queue's lock and then the records': another
+    /// order taking the number moves the record onto a completion still queued
+    /// under the same two locks, so it finds each completion either still
+    /// queued or already carrying its record. Read under the number after the
+    /// queue was let go, a completion taken in between was read against a
+    /// record already gone, or against the other order's.
     pub fn drain_completed_orders(&self) -> Vec<CompletedOrder> {
-        self.completed_orders.lock().unwrap().drain(..).collect()
+        let mut queued = self.completed_orders.lock().unwrap();
+        let cache = self.order_cache.lock().unwrap();
+        queued.drain(..).map(|mut order| {
+            if order.stated.is_none() && order.held.is_none() {
+                order.held = cache.get(&order.order_id).map(|info| Box::new((
+                    info.contract.clone(), info.order.clone(), info.order_state.clone(),
+                )));
+            }
+            order
+        }).collect()
     }
 
     /// Take the orders the venue has taken back, leaving none.
@@ -540,7 +559,7 @@ impl OrderState {
     /// Read before the completions beside them: an order taken back and then
     /// finished again is one order that finished once, and applied the other
     /// way round the new record is retracted and the superseded one kept.
-    pub fn drain_order_corrections(&self) -> Vec<u64> {
+    pub fn drain_order_corrections(&self) -> Vec<(u64, String)> {
         self.order_corrections.lock().unwrap().drain(..).collect()
     }
 
@@ -580,6 +599,13 @@ impl OrderState {
     /// Get enriched order info by order_id.
     pub fn get_order_info(&self, order_id: u64) -> Option<RichOrderInfo> {
         self.order_cache.lock().unwrap().get(&order_id).map(|info| (**info).clone())
+    }
+
+    /// The permanent id an order's record states, where it states one.
+    pub(crate) fn perm_id(&self, order_id: u64) -> Option<i64> {
+        self.order_cache.lock().unwrap().get(&order_id)
+            .map(|info| info.order.perm_id)
+            .filter(|id| *id != 0)
     }
 
     /// Whether a fill for this order is still waiting to be read.
@@ -717,6 +743,34 @@ impl OrderState {
     /// know is about the order before.
     #[doc(hidden)] pub fn number_placed_again(&self, order_id: u64) {
         self.numbers.lock().unwrap().unknown.remove(&order_id);
+    }
+
+    /// The venue is working another order under a number an order finished
+    /// under: what was kept under the number is about the order before.
+    ///
+    /// The finished order's record goes with its completion, where that is
+    /// still waiting to be read, so the working order can be kept under the
+    /// number and the finished one still reaches the caller as it was. Its own
+    /// completion alone, by the venue's name for it, and under the queue's
+    /// lock and then the records', as the queue is taken.
+    pub(crate) fn number_taken_by_another_order(&self, order_id: u64) {
+        let Some((_, named)) = self.completed.lock().unwrap().remove(&order_id) else { return };
+        let mut queued = self.completed_orders.lock().unwrap();
+        let mut cache = self.order_cache.lock().unwrap();
+        let Some(finished) = cache.get(&order_id).filter(|row| {
+            crate::types::order_status::is_terminal_status(
+                &row.order_state.status, &row.order_state.completed_status,
+            )
+        }) else { return };
+        if let Some(waiting) = queued.iter_mut().find(|waiting| {
+            waiting.order_id == order_id && waiting.venue_order == named
+                && waiting.stated.is_none() && waiting.held.is_none()
+        }) {
+            waiting.held = Some(Box::new((
+                finished.contract.clone(), finished.order.clone(), finished.order_state.clone(),
+            )));
+        }
+        cache.remove(&order_id);
     }
 
     /// Whether a status is news: a finish, an uncertain order, or a working
@@ -938,10 +992,16 @@ impl OrderState {
     /// session already saw finish, which is a different thing from the next
     /// event of the same history — so this path does not consult it, and the
     /// same answer restated supersedes what it restates.
+    ///
+    /// Not remembered as a finish under its number, either. That memory is of
+    /// what this session saw finish, so a replay of it can be refused; this is
+    /// the venue's account of the past, and written under the number it said
+    /// that an order this session holds under the same number had finished.
     #[doc(hidden)] pub fn refile_completed_order(&self, order: CompletedOrder) {
-        self.remember_completed(order.order_id);
         let mut queued = self.completed_orders.lock().unwrap();
-        match queued.iter_mut().find(|q| q.order_id == order.order_id) {
+        match queued.iter_mut().find(|q| q.order_id == order.order_id
+            && q.venue_order == order.venue_order)
+        {
             Some(waiting) => *waiting = order,
             // Queued whatever the memory of it says. That memory refuses a
             // *live* replay of an order already seen to finish; this is the
@@ -962,9 +1022,14 @@ impl OrderState {
     /// An order still remembered as completed is therefore not filed again;
     /// the memory itself is refreshed, so a notice extends the window in which
     /// a replay of it can still be refused.
+    ///
+    /// The same order is the same number under the same venue name. A number
+    /// is free again once its order is done, so a second order the venue
+    /// finished under it is a second completion, not a repeat of the first.
     #[doc(hidden)] pub fn push_completed_order(&self, order: CompletedOrder) {
-        let already = self.recently_completed(order.order_id);
-        self.remember_completed(order.order_id);
+        let already = self.finished_under(order.order_id)
+            .is_some_and(|named| named == order.venue_order);
+        self.remember_completed(order.order_id, &order.venue_order);
         if already {
             return;
         }
@@ -977,14 +1042,14 @@ impl OrderState {
     /// one of them had only half of it: pruning what had expired but not
     /// evicting the oldest survivors when nothing had, so a burst faster than
     /// the retention window grew past the cap it advertises.
-    fn remember_completed(&self, order_id: u64) {
+    fn remember_completed(&self, order_id: u64, venue_order: &str) {
         let now = Instant::now();
         let mut completed = self.completed.lock().unwrap();
-        completed.insert(order_id, now);
+        completed.insert(order_id, (now, venue_order.to_string()));
         // Pruned here rather than on every read: this runs once per order,
         // and a read is on the message path.
         if completed.len() > COMPLETED_MAX {
-            completed.retain(|_, at| now.duration_since(*at) < COMPLETED_RETENTION);
+            completed.retain(|_, (at, _)| now.duration_since(*at) < COMPLETED_RETENTION);
         }
         // A burst faster than the retention window leaves nothing expired
         // for `retain` to find, so the map can still be over the cap here.
@@ -992,7 +1057,7 @@ impl OrderState {
         // not just the common case.
         if completed.len() > COMPLETED_MAX {
             let mut by_age: Vec<(u64, Instant)> =
-                completed.iter().map(|(&id, &at)| (id, at)).collect();
+                completed.iter().map(|(&id, (at, _))| (id, *at)).collect();
             by_age.sort_unstable_by_key(|&(_, at)| at);
             for (id, _) in by_age.into_iter().take(completed.len() - COMPLETED_MAX) {
                 completed.remove(&id);
@@ -1003,8 +1068,15 @@ impl OrderState {
     /// Whether this order completed recently enough that a frame reopening it
     /// is a replay rather than news.
     pub(crate) fn recently_completed(&self, order_id: u64) -> bool {
+        self.finished_under(order_id).is_some()
+    }
+
+    /// The venue's own name for the order that recently finished under this
+    /// number, empty where it stated none.
+    pub(crate) fn finished_under(&self, order_id: u64) -> Option<String> {
         self.completed.lock().unwrap().get(&order_id)
-            .is_some_and(|at| at.elapsed() < COMPLETED_RETENTION)
+            .filter(|(at, _)| at.elapsed() < COMPLETED_RETENTION)
+            .map(|(_, named)| named.clone())
     }
 
     /// Note that this client put an order's message on the wire.
@@ -1119,18 +1191,23 @@ impl OrderState {
     /// working quantity. That is the venue's statement rather than a
     /// replay of an older one, so it is not refused, and the order stops being
     /// remembered as completed.
-    #[doc(hidden)] pub fn push_order_correction(&self, order_id: u64, info: RichOrderInfo) {
+    ///
+    /// The order is its number under the venue's own name for it, so what an
+    /// earlier order under the same number finished as is left standing.
+    #[doc(hidden)] pub fn push_order_correction(&self, order_id: u64, venue_order: &str, info: RichOrderInfo) {
         self.completed.lock().unwrap().remove(&order_id);
         // And the notice itself, where it has not been read yet. Only the
         // memory that refuses a replay was cleared, so a completion already
         // queued still went out after the correction had put the order back to
         // working — a caller was told the same order was open and finished.
-        self.completed_orders.lock().unwrap().retain(|c| c.order_id != order_id);
+        self.completed_orders.lock().unwrap().retain(|c| {
+            c.order_id != order_id || c.venue_order != venue_order
+        });
         // And the copy the caller's side kept, which this cannot reach. Said
         // there instead: the queue empties on read, so a completion already
         // read is held on the far side of it and went on being reported as
         // this order's outcome after the venue had withdrawn it.
-        self.order_corrections.lock().unwrap().push(order_id);
+        self.order_corrections.lock().unwrap().push((order_id, venue_order.to_string()));
         self.order_cache.lock().unwrap().insert(order_id, Arc::new(info));
     }
 }

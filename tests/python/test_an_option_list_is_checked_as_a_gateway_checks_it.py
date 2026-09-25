@@ -143,6 +143,16 @@ def test_an_entry_without_a_tag_and_value_is_written_as_its_text():
     assert [(r, code) for r, code, _ in w.seen] == [(1, 320)], w.seen
     assert c._test_take_commands() == []
 
+    # An order's list is written the same way.
+    w, c = _client()
+    order = ibkr_dx.Order()
+    order.action, order.totalQuantity, order.orderType, order.lmtPrice = "BUY", 1, "LMT", 1.0
+    order.orderMiscOptions = [object()]
+    c.placeOrder(7, _spy(), order)
+    c.poll()
+    assert [(r, code) for r, code, _ in w.seen] == [(7, 320)], w.seen
+    assert c._test_take_commands() == []
+
     class Printed:
         def __str__(self):
             return "manual=1;"
