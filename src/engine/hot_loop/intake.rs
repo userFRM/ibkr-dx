@@ -506,13 +506,14 @@ impl HotLoop {
         let op = if existing { OrderOp::Modify } else { OrderOp::Place };
         let order_id = if let Some(wire) = *wire_id { wire } else {
         let reusable = std::cell::Cell::new(false);
-        // Counted from the highest number used this session or saved before
-        // it, as a gateway counts the next id it states. A preview raises
-        // neither, and is judged by this session's numbers alone.
+        // Counted from the highest number used this session, saved before it
+        // or stated by the venue for a working order this client placed, as a
+        // gateway counts the next id it states. A preview raises none of them,
+        // and is judged by this session's numbers alone.
         let highest = if p.order.what_if {
             self.intake.attached.highest
         } else {
-            self.intake.attached.highest.max(self.shared.orders.saved_before() as i64)
+            self.intake.attached.highest.max(self.shared.orders.highest_used() as i64)
         };
         if let Err(why) = attached_checks::check_ids(
             api_id, &p.order, highest,

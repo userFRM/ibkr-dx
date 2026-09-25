@@ -1794,6 +1794,56 @@ impl CcpState {
             return;
         }
 
+        // A rejection naming this client's cancel refuses the cancel, not the
+        // order: the venue names the request it will not take and no order of
+        // its own. The order stands where it stood before the cancel went out,
+        // and the caller is told on the order's number, as a gateway tells it.
+        // Read as a report about the order, "Order is already being cancelled
+        // by another user" finished the order as refused while the venue went
+        // on holding it, pending the other cancel.
+        if parsed.get(&150).map(String::as_str) == Some("8")
+            && parsed.get(&39).map(String::as_str) == Some("8")
+            && parsed.get(&11).is_some_and(|name| name.starts_with('C'))
+        {
+            if let Some(stood) = context.before_the_cancel.remove(&clord_id) {
+                context.set_order_status_forced(clord_id, stood);
+            }
+            let reason = stated_reason(parsed);
+            log::warn!("Order {clord_id}: the venue refused the cancel, and the order stands: {reason}");
+            shared.orders.push_order_inactive(
+                clord_id, api::OrderOp::Cancel, ORDER_REJECTED_ERROR_CODE, reason,
+            );
+            // And the order as it stands, after the error, as a gateway
+            // restates it: a caller told of the cancel ahead of the answer
+            // learns where the order is.
+            if let Some(order) = context.order(clord_id).copied() {
+                emit(event_tx, Event::CancelReject(crate::types::CancelReject {
+                    order_id: clord_id,
+                    instrument: order.instrument,
+                    reject_type: 1,
+                    reason_code: -1,
+                    still_working: Some(order.status),
+                    answers_a_live_change: false,
+                    timestamp_ns: context.now_ns(),
+                }));
+                let update = crate::types::OrderUpdate {
+                    order_id: clord_id,
+                    instrument: order.instrument,
+                    status: order.status,
+                    filled_qty: qty_to_f64(order.filled),
+                    remaining_qty: qty_to_f64((order.qty - order.filled).max(0)),
+                    avg_price: shared.orders.get_order_info(clord_id)
+                        .map_or(0, |info| crate::types::price_from_f64(info.last_exec.avg_price)),
+                    perm_id,
+                    parent_id: parent_stated(parsed, clord_id),
+                    timestamp_ns: context.now_ns(),
+                };
+                shared.orders.push_order_update(update);
+                emit(event_tx, Event::OrderUpdate(update));
+            }
+            return;
+        }
+
         // A rejection naming an original order refuses its revision. The
         // original remains working on the terms the venue last accepted.
         if parsed.get(&150).map(String::as_str) == Some("8")
@@ -1976,6 +2026,23 @@ impl CcpState {
                 shared.orders.number_taken_by_another_order(clord_id);
             }
             self.recover_order(parsed, clord_id, prior, context, shared);
+            // A working order the venue states this client placed, under the
+            // number this client gave it, raises the mark a new order's number
+            // has to clear, as a gateway raises it by every working order it
+            // states to the client. Not another client's, and not one the
+            // venue states no such number for.
+            let working = !matches!(
+                status,
+                crate::types::OrderStatus::Inactive | crate::types::OrderStatus::Uncertain,
+            );
+            let placed_by = parsed.get(&6119).and_then(|client| client.parse().ok()).unwrap_or(0);
+            if let Some(api) = parsed.get(&6121).and_then(|s| stated_order_id(s))
+                && api != 0
+                && working
+                && placed_by == shared.orders.api_client_id()
+            {
+                shared.orders.note_used(api);
+            }
         }
         // The venue's own names for the order held under this number, as the
         // reports about what is happening to it state them.

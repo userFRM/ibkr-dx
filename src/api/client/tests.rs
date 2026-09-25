@@ -10154,41 +10154,69 @@ fn a_session_is_the_client_it_connected_as() {
 }
 
 /// A fill's client is the one that placed the order where the report names
-/// none. One pass announced `order_status` under the placing client and filed
-/// the same print under client zero, so a caller replaying its own fills by
-/// client id got none of them.
+/// none, on its status and on its execution, whether or not the report states
+/// the order's status beside the print, and its status names the parent this
+/// client placed it under. One pass announced `order_status` under the placing
+/// client and filed the same print under client zero, so a caller replaying
+/// its own fills by client id got none of them; and a report stating the order
+/// filled dropped the order's record before its client and its parent were
+/// read, so the fill that completed an order was reported as client zero's,
+/// with no parent.
 #[test]
 fn a_fill_whose_report_names_no_client_is_filed_under_the_placing_client() {
     #[derive(Default)]
-    struct Filed(Vec<i64>);
+    struct Filed(Vec<(&'static str, i64)>, Vec<i64>);
     impl Wrapper for Filed {
+        fn order_status(
+            &mut self, _: i64, _: &str, _: f64, _: f64, _: f64, _: i64, parent_id: i64, _: f64,
+            client_id: i64, _: &str, _: f64,
+        ) {
+            self.0.push(("order_status", client_id));
+            self.1.push(parent_id);
+        }
         fn exec_details(&mut self, _: i64, _: &Contract, e: &crate::types::model::Execution) {
-            self.0.push(e.client_id);
+            self.0.push(("exec_details", e.client_id));
         }
     }
-    let (client, rx, shared) = test_client();
-    client.core.set_api_client_id(5);
-    shared.orders.set_api_client_id(5);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
-    };
-    client.try_place_order(86, &spy(), &order).expect("placed");
-    rx.try_recv().expect("the order goes out");
-    // The venue's record of it, carrying a report that names no client.
-    shared.orders.push_order_info(86, crate::bridge::RichOrderInfo {
-        contract: spy(),
-        order: Order { order_id: 86, ..Default::default() },
-        order_state: Default::default(),
-        last_exec: crate::types::model::Execution { exec_id: "0001.86".into(), ..Default::default() },
-    });
-    shared.orders.push_fill(crate::types::Fill {
-        instrument: 0, order_id: 86, side: crate::types::Side::Buy,
-        price: 100 * PRICE_SCALE, qty: crate::types::QTY_SCALE, remaining: 0, timestamp_ns: 0, cum_qty: crate::types::QTY_SCALE, avg_price: 100 * PRICE_SCALE,
-    });
-    let mut w = Filed::default();
-    client.process_msgs(&mut w);
-    assert_eq!(w.0, [5], "filed under the client that placed it");
+    for stated in [None, Some(crate::types::OrderStatus::Filled)] {
+        let (client, rx, shared) = test_client();
+        client.core.set_api_client_id(5);
+        shared.orders.set_api_client_id(5);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        client.try_place_order(85, &spy(), &order).expect("the parent is placed");
+        client.try_place_order(86, &spy(), &Order { parent_id: 85, ..order }).expect("placed");
+        rx.try_recv().expect("the parent goes out");
+        rx.try_recv().expect("the order goes out");
+        settled(&client, &rx);
+        // The venue's record of it, carrying a report that names no client.
+        shared.orders.push_order_info(86, crate::bridge::RichOrderInfo {
+            contract: spy(),
+            order: Order { order_id: 86, ..Default::default() },
+            order_state: Default::default(),
+            last_exec: crate::types::model::Execution { exec_id: "0001.86".into(), ..Default::default() },
+        });
+        let fill = crate::types::Fill {
+            instrument: 0, order_id: 86, side: crate::types::Side::Buy,
+            price: 100 * PRICE_SCALE, qty: crate::types::QTY_SCALE, remaining: 0, timestamp_ns: 0,
+            cum_qty: crate::types::QTY_SCALE, avg_price: 100 * PRICE_SCALE,
+        };
+        match stated {
+            None => shared.orders.push_fill(fill),
+            Some(status) => shared.orders.push_fill_and_status(fill, None, OrderUpdate {
+                order_id: 86, instrument: 0, status, filled_qty: 1.0, remaining_qty: 0.0,
+                avg_price: 100 * PRICE_SCALE, perm_id: 86, parent_id: 0, timestamp_ns: 0,
+            }),
+        }
+        let mut w = Filed::default();
+        client.process_msgs(&mut w);
+        assert_eq!(
+            (w.0, w.1), (vec![("order_status", 5), ("exec_details", 5)], vec![85]),
+            "filed under the client that placed it, beneath its parent, with the status {stated:?}",
+        );
+    }
 }
 
 /// A fill on a bracket's leg is filed under the client the venue names.
@@ -12927,6 +12955,40 @@ fn a_fresh_engine_keeps_the_saved_order_id() {
     for (account, api_client, expected) in [("DU123", 0, 102), ("DU123", 7, 1), ("DU456", 0, 1)] {
         let (client, _, _) = saved_session(account, api_client, Some(&path));
         assert_eq!(client.next_order_id(), expected, "{account}, client {api_client}");
+    }
+}
+
+/// A working order the venue names for this client at connect raises the mark
+/// a new order's number has to clear, as a gateway raises it by every working
+/// order it states to the client: a new order at or below the number the
+/// client gave it is refused under 103, and the next id is past it. Another
+/// client's order, and one the venue holds inactive, leave the mark where it
+/// was; the next id counts past the 90 the report names them by, as it counts
+/// past every number the venue names. The mark was the saved counter and this
+/// session's own orders alone, so an order under such a number went to the
+/// venue.
+#[test]
+fn a_working_order_the_venue_names_for_this_client_raises_its_mark() {
+    for (placed_by, exec, status, refused, next) in [
+        ("7", "D", "D", true, 9001), ("3", "D", "D", false, 91), ("7", "0", "I", false, 91),
+    ] {
+        let (client, engine, shared) = saved_session("DU123", 7, None);
+        {
+            let mut held = engine.engine();
+            let held = &mut *held;
+            let named: std::collections::HashMap<u32, String> = [
+                (11, "C90"), (6121, "9000"), (6119, placed_by), (150, exec), (39, status),
+                (20, "3"), (6008, "756733"), (55, "SPY"), (167, "STK"), (54, "1"), (40, "2"),
+                (38, "1"), (44, "100"), (59, "0"), (14, "0"), (151, "1"),
+                (37, "0256d0f1.0001417e.6ab5fd25.0002"),
+            ].into_iter().map(|(tag, value)| (tag, value.to_string())).collect();
+            held.ccp.handle_exec_report(&named, b"", &mut held.context, &shared, &None, "DU123");
+        }
+        client.try_place_order(50, &spy(), &Order::limit("BUY", 1.0, 1.0)).unwrap();
+        let codes: Vec<_> = engine_refused(&engine, &shared).into_iter().map(|(id, code, _)| (id, code)).collect();
+        let expected: &[(i64, i64)] = if refused { &[(50, 103)] } else { &[] };
+        assert_eq!(codes, expected, "placed by client {placed_by}, 39={status}");
+        assert_eq!(client.next_order_id(), next, "placed by client {placed_by}, 39={status}");
     }
 }
 

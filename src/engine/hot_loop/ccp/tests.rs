@@ -8873,6 +8873,82 @@ fn a_holding_the_new_statement_never_names_is_closed() {
     );
 }
 
+/// A cancel the venue refuses on a report of its own leaves the order where it
+/// stood before the cancel went out, and the caller is told on the order's
+/// number.
+///
+/// The venue names the cancel it will not take and no order of its own, as it
+/// answered a second session's cancel of orders a first was withdrawing. Read
+/// as a report about the order, the refusal finished it as refused: stated
+/// Inactive and dropped from the open orders while the venue went on holding
+/// it, pending the first cancel.
+#[test]
+fn a_refused_cancel_leaves_the_order_where_it_stood() {
+    use std::io::Read;
+    use crate::types::OrderStatus::{PendingCancel, Submitted};
+    const REFUSED: &str = "Order is already being cancelled by another user";
+    for (named, stood) in [("0", Submitted), ("D", PendingCancel)] {
+        let (mut context, shared) = working_order_state();
+        let mut ccp = CcpState::new();
+        ccp.handle_exec_report(&exec_report_frame(&[
+            (11, "42.0"), (150, named), (39, named), (20, "3"),
+            (6008, "756733"), (55, "SPY"), (167, "STK"), (40, "2"), (54, "1"),
+            (38, "100"), (44, "100"), (59, "0"), (14, "0"), (151, "100"),
+            (100, "ARCA"), (198, "ARCA:1"), (37, "0256d0f1.0001417e.6ab5fd25.0001"),
+        ]), b"", &mut context, &shared, &None, "DU1");
+        assert_eq!(context.order(42).map(|order| order.status), Some(stood));
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        context.cancel(42);
+        crate::engine::hot_loop::order_builder::drain_and_send_orders(
+            &mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false,
+            &shared, false, &None, &mut 64,
+        );
+        let mut buf = [0; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("\x0111=C42\x01"));
+        shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+
+        let (tx, events) = std::sync::mpsc::sync_channel(8);
+        let sink = Some(crate::engine::hot_loop::EventSink::new(tx, Default::default()));
+        ccp.handle_exec_report(&exec_report_frame(&[
+            (11, "C42"), (150, "8"), (20, "3"), (103, "0"), (39, "8"), (38, "0"),
+            (32, "0"), (31, "0.00"), (14, "0"), (151, "0"), (6, "0"), (37, "0"),
+            (58, REFUSED), (40, "2"),
+        ]), b"", &mut context, &shared, &sink, "DU1");
+
+        assert_eq!(context.order(42).map(|order| order.status), Some(stood), "{named}");
+        assert!(!shared.orders.number_finished(42));
+        assert!(shared.orders.drain_completed_orders().is_empty());
+        assert_eq!(shared.orders.drain_open_orders().iter().map(|(id, _)| *id).collect::<Vec<_>>(), [42]);
+        let heard: Vec<_> = shared
+            .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+            .into_iter()
+            .filter_map(|(_, record)| match record {
+                crate::bridge::Record::OrderInactive((id, code, reason, op)) => {
+                    Some(format!("error {id} {code} {op:?} {reason}"))
+                }
+                crate::bridge::Record::OrderUpdate(update) => Some(format!(
+                    "status {} {:?} {}", update.update.order_id, update.update.status,
+                    update.update.perm_id,
+                )),
+                crate::bridge::Record::CancelReject(_) => Some("cancel reject".into()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heard, [
+            format!("error 42 201 Cancel {REFUSED} (reason code 0)"),
+            format!("status 42 {stood:?} 42"),
+        ]);
+        let emitted: Vec<_> = events.try_iter().map(|event| match event {
+            Event::CancelReject(reject) => format!("cancel reject {} {} {:?}", reject.order_id, reject.reject_type, reject.still_working),
+            Event::OrderUpdate(update) => format!("status {} {:?}", update.order_id, update.status),
+            other => format!("{other:?}"),
+        }).collect();
+        assert_eq!(emitted, [format!("cancel reject 42 1 Some({stood:?})"), format!("status 42 {stood:?}")]);
+    }
+}
+
 /// A revision the venue will not make reaches the surfaces as a refusal.
 ///
 /// The venue refuses a revision on the report the order's own answers arrive

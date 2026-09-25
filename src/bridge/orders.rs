@@ -80,7 +80,10 @@ pub enum ReplayWait {
 /// cache, and inactive-order reasons.
 pub struct OrderState {
     saved_ids: Mutex<Option<ids::SavedIds>>,
-    saved_before: AtomicU64,
+    /// The highest id this client has used, as a new order's number is
+    /// checked against it: saved before the session opened, and every id the
+    /// venue states for a working order this client placed.
+    used: AtomicU64,
     /// Each fill and the report it was booked off, where there is one.
     ///
     /// One pass can carry two prints of the same order. Looked up against the
@@ -245,7 +248,7 @@ impl OrderState {
     pub(super) fn stamping(stamps: &Stamps) -> Self {
         Self {
             saved_ids: Mutex::new(None),
-            saved_before: AtomicU64::new(0),
+            used: AtomicU64::new(0),
             fills: Queue::with_capacity(stamps, 64),
             orders_sent: Mutex::new(std::collections::HashSet::new()),
             reusable_order_ids: Mutex::new(std::collections::HashSet::new()),

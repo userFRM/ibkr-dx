@@ -1298,8 +1298,15 @@ fn synthesize_pending_cancel(
     order_id: crate::types::OrderId,
     event_tx: &Option<crate::engine::hot_loop::EventSink>,
 ) {
+    // Where the order stood, for a refusal of this cancel to put back. One
+    // already pending cancel stays so, and a cancel over it moves nothing.
+    let stood = context.order(order_id).map(|order| order.status);
+    context.before_the_cancel.remove(&order_id);
     if !context.update_order_status(order_id, OrderStatus::PendingCancel, false) {
         return; // unknown order, already terminal, or already pending-cancel
+    }
+    if let Some(stood) = stood {
+        context.before_the_cancel.insert(order_id, stood);
     }
     if let Some(order) = context.order(order_id).copied() {
         let update = OrderUpdate {

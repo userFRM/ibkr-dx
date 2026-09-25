@@ -123,9 +123,10 @@ pub struct EClientConfig {
     /// at connect.
     ///
     /// Every order the session places goes out under it and is reported under
-    /// it, on `open_order` and on `order_status`; the next order id kept across
-    /// sessions is kept for it; and `req_auto_open_orders` is refused to any
-    /// client but 0, as a gateway refuses it. Zero unless set.
+    /// it, on `open_order`, on `order_status` and on each fill's
+    /// `exec_details`, the fill that completes it included; the next order id
+    /// kept across sessions is kept for it; and `req_auto_open_orders` is
+    /// refused to any client but 0, as a gateway refuses it. Zero unless set.
     pub client_id: i32,
     /// Refuse to send anything that places, changes or withdraws an order.
     ///

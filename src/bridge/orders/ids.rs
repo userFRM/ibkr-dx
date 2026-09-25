@@ -141,17 +141,28 @@ impl OrderState {
             }
         });
         *self.saved_ids.lock().unwrap() = store;
-        self.saved_before.store(next - 1, Ordering::Release);
+        self.used.store(next - 1, Ordering::Release);
         if next > 1 {
             self.note_the_venue_named(next - 1);
         }
         next
     }
 
-    /// The highest id saved before this session opened. A new order at or
-    /// below it repeats a number already used.
-    pub(crate) fn saved_before(&self) -> u64 {
-        self.saved_before.load(Ordering::Acquire)
+    /// The highest id this client has used: saved before this session opened,
+    /// or stated by the venue for a working order this client placed. A new
+    /// order at or below it repeats a number already used.
+    pub(crate) fn highest_used(&self) -> u64 {
+        self.used.load(Ordering::Acquire)
+    }
+
+    /// The venue states this client placed a working order under this id, as
+    /// a gateway raises its mark by every working order it states to a
+    /// client, and the next id it gives past it. Kept in memory, as the
+    /// engine's loop does not wait on the file: the caller's next reservation
+    /// counts past it and carries it there.
+    pub(crate) fn note_used(&self, id: u64) {
+        self.used.fetch_max(id, Ordering::AcqRel);
+        self.note_the_venue_named(id);
     }
 
     fn with_saved_ids<T>(&self, change: impl FnOnce(u64) -> (u64, T)) -> T {

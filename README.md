@@ -1022,7 +1022,9 @@ for fields, refusals and the remaining venue evidence.
 Individually placed children with `parentId` / `parent_id` share the known
 parent's cancellation group, including children added to a bracket helper's
 family. A refused modification leaves the original working order and its last
-accepted terms intact. Hedge pricing instructions are retained on replacement.
+accepted terms intact, and a refused cancellation leaves the order in the state
+it held before the cancel went out. Hedge pricing instructions are retained on
+replacement.
 See [order behaviour](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html#orders).
 
 ## Testing
@@ -1031,8 +1033,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,211 | No |
-| Python | 1,181 | No |
+| Rust, unit and integration | 3,213 | No |
+| Python | 1,182 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

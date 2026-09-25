@@ -277,9 +277,11 @@ itself, to attached children and to exercises stated without one, are counted
 in memory and saved with the session's next placement or reservation.
 
 As through a gateway, a new order under an ID at or below the counter saved
-before the session opened is refused with error 103, "Duplicate order id". An
-order the session holds under that ID is modified as usual. Previews are
-neither counted nor refused against the saved counter.
+before the session opened, or at or below the ID this client gave a working
+order the venue names for it, is refused with error 103, "Duplicate order id".
+An order the session holds under that ID is modified as usual. Another client's
+working orders raise nothing here. Previews are neither counted nor refused
+against the saved counter.
 
 `next_valid_id` states a floor; it does not reserve it. Programs sharing an
 account, client ID and file should use `next_order_id()` for each allocation
@@ -404,6 +406,16 @@ or inactive. After the error, the order is restated through `open_order` and
 Replacement carries `useAutoPriceForHedge` under the same order type, hedge,
 opt-out and `HDGLMT` feature conditions as placement. Changing `hedgeMaxSize`
 keeps the pricing instruction.
+
+## Refused cancellations
+
+A cancel the venue refuses on a report naming the cancel, as it refuses one
+for an order another session is already withdrawing ("Order is already being
+cancelled by another user"), reports error 201 under the order's ID with the
+venue's words. The order stays in the state it held before the cancel went
+out, in the open-orders view and under its own permId: the refusal is about the
+cancel, not the order. After the error, the order is restated through
+`open_order` and `order_status` in that state, as a gateway restates it.
 
 ## What the account may trade
 

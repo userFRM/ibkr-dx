@@ -120,6 +120,9 @@ pub struct Context {
     /// server is entitled to drop — which is exactly the case a retry exists
     /// for. Counts so each attempt is a new name.
     pub(crate) cancel_attempts: HashMap<OrderId, u32>,
+    /// Where an order stood when this session's latest cancel moved it to
+    /// pending cancel: what a refusal of that cancel puts back.
+    pub(crate) before_the_cancel: HashMap<OrderId, OrderStatus>,
     /// What an order held before the latest replace went out, and the name it
     /// held it under. A replace writes its attempt into the record ahead of the
     /// venue's answer, and the answer can refuse it; this is the record that
@@ -178,6 +181,7 @@ impl Context {
             order_destination: HashMap::new(),
             submitted: HashMap::new(),
             cancel_attempts: HashMap::new(),
+            before_the_cancel: HashMap::new(),
             pre_replace: HashMap::new(),
             account: AccountState::default(),
             clock: Clock::new(),
@@ -621,6 +625,7 @@ impl Context {
         self.order_destination.remove(&order_id);
         self.submitted.remove(&order_id);
         self.cancel_attempts.remove(&order_id);
+        self.before_the_cancel.remove(&order_id);
         self.pre_replace.retain(|(id, _), _| *id != order_id);
     }
 

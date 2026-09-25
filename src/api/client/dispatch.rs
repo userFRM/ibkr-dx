@@ -677,17 +677,20 @@ impl EClient {
             .as_ref()
             .map(|u| order_status_str(u.status))
             .unwrap_or(if fill.remaining == 0 { "Filled" } else { "Submitted" });
+        self.core.learn_order_identity(&self.shared, fill.order_id);
+        let (perm_id, parent_id) = self.core.perm_and_parent_stated(
+            fill.order_id, report.as_deref(), status.as_ref(),
+        );
+        let client = self.core.client_stated(fill.order_id, report.as_deref());
+        // After the record is read: a status stating the order filled drops
+        // it, and read afterwards the fill that completed an order went out
+        // as client zero's, without the parent this client recorded.
         if let Some(u) = &status {
             self.core.update_order_status(
                 &self.shared, u.order_id, u.status, u.filled_qty, u.remaining_qty,
                 u.instrument,
             );
         }
-        self.core.learn_order_identity(&self.shared, fill.order_id);
-        let (perm_id, parent_id) = self.core.perm_and_parent_stated(
-            fill.order_id, report.as_deref(), status.as_ref(),
-        );
-        let client = self.core.client_stated(fill.order_id, report.as_deref());
         // `filled` and `avgFillPrice` describe the order so far;
         // `lastFillPrice` describes this print.
         let avg_price_f = fill.avg_price as f64 / PRICE_SCALE_F;

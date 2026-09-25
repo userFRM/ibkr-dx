@@ -100,6 +100,23 @@ fn a_recent_second() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// A status as a test names it.
+fn stated_status(status: &str) -> PyResult<OrderStatus> {
+    Ok(match status {
+        "PendingSubmit" => OrderStatus::PendingSubmit,
+        "PreSubmitted" => OrderStatus::PreSubmitted,
+        "Submitted" => OrderStatus::Submitted,
+        "PendingCancel" => OrderStatus::PendingCancel,
+        "PendingReplace" => OrderStatus::PendingReplace,
+        "Filled" => OrderStatus::Filled,
+        "PartiallyFilled" => OrderStatus::PartiallyFilled,
+        "Cancelled" => OrderStatus::Cancelled,
+        "Rejected" => OrderStatus::Rejected,
+        "Inactive" => OrderStatus::Inactive,
+        _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {status}"))),
+    })
+}
+
 #[pymethods]
 impl EClient {
     /// Set the session features stated at logon (test-only).
@@ -443,15 +460,16 @@ impl EClient {
 
     /// Push a fill into SharedState.
     #[doc(hidden)]
-    #[pyo3(signature = (instrument, order_id, side, price, qty, remaining, commission=0.0))]
+    #[pyo3(signature = (instrument, order_id, side, price, qty, remaining, commission=0.0, status=None))]
     /// Push a fill into SharedState.
     ///
     /// `qty` and `remaining` are whole shares, which is what a caller writing
     /// the test is thinking in. They are scaled here, so a test states the
     /// size it means rather than the fixed-point figure that stands for it.
+    /// A `status` is the one the same report states beside the print.
     fn _test_push_fill(
         &self, instrument: u32, order_id: u64, side: &str,
-        price: f64, qty: i64, remaining: i64, commission: f64,
+        price: f64, qty: i64, remaining: i64, commission: f64, status: Option<&str>,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let s = match side {
@@ -461,7 +479,7 @@ impl EClient {
             _ => return Err(PyRuntimeError::new_err(format!("Invalid side: {side}"))),
         };
         let ps = PRICE_SCALE as f64;
-        shared.orders.push_fill(Fill {
+        let fill = Fill {
             instrument, order_id, side: s,
             price: (price * ps) as i64,
             qty: crate::types::qty_from_wire(qty),
@@ -470,7 +488,15 @@ impl EClient {
             // Single-print injection: the order total is this print.
             cum_qty: crate::types::qty_from_wire(qty),
             avg_price: (price * ps) as i64,
-        });
+        };
+        match status {
+            Some(status) => shared.orders.push_fill_and_status(fill, None, OrderUpdate {
+                order_id, instrument, status: stated_status(status)?,
+                filled_qty: qty as f64, remaining_qty: remaining as f64,
+                avg_price: (price * ps) as i64, perm_id: 0, parent_id: 0, timestamp_ns: 100,
+            }),
+            None => shared.orders.push_fill(fill),
+        }
         // What it cost, the way the venue sends it: its own message, naming the
         // execution it belongs to and stating the currency it is charged in.
         // A fill carries the figure but nothing reads it out of there — the
@@ -525,21 +551,8 @@ impl EClient {
         filled_qty: f64, remaining_qty: f64,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
-        let st = match status {
-            "PendingSubmit" => OrderStatus::PendingSubmit,
-            "PreSubmitted" => OrderStatus::PreSubmitted,
-            "Submitted" => OrderStatus::Submitted,
-            "PendingCancel" => OrderStatus::PendingCancel,
-            "PendingReplace" => OrderStatus::PendingReplace,
-            "Filled" => OrderStatus::Filled,
-            "PartiallyFilled" => OrderStatus::PartiallyFilled,
-            "Cancelled" => OrderStatus::Cancelled,
-            "Rejected" => OrderStatus::Rejected,
-            "Inactive" => OrderStatus::Inactive,
-            _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {status}"))),
-        };
         shared.orders.push_order_update(OrderUpdate {
-            order_id, instrument, status: st, filled_qty, remaining_qty, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 100,
+            order_id, instrument, status: stated_status(status)?, filled_qty, remaining_qty, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 100,
         });
         Ok(())
     }

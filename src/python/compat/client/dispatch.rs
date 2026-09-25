@@ -927,11 +927,6 @@ impl EClient {
             .as_ref()
             .map(|u| order_status_str(u.status))
             .unwrap_or(if fill.remaining == 0 { "Filled" } else { "Submitted" });
-        if let Some(u) = &with_it {
-            self.core.update_order_status(
-                shared, u.order_id, u.status, u.filled_qty, u.remaining_qty, u.instrument,
-            );
-        }
         self.core.learn_order_identity(shared, fill.order_id);
         let (perm_id, parent_id) = self.core.perm_and_parent_stated(
             fill.order_id, rich_info.as_deref(), with_it.as_ref(),
@@ -987,6 +982,14 @@ impl EClient {
             avg_price,
             ..from_the_report
         };
+        // After the record is read: a status stating the order filled drops
+        // it, and read afterwards the fill that completed an order went out
+        // as client zero's, without the parent this client recorded.
+        if let Some(u) = &with_it {
+            self.core.update_order_status(
+                shared, u.order_id, u.status, u.filled_qty, u.remaining_qty, u.instrument,
+            );
+        }
         // What it cost arrives on a record of its own, after this. Stored
         // unstated so a replay of this execution says the charge is unknown.
         let api_commission = ApiCommissionAndFeesReport::default();
