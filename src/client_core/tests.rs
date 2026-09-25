@@ -3477,7 +3477,7 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
         timestamp: 0,
     });
     shared.market.push_option_tick(crate::bridge::OptionTick {
-        instrument: slot, figures: [0.2; 8], price_based: false,
+        instrument: slot, kind: crate::bridge::OptionTickKind::Model, figures: [0.2; 8], price_based: false,
     });
     shared.market.push_option_computation(crate::types::OptionComputation {
         opt_price: 1.25,

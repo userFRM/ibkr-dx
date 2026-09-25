@@ -130,41 +130,57 @@ natural exercise/lapse check. The quantity is limited to the whole-contract
 position captured before the wait. The alternate exercise transport named by
 some logins is not implemented.
 
-## Numbered ticks this client does not deliver
+## Option computation ticks
 
-Ninety-six numbered market-data ticks reach a caller of the reference client.
-Ninety of them reach one here. These six do not, for a reason that can be
-checked rather than taken on trust.
+Every numbered market-data tick that reaches a caller of the reference client
+reaches one here. The option computations, 10 to 13 and the delayed 80 to 83,
+are built from what the venue states as a gateway builds them, as
+[Venue behaviour](./venue-behaviour.md) describes, except as follows.
 
-| Ticks | What | Why not |
-| --- | --- | --- |
-| 10, 11, 12 and the delayed 80, 81, 82 | The option model struck against the bid, the ask and the last | Not sent by the venue. A gateway works each of them out with its own option model, at the volatility the venue states for that side (its bid, ask and last volatilities), with that side's price and the underlying's price it marks. How it marks the underlying is not carried here, so this client does not work them out. The venue's model is delivered on 13, and on 83 where the feed is delayed, as [Venue behaviour](./venue-behaviour.md) describes. This client's own model reads the venue's schedule of ex-dates and reproduces the venue's published price exactly, its delta within half a per cent and its gamma within one; what one day costs is within seven. What one point of volatility is worth is not, and the venue's own figures cannot settle how far out it is — at one strike its call and its put state vegas seven per cent apart, which is further than this client is from either |
+On all of them:
 
-Everything else the venue publishes and a caller can ask for is delivered, on
-the callback the reference client delivers it on.
+- The underlying's price is the one the chain parameters on the underlying
+  state. Where they state none for the option, a gateway takes the underlying's
+  mark on 13, which is not carried here, so 13 states no underlying's price.
+- On 10 to 12 a gateway takes the underlying's own quote, and the chain
+  parameters' price only while it holds no quote of the underlying. This client
+  always takes the chain parameters' price, so wherever a gateway holds the
+  underlying's quote, the underlying's price on 10 to 12 and the greeks worked
+  from it differ from a gateway's. Where the chain parameters state no price,
+  10 to 12 are not sent.
+- An option is worked from its definition as the venue has answered it to
+  this session, by a contract-details request or by a lookup of this client's
+  own. One this session has not been answered is modelled without it: no
+  underlying's price, a warrant's price per unit, and no 10 to 12.
+- A gateway withholds the underlying's price from a caller without quote
+  access to the underlying, and the side's price on 10 to 12 from one without
+  access to the option's quotes. That access is not checked here.
+- A gateway sends a snapshot a computation only once all eight figures are
+  stated, and holds an option's snapshot until 10 to 12 have arrived. Neither is
+  done here: a snapshot is sent them as a stream is, and ends without them.
+- On a frozen feed they are the live model's.
 
-On the model tick itself, 13 or 83:
+On 13 and 83: before the venue states any model, mid or last volatility for an
+option, a gateway takes one from the option chain's volatility curve at the
+strike. That curve is not carried here, so the implied volatility is not stated
+until the venue states one.
 
-- The present value of dividends is not stated. A gateway works it out from the
-  underlying's dividend schedule and the currency's rates, and the form of the
-  rates the venue answers with is not established here.
-- Before the venue states any model, mid or last volatility for an option, a
-  gateway takes one from the option chain's volatility curve at the strike.
-  That curve is not carried here, so the implied volatility is not stated until
-  the venue states one.
-- The underlying's price is not stated where the chain parameters state none
-  for the option. A gateway takes the underlying's mark there.
-- The underlying's price, and the per-contract price of a warrant or a
-  structured product, are read from the option's definition as a
-  contract-details request answers it. An option whose details a caller has not
-  asked for is modelled without them: no underlying's price, and a warrant's
-  price per unit.
-- A gateway withholds the underlying's price on 13 from a caller without quote
-  access to the underlying. That access is not checked here.
-- A gateway sends a snapshot's model tick only once all eight figures are
-  stated. With the dividend's present value unstated that would be never, so a
-  snapshot is sent the tick as a stream is.
-- On a frozen feed the tick is the live model's.
+On 10 to 12 and 80 to 82, and the present value of dividends on every one of
+them:
+
+- Only an option on a share is worked out. An option on an index or on a
+  future is worked from inputs its underlying states another way, which are not
+  carried here: it is sent no 10 to 12, and no dividends' present value.
+- They wait on the option's sessions, for when its time runs out, which this
+  client asks for by the key the option's definition names, once for every
+  option on the key and again each day, as a gateway asks; on the underlying's
+  schedule of payments; and, for the rate, the dividends' present value and the
+  greeks, on the currency's rates, asked for once. The rate and the present
+  value are worked out when these arrive and kept, as a gateway keeps them
+  until they are stated again.
+- A payment the model's tree takes is one whose ex-date ends a whole day or
+  more from now on this machine's own calendar, which is how a gateway counts
+  it on its own.
 
 # Where this client behaves differently
 

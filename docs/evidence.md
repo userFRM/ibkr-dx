@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,353 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,356 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,7 +72,7 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,195 | No |
+| Rust unit and integration | 3,198 | No |
 | Rust, live | 9 | Yes |
 | Python | 1,158 | No |
 | Python, live | 131 | Yes |
@@ -160,7 +160,7 @@ nothing.
 | News | ✅ Supported | 117 providers parsed. Headline retrieval requires a news subscription; this account holds none, and every provider returns an empty result set |
 | Exchange directory | ✅ Supported | 203 exchanges, in the two sections the venue states them in: shares and derivatives. What each carries and which group each aggregates into are not stated by the venue and are not stated here |
 | Corporate events calendar | ✅ Supported | 43 event types with their field schemas, 179 KB, over the security-definition connection; an event query is answered with a well-formed result and can be withdrawn. Event content needs a subscription — see the note below. `src/bin/capture_calendar.rs`, `tests/python/test_live_python_wrappers.py::TestCorporateEventsCalendar` |
-| Implied volatility, option price | ✅ Supported | The venue computes the model and publishes it per option on a subscription of its own, beside the volatilities it states it from, and the model tick a caller is given is built from those as a gateway builds it. A hypothetical the caller supplies — a price, or a volatility — is solved against that model in the engine, as a gateway solves it, and is held until the model is published; solved here it reproduces the venue's price to the cent on 2 contracts. `src/bin/capture_option_model.rs`, `tests/python/test_option_greeks_stream.py::test_the_calculations_are_answered_from_the_venues_model` |
+| Implied volatility, option price | ✅ Supported | The venue computes the model and publishes it per option on a subscription of its own, beside the volatilities it states it from, and the model tick a caller is given is built from those as a gateway builds it. The bid's, the ask's and the last's are worked out with an option model of this client's own the way a gateway works them, from the chain parameters' underlying price where a gateway takes the underlying's own quote when it holds one; they have not been compared with a gateway's. A hypothetical the caller supplies — a price, or a volatility — is solved against that model in the engine, as a gateway solves it, and is held until the model is published; solved here it reproduces the venue's price to the cent on 2 contracts. `src/bin/capture_option_model.rs`, `tests/python/test_option_greeks_stream.py::test_the_calculations_are_answered_from_the_venues_model` |
 
 **Corporate events data.** Event content requires a Wall Street Horizon
 subscription; this account holds none, so every query — by contract and by
@@ -216,8 +216,10 @@ client's own allocation; what a gateway answers the same way is on
 - **`keepUpToDate` queries are closed on first response.** Continuation is
   provided by folding the 5-second bar stream into the requested bar size.
   Daily updates retain the session bounds supplied with the history and use
-  its end date in the series' timezone. Later daily sessions without supplied
-  bounds still use UTC calendar boundaries. A week and a month are folded on the calendar, opening on the Monday and on
+  its end date in the series' timezone. When that session ends, the next one is
+  the contract's own session holding the next five-second bar, dated the same
+  way; UTC calendar boundaries are used only where the contract's sessions are
+  not in hand. A week and a month are folded on the calendar, opening on the Monday and on
   the 1st at midnight UTC, and start from the stream rather than from the
   venue's current bar.
 - **The option-exercise interest rate series is not served.**

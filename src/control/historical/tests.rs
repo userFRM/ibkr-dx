@@ -799,7 +799,7 @@ fn build_realtime_bar_xml_structure() {
 /// Sixty-one bits, in eight bytes, written the way the reader takes them —
 /// least significant bit first, with each four-byte group reversed, which is
 /// its own inverse over two whole groups.
-fn single_tick_payload(low_ticks: u32, volume: u32) -> Vec<u8> {
+pub(crate) fn single_tick_payload(low_ticks: u32, volume: u32) -> Vec<u8> {
     let mut bits: Vec<u8> = Vec::new();
     let mut put = |value: u32, width: usize| {
         for i in 0..width {

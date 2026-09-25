@@ -30,8 +30,11 @@ on the series' timezone, as the history does, under both date-format settings.
 Timed daily history is returned as `yyyyMMdd`; explicit weekly and monthly
 date strings are preserved.
 
-Continuation beyond the last supplied daily session still uses UTC calendar
-boundaries because it has no later session schedule. Intraday bars open on
+When that session ends, the next bar is the contract's own session that the
+next five-second bar falls in — its liquid hours for regular hours, its trading
+hours otherwise — dated by that session's end on the series' timezone and made
+from that session's bars alone. Where the contract's sessions are not in hand,
+the next bar opens at midnight UTC. Intraday bars open on
 whole multiples of their length from the epoch; a week opens on Monday and a
 month on its first day at midnight UTC. Updates to these calendar bars remain
 dates under both date-format settings.

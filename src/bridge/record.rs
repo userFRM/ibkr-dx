@@ -510,8 +510,9 @@ pub enum Record {
     CompanionRefusal((InstrumentId, u64, u32, String)),
     /// A broadcast notice.
     NewsBulletin(NewsBulletin),
-    /// A real-time bar, under its request.
-    RealTimeBar((u32, RealTimeBar)),
+    /// A real-time bar, under its request, with the session a day's bar kept
+    /// up to date belongs to.
+    RealTimeBar(super::SessionBar),
     // ── Reference ──
     /// A refusal or notice stated under a request, with what it is about.
     HistoricalError((api::ErrorOrigin, i32, String)),
@@ -817,7 +818,7 @@ impl super::SharedState {
         m.news_bulletins.take_below(cut, |_| !bulletins, Record::NewsBulletin, &mut out);
         m.real_time_bars.take_below(
             cut,
-            |(id, _)| kept_back(Some(RecordKind::Bars), request(*id)),
+            |(id, _, _)| kept_back(Some(RecordKind::Bars), request(*id)),
             Record::RealTimeBar,
             &mut out,
         );

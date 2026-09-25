@@ -136,6 +136,7 @@ impl EClient {
         let unstated = f64::MAX;
         shared.market.push_option_tick(crate::bridge::OptionTick {
             instrument,
+            kind: crate::bridge::OptionTickKind::Model,
             figures: [implied_vol, unstated, opt_price, unstated, unstated, unstated, unstated, und_price],
             price_based: false,
         });

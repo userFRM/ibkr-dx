@@ -46,9 +46,10 @@ pub struct Schedule {
     pub tax_adjustment: f64,
     /// The payments, in the order the venue stated them.
     pub payments: Vec<Payment>,
-    /// The rates the venue prices this contract's options at, by term, in the
-    /// order stated.
-    pub term_rates: Vec<f64>,
+    /// The rates the venue states for a currency, each as the date it runs to
+    /// (`YYYYMMDD`) and the percentage, in the order stated. A rate is written
+    /// as a payment is, with its own date and amount.
+    pub term_rates: Vec<(String, f64)>,
 }
 
 impl Default for Schedule {
@@ -92,12 +93,28 @@ pub fn parse(xml: &str) -> Schedule {
         .into_iter()
         .filter_map(one_payment)
         .collect();
-    let term_rates = crate::control::xml::elements(xml, "rate")
-        .into_iter()
-        .filter_map(|r| r.trim().parse::<f64>().ok())
-        .filter(|r| r.is_finite())
-        .collect();
-    Schedule { tax_adjustment, payments, term_rates }
+    Schedule { tax_adjustment, payments, term_rates: term_rates(xml) }
+}
+
+/// The rates, read as a gateway reads them: a rate stating no date leaves the
+/// currency with no rates at all, a rate stating no amount is nought, and the
+/// rates before an amount that is not a number stand without the rest.
+fn term_rates(xml: &str) -> Vec<(String, f64)> {
+    let mut rates = Vec::new();
+    for rate in crate::control::xml::elements(xml, "rate") {
+        let Some(date) = crate::control::xml::tag(rate, "date").map(str::trim) else {
+            return Vec::new();
+        };
+        let amount = match crate::control::xml::tag(rate, "amt") {
+            None => 0.0,
+            Some(stated) => match stated.trim().parse::<f64>() {
+                Ok(amount) => amount,
+                Err(_) => break,
+            },
+        };
+        rates.push((date.get(..8).unwrap_or(date).to_string(), amount));
+    }
+    rates
 }
 
 /// One entry, or nothing where it states no amount or no ex-date.
@@ -207,10 +224,14 @@ mod tests {
             <recDate>20260622</recDate><curr>USD</curr><amt>1.77</amt><dt>I</dt></div>\
             </dividends>\
             <taxAdjRatio>0.85</taxAdjRatio>\
-            <termrates><rate>0.0433</rate><rate>0.0441</rate></termrates>";
+            <termrates><rate><date>20261016</date><amt>4.33</amt></rate>\
+            <rate><date>20261218</date><amt>4.41</amt></rate></termrates>";
         let read = parse(answer);
         assert_eq!(read.tax_adjustment, 0.85);
-        assert_eq!(read.term_rates, [0.0433, 0.0441]);
+        assert_eq!(
+            read.term_rates,
+            [("20261016".to_string(), 4.33), ("20261218".to_string(), 4.41)],
+        );
         assert_eq!(read.payments.len(), 2, "{:?}", read.payments);
         assert_eq!(read.payments[0].ex_date, "20260320");
         assert_eq!(read.payments[0].pay_date, "20260331");

@@ -54,13 +54,14 @@ impl EClient {
     /// With `keep_up_to_date`, the bar still forming is folded here from the
     /// stream the venue sends, and it opens on a whole multiple of its own
     /// length counted from the epoch. For every size up to an hour that is the
-    /// clock boundary a caller expects. For `1 day` it is midnight UTC, which
-    /// is the trading day of an instrument that trades around the clock and is
-    /// the middle of the evening for one that does not — a US listing's
-    /// forming daily bar opens in its after-hours session and spans two of
-    /// them. A week opens on its Monday and a month on its first day, both at
-    /// midnight UTC, on the calendar as a gateway folds them. Bars already
-    /// closed are the venue's own and are not folded here.
+    /// clock boundary a caller expects. A `1 day` bar is the session the
+    /// history last stated and, once that ends, the contract's own session the
+    /// next five-second bar falls in (its liquid hours with `use_rth`, its
+    /// trading hours otherwise), dated by that session's end on the series'
+    /// zone; only where the contract's sessions are not in hand does it open
+    /// at midnight UTC. A week opens on its Monday and a month on its first
+    /// day, both at midnight UTC, on the calendar as a gateway folds them.
+    /// Bars already closed are the venue's own and are not folded here.
     pub fn req_historical_data(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, bar_size: &str,

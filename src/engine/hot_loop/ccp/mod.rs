@@ -928,6 +928,18 @@ pub(crate) struct CcpState {
     /// number, distinct from every other request's because the venue echoes
     /// only this one tag back.
     next_xml_query_id: u64,
+    /// The currencies whose rates were asked for on this connection, by the
+    /// id each question went out under, and the currencies answered: a
+    /// currency's rates are asked for once.
+    rates_asked: Vec<(String, String)>,
+    rates_answered: HashSet<String>,
+    /// The keys whose sessions the engine uses, the keys asked for on this
+    /// connection and not yet answered, and the day the venue's clock was
+    /// last read on: each key is asked for once, and again when the day
+    /// turns.
+    schedule_keys: Vec<String>,
+    schedules_asked: Vec<String>,
+    schedules_day: Option<jiff::civil::Date>,
     /// Secdef replies awaiting paired schedule reply (joined by tag 6256).
     pub(crate) pending_schedule_pair: Vec<PendingSchedulePair>,
     /// Profit-and-loss subscriptions standing, by request number and account.
@@ -1128,6 +1140,11 @@ impl CcpState {
             dividends_answered: std::collections::HashSet::new(),
             dividends_given_up_on: std::collections::VecDeque::new(),
             next_xml_query_id: 1,
+            rates_asked: Vec::new(),
+            rates_answered: HashSet::new(),
+            schedule_keys: Vec::new(),
+            schedules_asked: Vec::new(),
+            schedules_day: None,
             pending_schedule_pair: Vec::new(),
             pnl_subscriptions: Vec::new(),
             next_schedule_sub_id: 1,
@@ -1267,6 +1284,9 @@ impl CcpState {
         if *crate::engine::hot_loop::CAPTURE_WIRE {
             let hex: String = msg.iter().map(|b| format!("{b:02x}")).collect();
             shared.market.note_unread_wire("trading-msg", hex);
+        }
+        if let Some(sent_at) = parsed.get(&fix::TAG_SENDING_TIME) {
+            self.ask_schedules_again_on_a_new_day(sent_at, ccp_conn, hb);
         }
         match msg_type {
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed, msg, context, shared, event_tx, account_id),
@@ -2283,12 +2303,22 @@ impl CcpState {
             Some(v) => v,
             None => return,
         };
+        // Kept for the key, whoever asked: every contract on it has these
+        // sessions.
+        let schedule = crate::control::contracts::parse_schedule_response(msg);
+        if let Some(schedule) = &schedule {
+            self.schedules_asked.retain(|key| *key != join_key);
+            shared.reference.set_contract_schedule(&join_key, schedule.clone());
+        }
         let pos = match self.pending_schedule_pair.iter().position(|p| p.join_key == join_key) {
             Some(p) => p,
             None => return,
         };
         let mut pair = self.pending_schedule_pair.swap_remove(pos);
-        if let Some(sched) = crate::control::contracts::parse_schedule_response(msg) {
+        if let Some(sched) = schedule {
+            if pair.def.con_id != 0 {
+                shared.reference.note_schedule_key(pair.def.con_id, &join_key);
+            }
             pair.def.time_zone_id = if sched.timezone.is_empty() {
                 None
             } else {
@@ -3324,31 +3354,140 @@ impl CcpState {
         {
             return;
         }
-        let Some(conn) = ccp_conn.as_mut() else {
-            log::debug!("what {con_id} pays out could not be asked: no connection to the venue");
+        let query = crate::control::dividends::query_for(con_id);
+        // Registered as outstanding only if it went out. Recorded either way,
+        // the contract would never be asked about again.
+        if let Some(query_id) = self.send_text_query(&query, ccp_conn, hb) {
+            log::info!("Asked what {con_id} pays out, under {query_id}");
+            self.pending_dividends.push((
+                query_id, con_id, Instant::now() + COMPLETED_ORDERS_TIMEOUT,
+            ));
+        }
+    }
+
+    /// Ask the venue the rates it states for a currency, once: the query a
+    /// contract's schedule is asked with, naming the currency.
+    pub(crate) fn ask_currency_rates(
+        &mut self,
+        currency: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        if currency.is_empty()
+            || self.rates_answered.contains(currency)
+            || self.rates_asked.iter().any(|(_, asked)| asked == currency)
+        {
             return;
+        }
+        let query = crate::control::dividends::query_for_currency(currency);
+        if let Some(query_id) = self.send_text_query(&query, ccp_conn, hb) {
+            self.rates_asked.push((query_id, currency.to_string()));
+        }
+    }
+
+    /// Send a text query under an id of this client's own, which is what its
+    /// answer is filed by.
+    fn send_text_query(
+        &mut self,
+        query: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) -> Option<String> {
+        let Some(conn) = ccp_conn.as_mut() else {
+            log::debug!("{query} could not be asked: no connection to the venue");
+            return None;
         };
         let query_id = format!("div_{}", self.next_xml_query_id);
         self.next_xml_query_id += 1;
-        let query = crate::control::dividends::query_for(con_id);
         let ts = chrono_free_timestamp();
         match conn.send_fix(&[
             (fix::TAG_MSG_TYPE, "U"),
             (fix::TAG_SENDING_TIME, &ts),
             (6040, "27"),
             (320, &query_id),
-            (58, &query),
+            (58, query),
         ]) {
             Ok(()) => {
                 hb.last_ccp_sent = Instant::now();
-                log::info!("Asked what {con_id} pays out, under {query_id}");
-                self.pending_dividends.push((
-                    query_id, con_id, Instant::now() + COMPLETED_ORDERS_TIMEOUT,
-                ));
+                Some(query_id)
             }
-            // Registered as outstanding only if it went out. Recorded either
-            // way, the contract would never be asked about again.
-            Err(e) => log::warn!("what {con_id} pays out could not be asked: {e}"),
+            Err(e) => {
+                log::warn!("{query} could not be asked: {e}");
+                None
+            }
+        }
+    }
+
+    /// Ask the venue a contract's sessions for the engine's own use, by the
+    /// key its definition is joined to them on, as a gateway asks: once for
+    /// the key, whichever contracts on it wait, and not where the key's are
+    /// in hand. Nothing is asked until the definition is in hand.
+    pub(crate) fn ask_schedule(
+        &mut self,
+        con_id: u32,
+        shared: &SharedState,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        let key = match shared.reference.schedule_key(con_id) {
+            Some(key) => key,
+            None => {
+                let Some(key) = shared.reference.contract_definition(con_id, "")
+                    .map(|definition| definition.join_key)
+                    .filter(|key| !key.is_empty())
+                else {
+                    return;
+                };
+                shared.reference.note_schedule_key(con_id, &key);
+                key
+            }
+        };
+        if shared.reference.contract_schedule(con_id, |_| ()).is_none() {
+            self.ask_schedule_by_key(&key, ccp_conn, hb);
+        }
+        if !self.schedule_keys.contains(&key) {
+            self.schedule_keys.push(key);
+        }
+    }
+
+    fn ask_schedule_by_key(
+        &mut self,
+        key: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        if ccp_conn.is_none() || self.schedules_asked.iter().any(|asked| asked == key) {
+            return;
+        }
+        self.send_schedule_subscribe(key, ccp_conn, hb);
+        self.schedules_asked.push(key.to_string());
+    }
+
+    /// Ask again for the sessions of every key the engine uses once the day
+    /// the venue's clock reads on this machine's calendar turns, as a gateway
+    /// does when its day turns: what it holds runs about a week ahead. Those
+    /// held stand until the answer replaces them.
+    fn ask_schedules_again_on_a_new_day(
+        &mut self,
+        sent_at: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        let Some(day) = crate::protocol::datetime::ib_datetime_to_unix_millis(sent_at)
+            .and_then(|at| jiff::Timestamp::from_millisecond(at).ok())
+            .map(|at| at.to_zoned(jiff::tz::TimeZone::system()).date())
+        else {
+            return;
+        };
+        let held = self.schedules_day;
+        if held.is_some_and(|held| day <= held) {
+            return;
+        }
+        self.schedules_day = Some(day);
+        if held.is_some() {
+            for key in self.schedule_keys.clone() {
+                self.ask_schedule_by_key(&key, ccp_conn, hb);
+            }
         }
     }
 
@@ -3363,6 +3502,14 @@ impl CcpState {
         shared: &SharedState,
     ) {
         let Some(query_id) = parsed.get(&320) else { return };
+        if let Some(at) = self.rates_asked.iter().position(|(id, _)| id == query_id) {
+            let (_, currency) = self.rates_asked.remove(at);
+            let rates = parsed.get(&6118).map(|body| crate::control::dividends::parse(body).term_rates);
+            log::debug!("{currency} rates: {rates:?}");
+            self.rates_answered.insert(currency.clone());
+            shared.reference.set_currency_rates(&currency, rates.unwrap_or_default());
+            return;
+        }
         let con_id = match self.pending_dividends.iter().position(|(id, _, _)| id == query_id) {
             Some(at) => self.pending_dividends.remove(at).1,
             // Late, and still an answer. The id this session asked under is
@@ -3782,6 +3929,8 @@ impl CcpState {
         // The queries that went out on this connection will not be answered on
         // the next one, and an entry nobody will answer holds its contract.
         self.pending_dividends.clear();
+        self.rates_asked.clear();
+        self.schedules_asked.clear();
         // The names one connection's recovery taught this session mean nothing
         // on the next one, which recovers the account again and says them
         // afresh. Kept, they grew for the life of the engine and went on

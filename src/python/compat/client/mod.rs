@@ -2393,7 +2393,8 @@ assert w.calls == [('tickReqParams', 7)], w.calls
                             ..OptionComputation::solved(7)
                         }),
                         None => shared.market.push_option_tick(crate::bridge::OptionTick {
-                            instrument: 0, figures: [value; 8], price_based: false,
+                            instrument: 0, kind: crate::bridge::OptionTickKind::Model,
+                            figures: [value; 8], price_based: false,
                         }),
                     }
                     client.get().dispatch_once(py, &shared).unwrap();
@@ -2443,7 +2444,8 @@ if calls:
                     article_id: "BRFG$1".into(), headline: "SPY headline".into(),
                 });
                 shared.market.push_option_tick(crate::bridge::OptionTick {
-                    instrument: slot, figures: [0.2, 0.55, 5.0, f64::MAX, 0.02, 0.3, -0.1, 765.0],
+                    instrument: slot, kind: crate::bridge::OptionTickKind::Model,
+                    figures: [0.2, 0.55, 5.0, f64::MAX, 0.02, 0.3, -0.1, 765.0],
                     price_based: true,
                 });
             };

@@ -23,9 +23,10 @@ impl EClient {
     /// as an option (`OPT`, `FOP`, `IOPT`, `WAR`, `EC`) also the option model,
     /// 13 (83 delayed); on a delayed feed also the last trade's time, 88; or
     /// eleven seconds after the request. Ticks 10, 11 and 12 (80, 81 and 82
-    /// delayed), the bid's, the ask's and the last's greeks, are not produced:
-    /// a gateway computes them with an option model of its own, and the venue
-    /// does not state them. A gateway's snapshot of an option also waits for
+    /// delayed), the bid's, the ask's and the last's option computations, are
+    /// not stated by the venue: a gateway works them out with an option model
+    /// of its own, and so does this client, for an option on a share once its
+    /// inputs are in hand. A gateway's snapshot of an option also waits for
     /// them; this client's does not.
     ///
     /// `mkt_data_options` is checked as a gateway checks it: `manual`, `0` or `1`, is

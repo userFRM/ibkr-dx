@@ -552,13 +552,13 @@ impl EClient {
                          or_unstated_greek(comp.theta), or_unstated_price(comp.und_price)));
                 }
             }
-            // The option model to every request watching the option that is
-            // owed it.
+            // An option computation to every request watching the option
+            // that is owed it, with the figures it is owed.
             Record::OptionTick((generation, tick)) => {
                 let (tick_type, to) = self.core.option_tick_owed(generation, &tick);
-                let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
-                    tick.figures;
-                for req_id in to {
+                for (req_id, figures) in to {
+                    let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                        figures;
                     call_wrapper!(self, py, shared, "tick_option_computation",
                         (req_id, tick_type, i32::from(tick.price_based),
                          or_unstated_price(implied_vol).filter(|v| *v >= 0.0), or_unstated_greek(delta),
@@ -608,12 +608,14 @@ impl EClient {
             Record::NewsBulletin(b) => {
                 call_wrapper!(self, py, shared, "update_news_bulletin", (b.msg_id as i64, b.msg_type, b.message.as_str(), b.exchange.as_str()));
             }
-            Record::RealTimeBar((req_id, bar)) => {
+            Record::RealTimeBar((req_id, bar, session)) => {
                 if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
                     // keepUpToDate bar → dispatch as historical_data_update,
                     // dated as the history before it was.
                     let bar_obj = BarData::new(
-                        self.core.bar_time_for_epoch(req_id as i64, i64::from(bar.timestamp)),
+                        self.core.bar_time_for_epoch(
+                            req_id as i64, i64::from(bar.timestamp), session,
+                        ),
                         bar.open, bar.high, bar.low, bar.close,
                         bar.volume as i64, bar.wap, bar.count,
                         String::new(), // streaming bars carry no timezone

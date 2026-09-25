@@ -3514,6 +3514,83 @@ fn a_schedule_that_comes_late_is_still_filed_against_its_contract() {
     assert_eq!(filed.payments.len(), 1, "{:?}", filed.payments);
 }
 
+/// What an option's own model waits on from this connection is asked for
+/// once and filed from the answer: a currency's rates, by the query a
+/// contract's schedule is asked with, and an option's sessions, by the key its
+/// definition is joined to them on, once for every option on the key and
+/// again when the day turns.
+#[test]
+fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
+    use std::io::Read;
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut conn = Some(conn);
+    let mut hb = HeartbeatState::new();
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    let mut sent = || {
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).replace('\x01', "|")
+    };
+
+    ccp.ask_currency_rates("USD", &mut conn, &mut hb);
+    ccp.ask_currency_rates("USD", &mut conn, &mut hb);
+    let asked = sent();
+    assert_eq!(asked.matches("|58=div USD|").count(), 1, "asked once: {asked}");
+    let query_id = asked.split("|320=").nth(1).and_then(|rest| rest.split('|').next())
+        .expect("asked under an id").to_string();
+    let answer = fix::fix_build(
+        &[
+            (35, "U"), (52, "20260925-13:00:00"), (6040, "20"), (320, &query_id),
+            (6118, "<termrates><rate><date>20261016</date><amt>4.33</amt></rate></termrates>"),
+        ],
+        1,
+    );
+    ccp.process_ccp_message(&answer, &mut None, &mut Context::new(), &shared, &None, &mut hb, "");
+    assert_eq!(shared.reference.currency_rates("USD"), Some(vec![("20261016".to_string(), 4.33)]));
+    ccp.ask_currency_rates("USD", &mut conn, &mut hb);
+    assert!(!sent().contains("58=div"), "and not again once answered");
+
+    for con_id in [925_786_273, 925_786_274, 925_786_275] {
+        shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+            con_id, join_key: "AMEX/OPT".into(), ..Default::default()
+        });
+    }
+    for con_id in [925_786_273, 925_786_274, 925_786_273] {
+        ccp.ask_schedule(con_id, &shared, &mut conn, &mut hb);
+    }
+    let asked = sent();
+    assert_eq!(asked.matches("|6040=106|").count(), 1, "asked once for the key: {asked}");
+    assert!(asked.contains("|6256=AMEX/OPT|"), "{asked}");
+    let answer = fix::fix_build(
+        &[
+            (35, "U"), (52, "20260925-13:00:01"), (6040, "107"), (320, "SchedSub.1"),
+            (6256, "AMEX/OPT"), (6734, "US/Eastern"),
+            (6841, "20260925-13:30:00"), (6842, "20260925-20:15:00"), (75, "20260925"),
+            (6843, "1"), (6844, "1"),
+        ],
+        1,
+    );
+    ccp.process_ccp_message(&answer, &mut None, &mut Context::new(), &shared, &None, &mut hb, "");
+    ccp.ask_schedule(925_786_275, &shared, &mut conn, &mut hb);
+    assert!(!sent().contains("6040=106"), "and not again for any option on it once in hand");
+    for con_id in [925_786_273, 925_786_274, 925_786_275] {
+        let filed = shared.reference.contract_schedule(con_id, Clone::clone).expect("filed for the option");
+        assert_eq!(filed.timezone, "US/Eastern");
+        assert_eq!(filed.liquid_hours.len(), 1);
+        assert_eq!(filed.liquid_hours[0].end, "20260925-20:15:00");
+    }
+
+    let heartbeat = |sent_at: &str| fix::fix_build(&[(35, "0"), (52, sent_at)], 1);
+    ccp.process_ccp_message(&heartbeat("20260925-23:00:00"), &mut conn, &mut Context::new(), &shared, &None, &mut hb, "");
+    ccp.process_ccp_message(&heartbeat("20260927-13:00:00"), &mut conn, &mut Context::new(), &shared, &None, &mut hb, "");
+    let asked = sent();
+    assert_eq!(asked.matches("|6040=106|").count(), 1, "asked again once the day turns: {asked}");
+    assert!(asked.contains("|6256=AMEX/OPT|"), "{asked}");
+    assert!(shared.reference.contract_schedule(925_786_273, |_| ()).is_some(), "what is held stands until then");
+}
+
 /// A question about what the venue has finished waits for the session's own
 /// replay to be over.
 ///

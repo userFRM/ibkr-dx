@@ -1215,6 +1215,7 @@ mod news_tests {
     /// and from what was stated before the connection dropped.
     #[test]
     fn an_options_model_tick_is_built_from_what_the_venue_states() {
+        use crate::bridge::OptionTickKind::Model;
         const UNSTATED: f64 = f64::MAX;
         let over_a_year = |per_day: f64| per_day * 252f64.sqrt();
         let volatility = |attributes: i32, per_day: f64| {
@@ -1255,7 +1256,7 @@ mod news_tests {
             }
             // The chain parameters are asked for on the underlying, and
             // acknowledged under a number of the venue's.
-            farm.publish_option_ticks(1, &mut conn, &shared, &mut hb);
+            farm.publish_option_ticks(1_000, &context, &mut conn, &shared, &mut hb);
             let asked = super::drain_inner(&mut peer).into_iter()
                 .map(|msg| fix::fix_parse(&msg))
                 .find(|fields| fields.get(&264).map(String::as_str) == Some("687"))
@@ -1309,31 +1310,31 @@ mod news_tests {
                     })
                     .collect()
             };
-            for (second, (what, frames, figures, price_based)) in (2u64..).zip(steps) {
+            for (second, (what, frames, figures, price_based)) in (2i64..).zip(steps) {
                 let frames: Vec<(u32, u32, &[u8])> =
                     frames.iter().map(|(tag, series, payload)| (*tag, *series, payload.as_slice())).collect();
                 farm.handle_generic_tick(&framed_generic_ticks(&frames), &mut context, &shared, &None);
-                farm.publish_option_ticks(second, &mut conn, &shared, &mut hb);
+                farm.publish_option_ticks(second * 1_000, &context, &mut conn, &shared, &mut hb);
                 assert_eq!(
                     ticks_taken(),
-                    [crate::bridge::OptionTick { instrument, figures, price_based }],
+                    [crate::bridge::OptionTick { instrument, kind: Model, figures, price_based }],
                     "{sec_type}: {what}",
                 );
             }
-            farm.publish_option_ticks(20, &mut conn, &shared, &mut hb);
+            farm.publish_option_ticks(20_000, &context, &mut conn, &shared, &mut hb);
             assert!(ticks_taken().is_empty(), "{sec_type}: nothing new stated, nothing rebuilt");
             let restated = framed_generic_ticks(&[(81, 732, &greeks(Some(0.55)))]);
             farm.handle_generic_tick(&restated, &mut context, &shared, &None);
-            farm.publish_option_ticks(20, &mut conn, &shared, &mut hb);
+            farm.publish_option_ticks(20_000, &context, &mut conn, &shared, &mut hb);
             assert!(ticks_taken().is_empty(), "{sec_type}: rebuilt twice in one second");
 
             // Owed when the connection drops, it is built from what was stated
             // before the drop.
             farm.handle_disconnect(&mut conn, &mut context, &None, &shared);
-            farm.publish_option_ticks(21, &mut conn, &shared, &mut hb);
+            farm.publish_option_ticks(21_000, &context, &mut conn, &shared, &mut hb);
             assert_eq!(
                 ticks_taken(),
-                [crate::bridge::OptionTick { instrument, figures: stated(model, 766.5), price_based: true }],
+                [crate::bridge::OptionTick { instrument, kind: Model, figures: stated(model, 766.5), price_based: true }],
                 "{sec_type}: across the drop",
             );
 
@@ -1349,13 +1350,393 @@ mod news_tests {
             farm.handle_generic_tick(
                 &framed_generic_ticks(&[(81, 732, &greeks(Some(0.55)))]), &mut context, &shared, &None,
             );
-            farm.publish_option_ticks(22, &mut conn, &shared, &mut hb);
+            farm.publish_option_ticks(22_000, &context, &mut conn, &shared, &mut hb);
             assert_eq!(
                 ticks_taken(),
                 [crate::bridge::OptionTick {
-                    instrument, figures: stated(UNSTATED, UNSTATED), price_based: false,
+                    instrument, kind: Model, figures: stated(UNSTATED, UNSTATED), price_based: false,
                 }],
                 "{sec_type}",
+            );
+        }
+    }
+
+    /// An option's bid, ask and last ticks are what a gateway works out from
+    /// what the venue states: the volatility the venue states for the side
+    /// (736 for the bid and the ask, 737 for the last) over a year of trading
+    /// days, never sent as worked from prices, the side's price narrowed to
+    /// single precision (per contract for a warrant), the underlying's price
+    /// from the chain parameters, the present value of the dividends the
+    /// option's life covers at the currency's rate for its term, and greeks
+    /// from the model at the side's volatility, up to when its time runs out.
+    /// Nothing until the option's sessions are in hand, and nothing for an
+    /// option on anything but a share; rebuilt once every two seconds; put to
+    /// watchers where a side's volatility moved, and all three again on a
+    /// change to the quote; no price after a drop until the venue states one.
+    /// The model tick carries the same present value.
+    #[test]
+    fn an_options_bid_ask_and_last_ticks_are_worked_as_a_gateway_works_them() {
+        use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
+        use crate::control::contracts::{ContractSchedule, OptionRight, ScheduleSession};
+        use crate::protocol::tick_decoder::{O_ASK_PRICE, O_BID_PRICE, O_BID_SIZE, O_LAST_PRICE};
+        const UNSTATED: f64 = f64::MAX;
+        const DAY: i64 = 86_400_000;
+        let ms = |at: &str| at.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        // The model's clock, read once a minute from when it started.
+        let clock = ms("2026-09-25T13:37:00Z");
+        let midnight_today = ms("2026-09-25T04:00:00Z");
+        // One payment going ex three days from the clock's day, inside the
+        // option's life.
+        let ex_date = ms("2026-09-28T04:00:00Z");
+        let dividends = [crate::options::Dividend {
+            ex_day: 3,
+            millis_to_ex_date: ex_date - clock,
+            millis_from_today: ex_date - midnight_today,
+            days_to_end_of_ex_date: 3,
+            amount: 1.8,
+        }];
+        let per_day = |attributes: i32, per_day: f64| {
+            let mut payload = attributes.to_be_bytes().to_vec();
+            payload.extend_from_slice(&per_day.to_be_bytes());
+            payload
+        };
+        let bid_ask = |bid: f64, ask: f64, attributes: i32| {
+            let mut payload = bid.to_be_bytes().to_vec();
+            payload.extend_from_slice(&ask.to_be_bytes());
+            payload.extend_from_slice(&attributes.to_be_bytes());
+            payload
+        };
+        let greeks = {
+            let flags: u32 = 1 | 1 << 16 | 1 << 17 | 1 << 18 | 1 << 20;
+            let mut payload = flags.to_be_bytes().to_vec();
+            for figure in [4.766f64, 0.53, 0.037, 0.4, -0.39] {
+                payload.extend_from_slice(&figure.to_be_bytes());
+            }
+            payload
+        };
+        let narrowed = |price: f64| price as f32 as f64;
+        #[derive(Clone, Copy, PartialEq)]
+        enum Rates { AtStart, TheDayBefore, AfterTheSessions }
+        // What a row changes from an option on a share whose definition states
+        // the time of day it last trades, with sessions stating no hours, one
+        // set of chain parameters naming its class, and the currency's rates in
+        // hand from the start; and when its time runs out.
+        #[derive(Clone, Copy)]
+        struct Row {
+            what: &'static str,
+            sec_type: &'static str,
+            per_contract: f64,
+            under: &'static str,
+            last_trade_time: &'static str,
+            real_expiration: &'static str,
+            liquid: &'static [(&'static str, &'static str, &'static str)],
+            chain: (&'static str, i32),
+            rates: Rates,
+            expiry: &'static str,
+            date_only: bool,
+        }
+        let an_option = Row {
+            what: "an option", sec_type: "OPT", per_contract: 1.0, under: "STK",
+            last_trade_time: "1615", real_expiration: "", liquid: &[], chain: ("SPY", 5),
+            rates: Rates::AtStart, expiry: "2026-10-01T16:15:00-04:00", date_only: false,
+        };
+        let rows = [
+            an_option,
+            Row { what: "a warrant", sec_type: "WAR", per_contract: 100.0, ..an_option },
+            Row {
+                what: "a time of day past its range, run on into the next day",
+                last_trade_time: "2400", expiry: "2026-10-02T00:00:00-04:00", ..an_option
+            },
+            Row {
+                what: "no time of day: the end of that day's last liquid session",
+                last_trade_time: "",
+                liquid: &[
+                    ("20261001-13:30:00", "20261001-17:00:00", "20261001"),
+                    ("20261001-17:00:00", "20261001-20:15:00", "20261001"),
+                    ("20261002-13:30:00", "20261002-20:00:00", "20261002"),
+                ],
+                expiry: "2026-10-01T20:15:00Z", ..an_option
+            },
+            Row {
+                what: "a real expiry on another day, as that date",
+                real_expiration: "20261002", expiry: "2026-10-02T00:00:00-04:00", date_only: true,
+                ..an_option
+            },
+            Row {
+                what: "the rates counted from the day they were taken in",
+                rates: Rates::TheDayBefore, ..an_option
+            },
+            Row { what: "the rates after the sessions", rates: Rates::AfterTheSessions, ..an_option },
+            Row {
+                what: "the only set, naming another class, and worked from prices",
+                chain: ("XSP", 7), ..an_option
+            },
+            Row { what: "an option on an index", under: "IND", ..an_option },
+        ];
+        for (at_row, row) in rows.into_iter().enumerate() {
+            let what = row.what;
+            let per_contract = row.per_contract;
+            let years = crate::options::time_to_expiry(ms(row.expiry) - clock, row.date_only);
+            // Two rates inside the option's life, each counted from midnight
+            // of the day the model's clock read when they were taken in, so
+            // that the rate for its term moves with that day.
+            let taken_in = if row.rates == Rates::TheDayBefore { midnight_today - DAY } else { midnight_today };
+            let point = |at: &str, percent: f64| crate::options::RatePoint {
+                years: (ms(at) - taken_in) as f64 / 3.1536e10,
+                rate: crate::options::continuous_rate(percent),
+            };
+            let rate = crate::options::rate_at(
+                &[point("2026-09-27T04:00:00Z", 4.0), point("2026-09-29T04:00:00Z", 4.6)],
+                crate::options::rate_term(years),
+            );
+            let pv = 1.8 * (-rate * (3.0 / 365.0)).exp();
+            // What the model makes of a side, worked here from the inputs
+            // stated above and nothing the engine assembled.
+            let worked = |per_day: f64, price: f64, price_based: bool| {
+                let value = crate::options::model::calculate(
+                    &crate::options::model::Inputs {
+                        is_call: true,
+                        american: true,
+                        price_based,
+                        spot: 769.45,
+                        strike: 769.0,
+                        years,
+                        rate,
+                        yield_rate: 0.0,
+                        volatility: per_day * 252f64.sqrt(),
+                        dividend_pv: pv,
+                        dividends: &dividends,
+                        index_dividends: false,
+                        tax_adjustment: 1.0,
+                        forward: f64::NAN,
+                        futures_style: false,
+                        quanto: false,
+                    },
+                    Some(price),
+                );
+                [value.delta, value.gamma, value.vega, value.theta]
+            };
+
+            let mut farm = FarmState::new();
+            farm.model_clock_origin = clock;
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(700_001);
+            context.market.register_server_tag(9, instrument);
+            context.market.set_min_tick(instrument, 0.01);
+            let mut unnamed_fields = vec![(6659, "1".to_string())];
+            if !row.last_trade_time.is_empty() {
+                unnamed_fields.push((6850, row.last_trade_time.to_string()));
+            }
+            shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+                con_id: 700_001, trading_class: "SPY".into(), multiplier: 100.0,
+                last_trade_date: "20261001".into(), under_con_id: 756733,
+                under_sec_type: row.under.into(), strike: 769.0, right: Some(OptionRight::Call),
+                currency: "USD".into(), real_expiration_date: row.real_expiration.into(),
+                unnamed_fields,
+                ..Default::default()
+            });
+            shared.reference.set_dividend_schedule(756733, crate::control::dividends::Schedule {
+                payments: vec![crate::control::dividends::Payment {
+                    ex_date: "20260928".into(), amount: 1.8, ..Default::default()
+                }],
+                ..Default::default()
+            });
+            let state_the_rates = || {
+                shared.reference.set_currency_rates(
+                    "USD", vec![("20260927".into(), 4.0), ("20260929".into(), 4.6)],
+                );
+            };
+            if row.rates != Rates::AfterTheSessions {
+                state_the_rates();
+            }
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+            farm.send_mktdata_subscribe(
+                700_001, "SPY", "SMART", row.sec_type, "20261001", 769.0, "C", "100", instrument, 0,
+                false, &mut conn, &mut hb,
+            );
+            for (tag, series) in [(81, 732), (83, 735), (84, 737), (85, 736)] {
+                farm.generic_tick_tags.push((tag, series, instrument));
+            }
+            // The sides' ticks put since last asked, or the model's.
+            let taken_of = |model: bool| -> Vec<crate::bridge::OptionTick> {
+                shared
+                    .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+                    .into_iter()
+                    .filter_map(|(_, record)| match record {
+                        crate::bridge::Record::OptionTick((_, tick)) => Some(tick),
+                        _ => None,
+                    })
+                    .filter(|tick| (tick.kind == Model) == model)
+                    .collect()
+            };
+            let taken = || taken_of(false);
+            let at = |seconds: i64| clock + seconds * 1_000;
+            if row.rates == Rates::TheDayBefore {
+                farm.publish_option_ticks(clock - DAY, &context, &mut conn, &shared, &mut hb);
+            }
+            farm.publish_option_ticks(at(0), &context, &mut conn, &shared, &mut hb);
+            let asked = super::drain_inner(&mut peer).into_iter()
+                .map(|msg| fix::fix_parse(&msg))
+                .find(|fields| fields.get(&264).map(String::as_str) == Some("687"))
+                .expect("the chain parameters are asked for");
+            let ack = format!("35=Q\x0190,{},0.01,0,0,a6,,0,1", asked[&262]);
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            let chain = chain_parameters(&[(row.chain.0, 100.0, 769.45, row.chain.1, 20727)]);
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[
+                    (90, 687, &chain),
+                    (85, 736, &bid_ask(0.006734, 0.006766, 1)),
+                    (84, 737, &per_day(1, 0.006742)),
+                    (83, 735, &per_day(1, 0.006712)),
+                ]),
+                &mut context, &shared, &None,
+            );
+            farm.handle_tick_data(
+                &super::decode_publish_tests::framed_35p(9, &[(O_BID_PRICE, 2, 474), (O_ASK_PRICE, 2, 477)]),
+                &mut context, &shared, &None,
+            );
+            farm.publish_option_ticks(at(2), &context, &mut conn, &shared, &mut hb);
+            assert!(taken().is_empty(), "{what}: nothing before the option's sessions are in hand");
+            let wanted: &[u32] = if row.under == "STK" { &[700_001] } else { &[] };
+            assert_eq!(farm.schedules_wanted, wanted, "{what}: which are asked for");
+
+            shared.reference.note_schedule_key(700_001, "p111959");
+            shared.reference.set_contract_schedule("p111959", ContractSchedule {
+                timezone: "US/Eastern".into(),
+                trading_hours: Vec::new(),
+                liquid_hours: row.liquid.iter().map(|(start, end, day)| ScheduleSession {
+                    start: start.to_string(), end: end.to_string(), trade_date: day.to_string(),
+                }).collect(),
+            });
+            farm.publish_option_ticks(at(4), &context, &mut conn, &shared, &mut hb);
+            if row.under != "STK" {
+                assert!(taken().is_empty(), "{what}: not worked out");
+                continue;
+            }
+            // Greeks only where all four can be worked out, and never sent as
+            // worked from prices, whichever model worked them.
+            let worked_as = |price_based: bool, kind, per_day: f64, price: f64| {
+                let greeks = worked(per_day, price, price_based);
+                let [delta, gamma, vega, theta] =
+                    if greeks.iter().all(|g| g.is_finite()) { greeks } else { [UNSTATED; 4] };
+                let opt_price = if price.is_nan() { UNSTATED } else { price * per_contract };
+                crate::bridge::OptionTick {
+                    instrument, kind,
+                    figures: [
+                        per_day * 252f64.sqrt(), delta, opt_price, pv, gamma, vega, theta, 769.45,
+                    ],
+                    price_based: false,
+                }
+            };
+            let from_prices = row.chain.1 & 2 != 0;
+            let side = |kind, per_day: f64, price: f64| worked_as(from_prices, kind, per_day, price);
+            let (bid, ask) = (narrowed(4.74), narrowed(4.77));
+            let first = [
+                side(Bid, 0.006734, bid),
+                side(Ask, 0.006766, ask),
+                // A side with no price is worked all the same: on the model
+                // that does not take volatility in price its theta is capped at
+                // a time value that is not a number, and it states no greeks.
+                side(Last, 0.006742, f64::NAN),
+            ];
+            let size_moved = |farm: &mut FarmState, context: &mut Context, size: u64| {
+                farm.handle_tick_data(
+                    &super::decode_publish_tests::framed_35p(9, &[(O_BID_SIZE, 2, size)]),
+                    context, &shared, &None,
+                );
+            };
+            if row.rates == Rates::AfterTheSessions {
+                // No rate, so no dividends' present value and no greeks.
+                let unrated = first.map(|mut tick| {
+                    for at in [1, 3, 4, 5, 6] {
+                        tick.figures[at] = UNSTATED;
+                    }
+                    tick
+                });
+                assert_eq!(taken(), unrated, "{what}: before the rates");
+                state_the_rates();
+                farm.publish_option_ticks(at(6), &context, &mut conn, &shared, &mut hb);
+                size_moved(&mut farm, &mut context, 10);
+                assert_eq!(taken(), first, "{what}: once they are in hand");
+                continue;
+            }
+            assert_eq!(taken(), first, "{what}: each side, as its volatility first stands");
+            // The option and the warrant go on through every rebuild.
+            if at_row > 1 {
+                continue;
+            }
+
+            farm.publish_option_ticks(at(6), &context, &mut conn, &shared, &mut hb);
+            assert!(taken().is_empty(), "{what}: nothing new stated, nothing rebuilt");
+            farm.handle_tick_data(
+                &super::decode_publish_tests::framed_35p(9, &[(O_LAST_PRICE, 2, 485)]),
+                &mut context, &shared, &None,
+            );
+            assert_eq!(taken(), first, "{what}: each side as built, again, on a change to the quote");
+            farm.publish_option_ticks(at(7), &context, &mut conn, &shared, &mut hb);
+            size_moved(&mut farm, &mut context, 10);
+            assert_eq!(taken(), first, "{what}: not rebuilt within the same two seconds");
+            farm.publish_option_ticks(at(8), &context, &mut conn, &shared, &mut hb);
+            assert!(taken().is_empty(), "{what}: a volatility that did not move is not put");
+            size_moved(&mut farm, &mut context, 11);
+            let last = narrowed(4.85);
+            assert_eq!(
+                taken(),
+                [side(Bid, 0.006734, bid), side(Ask, 0.006766, ask), side(Last, 0.006742, last)],
+                "{what}: the last's price, at the next change to the quote",
+            );
+
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(85, 736, &bid_ask(0.0068, 0.0069, 2))]),
+                &mut context, &shared, &None,
+            );
+            farm.publish_option_ticks(at(10), &context, &mut conn, &shared, &mut hb);
+            assert!(taken().is_empty(), "{what}: volatilities that do not stand change nothing");
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(85, 736, &bid_ask(0.0068, 0.0069, 3))]),
+                &mut context, &shared, &None,
+            );
+            farm.publish_option_ticks(at(12), &context, &mut conn, &shared, &mut hb);
+            // Any volatility worked from prices puts every side on the model
+            // that takes them in price.
+            let (bid_side, ask_side) =
+                (worked_as(true, Bid, 0.0068, bid), worked_as(true, Ask, 0.0069, ask));
+            assert_eq!(taken(), [bid_side, ask_side], "{what}: the sides whose volatility moved");
+
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(81, 732, &greeks)]), &mut context, &shared, &None,
+            );
+            farm.publish_option_ticks(at(13), &context, &mut conn, &shared, &mut hb);
+            let model = taken_of(true);
+            assert_eq!(model.len(), 1, "{what}");
+            assert_eq!(model[0].figures[3], pv, "{what}: the model tick's dividend present value");
+
+            // Across a drop the quote is no price the venue stated: a side
+            // built then states none, and keeps the greeks it had.
+            farm.handle_disconnect(&mut conn, &mut context, &None, &shared);
+            farm.generic_tick_tags.push((85, 736, instrument));
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(85, 736, &bid_ask(0.0070, 0.0071, 3))]),
+                &mut context, &shared, &None,
+            );
+            farm.publish_option_ticks(at(14), &context, &mut conn, &shared, &mut hb);
+            let unpriced = |before: crate::bridge::OptionTick, per_day: f64| {
+                let mut tick = worked_as(true, before.kind, per_day, f64::NAN);
+                if tick.figures[1] == UNSTATED {
+                    for at in [1, 4, 5, 6] {
+                        tick.figures[at] = before.figures[at];
+                    }
+                }
+                tick
+            };
+            assert_eq!(
+                taken(),
+                [unpriced(bid_side, 0.0070), unpriced(ask_side, 0.0071)],
+                "{what}: after the drop",
             );
         }
     }
@@ -5852,7 +6233,7 @@ mod withdrawal_wire_tests {
                 .collect()
         };
 
-        farm.publish_option_ticks(1, &mut conn, &shared, &mut hb);
+        farm.publish_option_ticks(1_000, &context, &mut conn, &shared, &mut hb);
         let asked = chain(super::drain_inner(&mut peer), "1");
         assert_eq!(asked.len(), 1, "once for both options");
         for (tag, stated) in [(6008, "756733"), (207, "IBVOL"), (167, "CS")] {
@@ -5864,7 +6245,7 @@ mod withdrawal_wire_tests {
         let (next, next_peer) = Connection::for_test();
         let mut peer = Connection::new_raw(next_peer).expect("a connection over the test pair");
         farm.reconnect(next, &mut conn, &mut context, &mut hb, Default::default(), &shared);
-        farm.publish_option_ticks(2, &mut conn, &shared, &mut hb);
+        farm.publish_option_ticks(2_000, &context, &mut conn, &shared, &mut hb);
         let asked = chain(super::drain_inner(&mut peer), "1");
         assert_eq!(asked.len(), 1, "asked again on the next connection");
 

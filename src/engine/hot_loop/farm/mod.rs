@@ -965,15 +965,26 @@ struct ModelledOption {
     /// Whether its price is stated per unit and published per contract.
     per_contract: bool,
     /// What the venue's option model last stated of the option's own
-    /// volatility, the mid's and the last's (734, 735 and 737), per trading
-    /// day and with the attributes it was stated with. A statement the venue
-    /// says does not stand is not kept, and the one before it stands.
-    vols: [Option<(f64, i32)>; 3],
+    /// volatility, the mid's, the last's (734, 735 and 737), the bid's and the
+    /// ask's (736), per trading day and with the attributes each was stated
+    /// with. A statement the venue says does not stand is not kept, and the
+    /// one before it stands.
+    vols: [Option<(f64, i32)>; 5],
     /// What its definition states, read once it is in hand.
     terms: Option<OptionTerms>,
+    /// What the option's own model is worked from, once it is in hand.
+    inputs: Option<option_ticks::ModelInputs>,
+    /// Which of its bid, ask and last the venue has stated on this
+    /// connection.
+    quoted: u8,
+    /// The bid's, ask's and last's ticks as last built, each with the
+    /// volatility it was built at.
+    sides: Option<[option_ticks::BuiltSide; 3]>,
+    /// Whether an input of those ticks has changed since they were built.
+    sides_due: bool,
 }
 
-/// What an option's definition states that its model tick is built from.
+/// What an option's definition states that its model ticks are built from.
 struct OptionTerms {
     multiplier: f64,
     trading_class: String,
@@ -981,6 +992,17 @@ struct OptionTerms {
     last_trading_day: String,
     /// The underlying it is modelled on, where the definition names one.
     underlying: Option<i64>,
+    /// The underlying's security type, as the definition states it.
+    under_sec_type: String,
+    strike: f64,
+    call: bool,
+    /// Whether it may be exercised before expiry.
+    american: bool,
+    currency: String,
+    /// The time of day it last trades, `HHmm`, where the definition states one.
+    last_trade_time: String,
+    /// The day it expires, where that differs from its last trading day.
+    real_expiration: String,
 }
 
 struct DelayedSubscription {
@@ -1105,6 +1127,22 @@ pub(crate) struct FarmState {
     option_ticks_due: std::collections::HashSet<InstrumentId>,
     /// The second of the clock the model ticks were last built in.
     option_ticks_built_in: u64,
+    /// The two seconds of the clock the bid's, ask's and last's ticks were
+    /// last built in.
+    option_sides_built_in: i64,
+    /// The options whose bid's, ask's and last's ticks are owed a build.
+    option_sides_owed: Vec<InstrumentId>,
+    /// When the model's clock started: it reads the time once a minute from
+    /// then.
+    model_clock_origin: i64,
+    /// The contracts whose sessions, and the currencies whose rates, the
+    /// option model is waiting on, for the security definition connection to
+    /// ask.
+    pub(crate) schedules_wanted: Vec<u32>,
+    pub(crate) rates_wanted: Vec<String>,
+    /// Each currency's rates as the model took them in, for every option
+    /// priced in it.
+    currency_curves: std::collections::HashMap<String, Vec<crate::options::RatePoint>>,
     /// The chain parameters asked for on the underlyings of the options
     /// modelled here.
     underlying_models: Vec<UnderlyingModel>,
@@ -2370,6 +2408,14 @@ impl FarmState {
             modelled_options: std::collections::HashMap::new(),
             option_ticks_due: std::collections::HashSet::new(),
             option_ticks_built_in: 0,
+            option_sides_built_in: 0,
+            option_sides_owed: Vec::new(),
+            model_clock_origin: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as i64),
+            schedules_wanted: Vec::new(),
+            rates_wanted: Vec::new(),
+            currency_curves: std::collections::HashMap::new(),
             underlying_models: Vec::new(),
             generic_tick_reqs: Vec::new(),
             asked_generic_ticks: std::collections::HashMap::new(),
@@ -2402,10 +2448,10 @@ impl FarmState {
         // the map is stated, and let go once a gateway would stop waiting,
         // whether or not anything else arrives.
         self.publish_snapshot_answers(context, shared);
-        let second = std::time::SystemTime::now()
+        let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs());
-        self.publish_option_ticks(second, farm_conn, shared, hb);
+            .map_or(0, |since| since.as_millis() as i64);
+        self.publish_option_ticks(now, context, farm_conn, shared, hb);
         if self.disconnected {
             return;
         }
@@ -2871,8 +2917,9 @@ impl FarmState {
                 instrument, mode, context.quote(instrument),
                 self.pricing_present[instrument as usize], state_mask,
             );
-            self.pricing_present[instrument as usize] = 0;
+            let present = std::mem::take(&mut self.pricing_present[instrument as usize]);
             shared.market.push_quote(instrument, context.quote(instrument));
+            self.note_option_quote(instrument, present, shared);
             emit(event_tx, Event::Tick(instrument));
             notified[(instrument >> 6) as usize] &= !(1u64 << (instrument & 63));
         }
@@ -3598,8 +3645,12 @@ impl FarmState {
                 per_contract: matches!(
                     crate::control::contracts::sec_type_to_fix(sec_type), "WAR" | "IOPT",
                 ),
-                vols: [None; 3],
+                vols: [None; 5],
                 terms: None,
+                inputs: None,
+                quoted: 0,
+                sides: None,
+                sides_due: false,
             });
         }
 
@@ -5095,6 +5146,11 @@ impl FarmState {
             held.req_id = None;
             held.server_tag = None;
         }
+        // The quotes are zeroed below, and a zero is not a price the venue
+        // stated.
+        for option in self.modelled_options.values_mut() {
+            option.quoted = 0;
+        }
         // Server tags are the venue's and start again with the connection, so
         // one already warned about would otherwise silence the warning for a
         // different tick that happened to be given the same number.
@@ -5337,7 +5393,7 @@ impl FarmState {
                 }
                 // The volatilities the model is stated from, kept for it and
                 // stated as figures like any other series.
-                734 | 735 | 737 => {
+                734..=737 => {
                     self.note_option_volatility(instrument, tick, payload);
                     deliver_series(tick, payload, instrument, shared);
                 }

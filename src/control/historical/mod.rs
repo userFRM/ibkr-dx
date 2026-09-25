@@ -1406,4 +1406,4 @@ pub fn parse_head_timestamp_response(xml: &str) -> Option<HeadTimestampResponse>
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

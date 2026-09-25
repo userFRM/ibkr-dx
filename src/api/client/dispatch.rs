@@ -404,13 +404,13 @@ impl EClient {
                     );
                 }
             }
-            // The option model to every request watching the option that is
-            // owed it.
+            // An option computation to every request watching the option
+            // that is owed it, with the figures it is owed.
             Record::OptionTick((generation, tick)) => {
                 let (tick_type, to) = self.core.option_tick_owed(generation, &tick);
-                let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
-                    tick.figures;
-                for req_id in to {
+                for (req_id, figures) in to {
+                    let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                        figures;
                     wrapper.tick_option_computation(
                         req_id, tick_type, i32::from(tick.price_based),
                         implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price,
@@ -477,13 +477,15 @@ impl EClient {
             // Real-time bars, and the continued half of a keep-up-to-date
             // request. The two arrive on one feed and are told apart by
             // whether the request has already answered with its history.
-            Record::RealTimeBar((req_id, bar)) => {
+            Record::RealTimeBar((req_id, bar, session)) => {
                 if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
                     // A forming bar is stamped at its open, in seconds since
                     // the epoch; dated as the history before it was, in the
                     // caller's format on the zone the series was stated on.
                     let bd = BarData {
-                        date: self.core.bar_time_for_epoch(req_id as i64, i64::from(bar.timestamp)),
+                        date: self.core.bar_time_for_epoch(
+                            req_id as i64, i64::from(bar.timestamp), session,
+                        ),
                         open: bar.open,
                         high: bar.high,
                         low: bar.low,
@@ -1355,7 +1357,7 @@ mod delivered_size_tests {
         client.process_msgs(&mut heard);
         assert!(heard.ended.is_empty(), "an option's snapshot ended without its model");
         shared.market.push_option_tick(crate::bridge::OptionTick {
-            instrument: slot, figures: [0.2; 8], price_based: false,
+            instrument: slot, kind: crate::bridge::OptionTickKind::Model, figures: [0.2; 8], price_based: false,
         });
         client.process_msgs(&mut heard);
         assert_eq!(heard.ended, [1], "the model was the last of it");
@@ -1378,8 +1380,10 @@ mod delivered_size_tests {
 
     /// News and model publications belong to whoever still watches the
     /// contract. A model tick goes to each watcher as it stands, and to a
-    /// watcher only when it differs from the last that watcher was sent. An
-    /// explicit calculation answer keeps its own request id.
+    /// watcher only when it differs from the last that watcher was sent; a
+    /// bid's, ask's or last's is completed from the last of its kind that
+    /// watcher was sent. An explicit calculation answer keeps its own request
+    /// id.
     #[test]
     fn news_and_models_are_delivered_only_to_current_watchers() {
         type Model = (i64, i32, i32, [f64; 8]);
@@ -1410,7 +1414,7 @@ mod delivered_size_tests {
                 article_id: "BRFG$1".into(), headline: "SPY headline".into(),
             });
             shared.market.push_option_tick(crate::bridge::OptionTick {
-                instrument: slot, figures: figures(iv), price_based: true,
+                instrument: slot, kind: crate::bridge::OptionTickKind::Model, figures: figures(iv), price_based: true,
             });
         };
         publish(0.2);
@@ -1428,6 +1432,39 @@ mod delivered_size_tests {
         client.process_msgs(&mut heard);
         assert_eq!(heard.models, [(3, 13, 1, figures(0.2))], "sent once to each");
 
+        // The bid's, the ask's and the last's go out under numbers of their
+        // own, and take each figure they do not state from the last one of
+        // their kind a request was sent: sent where that differs from it, and
+        // not where it does not.
+        use crate::bridge::OptionTickKind::{Ask, Bid, Last};
+        let side = |kind, figures| {
+            shared.market.push_option_tick(crate::bridge::OptionTick {
+                instrument: slot, kind, figures, price_based: false,
+            });
+        };
+        let unstated = f64::MAX;
+        let bid = [0.1, 0.5, 4.74, 1.8, 0.04, 0.39, -0.44, 769.45];
+        let ask = [0.11, unstated, 4.77, unstated, unstated, unstated, unstated, 769.45];
+        side(Bid, bid);
+        side(Ask, ask);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert_eq!(
+            heard.models,
+            [(1, 10, 0, bid), (2, 10, 0, bid), (3, 10, 0, bid), (1, 11, 0, ask), (2, 11, 0, ask), (3, 11, 0, ask)],
+        );
+        let priced_again = [unstated, unstated, 4.75, unstated, unstated, unstated, unstated, unstated];
+        side(Bid, priced_again);
+        side(Bid, priced_again);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        let merged = [0.1, 0.5, 4.75, 1.8, 0.04, 0.39, -0.44, 769.45];
+        assert_eq!(
+            heard.models,
+            [(1, 10, 0, merged), (2, 10, 0, merged), (3, 10, 0, merged)],
+            "the new price with the rest as last sent, and once",
+        );
+
         // On a delayed feed the reference client numbers the model apart, and
         // a program that asked for delayed data reads it there.
         client.core.mark_feed_delayed_for_test(slot);
@@ -1436,6 +1473,11 @@ mod delivered_size_tests {
         client.process_msgs(&mut delayed_heard);
         let kinds: Vec<(i64, i32)> = delayed_heard.models.iter().map(|m| (m.0, m.1)).collect();
         assert_eq!(kinds, [(1, 83), (2, 83), (3, 83)], "the delayed model, not the live one");
+        side(Last, bid);
+        let mut delayed_heard = Heard::default();
+        client.process_msgs(&mut delayed_heard);
+        let kinds: Vec<(i64, i32)> = delayed_heard.models.iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(kinds, [(1, 82), (2, 82), (3, 82)], "the delayed last's, not the live one");
 
         // A number given up and asked under again is a request of its own,
         // sent the model it has not been sent.

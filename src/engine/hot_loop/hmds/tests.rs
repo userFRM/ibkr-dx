@@ -1517,11 +1517,11 @@ mod forming_bar_tests {
             bar: Default::default(), weighted: 0.0,
         };
         // 14:35:00, then two more within the same five minutes.
-        let first = forming.fold(&five(1_786_456_500, 10.0, 10.5, 9.5, 10.2, 100.0));
+        let first = forming.fold(&five(1_786_456_500, 10.0, 10.5, 9.5, 10.2, 100.0), &[]);
         assert_eq!(first.timestamp, 1_786_456_500, "the bar opens on its own boundary");
 
-        forming.fold(&five(1_786_456_505, 10.2, 11.0, 10.1, 10.8, 50.0));
-        let so_far = forming.fold(&five(1_786_456_510, 10.8, 10.9, 9.0, 9.4, 50.0));
+        forming.fold(&five(1_786_456_505, 10.2, 11.0, 10.1, 10.8, 50.0), &[]);
+        let so_far = forming.fold(&five(1_786_456_510, 10.8, 10.9, 9.0, 9.4, 50.0), &[]);
         assert_eq!(so_far.timestamp, 1_786_456_500, "still the same bar");
         assert_eq!(so_far.open, 10.0, "opened where the first one did");
         assert_eq!(so_far.high, 11.0, "the highest of them");
@@ -1532,7 +1532,7 @@ mod forming_bar_tests {
         assert!((so_far.wap - (10.2 * 100.0 + 10.8 * 50.0 + 9.4 * 50.0) / 200.0).abs() < 1e-9);
 
         // And the next five minutes start a bar of their own.
-        let next = forming.fold(&five(1_786_456_800, 9.4, 9.6, 9.3, 9.5, 10.0));
+        let next = forming.fold(&five(1_786_456_800, 9.4, 9.6, 9.3, 9.5, 10.0), &[]);
         assert_eq!(next.timestamp, 1_786_456_800);
         assert_eq!(next.volume, 10.0, "nothing carried over");
     }
@@ -1549,9 +1549,9 @@ mod forming_bar_tests {
             req_id: 1, seconds: week, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
         };
         // Sunday 20 September 2026 23:59:55, then Monday 21 September 00:00.
-        let sunday = weekly.fold(&five(1_789_948_795, 10.0, 10.0, 10.0, 10.0, 5.0));
+        let sunday = weekly.fold(&five(1_789_948_795, 10.0, 10.0, 10.0, 10.0, 5.0), &[]);
         assert_eq!(sunday.timestamp, 1_789_344_000, "the week that opened on Monday the 14th");
-        let monday = weekly.fold(&five(1_789_948_800, 11.0, 11.0, 11.0, 11.0, 7.0));
+        let monday = weekly.fold(&five(1_789_948_800, 11.0, 11.0, 11.0, 11.0, 7.0), &[]);
         assert_eq!(monday.timestamp, 1_789_948_800, "a new week on Monday the 21st");
         assert_eq!((monday.open, monday.volume), (11.0, 7.0), "nothing carried over");
 
@@ -1559,12 +1559,12 @@ mod forming_bar_tests {
             req_id: 2, seconds: month, opened_at: 0, daily_session: None, bar: Default::default(), weighted: 0.0,
         };
         // Saturday 31 January 2026 23:59:55, then Sunday 1 February 00:00.
-        let january = monthly.fold(&five(1_769_903_995, 10.0, 10.0, 10.0, 10.0, 5.0));
+        let january = monthly.fold(&five(1_769_903_995, 10.0, 10.0, 10.0, 10.0, 5.0), &[]);
         assert_eq!(january.timestamp, 1_767_225_600, "January opened on the 1st");
-        let february = monthly.fold(&five(1_769_904_000, 12.0, 12.0, 12.0, 12.0, 3.0));
+        let february = monthly.fold(&five(1_769_904_000, 12.0, 12.0, 12.0, 12.0, 3.0), &[]);
         assert_eq!(february.timestamp, 1_769_904_000, "February opens on the 1st");
         // A leap day is in its own month.
-        let leap = monthly.fold(&five(1_709_208_000, 12.0, 12.0, 12.0, 12.0, 3.0));
+        let leap = monthly.fold(&five(1_709_208_000, 12.0, 12.0, 12.0, 12.0, 3.0), &[]);
         assert_eq!(leap.timestamp, 1_706_745_600, "29 February 2024 is February's");
 
         // A stamp in the epoch's first days, before any Monday: the week opens
@@ -1572,7 +1572,7 @@ mod forming_bar_tests {
         let mut early = FormingBar {
             req_id: 3, seconds: week, opened_at: 1, daily_session: None, bar: Default::default(), weighted: 0.0,
         };
-        assert_eq!(early.fold(&five(86_400, 1.0, 1.0, 1.0, 1.0, 1.0)).timestamp, 0);
+        assert_eq!(early.fold(&five(86_400, 1.0, 1.0, 1.0, 1.0, 1.0), &[]).timestamp, 0);
     }
 
     /// The trade count comes off the wire at the full width the field carries,
@@ -1591,11 +1591,11 @@ mod forming_bar_tests {
         };
         let mut near_the_top = five(1_786_456_500, 10.0, 10.5, 9.5, 10.2, 100.0);
         near_the_top.count = i32::MAX - 1;
-        forming.fold(&near_the_top);
+        forming.fold(&near_the_top, &[]);
 
         let mut second = five(1_786_456_505, 10.2, 11.0, 10.1, 10.8, 50.0);
         second.count = i32::MAX - 1;
-        let so_far = forming.fold(&second);
+        let so_far = forming.fold(&second, &[]);
         assert!(so_far.count > 0, "a bar is never made by a negative number of trades");
     }
 }
@@ -2923,8 +2923,92 @@ fn a_daily_update_keeps_the_session_bounds_across_midnight() {
         let bar = forming.fold(&crate::types::RealTimeBar {
             timestamp, open: 1.0, high: 2.0, low: 0.5, close: 1.5,
             volume: 10.0, wap: 1.0, count: 1,
-        });
+        }, &[]);
         assert_eq!(bar.timestamp, start);
     }
     assert_eq!(forming.bar.volume, 30.0);
+}
+
+/// A day's bar kept up to date rolls over to the next session when the one
+/// the history stated ends: the next bar is the session of the contract's own
+/// that the five-second bar falls in, dated by that session's end on the
+/// series' zone and made from that session's bars alone — and it goes on
+/// through midnight UTC as one bar. Each is dated by its own session, however
+/// many sessions the bars waiting to be delivered span.
+#[test]
+fn a_days_bar_kept_up_to_date_rolls_over_to_the_next_session() {
+    use crate::control::contracts::{ContractSchedule, ScheduleSession};
+    #[derive(Default)]
+    struct Heard(Vec<(String, f64, i64)>);
+    impl crate::api::Wrapper for Heard {
+        fn historical_data_update(&mut self, _: i64, bar: &crate::types::model::BarData) {
+            self.0.push((bar.date.clone(), bar.open, bar.volume));
+        }
+    }
+    let (client, _rx, shared) = crate::api::client::tests::test_client();
+    client.req_historical_data(21, &crate::api::client::tests::spy(), "", "1 W", "1 day",
+        "TRADES", false, 1, true);
+    let mut hmds = HmdsState::new();
+    let mut hb = HeartbeatState::new();
+    hmds.pending_historical.push(("daily".into(), 21));
+    hmds.keep_up_to_date_reqs.insert(21);
+    hmds.forming_bars.push(FormingBar {
+        req_id: 21, seconds: 86_400, opened_at: 0, daily_session: None,
+        bar: Default::default(), weighted: 0.0,
+    });
+    hmds.rtbar_subs.push(("rt_21".into(), 21, Some(4002), 0.01, 1.0));
+    hmds.rtbar_resub.push(RtBarRequest {
+        req_id: 21, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
+        what_to_show: "TRADES".into(), use_rth: false,
+    });
+    // The history's last session runs overnight, from the evening before.
+    let history = String::from_utf8(make_bar_msg("daily", true)).unwrap()
+        .replace("20260714-13:30:00</time>", "20260923-22:00:00</time><endTime>20260924-21:00:00</endTime>")
+        .replace("<tz>UTC</tz>", "<tz>US/Central</tz>");
+    hmds.process_hmds_message(history.as_bytes(), &mut None, &shared, &None, &mut hb);
+    client.process_msgs(&mut Heard::default());
+    shared.reference.note_schedule_key(756733, "p4002");
+    shared.reference.set_contract_schedule("p4002", ContractSchedule {
+        timezone: "US/Central".into(),
+        trading_hours: vec![
+            ScheduleSession {
+                start: "20260924-22:00:00".into(), end: "20260925-21:00:00".into(),
+                trade_date: "20260925".into(),
+            },
+            ScheduleSession {
+                start: "20260925-22:00:00".into(), end: "20260926-21:00:00".into(),
+                trade_date: "20260926".into(),
+            },
+        ],
+        liquid_hours: Vec::new(),
+    });
+    let five = |at: &str, cents: u32, volume: u32| {
+        let at = crate::protocol::datetime::ib_datetime_to_unix(at).unwrap() as u32;
+        let payload = crate::control::historical::tests::single_tick_payload(cents, volume);
+        let mut msg = b"8=O\x019=0\x0135=G\x01".to_vec();
+        msg.extend_from_slice(&[0, 0]);
+        msg.extend_from_slice(&4002u32.to_be_bytes());
+        msg.extend_from_slice(&at.to_be_bytes());
+        msg.push(payload.len() as u8);
+        msg.extend_from_slice(&payload);
+        msg.extend_from_slice(b"\x018349=AABBCCDD\x01");
+        msg
+    };
+    for (at, cents, volume) in [
+        ("20260924-22:00:05", 10_000, 5),
+        ("20260925-00:00:05", 10_100, 7),
+        ("20260925-22:00:05", 10_200, 3),
+    ] {
+        hmds.process_hmds_message(&five(at, cents, volume), &mut None, &shared, &None, &mut hb);
+    }
+    let mut heard = Heard::default();
+    client.process_msgs(&mut heard);
+    assert_eq!(
+        heard.0,
+        [
+            ("20260925".to_string(), 100.0, 5),
+            ("20260925".to_string(), 100.0, 12),
+            ("20260926".to_string(), 102.0, 3),
+        ],
+    );
 }

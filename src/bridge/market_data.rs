@@ -38,12 +38,31 @@ pub struct TickReqParams {
     pub snapshot_permissions: i64,
 }
 
-/// What a gateway's option model publishes for an option on its own tick, 13
-/// (83 on a delayed feed).
+/// A bar under its request, with the session, as the moments it opens and
+/// closes, that a day's bar kept up to date belongs to.
+pub type SessionBar = (u32, RealTimeBar, Option<(u32, u32)>);
+
+/// Which of a gateway's option computations a tick is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OptionTickKind {
+    /// The venue's model's: 13, or 83 on a delayed feed.
+    Model,
+    /// Worked at the bid: 10, or 80 on a delayed feed.
+    Bid,
+    /// Worked at the ask: 11, or 81.
+    Ask,
+    /// Worked at the last: 12, or 82.
+    Last,
+}
+
+/// What a gateway's option model publishes for an option on one of its
+/// computation ticks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OptionTick {
     /// The option.
     pub instrument: InstrumentId,
+    /// Which computation it is.
+    pub kind: OptionTickKind,
     /// The implied volatility, delta, option price, dividend present value,
     /// gamma, vega, theta and underlying price, in the callback's order, with
     /// `f64::MAX` for a figure not stated.
@@ -179,7 +198,7 @@ pub struct MarketDataState {
     pub(super) tbt_quotes: Queue<TbtQuote>,
     /// The point between the two, each time it moved.
     pub(super) tbt_mids: Queue<TbtMid>,
-    pub(super) real_time_bars: Queue<(u32, RealTimeBar)>,
+    pub(super) real_time_bars: Queue<SessionBar>,
     pub(super) depth_updates: Queue<DepthUpdate>,
     /// Books that were dropped for running away unread, and have not been
     /// asked for again.
@@ -526,7 +545,7 @@ impl MarketDataState {
 
     /// Take every real time bars waiting, leaving none.
     pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
-        self.real_time_bars.drain()
+        self.real_time_bars.drain().into_iter().map(|(req_id, bar, _)| (req_id, bar)).collect()
     }
 
     /// Take the bars a dispatch loop should deliver, leaving behind those a
@@ -539,7 +558,8 @@ impl MarketDataState {
     pub fn drain_real_time_bars_for_dispatch(
         &self, mine: impl Fn(u32) -> bool,
     ) -> Vec<(u32, RealTimeBar)> {
-        self.real_time_bars.take_if(|e| !mine(e.0))
+        self.real_time_bars.take_if(|e| !mine(e.0)).into_iter()
+            .map(|(req_id, bar, _)| (req_id, bar)).collect()
     }
 
     /// Bars answering one request, leaving other requests' alone.
@@ -839,7 +859,15 @@ impl MarketDataState {
 
 
     #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
-        self.real_time_bars.push_bounded((req_id, bar), STREAM_BACKLOG_LIMIT, "real_time_bars");
+        self.push_bar_in_session(req_id, bar, None);
+    }
+
+    /// A bar kept up to date, with the session it belongs to where it is a
+    /// day's.
+    pub(crate) fn push_bar_in_session(
+        &self, req_id: u32, bar: RealTimeBar, session: Option<(u32, u32)>,
+    ) {
+        self.real_time_bars.push_bounded((req_id, bar, session), STREAM_BACKLOG_LIMIT, "real_time_bars");
     }
 
     #[doc(hidden)] pub fn push_depth_update(&self, update: DepthUpdate) {
@@ -924,7 +952,7 @@ impl MarketDataState {
     /// already arrived and nobody has read. Left there, the next request under
     /// the same number is served the previous stream's bars.
     #[doc(hidden)] pub fn purge_real_time_bars(&self, req_id: u32) {
-        self.real_time_bars.retain(|(id, _)| *id != req_id);
+        self.real_time_bars.retain(|(id, _, _)| *id != req_id);
     }
 
     /// Throw away tick-by-tick records still queued under a request.

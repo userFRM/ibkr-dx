@@ -319,14 +319,17 @@ client.stated_figures(1, 407)    # four margin figures for a future
 On tick 13, and on 83 where the feed is delayed, `tick_option_computation`
 carries the venue's model as a gateway builds it: the venue's greeks and option
 price, the first of its model, mid and last volatilities that stands as the
-implied volatility, over a year of 252 trading days, and the underlying's price
-the chain parameters on the underlying state for the option's expiry. The
-present value of dividends, `pvDividend`, is not stated yet and comes back
-unset, and ticks 10, 11, 12 and the delayed 80, 81, 82 — the model against the
-bid, the ask and the last — are not delivered yet
-([#28](https://github.com/userFRM/ibkr-dx/issues/28)).
-[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html#numbered-ticks-this-client-does-not-deliver)
-says what else the tick does not carry.
+implied volatility, over a year of 252 trading days, the underlying's price the
+chain parameters on the underlying state for the option's expiry, and the
+present value of the dividends the option's life covers. Ticks 10, 11 and 12,
+and the delayed 80, 81 and 82, carry the model against the bid, the ask and the
+last, worked out the way a gateway works it: at the volatility the venue states
+for that side, with that side's price, and greeks from this client's own option
+model. They are worked from the underlying's price the chain parameters state,
+where a gateway takes the underlying's own quote when it holds one, so their
+underlying's price and greeks are not a gateway's.
+[Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html#option-computation-ticks)
+says what they do not carry.
 
 The venue states more on the model's record, and it is all here: **rho**,
 **fugit**, the exercise boundary, the forward coefficient, the model and bridge
@@ -1026,8 +1029,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,195 | No |
-| Python | 1,157 | No |
+| Rust, unit and integration | 3,198 | No |
+| Python | 1,158 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

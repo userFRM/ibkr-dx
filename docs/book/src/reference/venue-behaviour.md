@@ -189,11 +189,49 @@ it:
 - The underlying's price is the one the chain parameters on the underlying
   (687, asked for once per underlying on each connection) state for the
   option's trading class, multiplier and last trading day.
+- The present value of dividends is that of the payments the underlying's
+  schedule states over the option's life, discounted at the currency's rate
+  for the option's term.
 
 It is rebuilt at most once a second, on the clock's seconds, and a request is
 sent it when any figure differs from the last one that request was sent. What
 was stated stands through a reconnect until the venue states it again, so a
 tick owed when the connection drops is built from what was stated before it.
+
+The bid's, the ask's and the last's computations, 10, 11 and 12 (80, 81 and 82
+on a delayed feed), are a gateway's own and not the venue's. This client works
+them out the way a gateway does, with an option model of its own, from the
+inputs below; the underlying's price it works them from is not always the one a
+gateway takes, as [Limits](./limits.md) says.
+
+- The implied volatility is the one the venue states for the side — the bid's
+  and the ask's together (736), the last's on its own (737) — carried to a year
+  of 252 trading days. `tickAttrib` is 0 on every one of them, as a gateway
+  sends it: it sends each side with the attribute of the last of that side it
+  sent, which starts unset.
+- The option price is the side's price as the model takes it in, to single
+  precision: a bid of 4.74 is 4.739999771118164. A warrant's or a structured
+  product's is per contract.
+- The greeks are this client's option model's at that volatility, the model for
+  volatilities worked from prices where any the venue states for the option,
+  or its chain parameters, say so. They are worked from the underlying's price
+  the chain parameters state — the first set for the option's class at its
+  multiplier, or, where no set names the class, the only set or else the first
+  for its last trading day at its multiplier — the time to the option's
+  expiry, the currency's rate for its term and the dividends above. A side's
+  greeks are replaced only by four that can be worked out. The time runs to the
+  option's last trading day at the time of day its definition states (read as
+  a gateway reads it, so 2400 is the next day's midnight), or at the end of
+  that day's last liquid session, on the zone its sessions are stated on, and
+  the model reads the clock once a minute. The currency's rates are counted
+  from the day they were taken in.
+- They are rebuilt at most once every two seconds, for the options something
+  new was stated for. A side is put to every request watching the option when
+  its volatility moves, and all three again on every change to the option's
+  quote. Each figure a side does not state is the last one of that side the
+  request was sent, and a request is sent a side when that differs from the
+  last.
+
 What is not carried yet is on [Limits](./limits.md).
 
 What the protocol carries no request for is the inversion: an option price or a

@@ -307,6 +307,15 @@ pub struct ReferenceState {
     /// every option on it is priced against, and the option that needs it next
     /// is not the one whose question fetched it.
     dividend_schedules: Mutex<std::collections::HashMap<u32, crate::control::dividends::Schedule>>,
+    /// The rates the venue states for each currency, kept as the schedules
+    /// above are: each is asked for once and every option priced in the
+    /// currency reads it.
+    currency_rates: Mutex<std::collections::HashMap<String, Vec<(String, f64)>>>,
+    /// The sessions the venue states, by the key it joins them to a
+    /// definition on, and that key for each contract whose key is known: every
+    /// contract on one key has its sessions, which are kept once for the key,
+    /// as a gateway keeps them.
+    contract_schedules: Mutex<(HashMap<u32, String>, HashMap<String, crate::control::contracts::ContractSchedule>)>,
     /// What the venue states about the issuer, by its id for the contract and
     /// the series the statement arrived on.
     ///
@@ -397,6 +406,8 @@ impl ReferenceState {
             order_presets: Mutex::new(PresetState { sequence: 2, ..Default::default() }),
             under_con_ids: Mutex::new(std::collections::HashMap::new()),
             dividend_schedules: Mutex::new(std::collections::HashMap::new()),
+            currency_rates: Mutex::new(std::collections::HashMap::new()),
+            contract_schedules: Mutex::new((HashMap::new(), HashMap::new())),
             company_data: Mutex::new(Default::default()),
             spread_scans: Mutex::new(std::collections::HashMap::new()),
         }
@@ -1647,6 +1658,39 @@ impl ReferenceState {
         &self, con_id: u32, schedule: crate::control::dividends::Schedule,
     ) {
         self.dividend_schedules.lock().unwrap().insert(con_id, schedule);
+    }
+
+    /// The rates the venue states for a currency, where it has.
+    pub(crate) fn currency_rates(&self, currency: &str) -> Option<Vec<(String, f64)>> {
+        self.currency_rates.lock().unwrap().get(currency).cloned()
+    }
+
+    pub(crate) fn set_currency_rates(&self, currency: &str, rates: Vec<(String, f64)>) {
+        self.currency_rates.lock().unwrap().insert(currency.to_string(), rates);
+    }
+
+    /// What is read from a contract's sessions, where the venue has stated
+    /// them.
+    pub(crate) fn contract_schedule<R>(
+        &self, con_id: u32, read: impl FnOnce(&crate::control::contracts::ContractSchedule) -> R,
+    ) -> Option<R> {
+        let (keys, schedules) = &*self.contract_schedules.lock().unwrap();
+        keys.get(&con_id).and_then(|key| schedules.get(key)).map(read)
+    }
+
+    /// The key a contract's sessions are joined to it on, where it is known.
+    pub(crate) fn schedule_key(&self, con_id: u32) -> Option<String> {
+        self.contract_schedules.lock().unwrap().0.get(&con_id).cloned()
+    }
+
+    pub(crate) fn note_schedule_key(&self, con_id: u32, key: &str) {
+        self.contract_schedules.lock().unwrap().0.insert(con_id, key.to_string());
+    }
+
+    pub(crate) fn set_contract_schedule(
+        &self, key: &str, schedule: crate::control::contracts::ContractSchedule,
+    ) {
+        self.contract_schedules.lock().unwrap().1.insert(key.to_string(), schedule);
     }
 
     /// What the venue states about a contract's company or its terms on one

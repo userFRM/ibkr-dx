@@ -248,39 +248,66 @@ impl ClientCore {
         )
     }
 
-    /// The tick a model tick goes out under, and the requests it goes to.
+    /// The tick an option computation goes out under, and each request it
+    /// goes to with the figures that request is sent.
     ///
-    /// Decided per request, as a gateway decides it: a request watching the
-    /// option is sent the tick when any of its eight figures differs from the
-    /// last tick that request was sent, and at least one figure is stated. The
-    /// last is replaced whether or not it is sent, so a tick stating nothing
-    /// is what the next one is compared with. A request joining a contract
-    /// already modelled is sent the next tick, changed or not.
+    /// Decided per request, as a gateway decides it. The model's is sent when
+    /// any of its eight figures differs from the last model tick that request
+    /// was sent and at least one figure is stated; the last is replaced
+    /// whether or not it is sent, so a tick stating nothing is what the next
+    /// one is compared with. The bid's, the ask's and the last's take each
+    /// figure they do not state from the last one of their kind that request
+    /// was sent, and are sent, and kept as the last, when that differs from
+    /// it. A request joining a contract already modelled is sent the next
+    /// tick of each kind.
     pub fn option_tick_owed(
         &self, generation: u64, tick: &crate::bridge::OptionTick,
-    ) -> (i32, Vec<i64>) {
-        let tick_type = if self.feed_is_delayed(tick.instrument) {
-            DELAYED_MODEL_OPTION_COMPUTATION
-        } else {
-            MODEL_OPTION_COMPUTATION
+    ) -> (i32, Vec<(i64, [f64; 8])>) {
+        use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
+        let tick_type = match (tick.kind, self.feed_is_delayed(tick.instrument)) {
+            (Model, false) => MODEL_OPTION_COMPUTATION,
+            (Model, true) => DELAYED_MODEL_OPTION_COMPUTATION,
+            (Bid, false) => 10,
+            (Bid, true) => 80,
+            (Ask, false) => 11,
+            (Ask, true) => 81,
+            (Last, false) => 12,
+            (Last, true) => 82,
         };
         if generation != self.generation_held(tick.instrument) {
             return (tick_type, Vec::new());
         }
-        let stated = tick.figures.iter().any(|figure| *figure != f64::MAX);
         // Marked under the map a withdrawal clears, so a withdrawal lands
         // wholly before or wholly after: marked after it, a number reused on
         // the same option was never sent a tick it had not been sent.
         let own = self.ownership();
         let mut sent = self.option_ticks_sent.lock().unwrap();
-        let owed: Vec<i64> = own.holders.get(&tick.instrument).copied().into_iter()
+        let owed: Vec<(i64, [f64; 8])> = own.holders.get(&tick.instrument).copied().into_iter()
             .chain(own.following.get(&tick.instrument).into_iter().flatten().copied())
-            .filter(|req_id| sent.insert(*req_id, tick.figures) != Some(tick.figures) && stated)
+            .filter_map(|req_id| {
+                let key = (req_id, tick.kind);
+                if tick.kind == Model {
+                    let stated = tick.figures.iter().any(|figure| *figure != f64::MAX);
+                    return (sent.insert(key, tick.figures) != Some(tick.figures) && stated)
+                        .then_some((req_id, tick.figures));
+                }
+                let last = sent.get(&key).copied().unwrap_or([f64::MAX; 8]);
+                let mut figures = tick.figures;
+                for (figure, before) in figures.iter_mut().zip(last) {
+                    if *figure == f64::MAX {
+                        *figure = before;
+                    }
+                }
+                (figures != last).then(|| {
+                    sent.insert(key, figures);
+                    (req_id, figures)
+                })
+            })
             .collect();
         drop(sent);
         drop(own);
         // The model is one of the kinds an option's snapshot waits for.
-        for req_id in &owed {
+        for (req_id, _) in &owed {
             self.note_snapshot_tick(*req_id, tick_type);
         }
         (tick_type, owed)
@@ -1375,8 +1402,9 @@ pub struct ClientCore {
     pub mdt_sent: Mutex<HashMap<i64, i32>>,
     /// Requests already told the parameters of their market-data subscription.
     tick_req_params_sent: Mutex<HashSet<i64>>,
-    /// The last option model tick each request was sent, figure by figure.
-    option_ticks_sent: Mutex<HashMap<i64, [f64; 8]>>,
+    /// The last option computation of each kind each request was sent,
+    /// figure by figure.
+    option_ticks_sent: Mutex<HashMap<(i64, crate::bridge::OptionTickKind), [f64; 8]>>,
     /// The type sent with each instrument's subscription. Every watcher reads
     /// that feed, even when it asked for another type or takes over as holder.
     mdt_by_instrument: Mutex<HashMap<InstrumentId, i32>>,
@@ -1891,7 +1919,7 @@ impl ClientCore {
             for req_id in &watching {
                 self.mdt_sent.lock().unwrap().remove(req_id);
                 self.tick_req_params_sent.lock().unwrap().remove(req_id);
-                self.option_ticks_sent.lock().unwrap().remove(req_id);
+                self.option_ticks_sent.lock().unwrap().retain(|(sent_to, _), _| sent_to != req_id);
                 // The slot going back ends the request, and a number that
                 // outlives its request with its marks still standing is read as
                 // the request it was: reused for an ordinary stream it was
@@ -2263,7 +2291,7 @@ impl ClientCore {
             own.epoch.remove(&req_id);
             own.series.remove(&req_id);
             self.tick_req_params_sent.lock().unwrap().remove(&req_id);
-            self.option_ticks_sent.lock().unwrap().remove(&req_id);
+            self.option_ticks_sent.lock().unwrap().retain(|(sent_to, _), _| *sent_to != req_id);
             if let Some(instrument) = own.by_req.remove(&req_id) {
                 let mut nobody_left = true;
                 if let Some(watchers) = own.following.get_mut(&instrument) {
@@ -4032,9 +4060,9 @@ impl ClientCore {
     /// delayed feed for the last trade's time (88).
     ///
     /// A gateway also waits, on an option, for the bid's, the ask's and the
-    /// last's greeks (10 to 12, or 80 to 82), which it computes with an option
-    /// model of its own. This client computes none of them, so no snapshot
-    /// waits for them.
+    /// last's computations (10 to 12, or 80 to 82), which it works out with an
+    /// option model of its own. This client works them out only where the
+    /// option's inputs are in hand, and holds no snapshot for them.
     ///
     /// Waiting on the quiet instead, as this did, ends a snapshot on a pause
     /// rather than on an answer, and a contract the venue never says anything
@@ -5593,14 +5621,17 @@ impl ClientCore {
 
     /// A continuing bar's time as the caller asked bars to be dated, on the
     /// zone its history was stated on — or by its day alone where its bars are
-    /// a day long or longer, as the history's are.
-    pub fn bar_time_for_epoch(&self, req_id: i64, secs: i64) -> String {
+    /// a day long or longer, as the history's are: by the end of the session
+    /// it belongs to, the history's or, past it, the one the contract's own
+    /// sessions place it in.
+    pub fn bar_time_for_epoch(&self, req_id: i64, secs: i64, placed: Option<(u32, u32)>) -> String {
         let asks = self.historical_asks.lock().unwrap();
         let (format_date, zone, by_day) = asks
             .get(&req_id)
             .map_or((1, "", false), |ask| (ask.format_date, ask.zone.as_str(), ask.by_day));
-        let end = asks.get(&req_id).and_then(|ask| ask.daily_session)
-            .filter(|(start, end)| *start <= secs && secs < *end).map(|(_, end)| end);
+        let placed = placed.map(|(start, end)| (i64::from(start), i64::from(end)));
+        let end = asks.get(&req_id).and_then(|ask| ask.daily_session).into_iter().chain(placed)
+            .find(|(start, end)| *start <= secs && secs < *end).map(|(_, end)| end);
         crate::protocol::datetime::bar_epoch_as_asked(secs, end, format_date, zone, by_day)
     }
 

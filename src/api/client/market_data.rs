@@ -67,11 +67,11 @@ impl EClient {
     /// [`req_mkt_data_ex`](EClient::req_mkt_data_ex).
     ///
     /// Ticks 10, 11 and 12 (80, 81 and 82 delayed), the bid's, the ask's and
-    /// the last's greeks, are not produced, in snapshots or in streams: a
-    /// gateway computes them with an option model of its own, from the
-    /// venue's model parameters and the quote, and the venue does not state
-    /// them. A gateway's snapshot of an option also waits for them; this
-    /// client's does not.
+    /// the last's option computations, are not stated by the venue: a gateway
+    /// works them out with an option model of its own, and so does this
+    /// client, for an option on a share once its inputs are in hand. A
+    /// gateway's snapshot of an option also waits for them; this client's
+    /// does not.
     ///
     /// `generic_tick_list` goes out with the subscription, and what comes back
     /// reaches the caller on the callback the series belongs to. These are
