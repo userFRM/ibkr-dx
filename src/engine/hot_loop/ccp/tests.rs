@@ -8343,37 +8343,108 @@ fn a_holding_the_new_statement_never_names_is_closed() {
 /// happen while their own book went on stating that it had.
 #[test]
 fn a_refused_revision_travels_on_the_channel_a_refusal_travels_on() {
-    let mut ccp = CcpState::new();
-    let mut context = Context::new();
-    let shared = SharedState::new();
-    let instrument = context.register_instrument(756733);
-    context.insert_order(crate::types::Order::new(
-        42, instrument, Side::Buy,
-        100 * crate::types::QTY_SCALE, 150 * crate::types::PRICE_SCALE,
-        b'2', b'0', 0,
-    ));
-    assert!(context.update_order_status(42, crate::types::OrderStatus::Submitted, false));
-    let before = *context.order(42).expect("tracked");
-    context.pre_replace.insert((42, 1), (before, "42.0".to_string(), None));
-    let refused = exec_report_frame(&[
-        (11, "42.1"), (150, "8"), (39, "0"), (378, "102"),
-        (58, "the price is through the band"),
-    ]);
-    ccp.handle_exec_report(&refused, b"", &mut context, &shared, &None, "DU1");
+    use std::io::Read;
+    use crate::types::OrderStatus::{PreSubmitted, Submitted};
+    for (reply, code, stood) in [
+        (vec![(39, "0"), (378, "102")], 399, Submitted),
+        (vec![(39, "8"), (41, "42.0")], 201, Submitted),
+        // Held by the venue, as a bracket's stop is until its parent fills.
+        (vec![(39, "8"), (41, "42.0")], 201, PreSubmitted),
+    ] {
+        let (mut context, shared) = working_order_state();
+        let mut held = *context.order(42).unwrap();
+        held.status = stood;
+        context.insert_order(held);
+        let mut ccp = CcpState::new();
+        let mut accepted = exec_report_frame(&[
+            (11, "42.0"), (150, "0"), (39, "0"),
+            (6008, "756733"), (55, "SPY"), (167, "STK"), (40, "2"),
+            (38, "100"), (44, "100"), (59, "0"), (14, "0"), (151, "100"),
+        ]);
+        if stood == Submitted {
+            accepted.extend([(100, "ARCA".to_string()), (198, "ARCA:1".to_string())]);
+        }
+        ccp.handle_exec_report(&accepted, b"", &mut context, &shared, &None, "DU1");
+        shared.orders.drain_order_updates();
+        let core = crate::client_core::ClientCore::new();
+        let accepted = shared.orders.get_order_info(42).unwrap();
+        core.restate_order(Some(&shared), 42, accepted.contract.clone(), accepted.order.clone(), 0);
+        let mut attempt = accepted.order;
+        attempt.order_type = "REL".into();
+        attempt.lmt_price = 105.0;
+        attempt.total_quantity = 200.0;
+        attempt.tif = "GTC".into();
+        core.restate_order(Some(&shared), 42, accepted.contract, attempt, 0);
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+        let mut conn = Some(conn);
+        context.modify_ex(42, 105 * PRICE_SCALE, 200, false, b'P', b'1', 0);
+        crate::engine::hot_loop::order_builder::drain_and_send_orders(
+            &mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false,
+            &shared, false, &None, &mut 64,
+        );
+        let mut buf = [0; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"));
+        let mut refused = exec_report_frame(&[
+            (11, "42.1"), (150, "8"), (58, "Cannot change order type"),
+            (40, "2"), (38, "100"), (44, "100"), (14, "0"), (151, "100"),
+        ]);
+        refused.extend(reply.into_iter().map(|(tag, value)| (tag, value.to_string())));
+        ccp.handle_exec_report(&refused, b"", &mut context, &shared, &None, "DU1");
 
-    let refusals = shared.orders.drain_cancel_rejects();
-    assert_eq!(refusals.len(), 1, "one refusal reaches the surfaces: {refusals:?}");
-    assert_eq!(refusals[0].order_id, 42);
-    assert_eq!(refusals[0].reject_type, 2, "it is the revision the venue refused");
-    assert_eq!(
-        refusals[0].still_working, Some(crate::types::OrderStatus::Submitted),
-        "and the order stands as it was",
-    );
-    let said = shared.orders.drain_order_inactive();
-    assert!(
-        said.iter().any(|(id, _, why)| *id == 42 && why.contains("band")),
-        "the venue's own words still reach the caller: {said:?}",
-    );
+        let order = context.order(42).expect("the original remains working");
+        assert_eq!((order.price, order.qty, order.ord_type, order.tif),
+            (100 * PRICE_SCALE, 100 * QTY_SCALE, b'2', b'0'));
+        assert_eq!(order.status, stood);
+        assert_eq!(context.last_clord[&42], "42.0");
+        assert!(!shared.orders.number_finished(42));
+        assert!(shared.orders.drain_completed_orders().is_empty());
+        let open = shared.orders.drain_open_orders();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].0, 42);
+        assert_eq!((&*open[0].1.order.order_type, open[0].1.order.lmt_price,
+            open[0].1.order.total_quantity, &*open[0].1.order.tif), ("LMT", 100.0, 100.0, "DAY"));
+        let mut errors = Vec::new();
+        let mut refusals = Vec::new();
+        let mut restated = Vec::new();
+        for (_, record) in shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false }) {
+            match record {
+                crate::bridge::Record::OrderBook(entry @ crate::bridge::OrderBook::RevisionRefused(_)) => {
+                    if let crate::bridge::OrderBook::RevisionRefused(reject) = &entry { refusals.push(*reject); }
+                    core.keep_the_book(&shared, entry);
+                }
+                crate::bridge::Record::CancelReject(reject) => {
+                    assert_eq!(code, 399, "the venue's refusal needs no second generic error");
+                    core.retire_rejected(&reject);
+                    refusals.push(reject);
+                }
+                crate::bridge::Record::OrderInactive((id, error, reason, op)) => {
+                    assert_eq!(op, crate::types::model::OrderOp::Modify);
+                    if code == 201 {
+                        let held = core.tracked_order(42).unwrap();
+                        assert_eq!((&*held.order_type, held.lmt_price, held.total_quantity, &*held.tif),
+                            ("LMT", 100.0, 100.0, "DAY"), "restored before the error callback");
+                    }
+                    errors.push((id, error, reason));
+                }
+                crate::bridge::Record::OrderUpdate(update) => {
+                    assert_eq!(errors.len(), 1, "the order is restated after the error");
+                    restated.push((update.update.order_id, update.update.status,
+                        update.update.filled_qty, update.update.remaining_qty));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(refusals.len(), 1);
+        assert_eq!((refusals[0].order_id, refusals[0].reject_type), (42, 2));
+        assert!(refusals[0].answers_a_live_change);
+        assert_eq!(refusals[0].still_working, Some(stood));
+        assert_eq!(errors,
+            [(42, code, "Cannot change order type".to_string())]);
+        let expected: &[_] = if code == 201 { &[(42, stood, 0.0, 100.0)] } else { &[] };
+        assert_eq!(restated, expected);
+    }
 }
 
 /// A refusal that arrives while the order is uncertain still puts the terms

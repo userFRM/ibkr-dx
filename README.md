@@ -860,7 +860,7 @@ factor included. Offering the saved session (`EClientConfig::resume`, or
 ## Configuration
 
 The gateway's configuration file is replaced by settings on the client:
-announced build, time zone, execution-report scope, and others — 16 in total,
+announced build, time zone, execution-report scope, and others — 17 in total,
 readable at runtime. Fifteen gateway settings are not settings here, and each says
 why or names what stands in for it (no window geometry, no local listening socket,
 no JVM heap, and no message pacing: a gateway paces requests at the rate its logon
@@ -868,6 +868,25 @@ states (fifty a second where it states none) unless it is set to reject them
 instead, and nothing here does either).
 
 Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
+
+Order IDs survive restarts in `ibkr-dx/order-ids.json` under the user's data
+directory: `$XDG_DATA_HOME` (or `~/.local/share`) on Linux,
+`~/Library/Application Support` on macOS, and `%APPDATA%` on Windows.
+The file keeps a separate next ID for each account and API client ID (Rust
+uses client 0). `next_order_id()` saves a reservation under an exclusive lock
+before returning; a fresh session starts above that counter and venue replay.
+A storage failure warns once in the log and leaves trading available with the
+session's in-memory counter and replay floor.
+
+Set `order_id_file` through `EClientConfig.gateway`, Python
+`connect(settings={"order_id_file": "/path/order-ids.json"})`, or
+`ibkr_dx.configure(order_id_file="/path/order-ids.json")`; the environment name
+is `IBKR_DX_ORDER_ID_FILE`. An empty string disables persistence. To move it,
+stop every process using it, move the JSON file, and configure the same new
+path in each process. The `.lock` and `.tmp` files beside it are maintained by
+the client. See [order IDs](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html#order-ids-across-sessions)
+for the reservation scope.
+
 `registration_timeout_ms` has been removed: registration is held by the engine
 and no longer waits at the call.
 
@@ -980,14 +999,20 @@ those holdings determine their quantities. The advertised level remains 217;
 [attached orders](https://userfrm.github.io/ibkr-dx/reference/limits.html#attached-orders)
 for fields, refusals and the remaining venue evidence.
 
+Individually placed children with `parentId` / `parent_id` share the known
+parent's cancellation group, including children added to a bracket helper's
+family. A refused modification leaves the original working order and its last
+accepted terms intact. Hedge pricing instructions are retained on replacement.
+See [order behaviour](https://userfrm.github.io/ibkr-dx/reference/venue-behaviour.html#orders).
+
 ## Testing
 
 Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,257 | No |
-| Python | 1,158 | No |
+| Rust, unit and integration | 3,258 | No |
+| Python | 1,156 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

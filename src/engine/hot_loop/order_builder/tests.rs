@@ -3205,7 +3205,7 @@ fn a_delayed_activation_is_written_the_way_it_is_read() {
     let mut fields: Vec<(u32, String)> = Vec::new();
     push_order_attrs(
         &mut fields, &attrs, &crate::types::OrderKind::Limit { price: 100_0000_0000 },
-        Side::Buy, String::new(), None);
+        Side::Buy, String::new(), None, &SharedState::new());
     let stated = fields.iter().find(|(t, _)| *t == 168).map(|(_, v)| v.as_str());
     assert_eq!(stated, Some("20260311-09:30:00"), "sent on 168: {fields:?}");
 }
@@ -3241,7 +3241,7 @@ fn what_this_client_writes_about_an_order_it_reads_back() {
     let mut fields: Vec<(u32, String)> = Vec::new();
     super::push_order_attrs(
         &mut fields, &attrs, &crate::types::OrderKind::Limit { price: 100_0000_0000 },
-        Side::Buy, String::new(), None);
+        Side::Buy, String::new(), None, &SharedState::new());
     let on_the_wire: std::collections::HashMap<u32, String> = fields.into_iter().collect();
 
     let mut read = crate::types::model::Order::default();
@@ -3276,7 +3276,7 @@ fn a_block_order_states_the_character_the_protocol_defines() {
             &attrs,
             &crate::types::OrderKind::Market,
             Side::Buy,
-            String::new(), None);
+            String::new(), None, &SharedState::new());
         fields
     };
     let on = stated(true);
@@ -3310,7 +3310,7 @@ fn a_manual_order_states_the_character_the_protocol_defines() {
             &attrs,
             &crate::types::OrderKind::Market,
             Side::Buy,
-            String::new(), None);
+            String::new(), None, &SharedState::new());
         fields.iter().find(|(t, _)| *t == 1028).map(|(_, v)| v.clone())
     };
     assert_eq!(stated(1).as_deref(), Some("Y"), "entered by hand");
@@ -4012,7 +4012,7 @@ fn an_advisor_allocation_rides_the_order_and_its_replacement() {
     // sent as an empty one.
     let mut fields: Vec<(u32, String)> = Vec::new();
     push_order_attrs(
-        &mut fields, &allocation(""), &K::Limit { price: 100 * P }, Side::Buy, String::new(), None);
+        &mut fields, &allocation(""), &K::Limit { price: 100 * P }, Side::Buy, String::new(), None, &SharedState::new());
     assert!(
         !fields.iter().any(|(t, _)| *t == 6164),
         "a blank share is left off, not written blank: {fields:?}",
@@ -4524,7 +4524,7 @@ fn a_replaced_bracket_leg_keeps_its_group_and_its_parent() {
     let mut buf = vec![0u8; 65536];
     let n = peer.read(&mut buf).unwrap();
     let placed = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
-    assert!(placed.contains("|583=OCA_10|"), "the legs were placed in a group: {placed}");
+    assert!(placed.contains("|583=10|"), "the legs were placed in a group: {placed}");
 
     // The stop-loss is moved.
     context.pending_orders.push(crate::types::OrderRequest::Modify {
@@ -4539,7 +4539,7 @@ fn a_replaced_bracket_leg_keeps_its_group_and_its_parent() {
 
     assert!(replaced.contains("|35=G|"), "a replace went out: {replaced}");
     assert!(
-        replaced.contains("|583=OCA_10|"),
+        replaced.contains("|583=10|"),
         "the replacement restates the group the leg was placed in: {replaced}",
     );
     assert!(
@@ -5210,7 +5210,7 @@ mod as_a_gateway_sends_it {
         }
     }
 
-    /// Where the venue prices hedge children, a new limit order carrying a
+    /// Where the venue prices hedge children, a placed or replaced limit carrying a
     /// beta or pair hedge says it may be priced so, unless the caller said
     /// not to.
     #[test]
@@ -5218,16 +5218,23 @@ mod as_a_gateway_sends_it {
         let hedge = |hedge_type, dont| OrderAttrs {
             hedge_type, hedge_beta: 1.2, dont_use_auto_price_for_hedge: dont, ..Default::default()
         };
-        let limit = K::Limit { price: P };
-        assert_eq!(one(&placed(limit.clone(), hedge(4, false), &["HDGLMT"]), 8262).as_deref(), Some("1"));
-        assert_eq!(one(&placed(limit.clone(), hedge(3, false), &["HDGLMT"]), 8262).as_deref(), Some("1"));
-        assert_eq!(one(&placed(limit.clone(), hedge(4, true), &["HDGLMT"]), 8262), None);
-        assert_eq!(one(&placed(limit.clone(), hedge(4, false), &[]), 8262), None);
-        assert_eq!(one(&placed(limit, hedge(2, false), &["HDGLMT"]), 8262), None);
-        assert_eq!(one(&placed(K::Market, hedge(4, false), &["HDGLMT"]), 8262), None);
-        // An adaptive or algo order is a limit order too.
-        let adaptive = K::Adaptive { price: P, priority: crate::types::AdaptivePriority::Normal };
-        assert_eq!(one(&placed(adaptive, hedge(4, false), &["HDGLMT"]), 8262).as_deref(), Some("1"));
+        for (kind, attrs, features, expected) in [
+            (K::Limit { price: P }, hedge(4, false), vec!["HDGLMT"], Some("1")),
+            (K::Limit { price: P }, hedge(3, false), vec!["HDGLMT"], Some("1")),
+            (K::Limit { price: P }, hedge(4, true), vec!["HDGLMT"], None),
+            (K::Limit { price: P }, hedge(4, false), vec![], None),
+            (K::Limit { price: P }, hedge(2, false), vec!["HDGLMT"], None),
+            (K::Market, hedge(4, false), vec!["HDGLMT"], None),
+            (K::Adaptive { price: P, priority: crate::types::AdaptivePriority::Normal },
+                hedge(4, false), vec!["HDGLMT"], Some("1")),
+        ] {
+            let (placed, replaced) = placed_and_replaced(
+                (kind.clone(), attrs.clone()), (kind, attrs), &features,
+            );
+            for frame in [placed, replaced] {
+                assert_eq!(one(&frame, 8262).as_deref(), expected, "{frame}");
+            }
+        }
     }
 
     /// All-or-none is stated only on an order in no group and with no hedge,

@@ -717,6 +717,118 @@ fn a_kept_family_goes_out_in_order_and_a_kept_order_alone_stays_kept() {
     assert!(shared.orders.drain_order_inactive().is_empty());
 }
 
+/// Children placed separately cancel together and retain that link on a change.
+#[test]
+fn individually_placed_children_share_the_parents_group() {
+    for held in [false, true] {
+        let (mut hl, shared, tx, mut peer) = with_trading();
+        shared.orders.set_replay_done();
+        tx.send(placement(10, spy(), 0, !held)).unwrap();
+        let mut take_profit = placement(11, spy(), 10, !held);
+        let mut stop = placement(12, spy(), 10, true);
+        if let ControlCommand::Place(order) = &mut take_profit {
+            order.order.action = "SELL".into();
+            order.order.lmt_price = 110.0;
+        }
+        if let ControlCommand::Place(order) = &mut stop {
+            order.order.action = "SELL".into();
+            order.order.order_type = "STP".into();
+            order.order.aux_price = 90.0;
+            order.order.tif = "GTC".into();
+            if held {
+                order.order.adjusted_order_type = "STP".into();
+                order.order.trigger_price = 92.0;
+                order.order.adjusted_stop_price = 93.0;
+            }
+        }
+        tx.send(take_profit.clone()).unwrap();
+        tx.send(stop).unwrap();
+        hl.poll_once();
+        hl.poll_once();
+        let wire = on_the_wire(&mut peer);
+        for id in [10, 11, 12] {
+            let name = format!("|11={id}.0|");
+            let frame = wire.split("8=FIX").find(|frame| frame.contains(&name)).unwrap();
+            if id == 10 {
+                assert!(!frame.contains("|583="), "the parent stands alone: {frame}");
+            } else {
+                assert!(frame.contains("|6107=10.0|"), "{frame}");
+                assert!(frame.contains("|583=10|6209=ReduceOnFillNonBlock|"), "{frame}");
+            }
+        }
+        // And recorded as the wire states them, for a caller reading them back.
+        let recorded: Vec<_> = shared
+            .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+            .into_iter()
+            .filter_map(|(_, record)| match record {
+                crate::bridge::Record::OrderBook(crate::bridge::OrderBook::Taken(taken)) if taken.order_id != 10 => {
+                    Some((taken.order_id, taken.order.oca_group, taken.order.oca_type))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(recorded, [(11, "10".to_string(), 3), (12, "10".to_string(), 3)]);
+        let stop = wire.split("8=FIX").find(|frame| frame.contains("|11=12.0|")).unwrap();
+        for field in ["|40=3|", "|99=90|", "|59=1|"] {
+            assert!(stop.contains(field), "{stop}");
+        }
+        if held {
+            for field in ["|6257=1|", "|6258=92|", "|6259=93|"] {
+                assert!(stop.contains(field), "{stop}");
+            }
+        }
+        if let ControlCommand::Place(order) = &mut take_profit {
+            order.order.transmit = true;
+            order.order.lmt_price = 111.0;
+        }
+        tx.send(take_profit).unwrap();
+        hl.poll_once();
+        hl.poll_once();
+        let wire = on_the_wire(&mut peer);
+        assert!(wire.contains("|35=G|"), "{wire}");
+        assert!(wire.contains("|583=10|6209=ReduceOnFillNonBlock|"), "{wire}");
+        assert!(wire.contains("|6107=10.0|"), "{wire}");
+        assert!(shared.drain_refused().is_empty());
+    }
+    let (mut hl, shared, tx, mut peer) = with_trading();
+    shared.orders.set_replay_done();
+    tx.send(ControlCommand::Bracket(Box::new(crate::types::Bracket {
+        contract: spy(), parent_id: 10, side: crate::types::Side::Buy,
+        quantity: 1.0, entry: 100.0, take_profit: 110.0, stop_loss: 90.0,
+    }))).unwrap();
+    tx.send(placement(13, spy(), 10, true)).unwrap();
+    hl.poll_once();
+    hl.poll_once();
+    let wire = on_the_wire(&mut peer);
+    for id in [11, 12, 13] {
+        let name = format!("|11={id}.0|");
+        let frame = wire.split("8=FIX").find(|frame| frame.contains(&name)).unwrap();
+        assert!(frame.contains("|583=10|"), "every child shares the group: {frame}");
+        assert!(frame.contains("|6209=ReduceOnFillNonBlock|"), "{frame}");
+        assert!(frame.contains("|6107=10.0|"), "{frame}");
+    }
+
+    // A scale order's child keeps the group its scale order gives it.
+    let (mut hl, shared, tx, mut peer) = with_trading();
+    shared.orders.set_replay_done();
+    let mut parent = placement(10, spy(), 0, true);
+    if let ControlCommand::Place(order) = &mut parent {
+        order.order.scale_init_level_size = 100;
+    }
+    let mut child = placement(11, spy(), 10, true);
+    if let ControlCommand::Place(order) = &mut child {
+        order.order.action = "SELL".into();
+        order.order.scale_profit_offset = 1.0;
+    }
+    tx.send(parent).unwrap();
+    tx.send(child).unwrap();
+    hl.poll_once();
+    hl.poll_once();
+    let wire = on_the_wire(&mut peer);
+    let child = wire.split("8=FIX").find(|frame| frame.contains("|11=11.0|")).unwrap();
+    assert!(child.contains("|6107=10.0|") && !child.contains("|583=10|"), "{child}");
+}
+
 /// A placement kept for a later transmit remains unsent work until its
 /// withdrawal or the session's end, even though its contract is already known.
 #[test]

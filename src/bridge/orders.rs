@@ -9,6 +9,10 @@ use crate::types::*;
 use crate::types::model as api;
 use super::record::{FillRecord, Queue, Stamps, UpdateRecord};
 
+mod ids;
+#[cfg(feature = "python")]
+pub(crate) use ids::reserve_order_ids;
+
 /// How long a caller waits for the venue to finish naming the working orders.
 ///
 /// Read by the engine as well, which holds the question of what the account
@@ -75,6 +79,8 @@ pub enum ReplayWait {
 /// Fills, order status updates, cancel rejects, what-if responses, order
 /// cache, and inactive-order reasons.
 pub struct OrderState {
+    saved_ids: Mutex<Option<ids::SavedIds>>,
+    saved_before: AtomicU64,
     /// Each fill and the report it was booked off, where there is one.
     ///
     /// One pass can carry two prints of the same order. Looked up against the
@@ -236,6 +242,8 @@ impl OrderState {
     /// An empty one, stamping from the session's counter.
     pub(super) fn stamping(stamps: &Stamps) -> Self {
         Self {
+            saved_ids: Mutex::new(None),
+            saved_before: AtomicU64::new(0),
             fills: Queue::with_capacity(stamps, 64),
             orders_sent: Mutex::new(std::collections::HashSet::new()),
             reusable_order_ids: Mutex::new(std::collections::HashSet::new()),
@@ -881,14 +889,8 @@ impl OrderState {
         (Instant::now() >= deadline).then_some(false)
     }
 
-    /// The highest id the venue has named an order under, or zero where it has
-    /// named none.
-    ///
-    /// The venue refuses an id it is still working an order under, and one a
-    /// fill has spent; an id whose order was withdrawn is free again. Rather
-    /// than track which is which, this counts past every id the venue has
-    /// named — the venue names them at every connect, so nothing has to be
-    /// remembered between runs.
+    /// The highest id named by the venue or retained from a previous session.
+    /// The saved counter supplies the initial floor; replay can raise it.
     pub fn working_id_watermark(&self) -> u64 {
         self.working_id_watermark.load(Ordering::Acquire)
     }

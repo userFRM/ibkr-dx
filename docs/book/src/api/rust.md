@@ -10,6 +10,11 @@ The same `EClient` also carries [the calls that answer](#calls-that-answer) and
 
 `Contract` and `Order` are at `ibkr_dx::api::client::{Contract, Order}`.
 
+`EClientConfig.gateway.order_id_file` selects the durable order-id counter;
+`Some(String::new())` disables persistence. See
+[order IDs across sessions](../reference/venue-behaviour.md#order-ids-across-sessions)
+for its default location, reservations and moving the file.
+
 ## The full reference
 
 Build the full reference from the source:

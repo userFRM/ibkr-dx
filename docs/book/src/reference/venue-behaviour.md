@@ -183,6 +183,79 @@ on a gateway as here. How long either waits for the model is on
 
 # Orders
 
+## Order IDs across sessions
+
+The next order ID is retained per account and API client ID. Rust uses client
+0; Python uses the `client_id` / `clientId` stated at connect. The saved counter
+raises `next_valid_id` and the request-compatible `order_id_floor` at connect,
+and venue replay can raise them further. Orders absent from that replay still
+leave their saved counter behind.
+
+`next_order_id()` reserves under an exclusive file lock and writes the raised
+counter before returning. Bracket helpers reserve their consecutive IDs in one
+operation. A positive ID supplied to `place_order()` or `exercise_options()`
+raises the saved counter before the call returns. IDs the engine assigns
+itself, to attached children and to exercises stated without one, are counted
+in memory and saved with the session's next placement or reservation.
+
+As through a gateway, a new order under an ID at or below the counter saved
+before the session opened is refused with error 103, "Duplicate order id". An
+order the session holds under that ID is modified as usual. Previews are
+neither counted nor refused against the saved counter.
+
+`next_valid_id` states a floor; it does not reserve it. Programs sharing an
+account, client ID and file should use `next_order_id()` for each allocation
+rather than incrementing separate counters from that callback. The file does
+not coordinate different client IDs, separate files or different machines.
+
+The default file is `ibkr-dx/order-ids.json` under:
+
+| Platform | Data directory |
+| --- | --- |
+| Linux | `$XDG_DATA_HOME`, or `~/.local/share` when unset |
+| macOS | `~/Library/Application Support` |
+| Windows | `%APPDATA%` |
+
+Rust sets `EClientConfig.gateway.order_id_file = Some(path.into())`. Python sets
+`connect(settings={"order_id_file": path})` for one session, or
+`ibkr_dx.configure(order_id_file=path)` before connecting. Both read
+`IBKR_DX_ORDER_ID_FILE` when the session leaves it unstated. An empty string
+disables persistence; Rust `None` and Python `configure(order_id_file=None)`
+restore the environment/default selection.
+
+To move the counter, stop all processes using it, move the JSON file and set
+all of them to its new path. The client creates parent directories and keeps
+`.lock` and `.tmp` siblings for locking and replacement. Writes are synced
+before rename, and the containing directory is synced on Unix. A read, lock
+or write failure warns once in the session's log and leaves it allocating from
+memory and venue replay; a counter that could be read still floors the
+session. The file then provides no reservation guarantee for that session.
+Removing the file or disabling persistence also removes the floor for orders
+the venue no longer replays.
+
+## Attached cancellation groups
+
+A child placed with `parent_id` / `parentId` uses the known parent's decimal
+wire order number as its OCA group. The default is reduce-on-fill without
+block. This applies to separately transmitted children and to families
+released by the last child's transmit flag. The bracket helper uses the same
+group, so individually added children join it. The parent has no OCA group;
+scale-generated children retain their scale group. Replacement retains the
+original parent reference and group.
+
+## Refused modifications
+
+A rejection that names the original order reports error 201 under that order's
+ID and leaves its last accepted terms and prior state in the open-orders view.
+Fills and cancellation progress already received are retained. That refusal
+reports a rejected modification; it does not declare the original cancelled
+or inactive. After the error, the order is restated through `open_order` and
+`order_status` with those terms and that state, as a gateway restates it.
+
+Replacement carries `useAutoPriceForHedge` under the same order type, hedge,
+opt-out and `HDGLMT` feature conditions as placement. Changing `hedgeMaxSize`
+keeps the pricing instruction.
+
 ## What the account may trade
 
 The venue states at logon which security types this account may trade, and

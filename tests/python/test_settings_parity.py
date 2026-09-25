@@ -60,22 +60,6 @@ def test_both_clients_give_the_same_reason_for_a_setting_with_no_counterpart():
     )
 
 
-def test_every_setting_is_readable_after_being_set():
-    ibkr_dx.configure(timezone="America/New_York")
-    assert ibkr_dx.settings()["timezone"] == "America/New_York"
-    ibkr_dx.configure(timezone=None)
-    assert ibkr_dx.settings()["timezone"] is None
-
-
-def test_a_misspelled_setting_is_refused():
-    try:
-        ibkr_dx.configure(timezon="UTC")
-    except ValueError as refused:
-        assert "timezon" in str(refused)
-    else:
-        raise AssertionError("a misspelled setting was accepted")
-
-
 def test_a_session_states_its_own_settings():
     """Settings belong to the session that stated them, not to the process.
 

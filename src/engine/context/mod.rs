@@ -674,8 +674,13 @@ impl Context {
             // withdrawn after the replace went out came back to working —
             // past the guard, since this writes the book rather than asking
             // it — and the caller's withdrawal was undone while its verdict
-            // was still owed.
-            if current.status.rank() > prior.status.rank() {
+            // was still owed. Pending replacement is the attempt's own state,
+            // not something that has happened to the order: it outranks a
+            // held order's, and kept, the refusal left the order reading as
+            // a revision in flight.
+            if current.status != OrderStatus::PendingReplace
+                && current.status.rank() > prior.status.rank()
+            {
                 prior.status = current.status;
             }
         }

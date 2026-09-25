@@ -41,7 +41,7 @@ def connect(host, port=0, client_id=0, username="", password="", paper=True, cor
 |-----------|------|-------------|
 | `host` | `str` | Server hostname. |
 | `port` | `int` | Port number (unused — ibkr-dx connects directly). |
-| `client_id` | `int` | Client ID (unused — single-client engine). |
+| `client_id` | `int` | API client ID for order ownership and the saved order-id counter. |
 | `username` | `str` | Account username. |
 | `password` | `str` | Account password. |
 | `paper` | `bool` | If `true`, connect to paper trading. If `false`, connect blocks on the live second-factor approval window (see method note). |
@@ -919,7 +919,7 @@ def req_ids(num_ids=1)
 
 #### `next_order_id`
 
-Get the next order ID (local counter, auto-increments).
+Reserve the next order ID above the saved counter and venue replay. The account and API client's counter is written under an exclusive lock before returning. A storage failure warns once in the log and leaves allocation using session memory and venue replay.
 
 ```python
 def next_order_id()
@@ -2609,7 +2609,7 @@ Where an order stands now. Fires on every change, and again on each fill. `fille
 | `perm_id` | `int` | Permanent order ID assigned by the server. |
 | `parent_id` | `int` | Parent order ID (0 if no parent). |
 | `last_fill_price` | `float` | Price of the last fill. |
-| `client_id` | `int` | Client ID (unused — single-client engine). |
+| `client_id` | `int` | API client ID for order ownership and the saved order-id counter. |
 | `why_held` | `str` | Reason the order is held (e.g. `"locate"`). |
 | `mkt_cap_price` | `float` | Market cap price for the order. |
 

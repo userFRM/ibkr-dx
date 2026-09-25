@@ -618,8 +618,7 @@ impl EClient {
 
         *self.shared.lock().unwrap() = Some(shared.clone());
         *self.control_tx.lock().unwrap() = Some(control_tx);
-        // Counted from whatever the venue names as working, once it has;
-        // nothing is carried over from the last run.
+        // The session's saved counter and venue replay supply the floor.
         self.next_order_id.store(0, Ordering::Relaxed);
         *self._thread.lock().unwrap() = Some(Arc::new(crate::api::client::Joiner::new(handle)));
         self.session_ended.store(false, Ordering::Release);
@@ -1481,13 +1480,8 @@ impl EClient {
     /// rather than reserved, as the reference client states it: the caller
     /// places under it, and the taking happens then.
     ///
-    /// An id is spent for good once a fill has spent it — only a withdrawn one
-    /// comes free. The venue names the live orders at connect and replays the
-    /// executions behind the rest, and both raise the mark, so what this
-    /// answers is safe once that has arrived. Asked before it has, it answers
-    /// from a mark of nothing and names an id a fill spent long ago, which the
-    /// venue refuses as a duplicate. Seen on a session that connected and
-    /// asked in the same breath.
+    /// The saved counter raises the floor at connect, and the venue's replay
+    /// raises it again before the first callback is delivered.
     pub(crate) fn stated_order_id(&self) -> u64 {
         let floor = self.shared.lock().unwrap().as_ref()
             .map(|shared| shared.orders.working_id_watermark().saturating_add(1))
@@ -1503,64 +1497,35 @@ impl EClient {
         id
     }
 
+    /// Save the next id this session's numbers have reached, with the
+    /// interpreter free while the file is written.
+    pub(crate) fn save_order_ids(&self, py: Python<'_>, next: u64) {
+        if let Ok(shared) = self.shared_state() {
+            py.detach(|| shared.orders.save_order_ids(next));
+        }
+    }
+
     /// Hand out the next order id.
     ///
-    /// Floored at one past the highest id the venue has named an order under,
-    /// from any session. Nothing is kept between runs, because there is
-    /// nothing a run knows that the next one will not be told — but it is told
-    /// after connecting rather than during it, so an id asked for in the same
-    /// breath as the connection is floored at nothing. See `stated_order_id`.
+    /// Counted above the saved counter and venue replay. The account and API
+    /// client's counter is written under an exclusive lock before returning.
     pub(crate) fn take_order_id(&self, py: Python<'_>) -> u64 {
         self.wait_for_the_replay(py);
-        // Past the highest the venue has named, uncapped. Taken from the
-        // number this client *states* instead, which is clamped so a caller is
-        // never told an id the wire cannot carry, the clamp handed back the
-        // very id the venue is working when the account reaches that end —
-        // where the other surface refuses. The refusal below is what states
-        // there is none left.
-        let floor = self
-            .shared_state()
-            .map(|shared| shared.orders.working_id_watermark().saturating_add(1))
-            .unwrap_or(1);
-        let mut held = self.next_order_id.load(Ordering::Acquire);
-        loop {
-            let id = held.max(floor);
-            // Zero where the account has no id left the venue's reports can
-            // name back, which every placement path refuses: an id carries no
-            // reason with it, so the reason is logged and the number says
-            // there is none. Taken unchecked, the counter went past the end of
-            // the signed range and the ids behind it read as negative — which
-            // the paths that carry one unsigned turned into an order number
-            // above nine quintillion.
-            if id > crate::bridge::MAX_ORDER_ID {
-                let why = format!(
-                    "this account has no order id left: the ids in use reach {id}, and an \
-                     order above {} cannot be named back by the venue's own reports",
-                    crate::bridge::MAX_ORDER_ID,
-                );
-                log::error!("{why}");
-                // And on the channel a caller already watches. Told only in
-                // the log, a caller reads a zero and has nowhere to learn why.
-                if let Ok(shared) = self.shared_state() {
+        let shared = self.shared_state().ok();
+        let reserved = py.detach(|| match &shared {
+            Some(shared) => shared.orders.reserve_order_ids(&self.next_order_id, 1),
+            None => crate::bridge::reserve_order_ids(&self.next_order_id, 1, 1),
+        });
+        match reserved {
+            Ok(id) => id,
+            Err(why) => {
+                log::error!("{}", why.message);
+                if let Some(shared) = shared {
                     shared.reference.push_historical_error(
-                        crate::bridge::ReferenceState::NO_REQUEST,
-                        crate::error_codes::Refusal::VALIDATION,
-                        why,
+                        crate::bridge::ReferenceState::NO_REQUEST, why.code, why.message,
                     );
                 }
-                return 0;
-            }
-            match self.next_order_id.compare_exchange_weak(
-                held, id + 1, Ordering::AcqRel, Ordering::Acquire,
-            ) {
-                // Against what is handed out, not against the floor it was
-                // taken from: the counter can already be past the floor, and
-                // two callers racing here take ids either side of the line.
-                Ok(_) => {
-                    crate::bridge::say_if_past_a_request_id(id);
-                    return id;
-                }
-                Err(seen) => held = seen,
+                0
             }
         }
     }

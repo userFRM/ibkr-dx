@@ -235,6 +235,7 @@ impl EClient {
         let oid = order_id as u64;
         if order_id > 0 && oid < crate::bridge::MAX_ORDER_ID && !crate::api::client::a_question_of_ours(oid) {
             self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+            self.save_order_ids(py, self.next_order_id.load(Ordering::Acquire));
         }
         // The order as it goes, under its number and the client it goes out
         // under. Left at nought, the order read back could not be told from
@@ -327,6 +328,10 @@ impl EClient {
         } else {
             0
         };
+        // Spent, as a placement spends it.
+        if oid > 0 && oid < crate::bridge::MAX_ORDER_ID {
+            self.save_order_ids(py, oid + 1);
+        }
         // The engine registers the option and sends the instruction, and
         // refuses a stated number the venue is working an order under.
         let exercise = crate::types::Exercise {
@@ -483,7 +488,10 @@ impl EClient {
         Ok(())
     }
 
-    /// Get the next order ID (local counter, auto-increments).
+    /// Reserve the next order ID above the saved counter and venue replay.
+    /// The account and API client's counter is written under an exclusive
+    /// lock before returning. A storage failure warns once in the log and
+    /// leaves allocation using session memory and venue replay.
     fn next_order_id(&self, py: Python<'_>) -> i64 {
         self.take_order_id(py) as i64
     }
@@ -842,6 +850,26 @@ w = W()",
                 matches!(sent.as_slice(), [ControlCommand::Order(OrderRequest::GlobalCancel { instruments, .. })] if instruments == &[0]),
                 "the order the venue named is withdrawn: {sent:?}",
             );
+        });
+    }
+
+    /// The numbers a Python session hands out, and the ones its caller places
+    /// under, are there for the next session on the same file.
+    #[test]
+    fn a_python_session_saves_the_order_ids_it_spends() {
+        Python::initialize();
+        Python::attach(|py| {
+            let scratch = crate::api::client::tests::Scratch::new("python-order-ids");
+            let path = scratch.0.join("ids.json");
+            for (placed, expected) in [(Some(80), 1), (None, 81), (None, 82)] {
+                let (client, _rx, shared, _wrapper) = wired_client(py);
+                shared.orders.open_order_ids(Some(&path), "DU123");
+                shared.orders.set_replay_done();
+                assert_eq!(client.take_order_id(py), expected);
+                if let Some(id) = placed {
+                    client.place_order(py, id, &bracket_contract(), &bracket_order(true, 0)).unwrap();
+                }
+            }
         });
     }
 

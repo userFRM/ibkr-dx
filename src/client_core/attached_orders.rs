@@ -59,11 +59,7 @@ impl AttachedState {
             return Some(wire);
         }
         loop {
-            let wire = next_id
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| {
-                    (id <= crate::bridge::MAX_ORDER_ID).then_some(id + 1)
-                })
-                .ok()?;
+            let wire = shared.orders.number_in_memory(next_id).ok()?;
             if wire != 0 && !self.aliases.contains_key(&wire) {
                 self.place(wire, api);
                 return Some(wire);
@@ -351,11 +347,7 @@ impl AttachedState {
                 self.place_order_id(shared, api_id, next_id)
                     .ok_or_else(|| Refusal::validation("No venue order identifier is available"))?
             } else {
-                next_id
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| {
-                        (id <= crate::bridge::MAX_ORDER_ID).then_some(id + 1)
-                    })
-                    .map_err(|_| Refusal::validation("No venue order identifier is available"))?
+                shared.orders.number_in_memory(next_id)?
             };
             let kind = OrderKind::Attached {
                 ord_type: child.prices.wire_order_type(trail_as_t).into(),

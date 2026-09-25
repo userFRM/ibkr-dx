@@ -330,7 +330,7 @@ pub(crate) fn drain_and_send_orders(
                 let entry_str = format_price(entry_price);
                 let tp_price_str = format_price(take_profit);
                 let sl_price_str = format_price(stop_loss);
-                let oca_group = format!("OCA_{parent_id}");
+                let oca_group = parent_id.to_string();
                 // Contract identity tags on every leg. A symbol alone names an
                 // option or future family, which the venue answers as ambiguous
                 // or unknown. Built before the tracking below borrows the
@@ -957,6 +957,7 @@ pub(crate) fn drain_and_send_orders(
                         orig.side,
                         exec_inst_for(&spec.kind, trail_as_t),
                         parent_clord(context, &spec.attrs),
+                        shared,
                     );
                     // Stated once. The lean message already names these, and the
                     // gateway reads a repeated tag as a second statement of it.
@@ -1604,28 +1605,12 @@ fn send_order_ex(
     fields.push((15, currency_for(context, shared, instrument)));
 
     let parent = parent_clord(context, attrs);
-    if let Some(stated) = push_order_attrs(&mut fields, attrs, &kind, side, exec_inst, parent) {
+    if let Some(stated) = push_order_attrs(&mut fields, attrs, &kind, side, exec_inst, parent, shared) {
         for (tag, value) in fields.iter_mut() {
             if *tag == 40 {
                 *value = stated.to_string();
             }
         }
-    }
-    // A limit order carrying a beta or pair hedge, where the venue prices
-    // hedge children at the parent's trade: a gateway states that it may,
-    // unless the caller said not to. An adaptive or algo order is a limit
-    // order too. Stated on a new order only; what a gateway states on a
-    // replacement of one is not established here.
-    if matches!(
-        kind,
-        crate::types::OrderKind::Limit { .. }
-            | crate::types::OrderKind::Adaptive { .. }
-            | crate::types::OrderKind::Algo { .. }
-    ) && matches!(attrs.hedge_type, 3 | 4)
-        && !attrs.dont_use_auto_price_for_hedge
-        && shared.reference.enables("HDGLMT")
-    {
-        fields.push((8262, "1".to_string()));
     }
     // A ladder stated as a table, which a gateway states on a new order only
     // and after everything else: how many levels, then each level's price and
@@ -2055,8 +2040,24 @@ fn push_order_attrs(
     exec_inst: String,
     // The parent's full venue name, where the order has one.
     parent: Option<String>,
+    shared: &SharedState,
 ) -> Option<&'static str> {
     use crate::types::OrderKind as K;
+    // A limit order carrying a beta or pair hedge, where the venue prices
+    // hedge children at the parent's trade: a gateway states that it may,
+    // unless the caller said not to. An adaptive or algo order is a limit
+    // order too. A replacement restates the same pricing instruction.
+    if matches!(
+        kind,
+        crate::types::OrderKind::Limit { .. }
+            | crate::types::OrderKind::Adaptive { .. }
+            | crate::types::OrderKind::Algo { .. }
+    ) && matches!(attrs.hedge_type, 3 | 4)
+        && !attrs.dont_use_auto_price_for_hedge
+        && shared.reference.enables("HDGLMT")
+    {
+        fields.push((8262, "1".to_string()));
+    }
     // A midpoint peg stated in two parts is a type of its own, whose name
     // carries the peg, so the peg's own character is not stated beside it.
     let unset_is_nought = |v: f64| if v == f64::MAX { 0.0 } else { v };

@@ -70,7 +70,7 @@ order placed with the first way and replaced naming none is refused, and one
 replaced from the default to a way outside the four is not. A parent or a group named on an order that had none is taken, and the
 order goes on under the links it was placed with.
 
-Five things are not settled:
+Four things are not settled:
 
 - **The links on a replace.** A gateway's replace states neither the parent
   nor the group. This client's restates the ones the order was placed with,
@@ -92,15 +92,18 @@ Five things are not settled:
   new order and leaves the working one alone. This client keys an order's
   record and its revisions on the number, so a preview there would stand in
   for the working order; it is refused under 329 until the two are kept apart.
-- **A priced hedge child on a replace.** Where the venue prices hedge children
-  itself, a gateway states tag 8262 on a new limit order — an adaptive or algo
-  one included — carrying a beta or a pair hedge, and so does this client. On
-  a replacement a gateway states it in cases whose rule is not established
-  here, and this client states it on none.
 
 A modify of an order this session did not place — one the venue named at
 connect — is restated from the caller's own statement of it, links included:
 there is no placement here to restate them from.
+
+## Market-on-close acknowledgement
+
+The observed MOC placement received no order report until cancellation about
+31 seconds later, when a New report and then Cancelled arrived. The client
+cannot report venue acceptance before the venue states it. Whether a gateway
+receives an earlier report under the same account, order fields and session
+features remains unsettled; no acknowledgement timing change is claimed.
 
 ## A trailing stop limit by percentage
 

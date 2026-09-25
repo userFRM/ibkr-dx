@@ -217,6 +217,7 @@ impl EClient {
         // moments before. A preview's own number is not one of those.
         if order_id > 0 && oid < crate::bridge::MAX_ORDER_ID && !super::a_question_of_ours(oid) {
             self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+            self.shared.orders.save_order_ids(self.next_order_id.load(Ordering::Acquire));
         }
 
         // The record carries the number the order went out under. Cached from
@@ -293,6 +294,7 @@ impl EClient {
                 // without this it hands the same number out again while the venue
                 // works the exercise under it.
                 self.next_order_id.fetch_max(oid + 1, Ordering::AcqRel);
+                self.shared.orders.save_order_ids(self.next_order_id.load(Ordering::Acquire));
                 oid
             } else {
                 // Written down, as on `place_order` above.
@@ -452,24 +454,8 @@ impl EClient {
         stated
     }
 
-    /// One past the highest id the account is working an order under.
-    ///
-    /// The venue refuses an order that names an id it is still working, and
-    /// takes one whose order has been withdrawn or filled: an id is spent only
-    /// while its order is live. So what an id has to clear is the working set,
-    /// which the venue names unprompted at every connect — from every session,
-    /// not just this one — and not every id the account has ever used.
-    ///
-    /// Read on each reservation rather than settled once, so an order the
-    /// venue names later still raises the floor.
-    ///
-    /// The naming is waited for, as the other surface waits for it. The venue
-    /// names what it is working after the connect returns, and an id asked for
-    /// in the same breath was floored at nothing: a caller that connected and
-    /// asked at once was handed one, and the venue refused the order under it
-    /// as a duplicate of one it is still working. An account with nothing
-    /// working is named with nothing and the wait is over as soon as the venue
-    /// says so, so counting from one costs it nothing.
+    /// Wait for the venue's replay before reserving above it and the saved
+    /// counter. Later reports still raise the floor on each reservation.
     fn next_id_base(&self) -> u64 {
         if !self.shared.orders.wait_for_replay() && self.shared.orders.naming_began() {
             // No error travels with an id, so this is said where it can be
@@ -484,7 +470,12 @@ impl EClient {
         self.shared.orders.working_id_watermark().saturating_add(1)
     }
 
-    /// Get the next order ID (local counter).
+    /// Reserve the next order ID above the saved counter and venue replay.
+    ///
+    /// The counter is saved under the account and API client before this
+    /// returns. Sessions sharing the configured file reserve under an
+    /// exclusive lock. A storage failure warns once and leaves allocation
+    /// using session memory and venue replay.
     ///
     /// Zero where there is no id to give, which every placement path refuses.
     /// A number carries no reason with it, so the reason goes out on the
@@ -550,7 +541,8 @@ impl EClient {
     /// floor as it stands at the read: it rises as the venue names what the
     /// account is working, before the read that delivers those orders, and
     /// again after every reconnect. A caller allocating ids clears it at each
-    /// allocation. It is one where the venue has named nothing.
+    /// allocation. The saved counter also raises it at connect; it is one
+    /// where neither the saved counter nor the venue names a prior id.
     pub fn order_id_floor(&self) -> i64 {
         self.shared.orders.narrow_id_watermark() as i64 + 1
     }
@@ -569,34 +561,8 @@ impl EClient {
     /// negative id — which the paths that carry one unsigned turned into an
     /// order number above nine quintillion.
     fn reserve_order_ids(&self, n: u64) -> Result<i64, Refusal> {
-        let floor = self.next_id_base();
-        let mut held = self.next_order_id.load(Ordering::Acquire);
-        loop {
-            let first = held.max(floor);
-            let last = first
-                .checked_add(n - 1)
-                .filter(|last| *last <= crate::bridge::MAX_ORDER_ID)
-                .ok_or_else(|| Refusal::validation(format!(
-                    "this account has no run of {n} order ids left: the ids in use reach \
-                     {first}, and an order above {} cannot be named back by the venue's \
-                     own reports",
-                    crate::bridge::MAX_ORDER_ID,
-                )))?;
-            match self.next_order_id.compare_exchange_weak(
-                held, last + 1, Ordering::AcqRel, Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // Said where the ids are handed out rather than only where
-                    // one is stated, so a caller that never asks what the next
-                    // one is still hears it — and against the widest of the
-                    // run, because a bracket's children are the first plus one
-                    // and two, and the run can cross the line between them.
-                    crate::bridge::say_if_past_a_request_id(last);
-                    return Ok(first as i64);
-                }
-                Err(seen) => held = seen,
-            }
-        }
+        self.next_id_base();
+        self.shared.orders.reserve_order_ids(&self.next_order_id, n).map(|id| id as i64)
     }
 
     // ── Open Orders ──

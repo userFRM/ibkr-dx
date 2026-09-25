@@ -506,8 +506,16 @@ impl HotLoop {
         let op = if existing { OrderOp::Modify } else { OrderOp::Place };
         let order_id = if let Some(wire) = *wire_id { wire } else {
         let reusable = std::cell::Cell::new(false);
+        // Counted from the highest number used this session or saved before
+        // it, as a gateway counts the next id it states. A preview raises
+        // neither, and is judged by this session's numbers alone.
+        let highest = if p.order.what_if {
+            self.intake.attached.highest
+        } else {
+            self.intake.attached.highest.max(self.shared.orders.saved_before() as i64)
+        };
         if let Err(why) = attached_checks::check_ids(
-            api_id, &p.order, self.intake.attached.highest,
+            api_id, &p.order, highest,
             |id| self.shared.orders.wire_order_id(id).is_some_and(|wire| {
                 self.intake.keeps_a_placement(wire) || self.working(wire)
             }),
@@ -628,6 +636,24 @@ impl HotLoop {
                 )
             }
         };
+
+        // Attached exits share the parent's group, including children placed
+        // individually. A scale child retains the group its scale order gave it.
+        if !replacing && p.order.parent_id != 0 {
+            let parent_id = self.intake.attached.wire_order_id(p.order.parent_id)
+                .unwrap_or(p.order.parent_id as u64);
+            let scale_parent = self.intake.placed.get(&parent_id)
+                .map(|parent| crate::client_core::attached_children::is_scale_order(&parent.order))
+                .or_else(|| self.shared.orders.get_order_info(parent_id)
+                    .map(|parent| crate::client_core::attached_children::is_scale_order(&parent.order)));
+            if let Some(scale_parent) = scale_parent
+                && !(scale_parent && p.order.scale_profit_offset != f64::MAX
+                    && p.order.scale_profit_offset > 0.0)
+            {
+                p.order.oca_group = parent_id.to_string();
+                if p.order.oca_type == 0 { p.order.oca_type = 3; }
+            }
+        }
 
         let mut command = if replacing {
             if placed_on.is_some_and(|placed_on| placed_on != instrument) {
@@ -987,18 +1013,9 @@ impl HotLoop {
             if self.shared.orders.replay_settled().is_none() {
                 return Step::Waits;
             }
-            let floor = self.shared.orders.working_id_watermark().saturating_add(1);
-            match allocator.fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |held| {
-                    let id = held.max(floor);
-                    (id <= crate::bridge::MAX_ORDER_ID).then_some(id.saturating_add(1))
-                },
-            ) {
-                Ok(held) => {
-                    e.order_id = held.max(floor);
-                    crate::bridge::say_if_past_a_request_id(e.order_id);
+            match self.shared.orders.number_in_memory(allocator) {
+                Ok(id) => {
+                    e.order_id = id;
                     e.allocator = None;
                 }
                 Err(_) => {
@@ -1202,7 +1219,7 @@ impl HotLoop {
             crate::types::Side::Sell => ("SELL", "BUY"),
             crate::types::Side::ShortSell => ("SSHORT", "BUY"),
         };
-        let oca_group = format!("OCA_{parent_id}");
+        let oca_group = parent_id.to_string();
         // Each leg recorded as the wire states it: the entry lives a day and
         // stands alone; each exit is good till cancelled, in the group, and
         // reduces the other on a fill.

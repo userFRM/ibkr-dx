@@ -20,6 +20,11 @@ Settings given to `connect(settings=...)` belong to that session; those given to
 falls back to. They are read when a session opens, so set them before
 `connect()`.
 
+`order_id_file` selects the durable counter shared by sessions with the same
+account and API client ID; an empty path disables it. See
+[order IDs across sessions](../reference/venue-behaviour.md#order-ids-across-sessions)
+for its default location, reservations and moving the file.
+
 Logging is settled at import: a process has one logger and importing
 `ibkr_dx` installs it, reading `IBKR_DX_LOG_LEVEL` (with or without a log
 directory; one that is not a level is said in the log), `IBKR_DX_LOG_DIR` and

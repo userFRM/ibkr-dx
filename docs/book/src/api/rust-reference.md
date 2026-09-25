@@ -1064,7 +1064,7 @@ pub fn req_ids(&self)
 
 #### `next_order_id`
 
-Get the next order ID (local counter). Zero where there is no id to give, which every placement path refuses. A number carries no reason with it, so the reason goes out on the channel a caller already watches as well as to the log: told only in the log, a caller reads a zero and has nowhere to learn why.
+Reserve the next order ID above the saved counter and venue replay. The counter is saved under the account and API client before this returns. Sessions sharing the configured file reserve under an exclusive lock. A storage failure warns once and leaves allocation using session memory and venue replay. Zero where there is no id to give, which every placement path refuses. A number carries no reason with it, so the reason goes out on the channel a caller already watches as well as to the log: told only in the log, a caller reads a zero and has nowhere to learn why.
 
 ```rust
 pub fn next_order_id(&self) -> i64
@@ -1104,7 +1104,7 @@ pub fn next_shared_id_within( &self, timeout: Option<std::time::Duration>, ) -> 
 
 #### `order_id_floor`
 
-One past the highest id the venue has named an order under that a request can also carry, read without waiting. A gateway gives its client the next valid id only once it has read the account's orders, and raises it past every new order. This is that floor as it stands at the read: it rises as the venue names what the account is working, before the read that delivers those orders, and again after every reconnect. A caller allocating ids clears it at each allocation. It is one where the venue has named nothing.
+One past the highest id the venue has named an order under that a request can also carry, read without waiting. A gateway gives its client the next valid id only once it has read the account's orders, and raises it past every new order. This is that floor as it stands at the read: it rises as the venue names what the account is working, before the read that delivers those orders, and again after every reconnect. A caller allocating ids clears it at each allocation. The saved counter also raises it at connect; it is one where neither the saved counter nor the venue names a prior id.
 
 ```rust
 pub fn order_id_floor(&self) -> i64
@@ -2762,7 +2762,7 @@ Where an order stands now. Fires on every change, and again on each fill. `fille
 | `perm_id` | `i64` | Permanent order ID assigned by the server. |
 | `parent_id` | `i64` | Parent order ID (0 if no parent). |
 | `last_fill_price` | `f64` | Price of the last fill. |
-| `client_id` | `i64` | Client ID (unused — single-client engine). |
+| `client_id` | `i64` | API client ID for order ownership and the saved order-id counter. |
 | `why_held` | `&str` | Reason the order is held (e.g. `"locate"`). |
 | `mkt_cap_price` | `f64` | Market cap price for the order. |
 
@@ -3337,7 +3337,7 @@ The permanent id an order was given, paired with the id this client used.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `perm_id` | `i64` | Permanent order ID assigned by the server. |
-| `client_id` | `i64` | Client ID (unused — single-client engine). |
+| `client_id` | `i64` | API client ID for order ownership and the saved order-id counter. |
 | `order_id` | `i64` | Order identifier. Must be unique per session. |
 
 ---

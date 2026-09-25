@@ -435,6 +435,7 @@ impl HotLoop {
     ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = channel();
         let reconnect_auth = gateway.reconnect_auth(caller);
+        shared.orders.open_order_ids(shared.settings().order_id_file.as_deref(), &gateway.account_id);
         // Emitted like everything else, so a logon that arrives at a channel
         // nobody has read yet is counted rather than waited on: this runs on
         // the thread that carries the session.

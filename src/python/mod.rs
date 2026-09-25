@@ -39,6 +39,7 @@ pub(crate) fn settings_from(
             "hardware_id" => settings.hardware_id = Some(value),
             "mac_address" => settings.mac_address = Some(value),
             "lan_ip" => settings.lan_ip = Some(value),
+            "order_id_file" => settings.order_id_file = Some(value),
             "market_data_host" => settings.market_data_host = Some(value),
             "port" => settings.port = Some(value.parse().map_err(|_| format!("port: {value}"))?),
             // One logger per process, and importing this client installs it.

@@ -326,6 +326,9 @@ pub enum OrderBook {
     /// A revision the engine kept and then withdrew. It never reached the
     /// venue, so the record goes back to the terms the venue holds.
     RevisionForgotten(u64),
+    /// A revision the venue refused. Restore the order before delivering the
+    /// error that carries the venue's reason.
+    RevisionRefused(crate::types::CancelReject),
 }
 
 /// An answer the dispatcher composes from its own side of the session when it
@@ -1029,6 +1032,7 @@ fn call_owner(record: &Record) -> Option<Owner> {
         Record::MarketDataTaken(taken) => Some(Owner::Request(taken.req_id)),
         Record::MarketDataWithdrawn(req_id) => Some(Owner::Request(*req_id)),
         Record::OrderBook(OrderBook::Taken(taken)) => Some(Owner::Order(taken.order_id as i64)),
+        Record::OrderBook(OrderBook::RevisionRefused(reject)) => Some(Owner::Order(reject.order_id as i64)),
         Record::OrderBook(OrderBook::Forgotten(id) | OrderBook::RevisionForgotten(id)) => {
             Some(Owner::Order(*id as i64))
         }

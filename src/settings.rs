@@ -73,6 +73,10 @@ pub struct GatewaySettings {
     /// state nothing the reader understood, so every value fell to the
     /// default.
     pub log_queue: Option<usize>,
+    /// File retaining the next order id per account and API client. Unset uses
+    /// `ibkr-dx/order-ids.json` in the user's data directory. An empty path
+    /// disables persistence. Also read from `IBKR_DX_ORDER_ID_FILE`.
+    pub order_id_file: Option<String>,
 
     // ── What the gateway did with what it received ──
     /// Which executions arrive when a session opens: today's, or every one
@@ -133,6 +137,8 @@ pub const UNAVAILABLE: &[(&str, &str)] = &[
 /// another session's reconnects through the process environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSettings {
+    /// The durable order-id file, or `None` when persistence is disabled.
+    pub order_id_file: Option<std::path::PathBuf>,
     /// The zone the session announces at logon.
     pub timezone: String,
     /// The locale it announces itself for.
@@ -168,6 +174,24 @@ pub struct SessionSettings {
     pub island_for_nasdaq: bool,
     /// Whether this session recovers on its own when a connection goes away.
     pub reconnect_on_socket_err: bool,
+}
+
+fn order_id_file() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    #[cfg(target_os = "windows")]
+    let data = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let data = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support"));
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
+    // A relative directory would be a different one in each process.
+    let data = data.filter(|path| path.is_absolute());
+    if data.is_none() {
+        log::warn!("cannot locate the user data directory; order ids will use session memory and venue replay only");
+    }
+    data.map(|path| path.join("ibkr-dx/order-ids.json"))
 }
 
 impl Default for SessionSettings {
@@ -214,6 +238,11 @@ impl GatewaySettings {
             Some(value)
         }
         SessionSettings {
+            order_id_file: match self.order_id_file.clone()
+                .or_else(|| std::env::var("IBKR_DX_ORDER_ID_FILE").ok()) {
+                Some(path) => (!path.is_empty()).then(|| path.into()),
+                None => order_id_file(),
+            },
             timezone: stated(self.timezone.as_ref(), "IBKR_DX_TZ")
                 .unwrap_or_else(|| "UTC".to_string()),
             locale: stated(self.locale.as_ref(), "IBKR_DX_LOCALE")
@@ -428,6 +457,23 @@ mod tests {
             );
         }
         unsafe { std::env::remove_var("IBKR_DX_ISLAND_FOR_NASDAQ") };
+
+        for (stated, file) in [("ids.json", Some("ids.json")), ("", None)] {
+            unsafe { std::env::set_var("IBKR_DX_ORDER_ID_FILE", stated) };
+            assert_eq!(
+                GatewaySettings::default().resolve().order_id_file.as_deref(),
+                file.map(std::path::Path::new),
+                "{stated:?}, where an empty path keeps no file",
+            );
+        }
+        unsafe { std::env::remove_var("IBKR_DX_ORDER_ID_FILE") };
+        // A data directory that is not absolute names no default file.
+        #[cfg(not(target_os = "windows"))]
+        {
+            unsafe { std::env::remove_var("XDG_DATA_HOME") };
+            unsafe { std::env::set_var("HOME", "relative") };
+            assert_eq!(GatewaySettings::default().resolve().order_id_file, None);
+        }
     }
 
     /// A setting is one field on the wire, and a value that would end that
@@ -476,11 +522,13 @@ mod tests {
             log_level: Some("debug".into()),
             log_dir: Some("d".into()),
             log_queue: Some(4096),
+            order_id_file: Some("state/order-ids.json".into()),
             execution_reports: Some(ExecutionReportScope::Today),
             island_for_nasdaq: Some(false),
             reconnect_on_socket_err: Some(false),
         };
         let resolved = all.resolve();
+        assert_eq!(resolved.order_id_file.as_deref(), Some(std::path::Path::new("state/order-ids.json")));
         assert_eq!(resolved.timezone, "t");
         assert_eq!(resolved.locale, "l");
         assert_eq!(resolved.build, "b");
@@ -511,6 +559,7 @@ mod tests {
             mac_address: _, lan_ip: _,
             market_data_host: _, port: _,
             log_level: _, log_dir: _, log_queue: _,
+            order_id_file: _,
             execution_reports: _, island_for_nasdaq: _, reconnect_on_socket_err: _,
         } = all;
     }

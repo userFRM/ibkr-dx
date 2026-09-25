@@ -42,6 +42,7 @@ _SETTINGS: dict[str, tuple[str, str]] = {
     "log_level": ("IBKR_DX_LOG_LEVEL", "verbose logging"),
     "log_dir": ("IBKR_DX_LOG_DIR", "log directory"),
     "log_queue": ("IBKR_DX_LOG_QUEUE", "how many records logging buffers before dropping them"),
+    "order_id_file": ("IBKR_DX_ORDER_ID_FILE", "the saved next order id per account and API client; an empty path disables persistence"),
     "market_data_host": ("IBKR_DX_FARM_HOST", "the host every farm connection is opened on"),
     "port": ("IBKR_DX_MISC_PORT", "the port a farm connection opens on, where the routing names none"),
     "locale": ("IBKR_DX_LOCALE", "session locale"),

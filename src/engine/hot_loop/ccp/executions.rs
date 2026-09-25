@@ -285,6 +285,18 @@ fn revision_of(clord: &str) -> u32 {
     clord.rsplit_once('.').and_then(|(_, v)| v.parse().ok()).unwrap_or(0)
 }
 
+/// The parent an order states on 6107, read only in the shape this client
+/// writes one: a whole number with a fraction, naming another order. None is
+/// zero.
+fn parent_stated(parsed: &std::collections::HashMap<u32, String>, order_id: u64) -> i64 {
+    parsed
+        .get(&6107)
+        .and_then(|stated| stated.split_once('.'))
+        .and_then(|(whole, _)| whole.parse().ok())
+        .filter(|named: &i64| *named != 0 && *named as u64 != order_id)
+        .unwrap_or(0)
+}
+
 /// The venue's stated reason for a parked or rejected order: the tag 58 text
 /// with the tag 103 reason code. Either alone is ambiguous — the text is often
 /// generic and the code alone names no instrument — so both are reported when
@@ -1543,6 +1555,56 @@ impl CcpState {
             return;
         }
 
+        // A rejection naming an original order refuses its revision. The
+        // original remains working on the terms the venue last accepted.
+        if parsed.get(&150).map(String::as_str) == Some("8")
+            && parsed.get(&39).map(String::as_str) == Some("8")
+            && parsed.get(&41).is_some_and(|name| !name.is_empty())
+        {
+            let revision = parsed.get(&11).map(|name| revision_of(name)).unwrap_or(0);
+            let answers_a_live_change = context.pre_replace.contains_key(&(clord_id, revision));
+            context.restore_pre_replace(clord_id, revision);
+            shared.orders.note_the_venue_named(clord_id);
+            let order = context.order(clord_id).copied();
+            let reject = crate::types::CancelReject {
+                order_id: clord_id,
+                instrument: order.map_or(0, |order| order.instrument),
+                reject_type: 2,
+                reason_code: -1,
+                still_working: order.map(|order| order.status),
+                answers_a_live_change,
+                timestamp_ns: context.now_ns(),
+            };
+            shared.push_call_record(crate::bridge::Record::OrderBook(
+                crate::bridge::OrderBook::RevisionRefused(reject),
+            ));
+            shared.orders.push_order_inactive(
+                clord_id, api::OrderOp::Modify, ORDER_REJECTED_ERROR_CODE, stated_reason(parsed),
+            );
+            emit(event_tx, Event::CancelReject(reject));
+            // And the order as it stands again, after the error, as a gateway
+            // restates it: a caller that took the attempted terms ahead of the
+            // answer learns the ones that stand.
+            if let Some(order) = order {
+                let update = crate::types::OrderUpdate {
+                    order_id: clord_id,
+                    instrument: order.instrument,
+                    status: order.status,
+                    filled_qty: qty_to_f64(order.filled),
+                    remaining_qty: qty_to_f64((order.qty - order.filled).max(0)),
+                    avg_price: crate::types::price_from_f64(
+                        parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    ),
+                    perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
+                    parent_id: parent_stated(parsed, clord_id),
+                    timestamp_ns: context.now_ns(),
+                };
+                shared.orders.push_order_update(update);
+                emit(event_tx, Event::OrderUpdate(update));
+            }
+            return;
+        }
+
         // Recovery insert: a 35=8 with exec type New (150=0) for an order
         // that is NOT in this session's context is a cross-session recovery entry
         // pushed by CCP on session establishment. Insert into context.open_orders
@@ -2129,12 +2191,7 @@ impl CcpState {
                 // which read as a parent gives each of them a parent that does
                 // not exist. A parent that is missing is recoverable; one that
                 // is invented is not.
-                let parent_id: i64 = parsed
-                    .get(&6107)
-                    .and_then(|stated| stated.split_once('.'))
-                    .and_then(|(whole, _)| whole.parse().ok())
-                    .filter(|named: &i64| *named != 0 && *named as u64 != clord_id)
-                    .unwrap_or(0);
+                let parent_id = parent_stated(parsed, clord_id);
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,

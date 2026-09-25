@@ -3330,6 +3330,9 @@ impl ClientCore {
                 self.open_orders.lock().unwrap().remove(&order_id);
             }
             crate::bridge::OrderBook::RevisionForgotten(order_id) => self.undo_restatement(order_id),
+            crate::bridge::OrderBook::RevisionRefused(reject) => {
+                self.retire_rejected(&reject);
+            }
         }
     }
 

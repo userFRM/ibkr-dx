@@ -98,7 +98,7 @@ PARAM_DOCS: dict[str, str] = {
     "code_provider": "Callable `(factor, display_id, avth_url) -> str` returning the second-factor code. `factor` is `\"ibkey\"` (the code shown for `display_id`) or `\"authenticator\"` (the account's current code). Required for authenticator accounts, which have no push to fall back to; ignored for paper.",
     "host": "Server hostname.",
     "port": "Port number (unused — ibkr-dx connects directly).",
-    "client_id": "Client ID (unused — single-client engine).",
+    "client_id": "API client ID for order ownership and the saved order-id counter.",
     "username": "Account username.",
     "password": "Account password.",
     "paper": "If `true`, connect to paper trading. If `false`, connect blocks on the live second-factor approval window (see method note).",

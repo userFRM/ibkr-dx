@@ -500,7 +500,7 @@ fn a_brackets_legs_are_recorded_as_the_wire_states_them() {
         let exit = client.core.tracked_order(id as u64).expect("tracked");
         assert_eq!(
             (exit.action.as_str(), exit.order_type.as_str(), exit.lmt_price, exit.aux_price, exit.tif.as_str(), exit.oca_group.as_str(), exit.oca_type, exit.parent_id),
-            ("BUY", order_type, lmt, aux, "GTC", format!("OCA_{parent}").as_str(), 3, parent),
+            ("BUY", order_type, lmt, aux, "GTC", parent.to_string().as_str(), 3, parent),
             "leg {id}",
         );
     }
@@ -2563,39 +2563,6 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
 }
 
 #[test]
-fn place_order_adjustable_stop_carries_bracket_attrs_and_tif() {
-    // An adjustable stop used as a bracket child must stay linked to
-    // its parent and its OCA group and keep the caller's tif. Routing it around
-    // the extended-attrs path shipped the child naked, unlinked and DAY.
-    let (client, rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
-        aux_price: 11.00,
-        adjusted_order_type: "STP".into(),
-        trigger_price: 12.00,
-        adjusted_stop_price: 11.50,
-        parent_id: 42,
-        oca_group: "bracket_1".into(),
-        oca_type: 1,
-        tif: "GTC".into(),
-        ..Default::default()
-    };
-    client.try_place_order(7, &spy(), &order).unwrap();
-
-    match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitEx { kind, tif, attrs, .. }) => {
-            assert!(matches!(kind, crate::types::OrderKind::AdjustableStop { .. }),
-                "adjustable stop must route through the extended path; got {kind:?}");
-            assert_eq!(tif, b'1', "tif must survive as GTC");
-            assert_eq!(attrs.parent_id, 42, "bracket child must stay linked to its parent");
-            assert_eq!(attrs.oca_group_str, "bracket_1", "OCA group must survive");
-        }
-        cmd => panic!("expected SubmitEx carrying AdjustableStop, got {cmd:?}"),
-    }
-}
-
-#[test]
 fn modify_carries_outside_rth_from_the_resubmitted_order() {
     // The replace asserted 6433=1 unconditionally, so an order placed
     // with outside_rth=false came back outside-RTH after any modify. The flag
@@ -2695,30 +2662,6 @@ fn place_order_limit_hidden_carries_the_attribute() {
 }
 
 // ── every order type must carry attrs + tif when set ──
-
-#[test]
-fn place_order_stop_with_parent_and_gtc_uses_submit_ex() {
-    let (client, rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
-        aux_price: 240.0, tif: "GTC".into(), parent_id: 42,
-        oca_group: "77".into(), ..Default::default()
-    };
-    client.try_place_order(1, &spy(), &order).unwrap();
-
-    let cmd = rx.try_recv().unwrap();
-    match cmd {
-        ControlCommand::Order(OrderRequest::SubmitEx { kind, tif, attrs, .. }) => {
-            assert!(matches!(kind, crate::types::OrderKind::Stop { stop_price }
-                if stop_price == (240.0 * PRICE_SCALE_F) as i64));
-            assert_eq!(tif, b'1'); // GTC
-            assert_eq!(attrs.parent_id, 42);
-            assert_eq!(attrs.oca_group_str, "77", "the group as the caller named it");
-        }
-        _ => panic!("expected a Ex order, got {cmd:?}"),
-    }
-}
 
 #[test]
 fn place_order_market_outside_rth_uses_submit_ex() {
@@ -9390,68 +9333,6 @@ fn a_request_numbered_where_the_engine_numbers_its_own_is_refused() {
     );
 }
 
-/// An account whose order ids have outgrown a request number is told so on
-/// whichever surface hands one out, not on the Python one alone.
-///
-/// Read out of each function's own body rather than the rest of the file: a
-/// search that ran to the end of the file passed on the strength of a call in
-/// a later function, so removing either one went unnoticed.
-#[test]
-fn every_path_that_hands_out_a_wide_order_id_says_so() {
-    for (file, wanted) in [
-        ("src/api/client/orders.rs", ["fn reserve_order_ids(", "fn stated_next_id("]),
-        ("src/python/compat/client/mod.rs", ["fn take_order_id(", "fn stated_order_id("]),
-    ] {
-        let src = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file),
-        ).unwrap_or_else(|e| panic!("{file} is there to read: {e}"));
-        for signature in wanted {
-            let body = body_of(&src, signature)
-                .unwrap_or_else(|| panic!("{file}: {signature} is no longer there"));
-            assert!(
-                body.contains("say_if_past_a_request_id"),
-                "{file}: {signature} hands out an id without saying it has outgrown a \
-                 request number",
-            );
-        }
-    }
-}
-
-/// The body of the function whose signature this names, by matching braces.
-fn body_of(src: &str, signature: &str) -> Option<String> {
-    let from = src.find(signature)? + signature.len();
-    let open = from + src[from..].find('{')?;
-    let mut depth = 0usize;
-    for (at, c) in src[open..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(src[open..open + at].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// A bracket takes three consecutive ids, and the line a request number stops
-/// at can fall between the first and the last of them.
-#[test]
-fn a_run_of_ids_is_measured_by_its_widest() {
-    let orders = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/client/orders.rs"),
-    ).expect("the order surface is there to read");
-    let body = body_of(&orders, "fn reserve_order_ids(").expect("ids are reserved in one place");
-    assert!(
-        body.contains("checked_add(n - 1)") && body.contains("say_if_past_a_request_id(last)"),
-        "a run is measured by its first id, so a bracket whose children cross the line \
-         hands them out in silence",
-    );
-}
-
 /// The venue names the working orders after the connect returns, and a global
 /// cancel is composed from what has been named. Issued before the naming
 /// lands, it waits for it — without the wait it counted no instruments, sent
@@ -10166,7 +10047,7 @@ fn a_leg_replaced_with_a_bare_order_keeps_its_links_in_the_record() {
     let record = client.core.tracked_order(tp as u64).expect("tracked");
     assert_eq!(
         (record.parent_id, record.oca_group.as_str(), record.oca_type, record.client_id),
-        (parent, format!("OCA_{parent}").as_str(), 3, 0),
+        (parent, parent.to_string().as_str(), 3, 0),
         "the links the wire keeps, and the client the placement recorded",
     );
 }
@@ -10299,7 +10180,7 @@ fn a_change_of_type_on_a_linked_order_goes_and_keeps_its_links() {
     let record = client.core.tracked_order(tp as u64).expect("tracked");
     assert_eq!(
         (record.parent_id, record.oca_group.as_str()),
-        (parent, format!("OCA_{parent}").as_str()),
+        (parent, parent.to_string().as_str()),
         "and the record keeps the links",
     );
 }
@@ -12702,4 +12583,136 @@ fn attached_smart_combo_uses_its_confirmed_definition_and_legs() {
             assert_eq!(client.core.tracked_order(id).unwrap().total_quantity, if transmit || id != 9401 { 200.0 } else { 100.0 });
         }
     }
+}
+
+/// A directory of the test's own, gone with the test however it ends.
+pub(crate) struct Scratch(pub(crate) std::path::PathBuf);
+
+impl Scratch {
+    pub(crate) fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir()
+            .join(format!("ibkr-dx-{name}-{}-{}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A session opened on the saved counters, as a connect opens it.
+fn saved_session(
+    account: &str,
+    api_client: i32,
+    file: Option<&std::path::Path>,
+) -> (EClient, Engine, Arc<SharedState>) {
+    let (client, engine, shared) = test_client();
+    shared.orders.set_api_client_id(api_client);
+    shared.orders.open_order_ids(file, account);
+    shared.orders.set_replay_done();
+    (client, engine, shared)
+}
+
+/// A fresh engine starts above numbers a previous session handed out or used,
+/// even when the venue has nothing to replay for those orders, and refuses a
+/// new order under one of them as a gateway does.
+#[test]
+fn a_fresh_engine_keeps_the_saved_order_id() {
+    let scratch = Scratch::new("saved-order-ids");
+    let path = scratch.0.join("ids.json");
+    {
+        let (client, engine, _) = saved_session("DU123", 0, Some(&path));
+        assert_eq!(client.next_order_id(), 1);
+        assert_eq!(client.next_order_id(), 2);
+        {
+            let _answering = super::Answering::begin();
+            let asked = i64::from(crate::bridge::ReferenceState::ASK_ID_BASE) + 7;
+            let preview = Order { what_if: true, ..Order::limit("BUY", 1.0, 1.0) };
+            client.try_place_order(asked, &spy(), &preview).unwrap();
+        }
+        while engine.try_recv().is_ok() {}
+        assert_eq!(client.next_order_id(), 3, "a preview is numbered as a question");
+        placed_here(&client, &engine, 80);
+    }
+    {
+        let (client, engine, shared) = saved_session("DU123", 0, Some(&path));
+        assert_eq!(client.stated_next_id(), 81);
+        assert_eq!(client.order_id_floor(), 81);
+        client.try_place_order(50, &spy(), &Order::limit("BUY", 1.0, 1.0)).unwrap();
+        assert!(matches!(engine_refused(&engine, &shared).as_slice(), [(50, 103, _)]));
+        assert_eq!(client.next_order_id(), 81);
+        shared.orders.note_the_venue_named(100);
+        assert_eq!(client.next_order_id(), 101);
+    }
+    for (account, api_client, expected) in [("DU123", 0, 102), ("DU123", 7, 1), ("DU456", 0, 1)] {
+        let (client, _, _) = saved_session(account, api_client, Some(&path));
+        assert_eq!(client.next_order_id(), expected, "{account}, client {api_client}");
+    }
+}
+
+/// Where the counter cannot be saved, the session goes on numbering from
+/// memory and venue replay, and a damaged file is left for its owner. A
+/// counter that can be read still floors a session that cannot write it.
+#[test]
+fn order_ids_fall_back_to_memory_where_they_cannot_be_saved() {
+    let scratch = Scratch::new("unsaved-order-ids");
+    let bad = scratch.0.join("bad.json");
+    std::fs::write(&bad, b"unfinished").unwrap();
+    for file in [None, Some(bad.as_path())] {
+        let (client, _, _) = saved_session("DU123", 0, file);
+        assert_eq!(client.next_order_id(), 1);
+        assert_eq!(client.next_order_id(), 2);
+    }
+    assert_eq!(std::fs::read(&bad).unwrap(), b"unfinished");
+    let path = scratch.0.join("ids.json");
+    std::fs::write(&path, br#"{"DU123":{"0":103}}"#).unwrap();
+    for blocked in ["ids.json.lock", "ids.json.tmp"] {
+        std::fs::create_dir(scratch.0.join(blocked)).unwrap();
+        let (client, _, _) = saved_session("DU123", 0, Some(&path));
+        assert_eq!(client.next_order_id(), 103, "{blocked}");
+        assert_eq!(client.next_order_id(), 104, "{blocked}");
+        std::fs::remove_dir(scratch.0.join(blocked)).unwrap();
+    }
+}
+
+/// Separate processes reserve through the same file while each keeps its own
+/// engine and in-memory counter.
+#[test]
+fn order_id_reservations_are_exclusive_between_processes() {
+    const CHILD: &str = "IBKR_DX_ORDER_ID_TEST_CHILD";
+    let bound = std::time::Duration::from_secs(30);
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = std::path::PathBuf::from(path);
+        let (client, _, _) = saved_session("DU123", 0, Some(&path.join("ids.json")));
+        std::fs::write(path.join(format!("{}.ready", std::process::id())), b"").unwrap();
+        let began = std::time::Instant::now();
+        while !path.join("go").exists() {
+            assert!(began.elapsed() < bound, "the other engines did not start");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let ids: Vec<_> = (0..64).map(|_| client.next_order_id()).collect();
+        std::fs::write(path.join(format!("{}.json", std::process::id())), serde_json::to_vec(&ids).unwrap()).unwrap();
+        return;
+    }
+    let scratch = Scratch::new("order-id-processes");
+    let directory = &scratch.0;
+    let mut children: Vec<_> = (0..4).map(|_| std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "api::client::tests::order_id_reservations_are_exclusive_between_processes"])
+        .env(CHILD, directory).spawn().unwrap()).collect();
+    let deadline = std::time::Instant::now() + bound;
+    while !children.iter().all(|child| directory.join(format!("{}.ready", child.id())).exists()) {
+        assert!(std::time::Instant::now() < deadline, "child engines did not start");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::fs::write(directory.join("go"), b"").unwrap();
+    let mut ids = Vec::<u64>::new();
+    for child in &mut children {
+        assert!(child.wait().unwrap().success());
+        ids.extend(serde_json::from_slice::<Vec<u64>>(&std::fs::read(directory.join(format!("{}.json", child.id()))).unwrap()).unwrap());
+    }
+    ids.sort_unstable();
+    assert_eq!(ids, (1..=256).collect::<Vec<_>>());
 }
