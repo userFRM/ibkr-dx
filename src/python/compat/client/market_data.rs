@@ -451,11 +451,12 @@ impl EClient {
 
     /// What the venue's own model last made of an option, whole.
     ///
-    /// `tickOptionComputation` carries eight figures, which is what the
-    /// documented callback has room for; the venue states eighteen on the same
-    /// tick. The ten it has no room for are in this dict beside them. A figure
-    /// the venue did not state is this API's own unset double; zero is a real
-    /// greek.
+    /// `tickOptionComputation` carries its greeks and its price, beside the
+    /// volatility and the underlying's price a gateway takes from the venue's
+    /// other series. The venue states eighteen figures on this record, and
+    /// every one is in this dict, its own volatility and underlying price among
+    /// them. A figure the venue did not state is this API's own unset double;
+    /// zero is a real greek.
     ///
     /// `None` where the request names no subscription, or the venue has not
     /// stated a model for it yet.

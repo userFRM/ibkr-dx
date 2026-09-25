@@ -1459,7 +1459,7 @@ pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote>
 
 #### `option_model`
 
-What the venue's own model last made of an option, whole. `Wrapper::tick_option_computation` carries eight figures, which is what the documented callback has room for; the venue states eighteen on the same tick. The ten it has no room for — the rate greek, the expected time to exercise and the price that triggers it, the forward coefficient, two yields, the time value, the days the model counted, the rate it discounted at, and which kind of volatility it priced on — were decoded and dropped. They are on the record this returns. A figure the venue did not state is `f64::MAX`, as everywhere else on this record; zero is a real greek. `None` where the request names no subscription, or the venue has not stated a model for it yet.
+What the venue's own model last made of an option, whole. `Wrapper::tick_option_computation` carries its greeks and its price, beside the volatility and the underlying's price a gateway takes from the venue's other series. The venue states eighteen figures on this record, and the ones the callback has no room for — its own volatility and underlying price, the rate greek, the expected time to exercise and the price that triggers it, the forward coefficient, two yields, the time value, the days the model counted, the rate it discounted at, and which kind of volatility it priced on — are on the record this returns. A figure the venue did not state is `f64::MAX`, as everywhere else on this record; zero is a real greek. `None` where the request names no subscription, or the venue has not stated a model for it yet.
 
 ```rust
 pub fn option_model(&self, req_id: i64) -> Option<crate::types::OptionComputation>

@@ -171,8 +171,25 @@ call does.
 ## Implied volatility and option price
 
 The venue computes its option model and publishes it per option, on a
-subscription of its own. Volatility and greeks read off a quote are the venue's
-own numbers.
+subscription of its own, beside the volatilities it states the model from. The
+model tick, 13 or 83 on a delayed feed, is built from those as a gateway builds
+it:
+
+- The greeks and the option price are the venue's model's. The price of a
+  warrant or a structured product (`WAR`, `IOPT`) is multiplied by its
+  multiplier.
+- The implied volatility is the first of the venue's model, mid and last
+  volatilities that stands, carried from a trading day to a year of 252.
+- `tickAttrib` is 1 where the mid's volatility was worked from prices.
+- The underlying's price is the one the chain parameters on the underlying
+  (687, asked for once per underlying on each connection) state for the
+  option's trading class, multiplier and last trading day.
+
+It is rebuilt at most once a second, on the clock's seconds, and a request is
+sent it when any figure differs from the last one that request was sent. What
+was stated stands through a reconnect until the venue states it again, so a
+tick owed when the connection drops is built from what was stated before it.
+What is not carried yet is on [Limits](./limits.md).
 
 What the protocol carries no request for is the inversion: an option price or a
 volatility the caller supplies, for the venue to work back from. A gateway

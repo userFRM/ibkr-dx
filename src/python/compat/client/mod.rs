@@ -2382,26 +2382,34 @@ assert w.calls == [('tickReqParams', 7)], w.calls
                     (1.25, [Some(1.25); 8]),
                 ];
                 for (value, expected) in cases {
-                    shared.market.push_option_computation(OptionComputation {
-                        answers, implied_vol: value, delta: value,
-                        opt_price: value, pv_dividend: value, gamma: value,
-                        vega: value, theta: value, und_price: value,
-                        ..OptionComputation::solved(7)
-                    });
+                    match answers {
+                        Some(_) => shared.market.push_option_computation(OptionComputation {
+                            answers, implied_vol: value, delta: value,
+                            opt_price: value, pv_dividend: value, gamma: value,
+                            vega: value, theta: value, und_price: value,
+                            ..OptionComputation::solved(7)
+                        }),
+                        None => shared.market.push_option_tick(crate::bridge::OptionTick {
+                            instrument: 0, figures: [value; 8], price_based: false,
+                        }),
+                    }
                     client.get().dispatch_once(py, &shared).unwrap();
                     let g = pyo3::types::PyDict::new(py);
                     g.set_item("w", &w).unwrap();
                     g.set_item("expected", expected.to_vec()).unwrap();
                     g.set_item("tick_type", if answers.is_some() { 53 } else { 13 }).unwrap();
+                    // A model tick stating nothing is not sent at all.
+                    g.set_item("calls", usize::from(answers.is_some() || value != f64::MAX)).unwrap();
                     py.run(c"
-assert len(w.calls) == 1, w.calls
-call = w.calls.pop()
-assert call[:4] == ('tickOptionComputation', 7, tick_type, 0), call
-for value, expected_value in zip(call[4:], expected):
-    if expected_value is None:
-        assert value is None, call
-    else:
-        assert value == expected_value, call
+assert len(w.calls) == calls, w.calls
+if calls:
+    call = w.calls.pop()
+    assert call[:4] == ('tickOptionComputation', 7, tick_type, 0), call
+    for value, expected_value in zip(call[4:], expected):
+        if expected_value is None:
+            assert value is None, call
+        else:
+            assert value == expected_value, call
 ", Some(&g), None).unwrap();
                 }
             }
@@ -2431,8 +2439,9 @@ for value, expected_value in zip(call[4:], expected):
                     instrument: slot, timestamp: 0, provider_code: "BRFG".into(),
                     article_id: "BRFG$1".into(), headline: "SPY headline".into(),
                 });
-                shared.market.push_option_computation(OptionComputation {
-                    instrument: slot, ..Default::default()
+                shared.market.push_option_tick(crate::bridge::OptionTick {
+                    instrument: slot, figures: [0.2, 0.55, 5.0, f64::MAX, 0.02, 0.3, -0.1, 765.0],
+                    price_based: true,
                 });
             };
             let g = pyo3::types::PyDict::new(py);
@@ -2441,7 +2450,8 @@ for value, expected_value in zip(call[4:], expected):
             client.get().dispatch_once(py, &shared).unwrap();
             py.run(c"
 assert [c[1] for c in w.calls if c[0] in ('tickNews', 'tick_news')] == [1, 2]
-assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick_option_computation')] == [(1, 13), (2, 13)]
+models = [c[1:] for c in w.calls if c[0] in ('tickOptionComputation', 'tick_option_computation')]
+assert models == [(i, 13, 1, 0.2, 0.55, 5.0, None, 0.02, 0.3, -0.1, 765.0) for i in (1, 2)], models
 w.calls.clear()
 ", Some(&g), None).unwrap();
 

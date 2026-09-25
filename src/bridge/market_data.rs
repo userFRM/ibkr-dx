@@ -38,6 +38,21 @@ pub struct TickReqParams {
     pub snapshot_permissions: i64,
 }
 
+/// What a gateway's option model publishes for an option on its own tick, 13
+/// (83 on a delayed feed).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OptionTick {
+    /// The option.
+    pub instrument: InstrumentId,
+    /// The implied volatility, delta, option price, dividend present value,
+    /// gamma, vega, theta and underlying price, in the callback's order, with
+    /// `f64::MAX` for a figure not stated.
+    pub figures: [f64; 8],
+    /// Whether the volatility behind it was worked from prices, which is what
+    /// `tickAttrib` says.
+    pub price_based: bool,
+}
+
 pub(crate) const PRICING_BID: u8 = 1;
 pub(crate) const PRICING_ASK: u8 = 2;
 pub(crate) const PRICING_LAST: u8 = 4;
@@ -185,8 +200,10 @@ pub struct MarketDataState {
     /// Each headline with the occupancy of its slot when it arrived.
     pub(super) tick_news: Queue<(u64, TickNews)>,
     pub(super) news_bulletins: Queue<NewsBulletin>,
-    /// Each computation with the occupancy of its slot when it was pushed.
-    pub(super) option_computations: Queue<(u64, crate::types::OptionComputation)>,
+    /// Each answer to a calculation asked of this client.
+    pub(super) option_computations: Queue<crate::types::OptionComputation>,
+    /// Each model tick with the occupancy of its slot when it was pushed.
+    pub(super) option_ticks: Queue<(u64, OptionTick)>,
     /// Calculations asked for before the venue had stated a model for their
     /// contract, by the number they were asked under: solved by the engine
     /// where it writes the model, and answered right after it.
@@ -328,6 +345,7 @@ impl MarketDataState {
             tick_news: Queue::with_capacity(stamps, 32),
             news_bulletins: Queue::with_capacity(stamps, 16),
             option_computations: Queue::with_capacity(stamps, 16),
+            option_ticks: Queue::with_capacity(stamps, 16),
             last_option_model: Mutex::new(std::collections::HashMap::new()),
             kept_calculations: Mutex::new(std::collections::HashMap::new()),
             calculations_waiting: std::sync::atomic::AtomicUsize::new(0),
@@ -435,15 +453,10 @@ impl MarketDataState {
         // lookup and still on its way to the caller.
         //
         // An account-wide notice is not among these. It names no contract, so
-        // no slot can carry it to the wrong one.
+        // no slot can carry it to the wrong one. Nor is an answer to a
+        // calculation, which belongs to the question that asked it.
         self.tick_news.retain(|(_, n)| n.instrument != instrument);
-        // An answer worked out here is not one of these. It belongs to the
-        // question that asked it and names no contract at all, so it is filed
-        // under slot zero — which is a real slot, and dropping that one took
-        // every answer waiting on it. The same rule the cache beside this
-        // queue already keeps.
-        self.option_computations
-            .retain(|(_, c)| c.answers.is_some() || c.instrument != instrument);
+        self.option_ticks.retain(|(_, t)| t.instrument != instrument);
     }
 
     /// The slots given back since this was last asked.
@@ -558,7 +571,7 @@ impl MarketDataState {
 
     /// Take every option computations waiting, leaving none.
     pub fn drain_option_computations(&self) -> Vec<crate::types::OptionComputation> {
-        self.option_computations.drain().into_iter().map(|(_, c)| c).collect()
+        self.option_computations.drain()
     }
 
     /// Everything the venue has sent this session that nothing reads.
@@ -1452,15 +1465,21 @@ impl MarketDataState {
         // venue's. It also says nothing about which model the venue used, so
         // the refusal that guards the one this client cannot solve with reads
         // as though there were nothing to guard.
+        //
+        // And only an answer is delivered as it stands. What a watcher of the
+        // contract is sent is the model tick built from this and the venue's
+        // volatilities, pushed on its own.
         if comp.answers.is_none() {
             self.last_option_model.lock().unwrap().insert(comp.instrument, comp);
+            return;
         }
-        // An answer worked out here names no slot; the venue's own statement
-        // carries the occupancy of the slot it is about.
-        let generation = if comp.answers.is_none() { self.generation_of(comp.instrument) } else { 0 };
-        self.option_computations.push_bounded(
-            (generation, comp), STREAM_BACKLOG_LIMIT, "option_computations",
-        );
+        self.option_computations.push_bounded(comp, STREAM_BACKLOG_LIMIT, "option_computations");
+    }
+
+    /// A model tick for whoever watches its option.
+    #[doc(hidden)] pub fn push_option_tick(&self, tick: OptionTick) {
+        let generation = self.generation_of(tick.instrument);
+        self.option_ticks.push_bounded((generation, tick), STREAM_BACKLOG_LIMIT, "option_ticks");
     }
 
     #[doc(hidden)] pub fn push_companion_refusal(

@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 mod attached_quotes;
+mod option_ticks;
 
 use crate::bridge::{Event, SharedState};
 use crate::protocol::datetime::chrono_free_timestamp;
@@ -849,8 +850,10 @@ fn deliver_series(
 /// | 657 | Two figures of four weeks' trading volume |
 /// | 658 | The volume of an average minute |
 /// | 680 | The venue's own weighted volume figure |
-/// | 689, 736 | The volatility either side of the close, and the model behind it |
-/// | 688, 694, 734, 735, 737 | Five more volatilities taken at or around the close |
+/// | 689 | The volatility either side of the close, and the model behind it |
+/// | 688, 694 | Two more volatilities taken at the close |
+/// | 734, 735, 737 | The volatility the venue's option model settles on, and the ones it states at the mid and at the last |
+/// | 736 | The volatilities the venue's option model states at the bid and at the ask |
 /// | 767 | What a perpetual contract is funding at |
 const STATED_FIGURES: &[(u32, &str)] = &[
     (30, "d"), (50, "d"), (75, "d"), (107, "d"), (125, "fffff"), (150, "d"),
@@ -936,6 +939,48 @@ pub(crate) struct MdReqRecord {
     /// entry and so beside its withdrawal too. Zero where none was.
     pub(crate) mode_9887: i32,
     pub(crate) entries: Vec<MdReqEntry>,
+}
+
+/// The chain parameters (687) a gateway asks for on the underlying of the
+/// options it models, for the underlying's price: one subscription per
+/// underlying however many of its options are modelled, withdrawn with the
+/// last of them.
+struct UnderlyingModel {
+    con_id: i64,
+    /// The underlying's security type in the wire's own spelling.
+    sec_type: String,
+    /// The number it is asked for under on this connection, once it is.
+    req_id: Option<u32>,
+    server_tag: Option<u32>,
+    options: Vec<InstrumentId>,
+    /// What they last stated. It stands through a reconnect until they state
+    /// it again, as the rest of what the model is built from does.
+    sets: Vec<crate::protocol::chain_model::ChainModelParameters>,
+}
+
+/// An option a gateway's model is asked for, and what its model tick is built
+/// from beyond the greeks the venue states on it.
+struct ModelledOption {
+    con_id: i64,
+    /// Whether its price is stated per unit and published per contract.
+    per_contract: bool,
+    /// What the venue's option model last stated of the option's own
+    /// volatility, the mid's and the last's (734, 735 and 737), per trading
+    /// day and with the attributes it was stated with. A statement the venue
+    /// says does not stand is not kept, and the one before it stands.
+    vols: [Option<(f64, i32)>; 3],
+    /// What its definition states, read once it is in hand.
+    terms: Option<OptionTerms>,
+}
+
+/// What an option's definition states that its model tick is built from.
+struct OptionTerms {
+    multiplier: f64,
+    trading_class: String,
+    /// The day it last trades, as the chain parameters' terms name it.
+    last_trading_day: String,
+    /// The underlying it is modelled on, where the definition names one.
+    underlying: Option<i64>,
 }
 
 struct DelayedSubscription {
@@ -1053,9 +1098,16 @@ pub(crate) struct FarmState {
     depth_resub_info: Vec<(u32, i64, String, String, String, i32, bool)>,
     md_resub_info: Vec<MdResubInfo>,
     delayed_subscriptions: std::collections::HashMap<InstrumentId, DelayedSubscription>,
-    /// The option-model subscriptions and what they were taken out on, so one
-    /// can be withdrawn the same way it was asked for.
-    greeks_subs: Vec<(u32, i64, String)>,
+    /// The options a gateway's model is asked for here.
+    modelled_options: std::collections::HashMap<InstrumentId, ModelledOption>,
+    /// The options something new has been stated for since their model ticks
+    /// were last built.
+    option_ticks_due: std::collections::HashSet<InstrumentId>,
+    /// The second of the clock the model ticks were last built in.
+    option_ticks_built_in: u64,
+    /// The chain parameters asked for on the underlyings of the options
+    /// modelled here.
+    underlying_models: Vec<UnderlyingModel>,
     /// What generic tick each request asked for, as (req_id, request type).
     /// The venue numbers a generic tick separately from the prices and states
     /// nothing on the frames themselves about which tick they carry, so the
@@ -1299,10 +1351,12 @@ fn depth_directory(
     out
 }
 
-/// The venue's option model, subscribed to by naming the model where a price
-/// subscription names an exchange, and the model's own tick where a price
-/// subscription names a request type. One subscription per option.
-fn build_greeks_subscribe_tags(req_id: u32, con_id: i64, sec_type: &str, ts: &str) -> Vec<(u32, String)> {
+/// One of the venue's option model series, subscribed to by naming the model
+/// where a price subscription names an exchange, and the series where a price
+/// subscription names a request type. One subscription per series.
+fn build_model_subscribe_tags(
+    req_id: u32, con_id: i64, sec_type: &str, series: u32, ts: &str,
+) -> Vec<(u32, String)> {
     let fix_sec_type = crate::control::contracts::sec_type_to_fix(sec_type);
     vec![
         (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
@@ -1313,7 +1367,7 @@ fn build_greeks_subscribe_tags(req_id: u32, con_id: i64, sec_type: &str, ts: &st
         (6008, (con_id as u32).to_string()),
         (207, GREEKS_VENUE.to_string()),
         (167, fix_sec_type.to_string()),
-        (264, GREEKS_REQUEST_TYPE.to_string()),
+        (264, series.to_string()),
         (6088, "Socket".to_string()),
         (9830, "1".to_string()),
         (9839, "1".to_string()),
@@ -1473,6 +1527,14 @@ pub(super) const DEPTH_VENUE_REFUSED: i32 = 354;
 /// The option model's own tick, in place of a request type.
 const GREEKS_REQUEST_TYPE: u32 = 732;
 
+/// The volatilities a gateway's option model asks for on an option beside the
+/// model itself, on the model's name too: the venue's model volatility, the
+/// mid's, the bid's and ask's together, and the last's.
+const OPTION_VOLATILITY_SERIES: [u32; 4] = [734, 735, 736, 737];
+
+/// The days in a year a volatility stated per trading day is carried over.
+const A_YEAR_OF_TRADING_DAYS: f64 = 252.0;
+
 /// The series the venue states a spread scan's strategies on.
 const SPREAD_SCAN_REQUEST_TYPE: u32 = 481;
 
@@ -1509,7 +1571,7 @@ fn companion_named(kind: u32) -> &'static str {
     match kind {
         TRADING_STATUS_REQUEST_TYPE => "whether the contract is halted",
         BBO_EXCHANGE_MAP_REQUEST_TYPE => "which venues its best bid and offer are on",
-        GREEKS_REQUEST_TYPE => "the venue's option model",
+        GREEKS_REQUEST_TYPE | 734..=737 => "the venue's option model",
         NEWS_REQUEST_TYPE => "the news on the contract",
         REALTIME_BID_ASK_REQUEST_TYPE => "every quote change",
         REALTIME_LAST_REQUEST_TYPE => "every trade",
@@ -2305,7 +2367,10 @@ impl FarmState {
             depth_resub_info: Vec::new(),
             md_resub_info: Vec::new(),
             delayed_subscriptions: std::collections::HashMap::new(),
-            greeks_subs: Vec::new(),
+            modelled_options: std::collections::HashMap::new(),
+            option_ticks_due: std::collections::HashSet::new(),
+            option_ticks_built_in: 0,
+            underlying_models: Vec::new(),
             generic_tick_reqs: Vec::new(),
             asked_generic_ticks: std::collections::HashMap::new(),
             subscription_asked_on: std::collections::HashMap::new(),
@@ -2337,6 +2402,10 @@ impl FarmState {
         // the map is stated, and let go once a gateway would stop waiting,
         // whether or not anything else arrives.
         self.publish_snapshot_answers(context, shared);
+        let second = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        self.publish_option_ticks(second, farm_conn, shared, hb);
         if self.disconnected {
             return;
         }
@@ -2897,6 +2966,13 @@ impl FarmState {
         // The request is the whole of it. An answer to a request nothing is
         // waiting on falls out below, where the wait is looked up and there is
         // none.
+        //
+        // The chain parameters asked for on an underlying for the options
+        // modelled on it are no caller's, and hold no slot.
+        if let Some(held) = self.underlying_models.iter_mut().find(|held| held.req_id == Some(req_id)) {
+            held.server_tag = Some(server_tag);
+            return;
+        }
         let instrument = match self.md_req_to_instrument.iter()
             .position(|(id, _)| *id == req_id)
         {
@@ -3445,12 +3521,16 @@ impl FarmState {
             crate::control::contracts::sec_type_to_fix(sec_type),
             "OPT" | "FOP" | "IOPT" | "WAR",
         );
-        let greeks_req_id = if models_a_volatility && con_id > 0 {
-            let id = self.next_md_req_id;
-            self.next_md_req_id += 1;
-            Some(id)
+        // What a gateway's option model asks for on one: the venue's greeks
+        // and the volatilities it states them from.
+        let model_reqs: Vec<(u32, u32)> = if models_a_volatility && con_id > 0 {
+            std::iter::once(GREEKS_REQUEST_TYPE).chain(OPTION_VOLATILITY_SERIES).map(|series| {
+                let id = self.next_md_req_id;
+                self.next_md_req_id += 1;
+                (id, series)
+            }).collect()
         } else {
-            None
+            Vec::new()
         };
 
         let status_req_id = self.next_md_req_id;
@@ -3489,7 +3569,9 @@ impl FarmState {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|tick| !already_asked.contains(tick))
+                .filter(|tick| {
+                    !already_asked.contains(tick) && model_reqs.iter().all(|(_, series)| series != tick)
+                })
                 .filter(|tick| !self.instrument_md_reqs.iter().any(|(id, record)| {
                     *id == instrument && record.entries.iter().any(|entry| entry.request_type == *tick)
                 }))
@@ -3506,12 +3588,19 @@ impl FarmState {
         if !regulatory_snapshot {
             self.md_req_to_instrument.push((last_id, instrument));
         }
-        if let Some(id) = greeks_req_id {
+        for &(id, series) in &model_reqs {
             self.md_req_to_instrument.push((id, instrument));
-            self.generic_tick_reqs.push((id, GREEKS_REQUEST_TYPE));
-            // Recorded whether or not the farm is up: what was asked for is
-            // bookkeeping, and a cancel has to find it either way.
-            self.greeks_subs.push((id, con_id, sec_type.to_string()));
+            self.generic_tick_reqs.push((id, series));
+        }
+        if !model_reqs.is_empty() {
+            self.modelled_options.entry(instrument).or_insert_with(|| ModelledOption {
+                con_id,
+                per_contract: matches!(
+                    crate::control::contracts::sec_type_to_fix(sec_type), "WAR" | "IOPT",
+                ),
+                vols: [None; 3],
+                terms: None,
+            });
         }
 
         // Each entry as it goes onto the wire: the number it is asked under,
@@ -3550,8 +3639,8 @@ impl FarmState {
                 req_id: id, request_type: tick, venue: series_venue(tick, &venue).to_string(),
             });
         }
-        if let Some(id) = greeks_req_id {
-            entries.push(MdReqEntry { req_id: id, request_type: GREEKS_REQUEST_TYPE, venue: GREEKS_VENUE.to_string() });
+        for &(id, series) in &model_reqs {
+            entries.push(MdReqEntry { req_id: id, request_type: series, venue: GREEKS_VENUE.to_string() });
         }
         match self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument) {
             Some((_, record)) => {
@@ -3610,8 +3699,8 @@ impl FarmState {
                 // field on the price one: it names the model in place of an
                 // exchange and its own tick in place of a request type. A
                 // subscription that does not ask for it is sent prices alone.
-                if let Some(greeks_id) = greeks_req_id {
-                    let tags = build_greeks_subscribe_tags(greeks_id, con_id, sec_type, &ts);
+                for &(id, series) in &model_reqs {
+                    let tags = build_model_subscribe_tags(id, con_id, sec_type, series, &ts);
                     let refs: Vec<(u32, &str)> =
                         tags.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
                     let _ = conn.send_fixcomp(&refs);
@@ -3784,6 +3873,14 @@ impl FarmState {
         // print for everything that traded in between, or for a negative
         // number of shares where the venue has started its day over.
         self.rt_volume_totals.retain(|(watched, _), _| *watched != instrument);
+        // And what was stated for the option model, whether or not the farm is
+        // up: left behind, the next contract on this slot is modelled from it.
+        self.option_ticks_due.remove(&instrument);
+        if let Some(underlying) = self.modelled_options.remove(&instrument)
+            .and_then(|option| option.terms?.underlying)
+        {
+            self.release_underlying_model(instrument, underlying, farm_conn, hb);
+        }
         let combo_quote = self.attached_combo_quotes.remove(&instrument);
         let record = match self.instrument_md_reqs.iter()
             .position(|(id, _)| *id == instrument)
@@ -3811,10 +3908,6 @@ impl FarmState {
         self.generic_tick_tags.retain(|(_, tick, held)| {
             *held != instrument || (news_stands && *tick == NEWS_REQUEST_TYPE)
         });
-        // The option-model records go with the withdrawal whether or not the
-        // farm is up: left behind, they outlive the subscription they
-        // describe.
-        self.greeks_subs.retain(|(id, ..)| !reqs.contains(id));
 
         let conn = match farm_conn.as_mut() {
             Some(c) => c,
@@ -3848,17 +3941,29 @@ impl FarmState {
                 (9830, "1"),
                 (9839, "1"),
             ];
-            // On every entry the subscription carried it on, which is every
-            // entry of a delayed or frozen stream — the extra series among
-            // them. Written only on the two price entries, a series asked for
-            // on a delayed stream was withdrawn without the field it was asked
-            // with, and a withdrawal short of the subscription's fields is one
-            // the venue leaves being served. The chargeable snapshot is served
-            // from no feed and is asked for without it.
+            // On every entry the subscription carried it on: the quote's two
+            // and the extra series a caller named. Written only on the two
+            // price entries, a series asked for on a delayed stream was
+            // withdrawn without the field it was asked with, and a withdrawal
+            // short of the subscription's fields is one the venue leaves being
+            // served. The ones the subscription asks for on its own — the
+            // trading status, the venue map and the option model's — are asked
+            // for without it, and so is the chargeable snapshot, which is
+            // served from no feed.
             let mode = delayed.as_ref().filter(|state| state.requests.is_some_and(|requests| requests.contains(&entry.req_id)))
                 .map_or(record.mode_9887, |state| state.mode);
             let mode_str = mode.to_string();
-            if mode != 0 && entry.request_type != REGULATORY_SNAPSHOT_REQUEST_TYPE
+            let the_models_own = entry.venue == GREEKS_VENUE
+                && (entry.request_type == GREEKS_REQUEST_TYPE
+                    || OPTION_VOLATILITY_SERIES.contains(&entry.request_type));
+            if mode != 0
+                && !the_models_own
+                && !matches!(
+                    entry.request_type,
+                    REGULATORY_SNAPSHOT_REQUEST_TYPE
+                        | TRADING_STATUS_REQUEST_TYPE
+                        | BBO_EXCHANGE_MAP_REQUEST_TYPE
+                )
             {
                 tags.push((9887, &mode_str));
             }
@@ -4183,7 +4288,11 @@ impl FarmState {
             self.asked_generic_ticks.get(&instrument).cloned().unwrap_or_default();
         let new_ones: Vec<u32> = wanted.iter()
             .copied()
-            .filter(|tick| !already.contains(tick) && !already_asked.contains(tick))
+            .filter(|tick| {
+                !already.contains(tick)
+                    && !already_asked.contains(tick)
+                    && !self.asked_for_the_model(instrument, *tick)
+            })
             .collect();
         if new_ones.is_empty() {
             return;
@@ -4435,6 +4544,7 @@ impl FarmState {
                     GREEKS_REQUEST_TYPE,
                 ]
                 .contains(tick)
+                    && !self.asked_for_the_model(instrument, *tick)
             })
             .filter(|tick| *tick != 232 || !self.attached_mark_watches.contains_key(&instrument))
             // And nothing another caller has asked for since this was decided.
@@ -4497,7 +4607,6 @@ impl FarmState {
         self.generic_tick_reqs.retain(|(req_id, _)| !reqs.contains(req_id));
         self.generic_tick_tags
             .retain(|(_, tick, held)| *held != instrument || !unwanted.contains(tick));
-        self.greeks_subs.retain(|(id, ..)| !reqs.contains(id));
         // And the totals a running series was being read against, as the
         // withdrawal of a whole subscription drops them. Kept, the first
         // reading after somebody asks for that series again is measured from
@@ -4980,7 +5089,12 @@ impl FarmState {
         // in full on a path that runs per acknowledgement and per withdrawal,
         // so a session that reconnects through a night grows its own latency.
         self.depth_fanout_exchange.clear();
-        self.greeks_subs.clear();
+        // The underlyings' chain parameters were asked for under numbers of
+        // this connection, and are asked for again on the next.
+        for held in &mut self.underlying_models {
+            held.req_id = None;
+            held.server_tag = None;
+        }
         // Server tags are the venue's and start again with the connection, so
         // one already warned about would otherwise silence the warning for a
         // different tick that happened to be given the same number.
@@ -5165,12 +5279,19 @@ impl FarmState {
         // record of what was asked for is still in hand, so that reading a
         // series which keeps state of its own does not borrow it a second time.
         let mut delivered: Vec<(u32, InstrumentId, &[u8])> = Vec::new();
+        // And the chain parameters on an underlying for the options modelled
+        // on it, which may share a caller's number for the same series.
+        let mut for_models: Vec<(u32, &[u8])> = Vec::new();
         {
             let asked = &self.generic_tick_tags;
+            let for_a_model = |server_tag: u32| {
+                self.underlying_models.iter().any(|held| held.server_tag == Some(server_tag))
+            };
             read_generic_ticks(
                 body,
                 |server_tag| {
                     asked.iter().find(|(tag, ..)| *tag == server_tag).map(|(_, tick, _)| *tick)
+                        .or_else(|| for_a_model(server_tag).then_some(CHAIN_MODEL_SERIES[0]))
                 },
                 |tick, record| {
                     if let Some((_, _, instrument)) =
@@ -5178,8 +5299,14 @@ impl FarmState {
                     {
                         delivered.push((tick, *instrument, record.payload));
                     }
+                    if for_a_model(record.server_tag) {
+                        for_models.push((record.server_tag, record.payload));
+                    }
                 },
             );
+        }
+        for (server_tag, payload) in for_models {
+            self.note_underlying_model(server_tag, payload);
         }
 
         for (tick, instrument, payload) in delivered {
@@ -5188,6 +5315,7 @@ impl FarmState {
                     if let Some(mut comp) = decode_greeks(payload) {
                         comp.instrument = instrument;
                         shared.market.push_option_computation(comp);
+                        self.option_ticks_due.insert(instrument);
                         // A calculation kept for this contract's model is
                         // answered right behind the model it waited for, so
                         // the answer stands before anything pushed after it —
@@ -5206,6 +5334,12 @@ impl FarmState {
                         comp.instrument = instrument;
                         shared.market.note_closing_option_model(comp);
                     }
+                }
+                // The volatilities the model is stated from, kept for it and
+                // stated as figures like any other series.
+                734 | 735 | 737 => {
+                    self.note_option_volatility(instrument, tick, payload);
+                    deliver_series(tick, payload, instrument, shared);
                 }
                 BBO_EXCHANGE_MAP_REQUEST_TYPE => {
                     // The venues the exchange masks are written over, one per

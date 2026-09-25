@@ -109,9 +109,12 @@ impl EClient {
         Ok(())
     }
 
-    /// Seed the venue's model for a contract, as a market-data subscription
-    /// does when it publishes tick 13: the model, then the answers to the
-    /// calculations kept for it, as the engine pushes them.
+    /// Seed the venue's model for a contract as a market-data subscription
+    /// does: the model, then the answers to the calculations kept for it, as
+    /// the engine pushes them. Then a model tick carrying the model's own
+    /// volatility and prices, which is not the tick the engine builds (that
+    /// takes the volatility and the underlying's price from other series):
+    /// it stands in for one, to be delivered.
     #[doc(hidden)]
     #[pyo3(signature = (instrument, implied_vol, opt_price, und_price, rho=f64::MAX, fugit=f64::MAX))]
     fn _test_push_option_model(
@@ -130,6 +133,12 @@ impl EClient {
             ..Default::default()
         });
         crate::client_core::answer_kept_calculations(&shared, Some(instrument), None);
+        let unstated = f64::MAX;
+        shared.market.push_option_tick(crate::bridge::OptionTick {
+            instrument,
+            figures: [implied_vol, unstated, opt_price, unstated, unstated, unstated, unstated, und_price],
+            price_based: false,
+        });
         Ok(())
     }
 

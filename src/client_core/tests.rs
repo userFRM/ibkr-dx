@@ -3459,10 +3459,14 @@ fn a_subscription_the_venue_has_taken_is_no_longer_refused_for_a_joiner() {
 /// take the slot is who it reaches: an increment acknowledged for the contract
 /// that left arrives as the new one's. A reader stalled in a callback is all it
 /// takes for the release to land in between.
+///
+/// An answer worked out here is not one of them. It names no contract at all,
+/// so it stands under slot zero — a real slot, and dropping it with that slot
+/// took every answer waiting on it.
 #[test]
 fn a_released_slot_leaves_nothing_queued_under_it() {
     let shared = SharedState::new();
-    let slot: InstrumentId = 3;
+    let slot: InstrumentId = 0;
 
     shared.market.push_tick_req_params(slot, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() });
     shared.market.push_tick_news(crate::types::TickNews {
@@ -3472,9 +3476,12 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
         headline: "about the contract that left".into(),
         timestamp: 0,
     });
+    shared.market.push_option_tick(crate::bridge::OptionTick {
+        instrument: slot, figures: [0.2; 8], price_based: false,
+    });
     shared.market.push_option_computation(crate::types::OptionComputation {
-        instrument: slot,
-        ..Default::default()
+        opt_price: 1.25,
+        ..crate::types::OptionComputation::solved(77)
     });
     shared.market.note_released_slot(slot, u64::MAX);
 
@@ -3486,9 +3493,16 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
         shared.market.drain_tick_news().iter().all(|n| n.instrument != slot),
         "nor a headline about the contract that left, under the one that took its slot",
     );
+    let left = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
     assert!(
-        shared.market.drain_option_computations().iter().all(|c| c.instrument != slot),
-        "nor a model solved against the previous contract's volatility and price",
+        !left.iter().any(|(_, record)| matches!(record, crate::bridge::Record::OptionTick(_))),
+        "nor a model worked out from the previous contract's volatility and price",
+    );
+    assert!(
+        left.iter().any(|(_, record)| matches!(
+            record, crate::bridge::Record::OptionComputation(c) if c.answers == Some(77)
+        )),
+        "but the answer to a question asked here stays",
     );
 }
 
@@ -3623,42 +3637,6 @@ fn registering_a_named_joiner_resets_its_baseline_without_pushing_records() {
 }
 
 
-
-/// An answer worked out here survives a slot going back to the table.
-///
-/// A model the venue publishes names the contract it is about. One solved on
-/// this side belongs to the question that asked it and names no contract at
-/// all, so it is filed under slot zero — a real slot, held by whatever
-/// contract happens to have it. Dropping that slot took every answer waiting
-/// on it, and the callbacks their callers were owed never arrived.
-#[test]
-fn an_answer_this_side_worked_out_is_not_dropped_with_a_slot() {
-    let shared = SharedState::new();
-    let slot: InstrumentId = 0;
-
-    // The venue's own model for the contract on that slot.
-    shared.market.push_option_computation(crate::types::OptionComputation {
-        instrument: slot,
-        ..Default::default()
-    });
-    // And an answer to a question asked here, which names no contract.
-    shared.market.push_option_computation(crate::types::OptionComputation {
-        opt_price: 1.25,
-        ..crate::types::OptionComputation::solved(77)
-    });
-
-    shared.market.note_released_slot(slot, u64::MAX);
-
-    let left = shared.market.drain_option_computations();
-    assert!(
-        left.iter().any(|c| c.answers == Some(77)),
-        "the answer to a question asked here went with somebody else's slot: {left:?}",
-    );
-    assert!(
-        !left.iter().any(|c| c.answers.is_none()),
-        "and the model the venue published for the slot did go with it: {left:?}",
-    );
-}
 
 /// A follower receives the feed already subscribed, including after promotion.
 #[test]

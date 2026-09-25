@@ -8272,7 +8272,6 @@ fn solving_an_option_answers_against_the_venues_own_model() {
         und_price: 505.0,
         ..Default::default()
     });
-    let _ = shared.market.drain_option_computations();
     heard.errors.clear();
 
     client.calculate_option_price(6, &option, 0.25, 505.0);

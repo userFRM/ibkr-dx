@@ -493,8 +493,10 @@ pub enum Record {
     DepthUpdate(DepthUpdate),
     /// A headline on a contract: generation, headline.
     TickNews((u64, TickNews)),
-    /// An option computation: the slot's generation, the computation.
-    OptionComputation((u64, OptionComputation)),
+    /// An answer to a calculation asked of this client.
+    OptionComputation(OptionComputation),
+    /// A model tick on an option: the slot's generation, the tick.
+    OptionTick((u64, super::OptionTick)),
     /// What the venue said went wrong, belonging to no request.
     VenueError(String),
     /// A subscription the venue could not be asked for: slot, generation,
@@ -792,10 +794,11 @@ impl super::SharedState {
         m.tick_news.take_below(cut, |_| kept_back(None, None), Record::TickNews, &mut out);
         m.option_computations.take_below(
             cut,
-            |(_, c)| kept_back(None, c.answers.map(Owner::Request)),
+            |c| kept_back(None, c.answers.map(Owner::Request)),
             Record::OptionComputation,
             &mut out,
         );
+        m.option_ticks.take_below(cut, |_| kept_back(None, None), Record::OptionTick, &mut out);
         m.venue_errors.take_below(cut, |_| kept_back(None, None), Record::VenueError, &mut out);
         m.subscription_notices.take_below(cut, |_| kept_back(None, None), Record::SubscriptionNotice, &mut out);
         m.market_data_types.take_below(cut, |_| kept_back(None, None), Record::MarketDataType, &mut out);

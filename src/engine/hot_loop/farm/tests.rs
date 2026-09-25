@@ -430,14 +430,14 @@ mod news_tests {
         );
     }
 
-    /// A calculation kept for a contract's model is answered right behind the
-    /// model, by the loop that wrote it.
+    /// A calculation kept for a contract's model is answered by the loop that
+    /// reads the model, as it reads it.
     ///
     /// Solved by the reader at its reads instead, the answer the last model
     /// enabled was worked out after the session's last record — which the loop
     /// pushes after everything else — and never delivered.
     #[test]
-    fn a_kept_calculation_is_answered_right_behind_the_model_it_waited_for() {
+    fn a_kept_calculation_is_answered_by_the_loop_that_reads_the_model() {
         let mut farm = FarmState::new();
         let mut context = Context::new();
         let shared = SharedState::new();
@@ -472,13 +472,12 @@ mod news_tests {
             shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false },
         );
         let kinds: Vec<&str> = taken.iter().map(|(_, record)| match record {
-            crate::bridge::Record::OptionComputation((_, c)) if c.answers == Some(9) => "answer",
-            crate::bridge::Record::OptionComputation(_) => "model",
+            crate::bridge::Record::OptionComputation(c) if c.answers == Some(9) => "answer",
             crate::bridge::Record::Refused((origin, ..)) if origin.id() == 9 => "answer",
             crate::bridge::Record::Closed => "closed",
             _ => "other",
         }).collect();
-        assert_eq!(kinds, ["model", "answer", "closed"]);
+        assert_eq!(kinds, ["answer", "closed"]);
     }
 
     /// The two series that state a run of paired figures, one of which states
@@ -1170,6 +1169,197 @@ mod news_tests {
         assert_eq!(super::tag_values(&tags, 207), ["IBVOL"]);
     }
 
+    /// Chain parameters as the fourth version states them: per set, one class
+    /// at one multiplier, the underlying's price, the set's attributes and one
+    /// term, whose last trading day is counted in days since the epoch.
+    fn chain_parameters(sets: &[(&str, f64, f64, i32, i32)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut body = Vec::new();
+        let mut put = |bytes: &[u8]| body.extend_from_slice(bytes);
+        put(&4i32.to_be_bytes());
+        put(&(sets.len() as i32).to_be_bytes());
+        for (class, multiplier, price, attributes, last_trading_day) in sets {
+            for v in [1i32, 1] {
+                put(&v.to_be_bytes());
+            }
+            put(&multiplier.to_be_bytes());
+            put(&1f64.to_be_bytes());
+            put(&(class.len() as i32).to_be_bytes());
+            put(class.as_bytes());
+            put(&vec![0u8; (4 - class.len() % 4) % 4]);
+            put(&price.to_be_bytes());
+            for v in [0i32, 1, *last_trading_day] {
+                put(&v.to_be_bytes());
+            }
+            for v in [0.0f64, 0.043, 451.0, 0.008, 0.008] {
+                put(&v.to_be_bytes());
+            }
+            for v in [1i32, 1_790_000_000, 0, *attributes] {
+                put(&v.to_be_bytes());
+            }
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&body).unwrap();
+        let mut payload = vec![0x01];
+        payload.extend(z.finish().unwrap());
+        payload
+    }
+
+    /// An option's model tick is what a gateway builds from what the venue
+    /// states: the greeks and price of the venue's model, the first of its
+    /// model, mid and last volatilities that stands, carried over a year of
+    /// trading days, whether the mid's was worked from prices, and the
+    /// underlying's price from the chain parameters on the underlying for the
+    /// option's class, multiplier and expiry. A warrant's price is published
+    /// per contract. Rebuilt once a second for what something was stated for,
+    /// and from what was stated before the connection dropped.
+    #[test]
+    fn an_options_model_tick_is_built_from_what_the_venue_states() {
+        const UNSTATED: f64 = f64::MAX;
+        let over_a_year = |per_day: f64| per_day * 252f64.sqrt();
+        let volatility = |attributes: i32, per_day: f64| {
+            let mut payload = attributes.to_be_bytes().to_vec();
+            payload.extend_from_slice(&per_day.to_be_bytes());
+            payload
+        };
+        let greeks = |delta: Option<f64>| {
+            let flags: u32 = 1 | u32::from(delta.is_some()) << 16 | 1 << 17 | 1 << 18 | 1 << 20;
+            let mut payload = flags.to_be_bytes().to_vec();
+            for figure in [Some(5.0f64), delta, Some(0.02), Some(0.3), Some(-0.1)].into_iter().flatten() {
+                payload.extend_from_slice(&figure.to_be_bytes());
+            }
+            payload
+        };
+        // 20261016, the option's last trading day, and a month after it.
+        let (expiry, later) = (20742, 20777);
+        for (sec_type, per_contract) in [("OPT", 1.0), ("WAR", 100.0)] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(700_001);
+            shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+                con_id: 700_001, trading_class: "SPY".into(), multiplier: 100.0,
+                last_trade_date: "20261016".into(), under_con_id: 756733,
+                under_sec_type: "STK".into(), ..Default::default()
+            });
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+            farm.send_mktdata_subscribe(
+                700_001, "SPY", "SMART", sec_type, "20261016", 765.0, "C", "100", instrument, 0,
+                false, &mut conn, &mut hb,
+            );
+            for (tag, series) in [(81, 732), (82, 734), (83, 735), (84, 737)] {
+                farm.generic_tick_tags.push((tag, series, instrument));
+            }
+            // The chain parameters are asked for on the underlying, and
+            // acknowledged under a number of the venue's.
+            farm.publish_option_ticks(1, &mut conn, &shared, &mut hb);
+            let asked = super::drain_inner(&mut peer).into_iter()
+                .map(|msg| fix::fix_parse(&msg))
+                .find(|fields| fields.get(&264).map(String::as_str) == Some("687"))
+                .expect("the chain parameters are asked for");
+            let ack = format!("35=Q\x0190,{},0.01,0,0,a6,,0,1", asked[&262]);
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+
+            let stated = |iv: f64, und: f64| {
+                [iv, 0.55, 5.0 * per_contract, UNSTATED, 0.02, 0.3, -0.1, und]
+            };
+            let chain = |sets: &[(&str, f64, f64, i32, i32)]| (90, 687, chain_parameters(sets));
+            let model = over_a_year(0.015);
+            let steps = [
+                ("volatilities alone state nothing",
+                 vec![(83, 735, volatility(1, 0.012))], [UNSTATED; 8], false),
+                ("the mid's volatility stands where the model's does not",
+                 vec![(81, 732, greeks(Some(0.55)))], stated(over_a_year(0.012), UNSTATED), false),
+                ("a model volatility that does not stand leaves the mid's, ahead of the last's",
+                 vec![
+                     (82, 734, volatility(0, 0.015)), (82, 734, volatility(2, 0.015)),
+                     (82, 734, volatility(-1, 0.015)), (82, 734, volatility(1, 0.0)),
+                     (82, 734, volatility(1, f64::INFINITY)), (84, 737, volatility(1, 0.014)),
+                 ],
+                 stated(over_a_year(0.012), UNSTATED), false),
+                ("the model's own once it stands",
+                 vec![(82, 734, volatility(1, 0.015))], stated(model, UNSTATED), false),
+                ("a mid worked from prices",
+                 vec![(83, 735, volatility(3, 0.013))], stated(model, UNSTATED), true),
+                ("no set for the class at that multiplier, even the only one",
+                 vec![chain(&[("SPY", 10.0, 2.0, 5, expiry)])], stated(model, UNSTATED), true),
+                ("no term for the option's expiry",
+                 vec![chain(&[("SPY", 100.0, 766.5, 5, later)])], stated(model, UNSTATED), true),
+                ("a price the set says does not stand",
+                 vec![chain(&[("SPY", 100.0, 766.5, 1, expiry)])], stated(model, UNSTATED), true),
+                ("the first set for the option's class at its multiplier",
+                 vec![chain(&[
+                     ("XSP", 100.0, 1.0, 5, expiry), ("SPY", 10.0, 2.0, 5, expiry),
+                     ("SPY", 100.0, 766.5, 5, expiry),
+                 ])],
+                 stated(model, 766.5), true),
+                ("greeks stating no delta state nothing",
+                 vec![(81, 732, greeks(None))], [UNSTATED; 8], false),
+            ];
+            let ticks_taken = || -> Vec<crate::bridge::OptionTick> {
+                shared
+                    .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+                    .into_iter()
+                    .filter_map(|(_, record)| match record {
+                        crate::bridge::Record::OptionTick((_, tick)) => Some(tick),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for (second, (what, frames, figures, price_based)) in (2u64..).zip(steps) {
+                let frames: Vec<(u32, u32, &[u8])> =
+                    frames.iter().map(|(tag, series, payload)| (*tag, *series, payload.as_slice())).collect();
+                farm.handle_generic_tick(&framed_generic_ticks(&frames), &mut context, &shared, &None);
+                farm.publish_option_ticks(second, &mut conn, &shared, &mut hb);
+                assert_eq!(
+                    ticks_taken(),
+                    [crate::bridge::OptionTick { instrument, figures, price_based }],
+                    "{sec_type}: {what}",
+                );
+            }
+            farm.publish_option_ticks(20, &mut conn, &shared, &mut hb);
+            assert!(ticks_taken().is_empty(), "{sec_type}: nothing new stated, nothing rebuilt");
+            let restated = framed_generic_ticks(&[(81, 732, &greeks(Some(0.55)))]);
+            farm.handle_generic_tick(&restated, &mut context, &shared, &None);
+            farm.publish_option_ticks(20, &mut conn, &shared, &mut hb);
+            assert!(ticks_taken().is_empty(), "{sec_type}: rebuilt twice in one second");
+
+            // Owed when the connection drops, it is built from what was stated
+            // before the drop.
+            farm.handle_disconnect(&mut conn, &mut context, &None, &shared);
+            farm.publish_option_ticks(21, &mut conn, &shared, &mut hb);
+            assert_eq!(
+                ticks_taken(),
+                [crate::bridge::OptionTick { instrument, figures: stated(model, 766.5), price_based: true }],
+                "{sec_type}: across the drop",
+            );
+
+            // Withdrawn while the connection is down, what was stated goes with
+            // the subscription, and the next one on the slot is not modelled
+            // from it.
+            farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+            farm.send_mktdata_subscribe(
+                700_001, "SPY", "SMART", sec_type, "20261016", 765.0, "C", "100", instrument, 0,
+                false, &mut conn, &mut hb,
+            );
+            farm.generic_tick_tags.push((81, 732, instrument));
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(81, 732, &greeks(Some(0.55)))]), &mut context, &shared, &None,
+            );
+            farm.publish_option_ticks(22, &mut conn, &shared, &mut hb);
+            assert_eq!(
+                ticks_taken(),
+                [crate::bridge::OptionTick {
+                    instrument, figures: stated(UNSTATED, UNSTATED), price_based: false,
+                }],
+                "{sec_type}",
+            );
+        }
+    }
+
     /// What the option model works a chain from is kept for the contract, and
     /// the set as the chain closed is not read as company text.
     #[test]
@@ -1632,8 +1822,17 @@ mod news_tests {
             "the fields the venue did not write are not read as nothing",
         );
 
+        // A volatility the option model states, its attributes ahead of it.
+        let mut mid = 3i32.to_be_bytes().to_vec();
+        mid.extend_from_slice(&0.013f64.to_be_bytes());
+        farm.generic_tick_tags.push((54, 735, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(54, 735, &mid)]), &mut context, &shared, &None,
+        );
+        assert_eq!(shared.market.stated_figures(instrument, 735), vec![3.0, 0.013]);
+
         assert_eq!(
-            shared.market.stated_figures_series(instrument), vec![402, 493, 613],
+            shared.market.stated_figures_series(instrument), vec![402, 493, 613, 735],
             "every series that stated figures is named",
         );
 
@@ -3884,16 +4083,9 @@ mod resub_tests {
         let mut context = Context::new();
         let mut hb = HeartbeatState::new();
         let shared = SharedState::new();
-        let instrument = context.market.register(756733);
 
         farm.send_depth_subscribe(
             5, 756733, "SMART", "ISLAND", "STK", 10, true, &mut None, &mut hb, &shared,
-        );
-        // An option is the one kind the venue is asked to model, so it is the
-        // one kind that records a modelling request to cancel later.
-        farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "OPT", "20261218", 700.0, "C", "100",
-            instrument, 0, false, &mut None, &mut hb,
         );
         // And a quote under a number no contract holds, which is remembered so
         // the warning is said once.
@@ -3904,7 +4096,6 @@ mod resub_tests {
             &mut context, &shared, &None,
         );
         assert!(!farm.depth_fanout_exchange.is_empty(), "the depth ask is recorded");
-        assert!(!farm.greeks_subs.is_empty(), "so is the modelling ask");
         assert!(!farm.quotes_for_no_one.is_empty(), "so is the unclaimed number");
 
         farm.handle_disconnect(&mut None, &mut context, &None, &crate::bridge::SharedState::new());
@@ -3914,7 +4105,6 @@ mod resub_tests {
             "left behind, no later withdrawal names it: {:?}",
             farm.depth_fanout_exchange,
         );
-        assert!(farm.greeks_subs.is_empty(), "same, keyed by a replaced id");
         assert!(farm.quotes_for_no_one.is_empty(), "server tags start again");
     }
 
@@ -4641,49 +4831,6 @@ mod price_scaling_tests {
     fn an_invalid_option_model_states_nothing() {
         assert!(super::super::decode_greeks(&[0u8; 32]).is_none());
         assert!(super::super::decode_greeks(&[0xff, 0xff, 0xff, 0xfe]).is_none(), "too short to hold one");
-    }
-
-    /// A subscription that asks for the option model has to withdraw it too.
-    /// Left behind, the venue keeps sending a model for a contract the caller
-    /// stopped watching, and nothing holds a request id to stop it by.
-    #[test]
-    fn cancelling_an_option_withdraws_its_model() {
-        let mut farm = FarmState::new();
-        let mut context = Context::new();
-        let instrument = context.market
-            .register_contract(805711629, "AAPL", "OPT", "SMART", "20260821|220|C|100");
-        let mut conn = None;
-        let mut hb = HeartbeatState::new();
-        farm.send_mktdata_subscribe(
-            805711629, "AAPL", "SMART", "OPT", "20260821", 220.0, "C", "100",
-            instrument, 0, false, &mut conn, &mut hb,
-        );
-        assert_eq!(farm.greeks_subs.len(), 1, "an option is worth modelling");
-        let record = &farm.instrument_md_reqs.iter()
-            .find(|(id, _)| *id == instrument).expect("its requests").1;
-        assert!(
-            record.entries.iter().any(|e| e.req_id == farm.greeks_subs[0].0),
-            "and the model is one of them, so a cancel finds it",
-        );
-
-        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
-        assert!(farm.greeks_subs.is_empty(), "withdrawn with the rest");
-        assert!(farm.instrument_md_reqs.iter().all(|(id, _)| *id != instrument));
-    }
-
-    /// Anything without a volatility to imply is not asked to be modelled: the
-    /// venue answers such a request with nothing at all.
-    #[test]
-    fn a_stock_is_not_asked_for_an_option_model() {
-        let mut farm = FarmState::new();
-        let mut context = Context::new();
-        let instrument = context.market
-            .register_contract(756733, "SPY", "STK", "SMART", "");
-        farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "",
-            instrument, 0, false, &mut None, &mut HeartbeatState::new(),
-        );
-        assert!(farm.greeks_subs.is_empty());
     }
 }
 mod trading_status_subscribe_tests {
@@ -5556,7 +5703,7 @@ mod withdrawal_wire_tests {
     use super::super::*;
     use crate::bridge::SharedState;
     use crate::engine::context::Context;
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
     /// Every value a message carries for one tag, in order. Split on the
     /// field mark, so a tag stated more than once states each of its values,
@@ -5578,70 +5725,156 @@ mod withdrawal_wire_tests {
     /// that starts on the same connection and asks under it is answered with
     /// nothing — no acknowledgement, no refusal, no data — while the quotes
     /// it never asked for keep arriving under the number it happens to have
-    /// given out.
+    /// given out. On a delayed feed the feed is named on the entries that were
+    /// asked with it, and only on those.
     #[test]
     fn a_withdrawal_states_the_entries_the_subscription_stated() {
+        // A realtime stock, and a delayed option with two series named beside
+        // it, one of them on the model's name.
+        for (con_id, sec_type, mode, series, numbers) in
+            [(756733, "STK", 0, vec![], 4), (805711629, "OPT", 1, vec![236, 687], 11)]
+        {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(con_id);
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+            // Each entry by its number, with every field it states.
+            let mut entries = |action: &str| -> BTreeMap<String, Vec<Option<String>>> {
+                let sent = super::drain_inner(&mut peer);
+                let sent: Vec<&Vec<u8>> =
+                    sent.iter().filter(|msg| values_of(msg, 263) == [action]).collect();
+                if action == "2" {
+                    assert!(sent.iter().all(|msg| values_of(msg, 146) == ["1"]), "one entry per withdrawal");
+                }
+                sent.iter()
+                    .flat_map(|msg| fix::fix_parse_repeating(msg, 262))
+                    .map(|entry| {
+                        let stated = [6008, 207, 167, 264, 6088, 9830, 9839, 9887]
+                            .map(|tag| entry.get(&tag).cloned());
+                        (entry[&262].clone(), stated.to_vec())
+                    })
+                    .collect()
+            };
+
+            farm.asked_generic_ticks.insert(instrument, series);
+            farm.send_mktdata_subscribe(
+                con_id, "SPY", "SMART", sec_type, "", 0.0, "", "", instrument, mode,
+                false, &mut conn, &mut hb,
+            );
+            let asked = entries("1");
+            assert_eq!(asked.len(), numbers, "{sec_type}: asked for under {numbers} numbers");
+
+            farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+            assert_eq!(entries("2"), asked, "{sec_type}: every entry is withdrawn as it was asked for");
+        }
+    }
+
+    /// What a gateway's option model asks for on an option goes out on the
+    /// model's name beside the quote, and is withdrawn with it: the venue's
+    /// greeks and the four volatilities they are stated from. Anything with no
+    /// volatility to imply is asked for none of it. A caller naming one of
+    /// those volatilities on an option, with the subscription or after it, is
+    /// served the model's own, and giving it up leaves the model's standing.
+    #[test]
+    fn an_option_is_modelled_on_the_models_name_and_withdrawn_with_it() {
+        for (sec_type, modelled) in [("OPT", &[732u32, 734, 735, 736, 737][..]), ("STK", &[][..])] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(805711629);
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+            let on_the_model = |msgs: Vec<Vec<u8>>, action: &str| -> Vec<(String, u32)> {
+                msgs.iter()
+                    .filter(|msg| values_of(msg, 263) == [action] && values_of(msg, 207) == ["IBVOL"])
+                    .map(|msg| {
+                        assert_eq!(values_of(msg, 6008), ["805711629"], "on the option");
+                        assert_eq!(values_of(msg, 167), [sec_type], "as the option");
+                        (values_of(msg, 262).concat(), values_of(msg, 264).concat().parse().unwrap())
+                    })
+                    .collect()
+            };
+
+            farm.asked_generic_ticks.insert(instrument, vec![735]);
+            farm.send_mktdata_subscribe(
+                805711629, "AAPL", "SMART", sec_type, "20260821", 220.0, "C", "100",
+                instrument, 0, false, &mut conn, &mut hb,
+            );
+            let sent = super::drain_inner(&mut peer);
+            let named = sent.iter().flat_map(|msg| values_of(msg, 264)).filter(|v| v == "735").count();
+            assert_eq!(named, 1, "{sec_type}: the mid's volatility is asked for once");
+            let asked = on_the_model(sent, "1");
+            let series: Vec<u32> = asked.iter().map(|(_, series)| *series).collect();
+            assert_eq!(series, modelled, "{sec_type}");
+
+            if !modelled.is_empty() {
+                farm.also_ask_for_series(instrument, 805711629, &[735], &context, &mut conn, &mut hb);
+                farm.stop_asking_for_series(instrument, 805711629, 0, &[735], u64::MAX, &mut conn, &mut hb);
+                assert!(super::drain_inner(&mut peer).is_empty(), "nothing asked or withdrawn for it");
+            }
+
+            farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+            assert_eq!(on_the_model(super::drain_inner(&mut peer), "2"), asked, "{sec_type}");
+        }
+    }
+
+    /// The chain parameters a gateway's option model reads the underlying's
+    /// price from are asked for once per underlying, on the model's name, and
+    /// withdrawn with the last option modelled on them.
+    #[test]
+    fn an_underlyings_chain_parameters_are_asked_once_and_go_with_its_last_option() {
         let mut farm = FarmState::new();
         let mut context = Context::new();
+        let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
-        let instrument = context.market.register(756733);
-
         let (conn, peer) = Connection::for_test();
         let mut conn = Some(conn);
         let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+        let options: Vec<InstrumentId> = [700_001i64, 700_002].into_iter().map(|con_id| {
+            shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+                con_id: con_id as u32, under_con_id: 756733, under_sec_type: "STK".into(),
+                ..Default::default()
+            });
+            let instrument = context.market.register(con_id);
+            farm.send_mktdata_subscribe(
+                con_id, "SPY", "SMART", "OPT", "20261016", 765.0, "C", "100", instrument, 0,
+                false, &mut conn, &mut hb,
+            );
+            instrument
+        }).collect();
+        let chain = |msgs: Vec<Vec<u8>>, action: &str| -> Vec<Vec<u8>> {
+            msgs.into_iter()
+                .filter(|msg| values_of(msg, 263) == [action] && values_of(msg, 264) == ["687"])
+                .collect()
+        };
 
-        farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
-        );
-        let mut asked = BTreeSet::new();
-        for msg in super::drain_inner(&mut peer) {
-            if values_of(&msg, 263).first().map(String::as_str) == Some("1") {
-                asked.extend(values_of(&msg, 262));
-            }
+        farm.publish_option_ticks(1, &mut conn, &shared, &mut hb);
+        let asked = chain(super::drain_inner(&mut peer), "1");
+        assert_eq!(asked.len(), 1, "once for both options");
+        for (tag, stated) in [(6008, "756733"), (207, "IBVOL"), (167, "CS")] {
+            assert_eq!(values_of(&asked[0], tag), [stated], "tag {tag}");
         }
-        assert_eq!(asked.len(), 4, "a realtime stock is asked for under four numbers");
 
-        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
-        let withdrawals: Vec<Vec<u8>> = super::drain_inner(&mut peer)
-            .into_iter()
-            .filter(|msg| values_of(msg, 263).first().map(String::as_str) == Some("2"))
-            .collect();
-        let withdrawn: BTreeSet<String> = withdrawals
-            .iter()
-            .flat_map(|msg| values_of(msg, 262))
-            .collect();
-        assert_eq!(withdrawn, asked, "every number asked for is withdrawn");
-        for msg in &withdrawals {
-            assert_eq!(
-                values_of(msg, 146).first().map(String::as_str), Some("1"),
-                "one entry per withdrawal",
-            );
-            assert_eq!(
-                values_of(msg, 6008).first().map(String::as_str), Some("756733"),
-                "the contract is stated",
-            );
-            assert_eq!(
-                values_of(msg, 207).first().map(String::as_str), Some("BEST"),
-                "the venue it was asked on",
-            );
-            assert_eq!(
-                values_of(msg, 167).first().map(String::as_str), Some("CS"),
-                "the type it was asked for",
-            );
-            assert!(
-                !values_of(msg, 264).is_empty(),
-                "the kind of market data it asked for",
-            );
-            // And the rest of the fields the subscription carried. The venue
-            // writes one entry whichever action carries it, so an entry short
-            // of them is not the entry that went out coming back.
-            for (tag, stated) in [(6088, "Socket"), (9830, "1"), (9839, "1")] {
-                assert_eq!(
-                    values_of(msg, tag).first().map(String::as_str), Some(stated),
-                    "tag {tag} is stated the way the subscription stated it",
-                );
-            }
+        // And once more on the next connection, under a number of that one.
+        farm.handle_disconnect(&mut conn, &mut context, &None, &shared);
+        let (next, next_peer) = Connection::for_test();
+        let mut peer = Connection::new_raw(next_peer).expect("a connection over the test pair");
+        farm.reconnect(next, &mut conn, &mut context, &mut hb, Default::default(), &shared);
+        farm.publish_option_ticks(2, &mut conn, &shared, &mut hb);
+        let asked = chain(super::drain_inner(&mut peer), "1");
+        assert_eq!(asked.len(), 1, "asked again on the next connection");
+
+        farm.send_mktdata_unsubscribe(options[0], 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        assert!(chain(super::drain_inner(&mut peer), "2").is_empty(), "the other is still modelled");
+        farm.send_mktdata_unsubscribe(options[1], 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        let withdrawn = chain(super::drain_inner(&mut peer), "2");
+        assert_eq!(withdrawn.len(), 1, "withdrawn with the last");
+        for tag in [262, 6008, 207, 167] {
+            assert_eq!(values_of(&withdrawn[0], tag), values_of(&asked[0], tag), "tag {tag}");
         }
     }
 

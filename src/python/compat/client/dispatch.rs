@@ -21,16 +21,6 @@ use super::super::contract::{Contract, ContractDescription, ContractDetails, Bar
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
 
-/// Tick type 13: the venue's model computation.
-const MODEL_OPTION_COMPUTATION: i32 = 13;
-
-/// The same on a delayed feed, which the reference client numbers apart.
-///
-/// A program that asked for delayed data reads its model there; delivered
-/// under 13 it arrived indistinguishable from a live reading, on a feed the
-/// caller had been told was delayed.
-const DELAYED_MODEL_OPTION_COMPUTATION: i32 = 83;
-
 /// Tick type 53: a computation this client was asked for.
 ///
 /// The stream and the answer are two different things, and the venue names
@@ -551,33 +541,30 @@ impl EClient {
                     }
                 }
             }
-            // A calculation's answer to the request that asked; the venue's
-            // model to every request watching the contract.
-            Record::OptionComputation((generation, comp)) => {
-                let (to, tick_type): (Vec<i64>, i32) = match comp.answers {
-                    Some(asked) => (vec![asked], ASKED_OPTION_COMPUTATION),
-                    None if generation != self.core.generation_held(comp.instrument) => {
-                        (Vec::new(), MODEL_OPTION_COMPUTATION)
-                    }
-                    None => (
-                        self.core.watchers_of(comp.instrument),
-                        if self.core.feed_is_delayed(comp.instrument) {
-                            DELAYED_MODEL_OPTION_COMPUTATION
-                        } else {
-                            MODEL_OPTION_COMPUTATION
-                        },
-                    ),
-                };
-                for req_id in to {
-                    // The model is one of the kinds an option's snapshot
-                    // waits for.
-                    self.core.note_snapshot_tick(req_id, tick_type);
+            // A calculation's answer to the request that asked.
+            Record::OptionComputation(comp) => {
+                if let Some(asked) = comp.answers {
                     call_wrapper!(self, py, shared, "tick_option_computation",
-                        (req_id, tick_type, 0i32,
+                        (asked, ASKED_OPTION_COMPUTATION, 0i32,
                          or_unstated_price(comp.implied_vol).filter(|v| *v >= 0.0), or_unstated_greek(comp.delta),
                          or_unstated_price(comp.opt_price), or_unstated_price(comp.pv_dividend),
                          or_unstated_greek(comp.gamma), or_unstated_greek(comp.vega),
                          or_unstated_greek(comp.theta), or_unstated_price(comp.und_price)));
+                }
+            }
+            // The option model to every request watching the option that is
+            // owed it.
+            Record::OptionTick((generation, tick)) => {
+                let (tick_type, to) = self.core.option_tick_owed(generation, &tick);
+                let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                    tick.figures;
+                for req_id in to {
+                    call_wrapper!(self, py, shared, "tick_option_computation",
+                        (req_id, tick_type, i32::from(tick.price_based),
+                         or_unstated_price(implied_vol).filter(|v| *v >= 0.0), or_unstated_greek(delta),
+                         or_unstated_price(opt_price), or_unstated_price(pv_dividend),
+                         or_unstated_greek(gamma), or_unstated_greek(vega),
+                         or_unstated_greek(theta), or_unstated_price(und_price)));
                 }
             }
             Record::VenueError(text) => {

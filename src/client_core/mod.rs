@@ -247,7 +247,55 @@ impl ClientCore {
             Some(&MDT_DELAYED) | Some(&MDT_DELAYED_FROZEN)
         )
     }
+
+    /// The tick a model tick goes out under, and the requests it goes to.
+    ///
+    /// Decided per request, as a gateway decides it: a request watching the
+    /// option is sent the tick when any of its eight figures differs from the
+    /// last tick that request was sent, and at least one figure is stated. The
+    /// last is replaced whether or not it is sent, so a tick stating nothing
+    /// is what the next one is compared with. A request joining a contract
+    /// already modelled is sent the next tick, changed or not.
+    pub fn option_tick_owed(
+        &self, generation: u64, tick: &crate::bridge::OptionTick,
+    ) -> (i32, Vec<i64>) {
+        let tick_type = if self.feed_is_delayed(tick.instrument) {
+            DELAYED_MODEL_OPTION_COMPUTATION
+        } else {
+            MODEL_OPTION_COMPUTATION
+        };
+        if generation != self.generation_held(tick.instrument) {
+            return (tick_type, Vec::new());
+        }
+        let stated = tick.figures.iter().any(|figure| *figure != f64::MAX);
+        // Marked under the map a withdrawal clears, so a withdrawal lands
+        // wholly before or wholly after: marked after it, a number reused on
+        // the same option was never sent a tick it had not been sent.
+        let own = self.ownership();
+        let mut sent = self.option_ticks_sent.lock().unwrap();
+        let owed: Vec<i64> = own.holders.get(&tick.instrument).copied().into_iter()
+            .chain(own.following.get(&tick.instrument).into_iter().flatten().copied())
+            .filter(|req_id| sent.insert(*req_id, tick.figures) != Some(tick.figures) && stated)
+            .collect();
+        drop(sent);
+        drop(own);
+        // The model is one of the kinds an option's snapshot waits for.
+        for req_id in &owed {
+            self.note_snapshot_tick(*req_id, tick_type);
+        }
+        (tick_type, owed)
+    }
 }
+
+/// Tick type 13: the option model's computation.
+pub(crate) const MODEL_OPTION_COMPUTATION: i32 = 13;
+
+/// The same on a delayed feed, which the reference client numbers apart.
+///
+/// A program that asked for delayed data reads its model there; delivered
+/// under 13 it arrived indistinguishable from a live reading, on a feed the
+/// caller had been told was delayed.
+pub(crate) const DELAYED_MODEL_OPTION_COMPUTATION: i32 = 83;
 
 /// Result of polling quotes for one instrument.
 pub struct QuotePollResult {
@@ -1327,6 +1375,8 @@ pub struct ClientCore {
     pub mdt_sent: Mutex<HashMap<i64, i32>>,
     /// Requests already told the parameters of their market-data subscription.
     tick_req_params_sent: Mutex<HashSet<i64>>,
+    /// The last option model tick each request was sent, figure by figure.
+    option_ticks_sent: Mutex<HashMap<i64, [f64; 8]>>,
     /// The type sent with each instrument's subscription. Every watcher reads
     /// that feed, even when it asked for another type or takes over as holder.
     mdt_by_instrument: Mutex<HashMap<InstrumentId, i32>>,
@@ -1560,6 +1610,7 @@ impl ClientCore {
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashMap::new()),
             tick_req_params_sent: Mutex::new(HashSet::new()),
+            option_ticks_sent: Mutex::new(HashMap::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
@@ -1643,6 +1694,7 @@ impl ClientCore {
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
         self.tick_req_params_sent.lock().unwrap().clear();
+        self.option_ticks_sent.lock().unwrap().clear();
         self.mdt_by_instrument.lock().unwrap().clear();
         self.historical_asks.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
@@ -1839,6 +1891,7 @@ impl ClientCore {
             for req_id in &watching {
                 self.mdt_sent.lock().unwrap().remove(req_id);
                 self.tick_req_params_sent.lock().unwrap().remove(req_id);
+                self.option_ticks_sent.lock().unwrap().remove(req_id);
                 // The slot going back ends the request, and a number that
                 // outlives its request with its marks still standing is read as
                 // the request it was: reused for an ordinary stream it was
@@ -2210,6 +2263,7 @@ impl ClientCore {
             own.epoch.remove(&req_id);
             own.series.remove(&req_id);
             self.tick_req_params_sent.lock().unwrap().remove(&req_id);
+            self.option_ticks_sent.lock().unwrap().remove(&req_id);
             if let Some(instrument) = own.by_req.remove(&req_id) {
                 let mut nobody_left = true;
                 if let Some(watchers) = own.following.get_mut(&instrument) {

@@ -22,17 +22,6 @@ use crate::types::*;
 
 use super::{Contract, EClient};
 
-/// The tick type a model computation is reported under, matching the reference
-/// client's own numbering.
-const MODEL_OPTION_COMPUTATION: i32 = 13;
-
-/// The same on a delayed feed, which the reference client numbers apart.
-///
-/// A program that asked for delayed data reads its model there; delivered
-/// under 13 it arrived indistinguishable from a live reading, on a feed the
-/// caller had been told was delayed.
-const DELAYED_MODEL_OPTION_COMPUTATION: i32 = 83;
-
 /// Tick type 53: a computation this client was asked for.
 ///
 /// The stream and the answer are two different things, and the venue names
@@ -405,31 +394,26 @@ impl EClient {
                     }
                 }
             }
-            // The venue's option model to every subscriber of the contract,
-            // and a computation answering a request to that request alone.
-            Record::OptionComputation((generation, comp)) => {
-                let (to, tick_type): (Vec<i64>, i32) = match comp.answers {
-                    Some(asked) => (vec![asked], ASKED_OPTION_COMPUTATION),
-                    None if generation != self.core.generation_held(comp.instrument) => {
-                        (Vec::new(), MODEL_OPTION_COMPUTATION)
-                    }
-                    None => (
-                        self.core.watchers_of(comp.instrument),
-                        if self.core.feed_is_delayed(comp.instrument) {
-                            DELAYED_MODEL_OPTION_COMPUTATION
-                        } else {
-                            MODEL_OPTION_COMPUTATION
-                        },
-                    ),
-                };
-                for req_id in to {
-                    // The model is one of the kinds an option's snapshot
-                    // waits for.
-                    self.core.note_snapshot_tick(req_id, tick_type);
+            // A computation answering a request, to that request alone.
+            Record::OptionComputation(comp) => {
+                if let Some(asked) = comp.answers {
                     wrapper.tick_option_computation(
-                        req_id, tick_type, 0,
+                        asked, ASKED_OPTION_COMPUTATION, 0,
                         comp.implied_vol, comp.delta, comp.opt_price, comp.pv_dividend,
                         comp.gamma, comp.vega, comp.theta, comp.und_price,
+                    );
+                }
+            }
+            // The option model to every request watching the option that is
+            // owed it.
+            Record::OptionTick((generation, tick)) => {
+                let (tick_type, to) = self.core.option_tick_owed(generation, &tick);
+                let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                    tick.figures;
+                for req_id in to {
+                    wrapper.tick_option_computation(
+                        req_id, tick_type, i32::from(tick.price_based),
+                        implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price,
                     );
                 }
             }
@@ -1370,8 +1354,8 @@ mod delivered_size_tests {
         let mut heard = Heard::default();
         client.process_msgs(&mut heard);
         assert!(heard.ended.is_empty(), "an option's snapshot ended without its model");
-        shared.market.push_option_computation(crate::types::OptionComputation {
-            instrument: slot, ..Default::default()
+        shared.market.push_option_tick(crate::bridge::OptionTick {
+            instrument: slot, figures: [0.2; 8], price_based: false,
         });
         client.process_msgs(&mut heard);
         assert_eq!(heard.ended, [1], "the model was the last of it");
@@ -1393,20 +1377,23 @@ mod delivered_size_tests {
     }
 
     /// News and model publications belong to whoever still watches the
-    /// contract. An explicit calculation answer keeps its own request id.
+    /// contract. A model tick goes to each watcher as it stands, and to a
+    /// watcher only when it differs from the last that watcher was sent. An
+    /// explicit calculation answer keeps its own request id.
     #[test]
     fn news_and_models_are_delivered_only_to_current_watchers() {
+        type Model = (i64, i32, i32, [f64; 8]);
         #[derive(Default)]
-        struct Heard { news: Vec<i64>, models: Vec<(i64, i32)> }
+        struct Heard { news: Vec<i64>, models: Vec<Model> }
         impl Wrapper for Heard {
             fn tick_news(&mut self, id: i64, _: i64, _: &str, _: &str, _: &str, _: &str) {
                 self.news.push(id);
             }
             fn tick_option_computation(
-                &mut self, id: i64, kind: i32, _: i32, _: f64, _: f64, _: f64,
-                _: f64, _: f64, _: f64, _: f64, _: f64,
+                &mut self, id: i64, kind: i32, attrib: i32, iv: f64, delta: f64, price: f64,
+                pv_dividend: f64, gamma: f64, vega: f64, theta: f64, und: f64,
             ) {
-                self.models.push((id, kind));
+                self.models.push((id, kind, attrib, [iv, delta, price, pv_dividend, gamma, vega, theta, und]));
             }
         }
         let (client, rx, shared) = crate::api::client::tests::test_client();
@@ -1416,42 +1403,67 @@ mod delivered_size_tests {
         }
         crate::api::client::tests::settled(&client, &rx);
         let slot = client.core.watching(1).expect("the engine took it");
-        let publish = || {
+        let figures = |iv: f64| [iv, 0.55, 5.0, f64::MAX, 0.02, 0.3, -0.1, 765.0];
+        let publish = |iv: f64| {
             shared.market.push_tick_news(crate::types::TickNews {
                 instrument: slot, timestamp: 0, provider_code: "BRFG".into(),
                 article_id: "BRFG$1".into(), headline: "SPY headline".into(),
             });
-            shared.market.push_option_computation(crate::types::OptionComputation {
-                instrument: slot, ..Default::default()
+            shared.market.push_option_tick(crate::bridge::OptionTick {
+                instrument: slot, figures: figures(iv), price_based: true,
             });
         };
-        publish();
+        publish(0.2);
         let mut heard = Heard::default();
         client.process_msgs(&mut heard);
         assert_eq!(heard.news, [1, 2]);
-        assert_eq!(heard.models, [(1, 13), (2, 13)]);
+        assert_eq!(heard.models, [(1, 13, 1, figures(0.2)), (2, 13, 1, figures(0.2))]);
+
+        // The same tick again goes only to a request that was not sent it.
+        client.try_req_mkt_data(3, &crate::api::client::tests::spy(), "", false, false)
+            .expect("taken");
+        crate::api::client::tests::settled(&client, &rx);
+        publish(0.2);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert_eq!(heard.models, [(3, 13, 1, figures(0.2))], "sent once to each");
 
         // On a delayed feed the reference client numbers the model apart, and
         // a program that asked for delayed data reads it there.
         client.core.mark_feed_delayed_for_test(slot);
-        publish();
+        publish(0.21);
         let mut delayed_heard = Heard::default();
         client.process_msgs(&mut delayed_heard);
-        assert_eq!(delayed_heard.models, [(1, 83), (2, 83)], "the delayed model, not the live one");
+        let kinds: Vec<(i64, i32)> = delayed_heard.models.iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(kinds, [(1, 83), (2, 83), (3, 83)], "the delayed model, not the live one");
+
+        // A number given up and asked under again is a request of its own,
+        // sent the model it has not been sent.
+        crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).unwrap();
+        client.try_req_mkt_data(1, &crate::api::client::tests::spy(), "", false, false)
+            .expect("taken");
+        crate::api::client::tests::settled(&client, &rx);
+        publish(0.21);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        let kinds: Vec<(i64, i32)> = heard.models.iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(kinds, [(1, 83)], "the same model to the same number, asked again");
 
         // Withdrawn where the engine takes the cancels, so what the venue
         // says of the contract after that is nobody's.
-        crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).unwrap();
-        crate::api::client::tests::reported(&client, || client.cancel_mkt_data(2)).unwrap();
+        for req_id in [1, 2, 3] {
+            crate::api::client::tests::reported(&client, || client.cancel_mkt_data(req_id)).unwrap();
+        }
         crate::api::client::tests::settled(&client, &rx);
-        publish();
+        publish(0.22);
         shared.market.push_option_computation(crate::types::OptionComputation {
             instrument: slot, answers: Some(7), ..Default::default()
         });
         let mut heard = Heard::default();
         client.process_msgs(&mut heard);
         assert!(heard.news.is_empty(), "a withdrawn watch was sent news: {:?}", heard.news);
-        assert_eq!(heard.models, [(7, 53)], "only the explicitly addressed answer is owed");
+        let kinds: Vec<(i64, i32)> = heard.models.iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(kinds, [(7, 53)], "only the explicitly addressed answer is owed");
     }
 
     /// What the venue says on its own account reaches the caller under the
