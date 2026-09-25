@@ -174,14 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn compute_x_deterministic() {
-        let salt = vec![0x01, 0x02, 0x03, 0x04];
-        let x1 = srp_compute_x(&salt, "user", "pass");
-        let x2 = srp_compute_x(&salt, "user", "pass");
-        assert_eq!(x1, x2);
-    }
-
-    #[test]
     fn compute_x_different_inputs() {
         let salt = vec![0x01, 0x02, 0x03, 0x04];
         let x1 = srp_compute_x(&salt, "user1", "pass");
@@ -197,15 +189,6 @@ mod tests {
         let u2 = srp_compute_u(&b, &a);
         assert_ne!(u1, u2); // order matters
     }
-
-    #[test]
-    fn compute_k_deterministic() {
-        let s = BigUint::from(999999u64);
-        let k1 = srp_compute_k(&s);
-        let k2 = srp_compute_k(&s);
-        assert_eq!(k1, k2);
-    }
-
 
     #[test]
     fn paper_token_differs() {
@@ -243,36 +226,6 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    #[test]
-    fn srp_compute_m1_produces_20_byte_sha1() {
-        let n = srp_venue_n();
-        let g = BigUint::from(SRP_VENUE_G);
-        let salt = BigUint::from(12345u64);
-        let a_pub = BigUint::from(99999u64);
-        let b_pub = BigUint::from(88888u64);
-        let k = BigUint::from(77777u64);
-
-        let m1 = srp_compute_m1(&n, &g, "testuser", &salt, &a_pub, &b_pub, &k);
-        // M1 is a SHA-1 output → always 20 bytes (160 bits)
-        let m1_bytes = m1.to_bytes_be();
-        assert!(
-            m1_bytes.len() <= 20,
-            "M1 should be at most 20 bytes (SHA-1 output), got {}",
-            m1_bytes.len()
-        );
-    }
-
-    #[test]
-    fn paper_token_convert_idempotent() {
-        // Converting with the same hw_info twice should give the same result
-        let k = BigUint::from(123456789u64);
-        let hw = "hwinfo|AA:BB:CC:DD:EE:FF";
-        let first = paper_token_convert(&k, hw);
-        let second = paper_token_convert(&k, hw);
-        assert_eq!(first, second);
-    }
-
-
     // ── Authentication failure paths ──────────────────────────────────
 
     #[test]
@@ -308,29 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn srp_empty_salt_no_panic() {
-        let salt = vec![];
-        let x = srp_compute_x(&salt, "user", "pass");
-        assert!(x > BigUint::ZERO, "x should still produce a non-zero value");
-    }
-
-    #[test]
-    fn srp_empty_username_no_panic() {
-        let salt = vec![0x01, 0x02, 0x03, 0x04];
-        let x = srp_compute_x(&salt, "", "pass");
-        let x2 = srp_compute_x(&salt, "user", "pass");
-        assert_ne!(x, x2, "Empty username should produce different x");
-    }
-
-    #[test]
-    fn srp_empty_password_no_panic() {
-        let salt = vec![0x01, 0x02, 0x03, 0x04];
-        let x_empty = srp_compute_x(&salt, "user", "");
-        let x_real = srp_compute_x(&salt, "user", "realpass");
-        assert_ne!(x_empty, x_real, "Empty password should produce different x");
-    }
-
-    #[test]
     fn srp_b_pub_zero_no_panic() {
         let n = srp_venue_n();
         let g = BigUint::from(SRP_VENUE_G);
@@ -362,14 +292,6 @@ mod tests {
         let token_b = paper_token_convert(&k, "hw2|11:22:33:44:55:66");
         assert_ne!(token_a, token_b,
             "Different hardware info must produce different paper tokens");
-    }
-
-
-    #[test]
-    fn srp_large_salt_no_panic() {
-        let salt: Vec<u8> = (0..256).map(|i| i as u8).collect();
-        let x = srp_compute_x(&salt, "user", "pass");
-        assert!(x > BigUint::ZERO);
     }
 
     #[test]

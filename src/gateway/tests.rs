@@ -329,14 +329,10 @@ fn the_inflated_init_content_is_scanned_but_not_handed_to_the_engine() {
     );
 }
 
+/// Tag 8483 carries the last four bytes of the token's SHA-1, in hex.
 #[test]
-fn token_short_hash_deterministic() {
-    let token = BigUint::from(123456789u64);
-    let h1 = token_short_hash(&token);
-    let h2 = token_short_hash(&token);
-    assert_eq!(h1, h2);
-    // Should be lowercase hex
-    assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+fn token_short_hash_known_answer() {
+    assert_eq!(token_short_hash(&BigUint::from(123456789u64)), "9ce39359");
 }
 
 /// The hash is written in its shortest form, with no leading zeros.
@@ -513,25 +509,12 @@ fn a_stated_host_and_port_are_where_a_farm_connection_goes() {
 }
 
 #[test]
-fn build_farm_logon_has_required_tags() {
-    let token = BigUint::from(999u64);
-    let hash = token_short_hash(&token);
-    assert!(!hash.is_empty());
-}
-
-#[test]
 fn chrono_free_timestamp_format() {
     let ts = chrono_free_timestamp();
     assert_eq!(ts.len(), 17); // "YYYYMMDD-HH:MM:SS"
     assert_eq!(ts.as_bytes()[8], b'-');
     assert_eq!(ts.as_bytes()[11], b':');
     assert_eq!(ts.as_bytes()[14], b':');
-}
-
-#[test]
-fn days_to_ymd_epoch() {
-    let (y, m, d) = days_to_ymd(0);
-    assert_eq!((y, m, d), (1970, 1, 1));
 }
 
 #[test]
@@ -589,13 +572,6 @@ fn parse_misc_urls_value_with_equals() {
     // split_once stops at first `=`, so URLs with query strings round-trip.
     let m = parse_misc_urls("cookbook=https://x.example/path?a=1&b=2");
     assert_eq!(m.get("cookbook").map(String::as_str), Some("https://x.example/path?a=1&b=2"));
-}
-
-#[test]
-fn days_to_ymd_known_date() {
-    // 2026-03-05 = day 20517 since epoch
-    let (y, m, d) = days_to_ymd(20517);
-    assert_eq!((y, m, d), (2026, 3, 5));
 }
 
 #[test]
@@ -672,26 +648,6 @@ fn a_farm_logon_states_the_session_the_way_an_order_logon_does() {
 }
 
 #[test]
-fn days_to_ymd_leap_year() {
-    let (y, m, d) = days_to_ymd(19782); // 2024-02-29
-    assert_eq!((y, m, d), (2024, 2, 29));
-}
-
-#[test]
-fn days_to_ymd_end_of_year() {
-    // 2025-12-31
-    let (y, m, d) = days_to_ymd(20453); // 2025-12-31
-    assert_eq!((y, m, d), (2025, 12, 31));
-}
-
-#[test]
-fn days_to_ymd_start_of_2000() {
-    // 2000-01-01 = 10957 days from epoch
-    let (y, m, d) = days_to_ymd(10957);
-    assert_eq!((y, m, d), (2000, 1, 1));
-}
-
-#[test]
 fn try_frame_farm_msg_garbage_prefix() {
     let mut buf = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let msg = fix_build(&[(35, "A")], 1);
@@ -749,50 +705,6 @@ fn try_frame_farm_msg_multiple_sequential() {
     let (extracted2, consumed2) = try_frame_farm_msg(&buf[consumed..]).unwrap();
     assert_eq!(extracted2, msg2);
     assert_eq!(consumed2, msg2.len());
-}
-
-#[test]
-fn token_short_hash_nonzero_output() {
-    let token = BigUint::from(1u64);
-    let hash = token_short_hash(&token);
-    assert!(!hash.is_empty());
-    // Should be hex string
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
-}
-
-#[test]
-fn token_short_hash_large_token() {
-    let token = BigUint::from(u64::MAX);
-    let hash = token_short_hash(&token);
-    assert!(!hash.is_empty());
-    assert!(hash.len() <= 8); // u32 hex is at most 8 chars
-}
-
-#[test]
-fn chrono_free_timestamp_not_empty() {
-    let ts = chrono_free_timestamp();
-    assert!(!ts.is_empty());
-    // Year should start with 20xx
-    assert!(ts.starts_with("20"));
-}
-
-#[test]
-fn gateway_config_fields() {
-    let config = GatewayConfig {
-        settings: Default::default(),
-        username: "user".to_string(),
-            password: Zeroizing::new("pass".to_string()),
-        host: "cdc1.ibllc.com".to_string(),
-        paper: true,
-        accept_invalid_certs: false,
-        ib_key_timeout_secs: session::IB_KEY_DEFAULT_TIMEOUT_SECS,
-        ib_key_token_sub_type: session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
-        code_provider: None,
-        cancel: None,
-        resume: None,
-    };
-    assert_eq!(config.username, "user");
-        assert!(config.paper);
 }
 
 fn auth_with(host: &str, trading_host: &str, trading_farm: &str) -> ReconnectAuth {

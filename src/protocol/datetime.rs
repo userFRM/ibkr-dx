@@ -855,3 +855,21 @@ mod venue_clock_tests {
         assert!(ib_datetime_to_unix("20260830-14:30:00").is_some());
     }
 }
+
+#[cfg(test)]
+mod day_count_tests {
+    use super::*;
+
+    #[test]
+    fn days_since_the_epoch_name_their_civil_date() {
+        for (days, date) in [
+            (0, (1970, 1, 1)),
+            (10957, (2000, 1, 1)),
+            (19782, (2024, 2, 29)),
+            (20453, (2025, 12, 31)),
+            (20517, (2026, 3, 5)),
+        ] {
+            assert_eq!(days_to_ymd(days), date, "day {days}");
+        }
+    }
+}

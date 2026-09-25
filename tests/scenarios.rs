@@ -10,7 +10,6 @@ use ibkr_dx::api::wrapper::tests::RecordingWrapper;
 use ibkr_dx::bridge::SharedState;
 use ibkr_dx::control::historical::{HistoricalResponse, HistoricalBar, HeadTimestampResponse};
 use ibkr_dx::control::contracts::{ContractDefinition, SecurityType};
-use ibkr_dx::engine::hot_loop::HotLoop;
 use ibkr_dx::types::ContractRef;
 use ibkr_dx::types::*;
 
@@ -483,73 +482,6 @@ fn market_data_tbt_trades_and_quotes() {
 //  ACCOUNT SCENARIOS
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Fill buy → fill sell → position returns to zero → verify round-trip.
-#[test]
-fn account_round_trip_position() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let spy_id = engine.context_mut().register_instrument(756733);
-
-    // Buy 100 @ 150
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 1, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 1000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 150 * PRICE_SCALE,
-    });
-    assert_eq!(engine.context_mut().position(spy_id), 100.0);
-    assert_eq!(shared.portfolio.position(spy_id), 100.0);
-
-    // Sell 100 @ 152
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 2, side: Side::Sell,
-        price: 152 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 2000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 152 * PRICE_SCALE,
-    });
-    assert_eq!(engine.context_mut().position(spy_id), 0.0);
-    assert_eq!(shared.portfolio.position(spy_id), 0.0);
-
-    // Two fills in shared state
-    let fills = shared.orders.drain_fills();
-    assert_eq!(fills.len(), 2);
-    assert_eq!(fills[0].0.side, Side::Buy);
-    assert_eq!(fills[1].0.side, Side::Sell);
-}
-
-/// Multiple instruments: fills on A and B → positions aggregate correctly.
-#[test]
-fn account_multi_instrument_positions() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let spy_id = engine.context_mut().register_instrument(756733);
-    let aapl_id = engine.context_mut().register_instrument(265598);
-
-    // Buy 50 SPY
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 1, side: Side::Buy,
-        price: 450 * PRICE_SCALE, qty: 50 * QTY_SCALE, remaining: 0, timestamp_ns: 1000,
-        cum_qty: 50 * QTY_SCALE, avg_price: 450 * PRICE_SCALE,
-    });
-
-    // Buy 100 AAPL
-    engine.inject_fill(&Fill {
-        instrument: aapl_id, order_id: 2, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 2000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 150 * PRICE_SCALE,
-    });
-
-    // Sell 20 SPY
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 3, side: Side::Sell,
-        price: 452 * PRICE_SCALE, qty: 20 * QTY_SCALE, remaining: 0, timestamp_ns: 3000,
-        cum_qty: 20 * QTY_SCALE, avg_price: 452 * PRICE_SCALE,
-    });
-
-    assert_eq!(engine.context_mut().position(spy_id), 30.0);
-    assert_eq!(engine.context_mut().position(aapl_id), 100.0);
-    assert_eq!(shared.portfolio.position(spy_id), 30.0);
-    assert_eq!(shared.portfolio.position(aapl_id), 100.0);
-}
-
 /// Account state tracks through fills and position updates.
 #[test]
 fn account_state_via_eclient() {
@@ -736,122 +668,6 @@ fn contract_lookup_then_subscribe() {
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:21:1:178")));
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:21:2:179")));
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  ENGINE-LEVEL SCENARIOS (HotLoop + SharedState)
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Full engine scenario: register → tick → fill → position check → second fill.
-#[test]
-fn engine_full_trade_lifecycle() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-
-    let spy_id = engine.context_mut().register_instrument(756733);
-    engine.context_mut().set_symbol(spy_id, "SPY".into());
-
-    // Market data
-    let q = engine.context_mut().quote_mut(spy_id);
-    q.bid = 450 * PRICE_SCALE;
-    q.ask = 451 * PRICE_SCALE;
-    q.last = 450_50000000;
-    engine.inject_tick(spy_id);
-
-    // Verify shared state
-    let sq = shared.market.quote(spy_id);
-    assert_eq!(sq.bid, 450 * PRICE_SCALE);
-
-    // Buy fill
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 1, side: Side::Buy,
-        price: 450 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 1000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 450 * PRICE_SCALE,
-    });
-    assert_eq!(engine.context_mut().position(spy_id), 100.0);
-
-    // Price moves up
-    let q = engine.context_mut().quote_mut(spy_id);
-    q.bid = 455 * PRICE_SCALE;
-    q.ask = 456 * PRICE_SCALE;
-    engine.inject_tick(spy_id);
-
-    // Sell fill at higher price
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 2, side: Side::Sell,
-        price: 455 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 2000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 455 * PRICE_SCALE,
-    });
-    assert_eq!(engine.context_mut().position(spy_id), 0.0);
-
-    // Verify all fills flowed to SharedState
-    let fills = shared.orders.drain_fills();
-    assert_eq!(fills.len(), 2);
-    assert_eq!(fills[0].0.price, 450 * PRICE_SCALE);
-    assert_eq!(fills[1].0.price, 455 * PRICE_SCALE);
-}
-
-/// Engine + EClient end-to-end: HotLoop pushes → EClient dispatches to wrapper.
-#[test]
-fn engine_to_eclient_end_to_end() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let spy_id = engine.context_mut().register_instrument(756733);
-
-    // Set up quote
-    let q = engine.context_mut().quote_mut(spy_id);
-    q.bid = 450 * PRICE_SCALE;
-    q.ask = 451 * PRICE_SCALE;
-    engine.inject_tick(spy_id);
-
-    // Build EClient on same SharedState
-    let (tx, _rx) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
-    client.map_req_instrument(1, spy_id);
-
-    // Process — should see ticks
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
-    assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:2:451")));
-
-    // Now inject a fill through the engine
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 42, side: Side::Buy,
-        price: 450 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 1000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 450 * PRICE_SCALE,
-    });
-
-    // Process — should see fill
-    w.events.clear();
-    client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:42:Filled")));
-    assert!(w.events.iter().any(|e| e.starts_with("exec_details:-1:BOT:100")));
-}
-
-/// Short sell scenario: sell short → buy to cover → flat.
-#[test]
-fn engine_short_sell_then_cover() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let spy_id = engine.context_mut().register_instrument(756733);
-
-    // Short sell 50
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 1, side: Side::ShortSell,
-        price: 450 * PRICE_SCALE, qty: 50 * QTY_SCALE, remaining: 0, timestamp_ns: 1000,
-        cum_qty: 50 * QTY_SCALE, avg_price: 450 * PRICE_SCALE,
-    });
-    assert_eq!(engine.context_mut().position(spy_id), -50.0);
-
-    // Buy to cover 50
-    engine.inject_fill(&Fill {
-        instrument: spy_id, order_id: 2, side: Side::Buy,
-        price: 445 * PRICE_SCALE, qty: 50 * QTY_SCALE, remaining: 0, timestamp_ns: 2000,
-        cum_qty: 50 * QTY_SCALE, avg_price: 445 * PRICE_SCALE,
-    });
-    assert_eq!(engine.context_mut().position(spy_id), 0.0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

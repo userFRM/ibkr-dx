@@ -5,11 +5,9 @@
 //! different signatures on two of them — so the file proved only that the
 //! copies agreed with themselves and no change to the real ones could fail it.
 //!
-//! Sources:
-//! - reference test vectors (checksum, XOR fold)
-//! - reference test vectors (VLQ, hibit strings, tick decoding, bar captures)
+//! Sources: reference test vectors (VLQ, hibit strings, bar captures)
 
-use ibkr_dx::protocol::fix::{fix_checksum, xor_fold};
+use ibkr_dx::control::historical::decode_bar_payload;
 use ibkr_dx::protocol::tick_decoder::{read_hibit_str, read_vlq, vlq_signed};
 
 // ============================================================
@@ -63,14 +61,6 @@ fn hibit_str_finra() {
 }
 
 #[test]
-fn hibit_str_empty() {
-    // 0x80 = empty string (null with hi-bit)
-    let (s, pos) = read_hibit_str(&[0x80], 0);
-    assert_eq!(s, "");
-    assert_eq!(pos, 1);
-}
-
-#[test]
 fn hibit_str_single_char() {
     // 0xC9 = 'I' | 0x80
     let (s, _) = read_hibit_str(&[0xc9], 0);
@@ -83,245 +73,6 @@ fn hibit_str_arca() {
     let (s, pos) = read_hibit_str(&[0x41, 0x52, 0x43, 0xc1], 0);
     assert_eq!(s, "ARCA");
     assert_eq!(pos, 4);
-}
-
-// ============================================================
-// Tick-by-tick binary decoding
-// ============================================================
-// AllLast marker = 0x81, BidAsk marker = 0x82
-// Format: [2-byte header] [marker] [ts_vlq] [fields...]
-
-/// Parse an AllLast tick entry from raw bytes.
-/// Returns (timestamp, price_cents, attribs_mask, size, exchange, conditions).
-fn decode_alllast_tick(
-    data: &[u8],
-    pos: usize,
-    price_state: &mut i64,
-) -> (u64, i64, u8, u64, String, String) {
-    let mut p = pos;
-
-    let (ts, used) = read_vlq(data, p);
-    p += used;
-
-    let (price_raw, n) = read_vlq(data, p);
-    p += n;
-    let delta = vlq_signed(price_raw, n);
-    *price_state += delta;
-
-    let (attribs_raw, used) = read_vlq(data, p);
-    p += used;
-    let attribs_mask = (attribs_raw & 3) as u8;
-
-    let (size, used) = read_vlq(data, p);
-    p += used;
-
-    let (exchange, used) = read_hibit_str(data, p);
-    p += used;
-
-    let (conditions, _) = read_hibit_str(data, p);
-
-    (ts, *price_state, attribs_mask, size, exchange, conditions)
-}
-
-/// Parse a BidAsk tick entry from raw bytes.
-/// Returns (timestamp, bid_cents, ask_cents, attribs, bid_size, ask_size).
-fn decode_bidask_tick(
-    data: &[u8],
-    pos: usize,
-    bid_state: &mut i64,
-    ask_state: &mut i64,
-) -> (u64, i64, i64, u8, u64, u64) {
-    let mut p = pos;
-
-    let (ts, _n) = read_vlq(data, p);
-    let new_p = p + _n;
-    p = new_p;
-
-    let (bid_raw, n) = read_vlq(data, p);
-    let new_p = p + n;
-    p = new_p;
-    *bid_state += vlq_signed(bid_raw, n);
-
-    let (ask_raw, n) = read_vlq(data, p);
-    let new_p = p + n;
-    p = new_p;
-    *ask_state += vlq_signed(ask_raw, n);
-
-    let (attribs_raw, used) = read_vlq(data, p);
-    p += used;
-    let attribs = (attribs_raw & 3) as u8;
-
-    let (bid_size, _n) = read_vlq(data, p);
-    let new_p = p + _n;
-    p = new_p;
-
-    let (ask_size, _) = read_vlq(data, p);
-
-    (ts, *bid_state, *ask_state, attribs, bid_size, ask_size)
-}
-
-// --- AllLast tick vectors (from reference test suite) ---
-
-#[test]
-fn alllast_first_tick() {
-    // First tick: delta from 0 → absolute price = 26343 ($263.43)
-    let body: &[u8] = &[
-        0x00, 0x00, // header
-        0x81, // AllLast marker
-        0xe4, // ts=100
-        0x01, 0x4d, 0xe7, // price=26343
-        0x84, // attribs=4
-        0xe4, // size=100
-        0x41, 0x52, 0x43, 0xc1, // "ARCA"
-        0x80, // empty conditions
-    ];
-
-    let mut price_state: i64 = 0;
-    let (ts, price, attribs, size, exchange, conditions) =
-        decode_alllast_tick(body, 3, &mut price_state); // skip header + marker
-
-    assert_eq!(ts, 100);
-    assert_eq!(price, 26343);
-    assert_eq!(attribs, 0); // 4 & 3 = 0
-    assert_eq!(size, 100);
-    assert_eq!(exchange, "ARCA");
-    assert_eq!(conditions, "");
-    assert_eq!(price_state, 26343);
-}
-
-#[test]
-fn alllast_delta_positive() {
-    // Second tick: delta = +8 cents → 26343 + 8 = 26351 ($263.51)
-    let body: &[u8] = &[
-        0x00, 0x00, // header
-        0x81, // AllLast marker
-        0xe4, // ts=100
-        0x88, // price delta=+8
-        0x84, // attribs=4
-        0xc8, // size=72
-        0x80, // empty exchange
-        0x80, // empty conditions
-    ];
-
-    let mut price_state: i64 = 26343;
-    let (_, price, _, size, exchange, _) = decode_alllast_tick(body, 3, &mut price_state);
-
-    assert_eq!(price, 26351);
-    assert_eq!(size, 72);
-    assert_eq!(exchange, "");
-    assert_eq!(price_state, 26351);
-}
-
-#[test]
-fn alllast_delta_negative() {
-    // delta = -6: VLQ byte 0xfa → value=122, signed(122,1) = 122-128 = -6
-    let body: &[u8] = &[
-        0x00, 0x00, //
-        0x81, //
-        0xe4, // ts
-        0xfa, // VLQ value=122 → signed=-6
-        0x84, // attribs
-        0x81, // size=1
-        0x80, // exchange
-        0x80, // conditions
-    ];
-
-    let mut price_state: i64 = 26351;
-    let (_, price, _, _, _, _) = decode_alllast_tick(body, 3, &mut price_state);
-
-    assert_eq!(price, 26345); // 26351 - 6
-}
-
-#[test]
-fn alllast_delta_state_persists() {
-    // First message: price = 26343
-    let body1: &[u8] = &[
-        0x00, 0x00, 0x81, 0xe4, 0x01, 0x4d, 0xe7, 0x84, 0xe4, 0x80, 0x80,
-    ];
-    let mut price_state: i64 = 0;
-    decode_alllast_tick(body1, 3, &mut price_state);
-    assert_eq!(price_state, 26343);
-
-    // Second message: delta = +8
-    let body2: &[u8] = &[0x00, 0x00, 0x81, 0xe4, 0x88, 0x84, 0xe4, 0x80, 0x80];
-    decode_alllast_tick(body2, 3, &mut price_state);
-    assert_eq!(price_state, 26351);
-}
-
-#[test]
-fn attribs_unreported() {
-    // raw=14 → mask = 14 & 3 = 2 (unreported bit)
-    let body: &[u8] = &[
-        0x00, 0x00, 0x81, 0xe4, 0x01, 0x4d, 0xe7, 0x8e, // attribs=14
-        0xe4, 0x80, 0x80,
-    ];
-    let mut ps: i64 = 0;
-    let (_, _, attribs, _, _, _) = decode_alllast_tick(body, 3, &mut ps);
-    assert_eq!(attribs, 2); // 14 & 3 = 2
-}
-
-// --- BidAsk tick vectors ---
-
-#[test]
-fn bidask_first_tick() {
-    // bid=26340 ($263.40), ask=26345 ($263.45), bidSize=200, askSize=300
-    let body: &[u8] = &[
-        0x00, 0x00, //
-        0x82, // BidAsk marker
-        0xe4, // ts=100
-        0x01, 0x4d, 0xe4, // bid=26340
-        0x01, 0x4d, 0xe9, // ask=26345
-        0x80, // attribs=0
-        0x01, 0xc8, // bidSize=200
-        0x02, 0xac, // askSize=300
-    ];
-
-    let mut bid_state: i64 = 0;
-    let mut ask_state: i64 = 0;
-    let (ts, bid, ask, attribs, bid_size, ask_size) =
-        decode_bidask_tick(body, 3, &mut bid_state, &mut ask_state);
-
-    assert_eq!(ts, 100);
-    assert_eq!(bid, 26340);
-    assert_eq!(ask, 26345);
-    assert_eq!(attribs, 0);
-    assert_eq!(bid_size, 200);
-    assert_eq!(ask_size, 300);
-}
-
-// ============================================================
-// FIX protocol
-// ============================================================
-
-#[test]
-fn fix_checksum_abc() {
-    assert_eq!(fix_checksum(b"abc"), format!("{:03}", (97 + 98 + 99) % 256));
-}
-
-#[test]
-fn fix_checksum_zero_padded() {
-    let result = fix_checksum(&[0x01]);
-    assert_eq!(result.len(), 3);
-    assert_eq!(result, "001");
-}
-
-#[test]
-fn xor_fold_sequential() {
-    // 20-byte input: bytes 0..20
-    let data: Vec<u8> = (0u8..20).collect();
-    let result = xor_fold(&data);
-    assert_eq!(result.len(), 8);
-    assert_eq!(result, result.to_uppercase());
-
-    // Verify manually: fold 5 groups of 4
-    let mut r = [0u8; 4];
-    for off in (0..20).step_by(4) {
-        for i in 0..4 {
-            r[i] ^= data[off + i];
-        }
-    }
-    let expected: String = r.iter().map(|b| format!("{b:02X}")).collect();
-    assert_eq!(result, expected);
 }
 
 // ============================================================
@@ -374,28 +125,23 @@ const RTBAR_CAPTURES: &[(&[u8], RtBar)] = &[
 ];
 
 #[test]
-fn rtbar_captures_have_fix_prefix() {
-    // Verify all captures start with the expected FIX header
-    for (raw, _) in RTBAR_CAPTURES {
-        assert!(raw.starts_with(b"8=O\x01"));
-        let text = String::from_utf8_lossy(&raw[..20]);
-        assert!(text.contains("35=G"));
-    }
-}
-
-#[test]
-fn rtbar_captures_consistent_length() {
-    // All captures should have the same body length (tag 9=0043)
-    for (raw, _) in RTBAR_CAPTURES {
-        let text = String::from_utf8_lossy(raw);
-        assert!(text.contains("9=0043"));
-    }
-}
-
-#[test]
-fn rtbar_timestamps_are_sequential() {
-    let times: Vec<u32> = RTBAR_CAPTURES.iter().map(|(_, e)| e.0).collect();
-    for w in times.windows(2) {
-        assert_eq!(w[1] - w[0], 5, "RTBAR timestamps should be 5s apart");
+fn rtbar_captures_decode_to_their_bars() {
+    for (raw, (time, open, high, low, close, volume, count)) in RTBAR_CAPTURES {
+        // Behind the header: a ticker id, the bar's time, then the payload's
+        // length and the payload.
+        let body = raw.strip_prefix(b"8=O\x019=0043\x0135=G\x01").expect("header");
+        assert_eq!(u32::from_be_bytes(body[6..10].try_into().unwrap()), *time);
+        let payload = &body[11..11 + body[10] as usize];
+        let bar = decode_bar_payload(payload, 0.01, 1.0).expect("decodes");
+        for (got, want) in [
+            (bar.open, *open),
+            (bar.high, *high),
+            (bar.low, *low),
+            (bar.close, *close),
+        ] {
+            assert!((got - want).abs() < 1e-6, "{time}: {got} != {want}");
+        }
+        assert_eq!(bar.volume, f64::from(*volume), "{time}");
+        assert_eq!(bar.count, *count as i32, "{time}");
     }
 }

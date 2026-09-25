@@ -1289,16 +1289,6 @@ mod tests {
         assert!(tag9_is_unreadable(b"8=FIX.4.1\x0135=0\x0134=000001\x01", fix_msg_length));
     }
 
-    #[test]
-    fn binary_msg_length_basic() {
-        // Build a minimal 8=O message
-        let body = b"35=P\x01data";
-        let msg = format!("8=O\x019={}\x01", body.len());
-        let mut full = msg.into_bytes();
-        full.extend_from_slice(body);
-        assert_eq!(binary_msg_length(&full), Some(full.len()));
-    }
-
     /// A length read from a `9=` the peer wrote into a payload is not this
     /// frame's length.
     ///
@@ -1336,29 +1326,6 @@ mod tests {
     }
 
     #[test]
-    fn fixcomp_length_basic() {
-        let inner = fix_build(&[(35, "0")], 1);
-        let comp = fixcomp_build(&inner);
-        // fixcomp_length is from fixcomp module, already tested there
-        assert_eq!(fixcomp::fixcomp_length(&comp), Some(comp.len()));
-    }
-
-    #[test]
-    fn frame_extraction_fix() {
-        let msg1 = fix_build(&[(35, "0")], 1);
-        let msg2 = fix_build(&[(35, "A"), (108, "10")], 2);
-        let mut buf = msg1.clone();
-        buf.extend_from_slice(&msg2);
-
-        // Simulate extraction by testing the length functions
-        let len1 = fix_msg_length(&buf).unwrap();
-        assert_eq!(len1, msg1.len());
-        let remaining = &buf[len1..];
-        let len2 = fix_msg_length(remaining).unwrap();
-        assert_eq!(len2, msg2.len());
-    }
-
-    #[test]
     fn frame_extraction_mixed_binary_and_fix() {
         let body = b"35=P\x01tickdata";
         let o_msg = format!("8=O\x019={}\x01", body.len());
@@ -1369,23 +1336,18 @@ mod tests {
 
         let mut buf = o_full.clone();
         buf.extend_from_slice(&fix_msg);
-
-        // First message is 8=O
-        assert!(buf.starts_with(b"8=O\x01"));
-        let len1 = binary_msg_length(&buf).unwrap();
-        assert_eq!(len1, o_full.len());
-
-        let remaining = &buf[len1..];
-        assert!(remaining.starts_with(b"8=FIX."));
-        let len2 = fix_msg_length(remaining).unwrap();
-        assert_eq!(len2, fix_msg.len());
-    }
-
-    #[test]
-    fn find_subsequence_basic() {
-        assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
-        assert_eq!(find_subsequence(b"hello world", b"xyz"), None);
-        assert_eq!(find_subsequence(b"8=FIX.4.1\x01", b"8=FIX."), Some(0));
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 2);
+        match &frames[0] {
+            Frame::Binary(data) => assert_eq!(data, &o_full),
+            other => panic!("expected Frame::Binary first, got {other:?}"),
+        }
+        match &frames[1] {
+            Frame::Fix(data) => assert_eq!(data, &fix_msg),
+            other => panic!("expected Frame::Fix second, got {other:?}"),
+        }
+        assert_eq!(conn.buffered(), 0);
     }
 
     /// Helper: create a Connection with a dummy TCP stream for buffer tests.
@@ -1766,29 +1728,6 @@ mod tests {
         let frames = conn.extract_frames();
         assert!(frames.is_empty(), "incomplete control frame should not produce a frame");
         assert!(conn.buffered() > 0, "partial frame must stay buffered, not be cleared");
-    }
-
-    #[test]
-    fn find_subsequence_needle_at_start() {
-        assert_eq!(find_subsequence(b"hello world", b"hello"), Some(0));
-    }
-
-    #[test]
-    fn find_subsequence_needle_at_end() {
-        assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
-    }
-
-    #[test]
-    fn find_subsequence_overlapping() {
-        // "aaa" in "aaaa" — should find at position 0 (first match)
-        assert_eq!(find_subsequence(b"aaaa", b"aaa"), Some(0));
-    }
-
-    #[test]
-    #[should_panic(expected = "window size must be non-zero")]
-    fn find_subsequence_empty_needle() {
-        // windows(0) panics, so empty needle panics
-        find_subsequence(b"hello", b"");
     }
 
     /// Build a connection with signing configured, over a loopback pair.

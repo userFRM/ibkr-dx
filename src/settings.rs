@@ -335,18 +335,12 @@ mod tests {
             GatewaySettings::default().resolve().reconnect_on_socket_err,
             "the documented default",
         );
-        for off in ["0", "false", "False", "no", "NO"] {
-            let stated = GatewaySettings {
-                reconnect_on_socket_err: Some(
-                    !["0", "false", "no"].iter().any(|s| off.eq_ignore_ascii_case(s)),
-                ),
-                ..Default::default()
-            };
-            assert!(
-                !stated.resolve().reconnect_on_socket_err,
-                "however {off} is spelled",
-            );
-        }
+        assert!(
+            !GatewaySettings { reconnect_on_socket_err: Some(false), ..Default::default() }
+                .resolve()
+                .reconnect_on_socket_err,
+            "a session that states it off is off",
+        );
         assert!(
             GatewaySettings { reconnect_on_socket_err: Some(true), ..Default::default() }
                 .resolve()

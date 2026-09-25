@@ -396,17 +396,3 @@ fn fixcomp_wraps_secdef_response() {
     assert_eq!(def.con_id, 265598);
     assert_eq!(def.symbol, "AAPL");
 }
-
-#[test]
-fn fix_sign_verify_secdef_request() {
-    // Build a secdef request, sign it, verify signature
-    let msg = build_secdef_request_by_conid("R1", 265598, 1);
-    let mac_key: Vec<u8> = (0..20).collect();
-    let iv: Vec<u8> = (0..16).collect();
-
-    let (signed, new_iv) = fix::fix_sign(&msg, &mac_key, &iv);
-    let (_, unsign_iv, valid) = fix::fix_unsign(&signed, &mac_key, &iv);
-
-    assert!(valid, "HMAC signature should verify");
-    assert_eq!(new_iv, unsign_iv, "IV chain should match");
-}

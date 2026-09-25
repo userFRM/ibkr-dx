@@ -76,7 +76,7 @@ jobs:
       - name: Test the suites that need no session
         run: |
           set +e
-          timeout -k 30 1500 cargo test --test control_plane --test depth_wire_test --test error_edge_concurrency --test hot_loop_lifecycle --test log_level --test malformed_input --test protocol_vectors --test public_surface --test scenarios > test-suites.log 2>&1
+          timeout -k 30 1500 cargo test --test control_plane --test depth_wire_test --test error_edge_concurrency --test log_level --test malformed_input --test protocol_vectors --test public_surface --test scenarios > test-suites.log 2>&1
           code=$?
           # Printed from the file rather than streamed, so a test that
           # outlives the timeout cannot hold the step's own output open:

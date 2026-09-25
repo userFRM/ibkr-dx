@@ -518,52 +518,33 @@ fn recv_msg_xyz_variant() {
 // ── AuthResult struct ───────────────────────────────────────────────
 
 #[test]
-fn auth_result_default_like_init() {
-    let ar = AuthResult {
-        session_token: BigUint::ZERO,
-        token_type: String::new(),
-        session_id: String::new(),
-        features: Vec::new(),
-        authenticated: false,
-    };
-    assert_eq!(ar.session_token, BigUint::ZERO);
-    assert!(ar.token_type.is_empty());
-    assert!(ar.session_id.is_empty());
-    assert!(ar.features.is_empty());
-    assert!(!ar.authenticated);
-}
-
-#[test]
 fn session_token_bytes_roundtrip_nonzero() {
-    // 0x010203 → [0x01, 0x02, 0x03]; round-trip through BigUint::from_bytes_be.
-    let token = BigUint::from(0x010203u32);
-    let ar = AuthResult {
-        session_token: token.clone(),
-        token_type: "st".to_string(),
-        session_id: String::new(),
-        features: Vec::new(),
-        authenticated: true,
-    };
-    let bytes = ar.session_token_bytes();
-    assert_eq!(bytes, vec![0x01, 0x02, 0x03]);
-    assert_eq!(BigUint::from_bytes_be(&bytes), token);
-}
-
-#[test]
-fn session_token_bytes_roundtrip_large() {
-    let token = BigUint::parse_bytes(
-        b"deadbeefcafebabe0123456789abcdef",
-        16,
-    ).unwrap();
-    let ar = AuthResult {
-        session_token: token.clone(),
-        token_type: "tst".to_string(),
-        session_id: String::new(),
-        features: Vec::new(),
-        authenticated: true,
-    };
-    let bytes = ar.session_token_bytes();
-    assert_eq!(BigUint::from_bytes_be(&bytes), token);
+    // Big-endian bytes, every byte kept, no sign byte before a high bit;
+    // round-trip through BigUint::from_bytes_be.
+    let rows: &[(&[u8], &[u8])] = &[
+        (b"010203", &[0x01, 0x02, 0x03]),
+        (b"80ff", &[0x80, 0xff]),
+        (
+            b"0102030405060708090a0b0c0d0e0f1011121314",
+            &[
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+                0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+            ],
+        ),
+    ];
+    for (hex, expected) in rows {
+        let token = BigUint::parse_bytes(hex, 16).unwrap();
+        let ar = AuthResult {
+            session_token: token.clone(),
+            token_type: "st".to_string(),
+            session_id: String::new(),
+            features: Vec::new(),
+            authenticated: true,
+        };
+        let bytes = ar.session_token_bytes();
+        assert_eq!(bytes, *expected);
+        assert_eq!(BigUint::from_bytes_be(&bytes), token);
+    }
 }
 
 #[test]
@@ -577,40 +558,7 @@ fn session_token_bytes_zero_keeps_single_byte() {
         features: Vec::new(),
         authenticated: false,
     };
-    let bytes = ar.session_token_bytes();
-    assert_eq!(BigUint::from_bytes_be(&bytes), BigUint::ZERO);
-}
-
-#[test]
-fn session_token_bytes_strips_leading_zero_high_bit() {
-    // BigUint with high bit set in first byte should not have leading zero padding.
-    let token = BigUint::parse_bytes(b"80ff", 16).unwrap();
-    let ar = AuthResult {
-        session_token: token.clone(),
-        token_type: "zenith".to_string(),
-        session_id: String::new(),
-        features: Vec::new(),
-        authenticated: true,
-    };
-    let bytes = ar.session_token_bytes();
-    assert_eq!(bytes, vec![0x80, 0xff]);
-    assert_eq!(BigUint::from_bytes_be(&bytes), token);
-}
-
-#[test]
-fn auth_result_all_fields_accessible() {
-    let ar = AuthResult {
-        session_token: BigUint::from(42u32),
-        token_type: "SRP".to_string(),
-        session_id: "abc.0001".to_string(),
-        features: vec!["feat1".into(), "feat2".into()],
-        authenticated: true,
-    };
-    assert_eq!(ar.session_token, BigUint::from(42u32));
-    assert_eq!(ar.token_type, "SRP");
-    assert_eq!(ar.session_id, "abc.0001");
-    assert_eq!(ar.features.len(), 2);
-    assert!(ar.authenticated);
+    assert_eq!(ar.session_token_bytes(), vec![0x00]);
 }
 
 // ── recv_secure ──────────────────────────────────────────────────────
@@ -694,19 +642,6 @@ fn flag_paper_connect_value() {
 #[test]
 fn flag_soft_token_value() {
     assert_eq!(FLAG_SOFT_TOKEN, 16);
-}
-
-#[test]
-fn flags_can_be_ored() {
-    let combined = FLAG_OK_TO_REDIRECT | FLAG_PAPER_CONNECT | FLAG_SOFT_TOKEN;
-    assert_eq!(combined, 1 | 8192 | 16);
-    assert_eq!(combined, 8209);
-    // Each flag bit is independent
-    assert_ne!(combined & FLAG_OK_TO_REDIRECT, 0);
-    assert_ne!(combined & FLAG_PAPER_CONNECT, 0);
-    assert_ne!(combined & FLAG_SOFT_TOKEN, 0);
-    // A flag that was not set is absent
-    assert_eq!(combined & FLAG_IS_FARM, 0);
 }
 
 // ── do_ib_key_2fa ───────────────────────────────────────────────────

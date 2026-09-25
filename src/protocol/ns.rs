@@ -383,9 +383,20 @@ fn a_frame_paused_mid_payload_is_still_read_whole() {
 
     #[test]
     fn is_ns_text_checks() {
-        assert!(is_ns_text(b"50;521;user;"));
-        assert!(!is_ns_text(b"\x00\x00\x00\x17")); // XYZ binary
-        assert!(!is_ns_text(b""));
+        let rows: &[(&[u8], bool)] = &[
+            (b"50;521;user;", true),
+            (b"0rest", true),
+            (b"9rest", true),
+            (b"\x00\x00\x00\x17", false), // XYZ binary
+            (b"", false),
+            (b"Atext", false),
+            (b"z", false),
+            (b"\x00", false),
+            (b" ", false),
+        ];
+        for (payload, text) in rows {
+            assert_eq!(is_ns_text(payload), *text, "{payload:?}");
+        }
     }
 
     // ── New tests ───────────────────────────────────────────────────
@@ -424,17 +435,6 @@ fn a_frame_paused_mid_payload_is_still_read_whole() {
     }
 
     #[test]
-    fn parse_misc_prefix_lowercase() {
-        // "misc" in lowercase — to_uppercase converts to "MISC", so it should still
-        // strip.
-        let payload = b"misc38;529;val;";
-        let (version, msg_type, fields) = ns_parse(payload).unwrap();
-        assert_eq!(version, 38);
-        assert_eq!(msg_type, 529);
-        assert_eq!(fields, vec!["val"]);
-    }
-
-    #[test]
     fn recv_bad_magic_returns_error() {
         let bad = b"AAAA\x00\x00\x00\x02ok";
         let mut cursor = std::io::Cursor::new(&bad[..]);
@@ -454,28 +454,6 @@ fn a_frame_paused_mid_payload_is_still_read_whole() {
         let (payload, total) = ns_recv(&mut cursor, far_enough()).unwrap();
         assert!(payload.is_empty());
         assert_eq!(total, 8);
-    }
-
-    #[test]
-    fn is_ns_text_digit() {
-        assert!(is_ns_text(b"0rest"));
-        assert!(is_ns_text(b"9rest"));
-    }
-
-    #[test]
-    fn is_ns_text_letter() {
-        assert!(!is_ns_text(b"Atext"));
-        assert!(!is_ns_text(b"z"));
-    }
-
-    #[test]
-    fn is_ns_text_null_byte() {
-        assert!(!is_ns_text(b"\x00"));
-    }
-
-    #[test]
-    fn is_ns_text_space() {
-        assert!(!is_ns_text(b" "));
     }
 
     #[test]

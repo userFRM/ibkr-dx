@@ -364,13 +364,13 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let mut enc_ch = make_test_channel();
-        let mut dec_ch = make_test_channel();
-
-        let plaintext = b"hello secure channel";
-        let encrypted = enc_ch.encrypt(plaintext);
-        let decrypted = dec_ch.decrypt(&encrypted).unwrap();
-        assert_eq!(decrypted, plaintext);
+        let plaintexts: [&[u8]; 4] = [b"", &[0x42], b"hello secure channel", &[0xAB; 4096]];
+        for plaintext in plaintexts {
+            let mut enc_ch = make_test_channel();
+            let mut dec_ch = make_test_channel();
+            let encrypted = enc_ch.encrypt(plaintext);
+            assert_eq!(dec_ch.decrypt(&encrypted).unwrap(), plaintext, "{} bytes", plaintext.len());
+        }
     }
 
     #[test]
@@ -410,64 +410,10 @@ mod tests {
     #[test]
     fn iv_chains_across_messages() {
         let mut ch = make_test_channel();
-        let ct1 = ch.encrypt(b"first");
-        let ct2 = ch.encrypt(b"second");
-        // Different ciphertexts due to IV chaining
+        let ct1 = ch.encrypt(b"same");
+        let ct2 = ch.encrypt(b"same");
+        // The same plaintext encrypts differently under the chained IV.
         assert_ne!(ct1, ct2);
-    }
-
-    #[test]
-    fn build_secure_connect_format() {
-        let ch = SecureChannel::new();
-        let msg = ch.build_secure_connect(50, 50);
-        assert_eq!(&msg[..4], NS_MAGIC);
-        let payload = &msg[8..];
-        let text = std::str::from_utf8(payload).unwrap();
-        assert!(text.starts_with("50;532;0;50;"));
-        assert!(text.ends_with(';'));
-    }
-
-    #[test]
-    fn encrypt_fresh_output_is_valid_base64() {
-        let ch = make_test_channel();
-        let ct = ch.encrypt_fresh(b"some payload data");
-        // The raw output is ciphertext || HMAC, not base64 itself.
-        // But when base64-encoded, it should produce valid base64.
-        let encoded = B64.encode(&ct);
-        let decoded = B64.decode(&encoded).unwrap();
-        assert_eq!(decoded, ct);
-        // Ciphertext should be at least 16 (one AES block) + 20 (HMAC) = 36 bytes
-        assert!(ct.len() >= 36);
-    }
-
-    #[test]
-    fn encrypt_decrypt_max_payload() {
-        let mut enc_ch = make_test_channel();
-        let mut dec_ch = make_test_channel();
-        let plaintext = vec![0xABu8; 4096];
-        let encrypted = enc_ch.encrypt(&plaintext);
-        let decrypted = dec_ch.decrypt(&encrypted).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn encrypt_decrypt_one_byte() {
-        let mut enc_ch = make_test_channel();
-        let mut dec_ch = make_test_channel();
-        let plaintext = &[0x42u8];
-        let encrypted = enc_ch.encrypt(plaintext);
-        let decrypted = dec_ch.decrypt(&encrypted).unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn encrypt_decrypt_empty_payload() {
-        let mut enc_ch = make_test_channel();
-        let mut dec_ch = make_test_channel();
-        let plaintext: &[u8] = &[];
-        let encrypted = enc_ch.encrypt(plaintext);
-        let decrypted = dec_ch.decrypt(&encrypted).unwrap();
-        assert_eq!(decrypted, plaintext);
     }
 
     #[test]
@@ -482,6 +428,7 @@ mod tests {
                 payload.starts_with(&expected_prefix),
                 "Expected prefix '{expected_prefix}' but got '{payload}'"
             );
+            assert!(payload.ends_with(';'), "{payload}");
         }
     }
 
@@ -491,40 +438,6 @@ mod tests {
         assert!(ch.key_block().is_none());
     }
 
-    #[test]
-    fn key_block_some_after_server_hello() {
-        // Create two channels and exchange keys between them to simulate
-        // a real handshake without needing a server.
-        let mut channel_a = SecureChannel::new();
-        let mut channel_b = SecureChannel::new();
-
-        // Channel A builds its SECURE_CONNECT message
-        let msg_a = channel_a.build_secure_connect(50, 50);
-        let payload_a = std::str::from_utf8(&msg_a[8..]).unwrap();
-        let parts_a: Vec<&str> = payload_a.trim_end_matches(';').split(';').collect();
-        // parts_a: [version, 532, 0, negotiated_version, client_random_b64, pub_b64]
-        let a_random = parts_a[4];
-        let a_pub = parts_a[5];
-
-        // Channel B builds its SECURE_CONNECT message
-        let msg_b = channel_b.build_secure_connect(50, 50);
-        let payload_b = std::str::from_utf8(&msg_b[8..]).unwrap();
-        let parts_b: Vec<&str> = payload_b.trim_end_matches(';').split(';').collect();
-        let b_random = parts_b[4];
-        let b_pub = parts_b[5];
-
-        // Each channel processes the other's hello as if it were a server response
-        // process_server_hello expects [server_random_b64, server_pub_b64]
-        channel_a.process_server_hello(&[b_random, b_pub]).unwrap();
-        channel_b.process_server_hello(&[a_random, a_pub]).unwrap();
-
-        // Both should now have key_blocks of 104 bytes
-        let kb_a = channel_a.key_block().expect("channel_a should have key_block");
-        assert_eq!(kb_a.len(), 104);
-        let kb_b = channel_b.key_block().expect("channel_b should have key_block");
-        assert_eq!(kb_b.len(), 104);
-    }
-
     /// Both channels complete a key exchange and derive a usable key block.
     ///
     /// Each side seeds its key block with its own `client_random`, so two
@@ -532,7 +445,7 @@ mod tests {
     /// not compare shared secrets. It checks only that both derivations
     /// produce a 104-byte key block and that both channels then encrypt.
     #[test]
-    fn two_channels_exchange_keys_shared_secret_matches() {
+    fn two_channels_exchange_keys_and_encrypt() {
         let mut channel_a = SecureChannel::new();
         let mut channel_b = SecureChannel::new();
 
