@@ -207,6 +207,22 @@ def events_lost()
 
 ---
 
+#### `refuse`
+
+Put a refusal the program makes itself into the session's order.  Delivered by a pass on `error`, or `error_from`, under the number `origin` names: after everything the session queued before this call and before everything after it, as a gateway's rejection arrives after everything the gateway wrote before it. Said at the call instead, it reaches the wrapper ahead of the refusals of requests made before it. `origin` is an `ErrorOrigin`, `ErrorOrigin("Request", 7)` for a request's number. With no session, or one that is over, there is no order to put it in and nothing is delivered.
+
+```python
+def refuse(origin, code, msg)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `origin` | `ErrorOrigin` | What the error is about: a request, an order and the operation on it, a request with no number of its own, the session, or a lookup this client made for itself. |
+| `code` | `int` |  |
+| `msg` | `str` |  |
+
+---
+
 #### `backlog`
 
 How many requests this client has handed the engine that the engine has not finished with: still waiting to be taken, or taken and held — for the contract to be named, in the order buffer, or behind the session's own replay. Zero before a session exists.  No call waits for the engine to take what it is handed, so this is what bounds what a caller has handed over. Read once per lap of the engine's loop, which takes at most 64 commands a lap.

@@ -32,6 +32,8 @@ one  = c.qualify_contract(aapl)   # a single Contract
 `qualify_contract` refuses an ambiguous description rather than handing back
 whichever the venue listed first, which would be a different contract from the
 one you asked about. `c.qualify_contracts([...])` takes several at once.
+Nothing that answers these calls reaches your wrapper, even what arrives after
+the call has returned.
 
 These send, wait and return. They take their answer off the queue by request id
 and release the interpreter lock while waiting, so they need no `run()` thread

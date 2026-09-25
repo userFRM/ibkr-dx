@@ -153,6 +153,31 @@ def test_a_dispatch_loop_running_beside_an_ask_does_not_eat_its_answer():
     assert [d.contract.conId for d in found] == [756733]
 
 
+def test_a_lookup_that_found_nothing_says_nothing_to_the_wrapper():
+    """A lookup that finds nothing is refused and then ended, and the call
+    returns on the refusal. The end is under the number the call took for
+    itself and has let go, so the next pass hands it to nobody."""
+    heard = []
+
+    class W(ibkr_dx.EWrapper):
+        def contractDetailsEnd(self, reqId):
+            heard.append(("contractDetailsEnd", reqId))
+
+        def error(self, reqId, *rest):
+            heard.append(("error", reqId))
+
+    c = ibkr_dx.EClient(W())
+    c._test_connect("DU0000000")
+    asked = c._test_peek_ask_id()
+    c._test_push_historical_error(asked, 200, "No security definition has been found for the request")
+    c._test_push_contract_details_end(asked)
+
+    with pytest.raises(RuntimeError, match="No security definition"):
+        c.qualify_contract(spy())
+    c._test_dispatch_once()
+    assert heard == []
+
+
 def test_a_dispatch_loop_still_delivers_a_callers_own_request():
     seen = []
 

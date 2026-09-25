@@ -123,16 +123,14 @@ PLUMBING = {"keep_record", "shared_state", "session_token_bytes", "session", "co
 #: — so there is no moment before a session for `check_connected` to guard.
 #: Waiting on one order and reading an algorithm's parameters apart from an
 #: order are conveniences of the Rust surface's own. No reference client names
-#: any of the three. `refuse` puts a refusal a Rust caller makes of its own
-#: into the session's order, for a value the engine's types cannot carry; the
-#: Python surface refuses such a value itself, at the call that was handed it.
-#: `question_retired` is where a Rust wrapper hears a question's cancel take
-#: effect; the Python surface says nothing at a cancel, as ibapi's does.
+#: any of the three. `question_retired` is where a Rust wrapper hears a
+#: question's cancel take effect; the Python surface says nothing at a cancel,
+#: as ibapi's does.
 #: Checked as `LOCAL` is: one no longer on the surface said to have it, or now
 #: on the one said to have no use for it, fails the run.
 ONE_SURFACE = {
     "checkconnected": "rust", "awaitorder": "python", "parsealgoparams": "python",
-    "questionretired": "python", "refuse": "python",
+    "questionretired": "python",
 }
 
 

@@ -380,12 +380,81 @@ camel_aliases_copy! {
 /// on an order the error answers: `"Place"`, `"Modify"`, `"Cancel"`,
 /// `"Exercise"`, or `"Venue"` for the venue's own word on a working order.
 /// `question` names the request with no number: `"OpenOrders"`,
-/// `"MarketRule(26)"` and so on. Each is `None` where it does not apply.
+/// `"MarketRule(26)"` and so on. Each is `None` where it does not apply. A
+/// program makes one from the same five, for `EClient.refuse`.
 #[pyclass(frozen, name = "ErrorOrigin")]
 pub struct ErrorOrigin(pub(crate) crate::types::model::ErrorOrigin);
 
 #[pymethods]
 impl ErrorOrigin {
+    /// One a program states, for `EClient.refuse`: the five fields as they
+    /// read back, so an origin `error_from` hands over is made again from
+    /// them. `op` is required of an order and `question` of a question; a
+    /// field that does not apply to `kind` is not read.
+    #[new]
+    #[pyo3(signature = (kind, id=-1, ends=true, op=None, question=None))]
+    fn new(kind: &str, id: i64, ends: bool, op: Option<&str>, question: Option<&str>) -> PyResult<Self> {
+        use crate::types::model::{ErrorOrigin as O, OrderOp, Question as Q};
+        use pyo3::exceptions::PyValueError;
+        /// Every question that carries nothing, in the spelling `question`
+        /// reads back.
+        const UNNUMBERED: [Q; 13] = [
+            Q::OpenOrders, Q::AllOpenOrders, Q::CompletedOrders, Q::Positions,
+            Q::AccountUpdates, Q::ManagedAccounts, Q::CurrentTime, Q::CurrentTimeInMillis,
+            Q::NewsProviders, Q::FamilyCodes, Q::MktDepthExchanges, Q::ScannerParameters, Q::Fa,
+        ];
+        // A question added to the model does not compile here until it has
+        // its place above or, as a market rule does, a number of its own.
+        const _: () = match Q::Fa {
+            Q::OpenOrders | Q::AllOpenOrders | Q::CompletedOrders | Q::Positions
+            | Q::AccountUpdates | Q::ManagedAccounts | Q::CurrentTime | Q::CurrentTimeInMillis
+            | Q::NewsProviders | Q::FamilyCodes | Q::MktDepthExchanges | Q::ScannerParameters
+            | Q::Fa | Q::MarketRule(_) => {}
+        };
+        Ok(Self(match kind {
+            "Request" => O::Request { id, ends },
+            "Order" => O::Order {
+                id,
+                op: match op {
+                    Some("Place") => OrderOp::Place,
+                    Some("Modify") => OrderOp::Modify,
+                    Some("Cancel") => OrderOp::Cancel,
+                    Some("Exercise") => OrderOp::Exercise,
+                    Some("Venue") => OrderOp::Venue,
+                    _ => return Err(PyValueError::new_err(format!(
+                        "an order's origin names the operation, Place, Modify, Cancel, \
+                         Exercise or Venue, and {op:?} is none of them",
+                    ))),
+                },
+            },
+            "Question" => {
+                let named = question.and_then(|named| {
+                    named
+                        .strip_prefix("MarketRule(")
+                        .and_then(|rule| rule.strip_suffix(')')?.parse().ok())
+                        .map(Q::MarketRule)
+                        .or_else(|| UNNUMBERED.into_iter().find(|q| format!("{q:?}") == named))
+                });
+                let Some(q) = named else {
+                    return Err(PyValueError::new_err(format!(
+                        "a question's origin names the question as `question` reads it back, \
+                         OpenOrders or MarketRule(26) and so on, and {question:?} is none of them",
+                    )));
+                };
+                O::Question { q, ends }
+            }
+            "Session" => O::Session,
+            "Internal" => O::Internal(u32::try_from(id).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "a lookup's number is between 0 and {}, and {id} is not", u32::MAX,
+                ))
+            })?),
+            _ => return Err(PyValueError::new_err(format!(
+                "an origin is a Request, an Order, a Question, the Session or Internal, not {kind:?}",
+            ))),
+        }))
+    }
+
     /// Which of the five it is.
     #[getter]
     fn kind(&self) -> &'static str {

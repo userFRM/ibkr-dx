@@ -49,8 +49,15 @@ Python `ErrorOrigin` exposes `kind`, `id`, `ends`, `op` and `question`.
 `question` are `None` when inapplicable. Ordinary ibapi wrappers receive
 `error` with the original number and code.
 
-Rust `refuse(origin, code, message)` adds a caller-side refusal to the same
-stream. `question_retired(Question)` marks the ordered cancellation of positions
+A call that answers asks under a number this client took for that call. What
+answers it after the call has returned — the end of a lookup that was refused,
+an answer that came after the wait ran out — reaches no wrapper on either
+surface.
+
+`refuse(origin, code, msg)` adds a caller-side refusal to the same stream, on
+both surfaces. Python makes the origin from the fields it reads back:
+`ErrorOrigin(kind, id=-1, ends=True, op=None, question=None)`.
+`question_retired(Question)` marks the ordered cancellation of positions
 or account updates; its default does nothing. Python delivers no cancellation
 callback for these questions.
 

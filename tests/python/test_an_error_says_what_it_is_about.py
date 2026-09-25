@@ -6,7 +6,8 @@ the same error with its origin: a request and whether nothing more follows for
 it, an order and the operation on it, a request that carries no number, the
 session, or an internal lookup. A subclass of `EWrapper` that overrides only
 `error` is told exactly what it was told before; a wrapper that is not one is
-called on `error`, as the reference client calls it.
+called on `error`, as the reference client calls it. A refusal the program
+makes itself, with the origin it states, takes its place among them.
 """
 
 import time
@@ -86,26 +87,25 @@ def connected(w, **kwargs):
     return c
 
 
-def test_an_internal_lookups_error_and_an_orders_error_under_one_number_differ():
+def test_an_orders_error_is_heard_under_a_number_a_finished_lookup_had():
+    """What answers a lookup of this client's own under a number from the band
+    those lookups take, once nobody is waiting on it, is heard by nobody. An
+    order can be numbered there, and is heard."""
     w = Origins()
     c = connected(w)
     c._test_push_historical_error(INTERNAL, 200, "no security definition")
     c._test_push_order_inactive(INTERNAL, 201, "refused")
     c.poll()
-    assert w.said == [
-        ("Internal", INTERNAL, None, None, None, 200),
-        ("Order", INTERNAL, None, "Venue", None, 201),
-    ], w.said
+    assert w.said == [("Order", INTERNAL, None, "Venue", None, 201)], w.said
 
 
 def test_a_wrapper_overriding_only_error_is_told_what_it_was_told_before():
     for w in (OnlyError(), NotASubclass()):
         c = connected(w)
-        c._test_push_historical_error(INTERNAL, 200, "no security definition")
         c._test_push_order_inactive(INTERNAL, 201, "refused")
         c._test_push_historical_error(7, 162, "no data")
         c.poll()
-        assert w.said == [(INTERNAL, 200), (INTERNAL, 201), (7, 162)], (type(w), w.said)
+        assert w.said == [(INTERNAL, 201), (7, 162)], (type(w), w.said)
 
 
 def test_a_refused_new_order_and_a_refused_modify_of_one_id_carry_place_and_modify():
@@ -202,3 +202,37 @@ def test_withdrawing_the_accounts_figures_or_holdings_is_the_sessions():
         withdraw(c)
         c.poll()
         assert w.said and w.said[0][:3] == ("Session", -1, None), w.said
+
+
+def test_a_refusal_the_program_makes_arrives_in_the_order_it_was_made():
+    """Said at the call, a program's own refusal reached the wrapper ahead of
+    the venue's refusal of a request made before it. Put into the session's
+    order, it arrives where a gateway's would."""
+    w = OnlyError()
+    c = connected(w)
+    c._test_push_historical_error(1, 162, "the venue's, of the request before")
+    c.refuse(ibkr_dx.ErrorOrigin("Request", 2), 320, "the program's own")
+    c._test_push_historical_error(3, 162, "the venue's, of the request after")
+    c.poll()
+    assert w.said == [(1, 162), (2, 320), (3, 162)], w.said
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [
+        ("Request", 7, False, None, None),
+        ("Order", 9, None, "Place", None),
+        ("Order", 9, None, "Modify", None),
+        ("Order", 9, None, "Cancel", None),
+        ("Order", 9, None, "Exercise", None),
+        ("Order", 9, None, "Venue", None),
+        ("Question", -1, True, None, "MarketRule(26)"),
+        ("Question", -1, False, None, "OpenOrders"),
+        ("Session", -1, None, None, None),
+        ("Internal", INTERNAL, None, None, None),
+    ],
+)
+def test_an_origin_is_made_from_what_it_reads_back(stated):
+    kind, id_, ends, op, question = stated
+    made = ibkr_dx.ErrorOrigin(kind, id_, True if ends is None else ends, op, question)
+    assert (made.kind, made.id, made.ends, made.op, made.question) == stated

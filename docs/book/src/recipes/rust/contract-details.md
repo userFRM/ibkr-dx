@@ -32,7 +32,8 @@ let one  = client.qualify_contract(&aapl)?;   // the single match
 
 `qualify_contract` refuses an ambiguous description rather than handing back
 whichever the venue listed first, which would be a different contract from the
-one you asked about.
+one you asked about. Nothing that answers either call reaches the wrapper
+`process_msgs` is handed, even what arrives after the call has returned.
 
 ## Lookups by contract id
 

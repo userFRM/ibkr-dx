@@ -64,34 +64,33 @@ fn limit() -> Order {
     }
 }
 
-/// The same number can be an order's and a lookup's this client made for
+/// The same number can be an order's and a lookup's the engine made for
 /// itself. Each error says which it is about, and a wrapper that implements
 /// only `error` still hears both under that number.
 #[test]
 fn an_internal_lookups_error_and_an_orders_error_under_one_number_say_which_they_are() {
-    for n in [crate::bridge::ReferenceState::ASK_ID_BASE + 1, u32::MAX - 1] {
-        let (client, _rx, shared) = test_client();
-        // As the engine refuses a lookup, and an order, under the number each
-        // was made under.
-        shared.reference.push_historical_error(n, 200, "no security definition".into());
-        shared.orders.push_order_inactive(u64::from(n), OrderOp::Place, 201, "refused".into());
-        let mut told = Told::default();
-        client.process_msgs(&mut told);
-        assert_eq!(
-            told.0,
-            [
-                format!("{:?} 200", ErrorOrigin::Internal(n)),
-                format!("{:?} 201", ErrorOrigin::Order { id: i64::from(n), op: OrderOp::Place }),
-            ],
-        );
+    let n = u32::MAX - 1;
+    let (client, _rx, shared) = test_client();
+    // As the engine refuses a lookup, and an order, under the number each
+    // was made under.
+    shared.reference.push_historical_error(n, 200, "no security definition".into());
+    shared.orders.push_order_inactive(u64::from(n), OrderOp::Place, 201, "refused".into());
+    let mut told = Told::default();
+    client.process_msgs(&mut told);
+    assert_eq!(
+        told.0,
+        [
+            format!("{:?} 200", ErrorOrigin::Internal(n)),
+            format!("{:?} 201", ErrorOrigin::Order { id: i64::from(n), op: OrderOp::Place }),
+        ],
+    );
 
-        let (client, _rx, shared) = test_client();
-        shared.reference.push_historical_error(n, 200, "no security definition".into());
-        shared.orders.push_order_inactive(u64::from(n), OrderOp::Place, 201, "refused".into());
-        let mut heard = OnlyError::default();
-        client.process_msgs(&mut heard);
-        assert_eq!(heard.0, [(i64::from(n), 200), (i64::from(n), 201)], "as it always was");
-    }
+    let (client, _rx, shared) = test_client();
+    shared.reference.push_historical_error(n, 200, "no security definition".into());
+    shared.orders.push_order_inactive(u64::from(n), OrderOp::Place, 201, "refused".into());
+    let mut heard = OnlyError::default();
+    client.process_msgs(&mut heard);
+    assert_eq!(heard.0, [(i64::from(n), 200), (i64::from(n), 201)], "as it always was");
 }
 
 /// A new order and a change to it, each refused at its call under one

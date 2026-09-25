@@ -915,6 +915,24 @@ impl EClient {
         0
     }
 
+    /// Put a refusal the program makes itself into the session's order.
+    ///
+    /// Delivered by a pass on `error`, or `error_from`, under the number
+    /// `origin` names: after everything the session queued before this call
+    /// and before everything after it, as a gateway's rejection arrives after
+    /// everything the gateway wrote before it. Said at the call instead, it
+    /// reaches the wrapper ahead of the refusals of requests made before it.
+    /// `origin` is an `ErrorOrigin`, `ErrorOrigin("Request", 7)` for a
+    /// request's number. With no session, or one that is over, there is no
+    /// order to put it in and nothing is delivered.
+    fn refuse(&self, origin: &super::class_reports::ErrorOrigin, code: i64, msg: &str) {
+        if let Ok(shared) = self.shared_state()
+            && !shared.admission_closed()
+        {
+            shared.push_refused(origin.0, code, msg);
+        }
+    }
+
     /// What this session has sent and received on the venue's connections
     /// since it opened, as a dict: `bytes_sent`, `bytes_received`,
     /// `messages_sent` and `messages_received`. Bytes are the protocol bytes

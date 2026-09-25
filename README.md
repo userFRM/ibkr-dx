@@ -717,7 +717,7 @@ ib_async's transport, has a method by that name.
 | `question_retired` | this client | · | · | · | ● | — |
 | `quote` | venue | · | · | · | ● | ● |
 | `quoteByInstrument` | venue | · | · | · | ● | ● |
-| `refuse` | this client | · | · | · | ● | — |
+| `refuse` | this client | · | · | · | ● | ● |
 | `reqAdjustments` | venue | · | · | · | ● | ● |
 | `req_config` / `req_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `reqMktDataEx` | venue | · | · | · | ● | ● |
@@ -1030,7 +1030,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
 | Rust, unit and integration | 3,198 | No |
-| Python | 1,158 | No |
+| Python | 1,170 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

@@ -9248,12 +9248,19 @@ fn a_chargeable_snapshot_is_asked_for_even_where_the_contract_is_watched() {
 #[test]
 fn a_caller_cannot_take_a_number_this_client_reserves() {
     use crate::bridge::ReferenceState;
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, _shared) = test_client();
     let spy = spy();
 
+    // Refused, and told so under the number it used, by the read that
+    // delivers everything else: said nothing, it reads as a request that
+    // vanished.
     let taken = ReferenceState::ASK_ID_BASE as i64;
-    let refused = crate::api::client::tests::reported(&client, || client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231"));
-    assert!(refused.is_err(), "a request numbered {taken} must not be sent");
+    client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231");
+    let heard = settled(&client, &rx);
+    assert!(
+        matches!(heard.as_slice(), [one] if one.starts_with(&format!("error:{taken}:"))),
+        "a request numbered {taken} must be refused under its own number: {heard:?}",
+    );
 
     // Every request, not one of them: a number from that band collides on
     // whichever call carries it.

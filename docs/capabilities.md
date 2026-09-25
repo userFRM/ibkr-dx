@@ -301,7 +301,7 @@ ib_async's transport, has a method by that name.
 | `question_retired` | this client | · | · | · | ● | — |
 | `quote` | venue | · | · | · | ● | ● |
 | `quoteByInstrument` | venue | · | · | · | ● | ● |
-| `refuse` | this client | · | · | · | ● | — |
+| `refuse` | this client | · | · | · | ● | ● |
 | `reqAdjustments` | venue | · | · | · | ● | ● |
 | `req_config` / `req_config_proto_buf` | this client | · | · | · | ◐ | ◐ |
 | `reqMktDataEx` | venue | · | · | · | ● | ● |

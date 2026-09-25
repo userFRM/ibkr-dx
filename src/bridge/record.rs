@@ -160,35 +160,47 @@ impl<T> Queue<T> {
         self.lock().is_empty()
     }
 
-    /// Take the records stamped below `cut` that `leave` does not keep back,
-    /// each made a [`Record`] by `wrap` and held with its stamp.
-    fn take_below(
+    /// Take the records stamped below `cut` as `fate` says, each taken one
+    /// made a [`Record`] by `wrap` and held with its stamp. `true` leaves a
+    /// record where it is and `false` takes it.
+    fn take_below<F: Into<Fate>>(
         &self,
         cut: u64,
-        leave: impl Fn(&T) -> bool,
+        fate: impl Fn(&T) -> F,
         wrap: impl Fn(T) -> Record,
         out: &mut Vec<(u64, Record)>,
     ) {
         let mut held = self.lock();
         let end = held.partition_point(|(seq, _)| *seq < cut);
-        if !held[..end].iter().any(|(_, item)| leave(item)) {
-            out.extend(held.drain(..end).map(|(seq, item)| (seq, wrap(item))));
-        } else {
-            let mut taken = Vec::new();
-            let mut kept = Vec::new();
-            for entry in held.drain(..end) {
-                if leave(&entry.1) {
-                    kept.push(entry);
-                } else {
-                    taken.push(entry);
-                }
+        let mut left = Vec::new();
+        for (seq, item) in held.drain(..end) {
+            match fate(&item).into() {
+                Fate::Take => out.push((seq, wrap(item))),
+                Fate::Leave => left.push((seq, item)),
+                Fate::Drop => {}
             }
-            held.splice(..0, kept);
-            out.extend(taken.into_iter().map(|(seq, item)| (seq, wrap(item))));
         }
+        held.splice(..0, left);
         drop(held);
         #[cfg(test)]
         hooks::run(&hooks::BETWEEN_DRAINS);
+    }
+}
+
+/// What a read does with one queued record.
+#[derive(Clone, Copy)]
+enum Fate {
+    /// Delivered by this read.
+    Take,
+    /// Left where it is, for the reader that holds it.
+    Leave,
+    /// Taken and delivered to nobody.
+    Drop,
+}
+
+impl From<bool> for Fate {
+    fn from(leave: bool) -> Self {
+        if leave { Self::Leave } else { Self::Take }
     }
 }
 
@@ -631,7 +643,7 @@ impl super::SharedState {
         // is. A stream reads its records by number and holds no turn; a call
         // that answers is either this read (with a record kept) or reads by
         // number too.
-        let kept_back = |kind: Option<RecordKind>, owner: Option<Owner>| -> bool {
+        let leave = |kind: Option<RecordKind>, owner: Option<Owner>| -> bool {
             let id = match owner {
                 Some(Owner::Order(id) | Owner::Request(id)) => id,
                 None => return matches!(take, Take::Own(_)),
@@ -651,15 +663,36 @@ impl super::SharedState {
                 Take::Own(mine) => !mine.contains(owner.as_ref().unwrap()),
             }
         };
+        // What the engine and the venue answer under a request number in the
+        // band the calls that answer take, once no call holds it any longer,
+        // answers a question already given up on — the end of a lookup whose
+        // call returned on its refusal, an answer that came after the wait ran
+        // out — and is nobody's.
+        let abandoned = |id: i64| {
+            u32::try_from(id).is_ok_and(super::ReferenceState::is_ask_id)
+                && !self.reference.held_under_any_kind(id)
+        };
+        let kept_back = |kind: Option<RecordKind>, owner: Option<Owner>| -> Fate {
+            match owner {
+                Some(Owner::Request(id)) if abandoned(id) => Fate::Drop,
+                _ => leave(kind, owner).into(),
+            }
+        };
         // The refusals queue belongs to every kind of request at once.
-        let error_kept_back = |id: u32| -> bool {
-            let id64 = i64::from(id);
+        let error_left = |id: u32| -> bool {
             match take {
-                Take::Dispatch { .. } => self.reference.held_under_any_kind(id64),
+                Take::Dispatch { .. } => self.reference.held_under_any_kind(i64::from(id)),
                 Take::Whole { .. } => self.reference.left_for_its_reader(id),
                 Take::Own(mine) => {
                     !mine.contains(&Owner::Request(super::ReferenceState::request_id_reported(id)))
                 }
+            }
+        };
+        let error_kept_back = |id: u32| -> Fate {
+            if abandoned(i64::from(id)) {
+                Fate::Drop
+            } else {
+                error_left(id).into()
             }
         };
         let bulletins = match take {
@@ -678,13 +711,18 @@ impl super::SharedState {
             |r| match r {
                 // A refusal under a number a reader holds is left for that
                 // reader, as the venue's refusals are.
+                //
+                // Nothing here is dropped, under whatever number: a request a
+                // program numbered in the band is refused under that number,
+                // and a stream `watch` opened there is withdrawn, and a second
+                // withdrawal refused, after its number is let go.
                 Record::Refused((api::ErrorOrigin::Request { id, .. }, ..)) => {
                     match u32::try_from(*id) {
-                        Ok(id) => error_kept_back(id),
-                        Err(_) => kept_back(None, call_owner(r)),
+                        Ok(id) => error_left(id),
+                        Err(_) => leave(None, call_owner(r)),
                     }
                 }
-                _ => kept_back(None, call_owner(r)),
+                _ => leave(None, call_owner(r)),
             },
             |r| r,
             &mut out,
@@ -912,9 +950,9 @@ impl super::SharedState {
         );
         r.scanner_data.take_below(
             cut,
-            |(id, _)| {
-                kept_back(Some(RecordKind::Scanner), request(*id))
-                    || kept_back(answer, request(*id))
+            |(id, _)| match kept_back(Some(RecordKind::Scanner), request(*id)) {
+                Fate::Take => kept_back(answer, request(*id)),
+                fate => fate,
             },
             Record::ScannerData,
             &mut out,
