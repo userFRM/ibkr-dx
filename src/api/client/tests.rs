@@ -8633,8 +8633,8 @@ fn a_book_a_gateway_refuses_before_asking_is_refused_here() {
         let refused = crate::api::client::tests::reported(&client, || client.req_mkt_depth(1, &contract, rows, false)).expect_err(reason);
         assert_eq!((refused.code, refused.message.as_str()), (Refusal::VALIDATION, reason));
         assert!(rx.try_recv().is_err(), "nothing was sent for it");
-        assert!(client.core.hold_the_book(1).is_ok(), "and no book slot was taken");
-        client.core.release_the_book(1).unwrap();
+        assert!(client.core.hold_the_book(1, &client.shared).is_ok(), "and no book slot was taken");
+        client.core.release_the_book(1, &client.shared).unwrap();
     }
 }
 
@@ -8669,7 +8669,7 @@ fn no_book_is_taken_on_a_feed_that_is_over_for_the_session() {
     assert!(rx.try_recv().is_err(), "and nothing was sent for it");
     // The slot is free, so a later session's request under the same number is
     // not refused as a book this one is already holding.
-    assert!(client.core.hold_the_book(1).is_ok(), "the book slot was not taken");
+    assert!(client.core.hold_the_book(1, &client.shared).is_ok(), "the book slot was not taken");
 }
 
 /// A caller chooses how its bar times are written, and the choice is per

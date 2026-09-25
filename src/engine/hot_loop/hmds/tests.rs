@@ -552,6 +552,64 @@ fn an_adjusted_request_folds_its_raw_trades_before_it_files_them() {
     assert!(hmds.held.is_empty(), "the hold is released once folded");
 }
 
+/// A series is folded with the actions dated up to the day it is folded on,
+/// today on UTC's calendar included, and with none after it, whether or not
+/// the logon states NOINEFFECTCONCQUERY. An action whose day cannot be read is
+/// refused by the fold rather than dropped as one after it.
+#[test]
+fn a_series_is_folded_with_the_actions_up_to_today_and_none_after() {
+    use crate::protocol::connection::Connection;
+
+    let day = |days: i64| {
+        jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date()
+            .checked_add(jiff::Span::new().days(days)).unwrap()
+            .strftime("%Y%m%d").to_string()
+    };
+    // Two days ahead rather than one, so a run across midnight UTC still
+    // names a day after the one the series is folded on.
+    for (features, dated, close) in [
+        (&[][..], day(0), Some(120.888)),
+        (&["NOINEFFECTCONCQUERY"][..], day(0), Some(120.888)),
+        (&[][..], day(2), Some(1208.88)),
+        (&["NOINEFFECTCONCQUERY"][..], day(2), Some(1208.88)),
+        (&[][..], format!("{}9", day(2)), None),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(sock).unwrap());
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
+        let mut hb = HeartbeatState::new();
+        hmds.pending_historical.push(("hist_1".to_string(), 42));
+        hmds.held.push(HeldSeries {
+            req_id: 42, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
+            bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
+            fold: Fold::Adjusted, actions: None, complete: false,
+        });
+        hmds.process_hmds_message(
+            &adj_bar_msg("hist_1", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
+        );
+        read_frame(&mut peer);
+        let qid = hmds.pending_adjustments[0].0.clone();
+        hmds.process_hmds_message(
+            &conadj_msg(&qid, 756733, &format!("SS\n{dated},10")), &mut conn, &shared, &None, &mut hb,
+        );
+        let filed = shared.reference.drain_historical_data().first()
+            .and_then(|(_, h)| h.bars.first()).map(|bar| bar.close);
+        let refused = !shared.reference.drain_historical_errors().is_empty();
+        assert!(
+            match close {
+                Some(close) => filed.is_some_and(|filed| (filed - close).abs() < 1e-6),
+                None => filed.is_none() && refused,
+            },
+            "{features:?}, a split dated {dated}: close {filed:?}, refused {refused}",
+        );
+    }
+}
+
 /// A contract with no corporate action to its name is answered with the echoed
 /// query and nothing else, and that answer completes the series waiting on it.
 ///

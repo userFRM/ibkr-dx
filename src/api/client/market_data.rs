@@ -348,7 +348,7 @@ impl EClient {
                     "market data is unavailable for the rest of this session: {why}",
                 )));
             }
-            self.core.hold_the_book(req_id)?;
+            self.core.hold_the_book(req_id, &self.shared)?;
             self.send(ControlCommand::SubscribeDepth {
                 contract: ContractRef {
                     con_id: contract.con_id,
@@ -376,7 +376,7 @@ impl EClient {
             // A caller withdrawing a book this client does not hold branches on
             // being told so, under the number the catalogue gives depth rather
             // than the one a quote subscription is withdrawn under.
-            self.core.release_the_book(req_id)?;
+            self.core.release_the_book(req_id, &self.shared)?;
             self.send(ControlCommand::UnsubscribeDepth { req_id: wire })
         })() {
             self.refuse_request(req_id, &why);

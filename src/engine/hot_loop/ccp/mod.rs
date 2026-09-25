@@ -940,6 +940,10 @@ pub(crate) struct CcpState {
     schedule_keys: Vec<String>,
     schedules_asked: Vec<String>,
     schedules_day: Option<jiff::civil::Date>,
+    /// The contracts whose definition was asked for on this connection
+    /// because their sessions are wanted and the key they are joined on was
+    /// not known: each is asked for once, and its sessions once it answers.
+    definitions_asked: Vec<u32>,
     /// Secdef replies awaiting paired schedule reply (joined by tag 6256).
     pub(crate) pending_schedule_pair: Vec<PendingSchedulePair>,
     /// Profit-and-loss subscriptions standing, by request number and account.
@@ -1145,6 +1149,7 @@ impl CcpState {
             schedule_keys: Vec::new(),
             schedules_asked: Vec::new(),
             schedules_day: None,
+            definitions_asked: Vec::new(),
             pending_schedule_pair: Vec::new(),
             pnl_subscriptions: Vec::new(),
             next_schedule_sub_id: 1,
@@ -1790,6 +1795,14 @@ impl CcpState {
                         );
                         identify_position(shared, &def);
                         self.try_release_scanner_enrichments(def.con_id as i64, shared);
+                        // A contract whose sessions waited on this lookup has
+                        // them asked for now, by the key the definition states.
+                        if !def.join_key.is_empty()
+                            && let Some(at) = self.definitions_asked.iter().position(|c| *c == def.con_id)
+                        {
+                            self.definitions_asked.swap_remove(at);
+                            self.ask_schedule(def.con_id, "", shared, ccp_conn, hb);
+                        }
                         // A request held until this lookup names its contract.
                         if let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
                             && let Some(at) = self.pending_named.iter().position(|(pid, ..)| *pid == rid)
@@ -2155,6 +2168,10 @@ impl CcpState {
             )
         };
         log::warn!("Request abandoned: {reason}");
+        // A book's number is free again, as a gateway frees it.
+        if let crate::types::ControlCommand::SubscribeDepth { req_id, .. } = cmd {
+            shared.market.note_book_let_go(*req_id);
+        }
         if let Some(req_id) = request_id(cmd) {
             super::push_hmds_refusal(
                 shared, req_id, crate::error_codes::Refusal::NO_DEFINITION, reason,
@@ -3421,10 +3438,14 @@ impl CcpState {
     /// Ask the venue a contract's sessions for the engine's own use, by the
     /// key its definition is joined to them on, as a gateway asks: once for
     /// the key, whichever contracts on it wait, and not where the key's are
-    /// in hand. Nothing is asked until the definition is in hand.
+    /// in hand. A contract whose definition is not in hand has it looked up
+    /// first, by its id on the exchange it was asked for on, as a gateway
+    /// looks up the contract of every request; the sessions are asked for
+    /// once the definition states the key.
     pub(crate) fn ask_schedule(
         &mut self,
         con_id: u32,
+        exchange: &str,
         shared: &SharedState,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
@@ -3436,6 +3457,12 @@ impl CcpState {
                     .map(|definition| definition.join_key)
                     .filter(|key| !key.is_empty())
                 else {
+                    if ccp_conn.is_some() && con_id != 0 && !self.definitions_asked.contains(&con_id) {
+                        self.definitions_asked.push(con_id);
+                        let req_id = self.next_internal_secdef_id;
+                        self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
+                        self.send_secdef_request(req_id, i64::from(con_id), exchange, ccp_conn, hb, shared, &None);
+                    }
                     return;
                 };
                 shared.reference.note_schedule_key(con_id, &key);
@@ -3931,6 +3958,7 @@ impl CcpState {
         self.pending_dividends.clear();
         self.rates_asked.clear();
         self.schedules_asked.clear();
+        self.definitions_asked.clear();
         // The names one connection's recovery taught this session mean nothing
         // on the next one, which recovers the account again and says them
         // afresh. Kept, they grew for the life of the engine and went on

@@ -58,9 +58,12 @@ impl EClient {
     /// history last stated and, once that ends, the contract's own session the
     /// next five-second bar falls in (its liquid hours with `use_rth`, its
     /// trading hours otherwise), dated by that session's end on the series'
-    /// zone; only where the contract's sessions are not in hand does it open
-    /// at midnight UTC. A week opens on its Monday and a month on its first
-    /// day, both at midnight UTC, on the calendar as a gateway folds them.
+    /// zone. A contract whose definition no lookup has stated has it looked up
+    /// first, as a gateway looks up a request's contract, and its sessions
+    /// asked for by the key it states; only while they are not in hand does
+    /// the bar open at midnight UTC. A week opens on its Monday and a month on
+    /// its first day, both at midnight UTC, on the calendar as a gateway folds
+    /// them.
     /// Bars already closed are the venue's own and are not folded here.
     pub fn req_historical_data(
         &self, req_id: i64, contract: &Contract,

@@ -2152,7 +2152,8 @@ impl ClientCore {
     /// interleaved under one number with nothing to tell them apart, the
     /// withdrawal named only the later contract and left the earlier one being
     /// served, and a reconnect brought back one book where there had been two.
-    pub fn hold_the_book(&self, req_id: i64) -> Result<(), Refusal> {
+    pub fn hold_the_book(&self, req_id: i64, shared: &SharedState) -> Result<(), Refusal> {
+        self.forget_books_let_go(shared);
         if !self.depth_reqs.lock().unwrap().insert(req_id) {
             return Err(Refusal::stated(
                 DUPLICATE_TICKER_ID,
@@ -2212,7 +2213,8 @@ impl ClientCore {
     }
 
     /// Give the number back, or say it was holding no book.
-    pub fn release_the_book(&self, req_id: i64) -> Result<(), Refusal> {
+    pub fn release_the_book(&self, req_id: i64, shared: &SharedState) -> Result<(), Refusal> {
+        self.forget_books_let_go(shared);
         if !self.depth_reqs.lock().unwrap().remove(&req_id) {
             return Err(Refusal::stated(
                 NO_SUCH_BOOK,
@@ -2220,6 +2222,18 @@ impl ClientCore {
             ));
         }
         Ok(())
+    }
+
+    /// Forget the numbers whose book the engine let go before it was asked
+    /// for: the venue named no single contract for it.
+    fn forget_books_let_go(&self, shared: &SharedState) {
+        let let_go = shared.market.take_books_let_go();
+        if !let_go.is_empty() {
+            let mut held = self.depth_reqs.lock().unwrap();
+            for req_id in let_go {
+                held.remove(&i64::from(req_id));
+            }
+        }
     }
 
     /// Whether this number is watching a contract at all.

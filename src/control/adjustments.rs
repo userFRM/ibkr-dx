@@ -372,7 +372,7 @@ const EXACT_IN_A_FLOAT: u64 = 1 << 53;
 /// there is — so the whole series would be scaled by all of them. What tells
 /// the two apart is what follows: a day is followed by a time or by nothing,
 /// never by a ninth digit.
-fn day_of(bar_date: &str, zone: &str) -> Option<String> {
+pub(crate) fn day_of(bar_date: &str, zone: &str) -> Option<String> {
     let day: String = bar_date.chars().take(8).collect();
     if day.len() != 8 || !day.bytes().all(|c| c.is_ascii_digit()) {
         return None;

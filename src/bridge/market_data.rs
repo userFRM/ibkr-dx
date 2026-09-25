@@ -209,6 +209,11 @@ pub struct MarketDataState {
     /// again. Handing back what arrives next would be handing back a book that
     /// reads correct and is not.
     depth_dropped: Mutex<std::collections::HashSet<u32>>,
+    /// The numbers whose book was let go before it was asked for, because
+    /// the venue named no single contract for it: a gateway frees the number
+    /// then, so a withdrawal after it is refused and the number can be asked
+    /// under again.
+    books_let_go: Mutex<Vec<u32>>,
     /// The books given up on that the caller has not been told about yet, and
     /// what happened, under the request each was asked for.
     ///
@@ -360,6 +365,7 @@ impl MarketDataState {
             real_time_bars: Queue::with_capacity(stamps, 64),
             depth_updates: Queue::with_capacity(stamps, 64),
             depth_dropped: Mutex::new(std::collections::HashSet::new()),
+            books_let_go: Mutex::new(Vec::new()),
             depth_drops_unsaid: Queue::new(stamps),
             tick_news: Queue::with_capacity(stamps, 32),
             news_bulletins: Queue::with_capacity(stamps, 16),
@@ -481,6 +487,16 @@ impl MarketDataState {
     /// The slots given back since this was last asked.
     pub fn take_released_slots(&self) -> Vec<(crate::types::InstrumentId, u64)> {
         std::mem::take(&mut *self.released_slots.lock().unwrap())
+    }
+
+    /// Note a book let go before it was asked for.
+    pub(crate) fn note_book_let_go(&self, req_id: u32) {
+        self.books_let_go.lock().unwrap().push(req_id);
+    }
+
+    /// The numbers whose book was let go since this was last asked.
+    pub(crate) fn take_books_let_go(&self) -> Vec<u32> {
+        std::mem::take(&mut *self.books_let_go.lock().unwrap())
     }
 
     /// Drop a subscription failure still waiting under a slot that has gone

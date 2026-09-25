@@ -257,9 +257,8 @@ impl EClient {
         // disconnects takes this same lock on its way out — held across the
         // call, the two are one thread waiting on a lock it is already holding,
         // with the interpreter stopped behind it.
-        let feed_is_over = self.shared.lock().unwrap().as_ref()
-            .and_then(|s| s.market.market_data_over());
-        if let Some(why) = feed_is_over {
+        let shared = self.shared_state()?;
+        if let Some(why) = shared.market.market_data_over() {
             return self.report_refusal(
                 py, req_id,
                 Refusal::not_connected(format!(
@@ -267,7 +266,7 @@ impl EClient {
                 )),
             );
         }
-        if let Err(why) = self.core.hold_the_book(req_id) {
+        if let Err(why) = self.core.hold_the_book(req_id, &shared) {
             return self.report_refusal(py, req_id, why);
         }
         if let Err(why) = self.send_control(&tx, ControlCommand::SubscribeDepth {
@@ -281,7 +280,7 @@ impl EClient {
             // against a request the venue never heard, and the caller's
             // retry under it was refused as a duplicate of that one until
             // the session was rebuilt.
-            let _ = self.core.release_the_book(req_id);
+            let _ = self.core.release_the_book(req_id, &shared);
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
         Ok(())
@@ -300,7 +299,7 @@ impl EClient {
         // being told so, under the number the catalogue gives depth rather
         // than the one a quote subscription is withdrawn under.
         let wire = wire_req_id(req_id)?;
-        if let Err(why) = self.core.release_the_book(req_id) {
+        if let Err(why) = self.core.release_the_book(req_id, &*self.shared_state()?) {
             return self.report_refusal(py, req_id, why);
         }
         if let Err(why) = self.send_control(&tx, ControlCommand::UnsubscribeDepth { req_id: wire }) {

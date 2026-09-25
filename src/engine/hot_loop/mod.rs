@@ -850,14 +850,14 @@ impl HotLoop {
             // security definition connection: an option's sessions and its
             // currency's rates.
             for con_id in std::mem::take(&mut self.farm.schedules_wanted) {
-                self.ccp.ask_schedule(con_id, &self.shared, &mut self.ccp_conn, &mut self.hb);
+                self.ccp.ask_schedule(con_id, "", &self.shared, &mut self.ccp_conn, &mut self.hb);
             }
             for currency in std::mem::take(&mut self.farm.rates_wanted) {
                 self.ccp.ask_currency_rates(&currency, &mut self.ccp_conn, &mut self.hb);
             }
             // And the sessions a day's bar kept up to date rolls over on.
-            for con_id in std::mem::take(&mut self.hmds.schedules_wanted) {
-                self.ccp.ask_schedule(con_id, &self.shared, &mut self.ccp_conn, &mut self.hb);
+            for (con_id, exchange) in std::mem::take(&mut self.hmds.schedules_wanted) {
+                self.ccp.ask_schedule(con_id, &exchange, &self.shared, &mut self.ccp_conn, &mut self.hb);
             }
 
             // 1b. Busy-poll historical socket for tick-by-tick data
@@ -1538,7 +1538,8 @@ impl HotLoop {
                             // this one ends.
                             if size == crate::control::historical::BarSize::Day1 {
                                 self.ccp.ask_schedule(
-                                    con_id as u32, &self.shared, &mut self.ccp_conn, &mut self.hb,
+                                    con_id as u32, &exchange, &self.shared, &mut self.ccp_conn,
+                                    &mut self.hb,
                                 );
                             }
                         }

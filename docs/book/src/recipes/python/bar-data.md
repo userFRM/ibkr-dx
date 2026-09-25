@@ -32,8 +32,10 @@ date strings are preserved.
 When that session ends, the next bar is the contract's own session that the
 next five-second bar falls in — its liquid hours for regular hours, its trading
 hours otherwise — dated by that session's end on the series' timezone and made
-from that session's bars alone. Where the contract's sessions are not in hand,
-the next bar opens at midnight UTC. Intraday bars open on
+from that session's bars alone. A contract whose definition no lookup has
+stated has it looked up first, as a gateway looks up a request's contract, and
+its sessions are asked for by the key the definition states; only while they
+are not in hand does the next bar open at midnight UTC. Intraday bars open on
 whole multiples of their length from the epoch; a week opens on Monday and a
 month on its first day at midnight UTC. Updates to these calendar bars remain
 dates under both date-format settings.

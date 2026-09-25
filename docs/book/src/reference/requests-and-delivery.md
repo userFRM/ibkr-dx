@@ -4,7 +4,10 @@ Requests and cancels return after admission. The engine holds work while it
 waits for contract naming, order replay, account download, an option's model,
 or an earlier exchange to finish. A cancel withdraws its own kind of request,
 including one still waiting. Cancelling a question that is ready follows its
-answer; cancelling one still waiting prevents that answer.
+answer; cancelling one still waiting prevents that answer. A request for a
+contract the venue names no single contract for is over, as it is at a gateway:
+its number holds nothing, a cancel under it is refused as one of nothing held,
+and it can be asked under again.
 
 ## Requests and callbacks
 

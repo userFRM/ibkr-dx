@@ -138,8 +138,9 @@ pub(crate) struct HmdsState {
     /// send and the bars stopped for good.
     pub(crate) rtbar_resub: Vec<RtBarRequest>,
     /// The contracts whose sessions a day's bar kept up to date waits on,
-    /// for the security definition connection to ask for.
-    pub(crate) schedules_wanted: Vec<u32>,
+    /// and the exchange each was asked for on, for the security definition
+    /// connection to ask for.
+    pub(crate) schedules_wanted: Vec<(u32, String)>,
     /// Every scan batch, for the engine to hand over: drained after each poll
     /// and given to `CcpState::start_scanner_enrichment`, which resolves the
     /// rows whose contracts are not yet held and releases a scan's batches in
@@ -1818,8 +1819,9 @@ impl HmdsState {
                     match read {
                         Some(sessions) => sessions,
                         None => {
-                            if !self.schedules_wanted.contains(&(asked.con_id as u32)) {
-                                self.schedules_wanted.push(asked.con_id as u32);
+                            let wanted = (asked.con_id as u32, asked.exchange.clone());
+                            if !self.schedules_wanted.contains(&wanted) {
+                                self.schedules_wanted.push(wanted);
                             }
                             Vec::new()
                         }
@@ -2334,7 +2336,17 @@ fn build_tbt_query(
         let folded = match entry.fold {
             Fold::None => Ok(entry.bars),
             fold => {
-                let actions = entry.actions.unwrap_or_default();
+                let mut actions = entry.actions.unwrap_or_default();
+                // Up to the day it is folded on, that day included, as a
+                // gateway folds them: today on UTC's calendar, whether or not
+                // the logon states NOINEFFECTCONCQUERY, because a request made
+                // through the API carries no sessions to date it by. An action
+                // after that day moves no bar, whatever the answer holds. One
+                // whose day cannot be read is kept, so the fold refuses it.
+                let today: String = chrono_free_timestamp().chars().take(8).collect();
+                actions.retain(|a| {
+                    crate::control::adjustments::day_of(&a.date, "").is_none_or(|day| day <= today)
+                });
                 // The vendor states TRADES as adjusted for splits and no
                 // more, so its fold takes the kinds that move the scale and
                 // leaves a payment out of the price where it is. ADJUSTED_LAST

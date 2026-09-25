@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,368 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,371 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,7 +72,7 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,198 | No |
+| Rust unit and integration | 3,201 | No |
 | Rust, live | 9 | Yes |
 | Python | 1,170 | No |
 | Python, live | 131 | Yes |
@@ -218,8 +218,9 @@ client's own allocation; what a gateway answers the same way is on
   Daily updates retain the session bounds supplied with the history and use
   its end date in the series' timezone. When that session ends, the next one is
   the contract's own session holding the next five-second bar, dated the same
-  way; UTC calendar boundaries are used only where the contract's sessions are
-  not in hand. A week and a month are folded on the calendar, opening on the Monday and on
+  way; UTC calendar boundaries are used only while the contract's sessions are
+  not in hand. A contract whose definition no lookup has stated is looked up
+  first, as a gateway looks up a request's contract, to ask for them. A week and a month are folded on the calendar, opening on the Monday and on
   the 1st at midnight UTC, and start from the stream rather than from the
   venue's current bar.
 - **The option-exercise interest rate series is not served.**

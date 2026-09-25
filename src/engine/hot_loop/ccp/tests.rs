@@ -3558,7 +3558,7 @@ fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
         });
     }
     for con_id in [925_786_273, 925_786_274, 925_786_273] {
-        ccp.ask_schedule(con_id, &shared, &mut conn, &mut hb);
+        ccp.ask_schedule(con_id, "", &shared, &mut conn, &mut hb);
     }
     let asked = sent();
     assert_eq!(asked.matches("|6040=106|").count(), 1, "asked once for the key: {asked}");
@@ -3573,7 +3573,7 @@ fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
         1,
     );
     ccp.process_ccp_message(&answer, &mut None, &mut Context::new(), &shared, &None, &mut hb, "");
-    ccp.ask_schedule(925_786_275, &shared, &mut conn, &mut hb);
+    ccp.ask_schedule(925_786_275, "", &shared, &mut conn, &mut hb);
     assert!(!sent().contains("6040=106"), "and not again for any option on it once in hand");
     for con_id in [925_786_273, 925_786_274, 925_786_275] {
         let filed = shared.reference.contract_schedule(con_id, Clone::clone).expect("filed for the option");
@@ -3589,6 +3589,48 @@ fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
     assert_eq!(asked.matches("|6040=106|").count(), 1, "asked again once the day turns: {asked}");
     assert!(asked.contains("|6256=AMEX/OPT|"), "{asked}");
     assert!(shared.reference.contract_schedule(925_786_273, |_| ()).is_some(), "what is held stands until then");
+}
+
+/// Sessions wanted for a contract whose definition nothing has looked up have
+/// the definition looked up first, once, by the contract's id on the exchange
+/// they were wanted for, and are asked for by the key it states.
+#[test]
+fn sessions_wanted_before_the_definition_wait_on_its_lookup() {
+    use std::io::Read;
+    let (conn, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut conn = Some(conn);
+    let mut hb = HeartbeatState::new();
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    let mut sent = || {
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).replace('\x01', "|")
+    };
+
+    ccp.ask_schedule(495_512_563, "CME", &shared, &mut conn, &mut hb);
+    ccp.ask_schedule(495_512_563, "CME", &shared, &mut conn, &mut hb);
+    let asked = sent();
+    assert_eq!(asked.matches("|35=c|").count(), 1, "looked up once: {asked}");
+    assert!(asked.contains("|6008=495512563|6004=CME|"), "{asked}");
+    assert!(!asked.contains("6040=106"), "no sessions before the key: {asked}");
+    let looked_up = asked.split("|320=").nth(1).and_then(|rest| rest.split('|').next())
+        .expect("asked under an id").to_string();
+    let answer = fix::fix_build(
+        &[
+            (35, "d"), (crate::control::contracts::TAG_SECURITY_REQ_ID, &looked_up),
+            (crate::control::contracts::TAG_SECURITY_RESPONSE_TYPE, "4"),
+            (55, "ES"), (167, "FUT"), (crate::control::contracts::TAG_IB_CON_ID, "495512563"),
+            (15, "USD"), (6256, "CME/FUT"),
+        ],
+        1,
+    );
+    ccp.process_ccp_message(&answer, &mut conn, &mut Context::new(), &shared, &None, &mut hb, "");
+    let asked = sent();
+    assert_eq!(asked.matches("|6040=106|").count(), 1, "{asked}");
+    assert!(asked.contains("|6256=CME/FUT|"), "{asked}");
+    assert!(shared.reference.drain_contract_details().is_empty(), "the lookup is the engine's own");
 }
 
 /// A question about what the venue has finished waits for the session's own
@@ -5153,6 +5195,38 @@ fn secdef_not_found_stays_silent_for_an_internal_fetch() {
     assert!(shared.reference.drain_contract_details().is_empty());
     assert!(shared.reference.drain_historical_errors().is_empty());
     assert!(shared.reference.drain_contract_details_end().is_empty());
+}
+
+/// A book whose contract the venue names no single contract for gives its
+/// number back, as a gateway gives it back: withdrawn after that it is refused
+/// as a book not held, and the number can be asked under again.
+#[test]
+fn a_book_whose_contract_is_not_named_gives_its_number_back() {
+    // Each as the first call after the book is let go.
+    for withdrawn in [true, false] {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let core = crate::client_core::ClientCore::new();
+        core.hold_the_book(3, &shared).unwrap();
+        let book = crate::types::ControlCommand::SubscribeDepth {
+            req_id: 3,
+            contract: crate::types::ContractRef {
+                symbol: "ES".into(), sec_type: "FUT".into(), exchange: "CME".into(), ..Default::default()
+            },
+            num_rows: 5,
+            is_smart_depth: false,
+            filters: Default::default(),
+        };
+        assert!(ccp.hold_until_named(book, &mut None, &mut HeartbeatState::new(), &shared).is_none());
+        let lookup = ccp.pending_named[0].0.to_string();
+        ccp.process_ccp_message(&secdef_not_found(&lookup), &mut None, &mut context, &shared,
+            &None, &mut HeartbeatState::new(), "DU1");
+        if withdrawn {
+            let refused = core.release_the_book(3, &shared).expect_err("no book is held");
+            assert_eq!(refused.code, crate::error_codes::NO_SUCH_BOOK);
+        } else {
+            assert!(core.hold_the_book(3, &shared).is_ok(), "the number can be asked under again");
+        }
+    }
 }
 
 #[test]

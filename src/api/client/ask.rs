@@ -359,11 +359,13 @@ impl EClient {
     /// trades, and the two series the vendor states as adjusted — TRADES and
     /// ADJUSTED_LAST — are those folded with the contract's own actions. The
     /// fold is made once the series is whole and the actions are in hand,
-    /// before a bar is handed to anyone. This call waits and hands the series
-    /// back in one piece; `req_historical_data` delivers the same bars one at
-    /// a time on its callbacks. Both ask for the actions by the venue's id for
-    /// the contract, which the venue is asked for first where the contract is
-    /// named some other way.
+    /// before a bar is handed to anyone, with the actions dated up to the day
+    /// it is made, that day on UTC's calendar included, as a gateway folds
+    /// them. This call waits and hands the series back in one piece;
+    /// `req_historical_data` delivers the same bars one at a time on its
+    /// callbacks. Both ask for the actions by the venue's id for the contract,
+    /// which the venue is asked for first where the contract is named some
+    /// other way.
     pub fn historical_data(
         &self, contract: &Contract, end_date_time: &str, duration: &str,
         bar_size: &str, what_to_show: &str, use_rth: bool,
