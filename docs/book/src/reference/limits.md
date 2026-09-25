@@ -256,7 +256,7 @@ client asks the venue whatever the permission, and waits up to eleven seconds.
 | Call | Argument | On a gateway | Here |
 | --- | --- | --- | --- |
 | `cancel_mkt_depth` | `is_smart_depth` | Says whether the book is found among the smart books or the exchange books, and one naming the wrong kind is answered with 310 and leaves the book running | The request id alone finds the book. Stated as the book was asked for, both withdraw the same one |
-| `req_auto_open_orders` | `b_auto_bind` | Turns binding on or off for client 0 | What binding asks for is already the default: every session is told about every order on the account, so it changes nothing. A client other than 0 is refused, as a gateway refuses one |
+| `req_auto_open_orders` | `b_auto_bind` | Turns binding on or off for client 0 | What binding asks for is already the default: every session is told about every order on the account, so it changes nothing. A client other than 0 is refused, as a gateway refuses one: with 321 asked to bind, as a request that fails validation, and with 327 asked not to |
 
 ## Configuration requests
 

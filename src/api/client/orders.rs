@@ -717,14 +717,25 @@ impl EClient {
     /// every order on the account, whoever entered it. Nothing goes to the
     /// venue. On a gateway, client 0's flag turns binding on or off; here every
     /// session is already told about every order, so `b_auto_bind` changes
-    /// nothing. This surface names no client, so there is no other client to
-    /// refuse.
+    /// nothing. Any client but 0 is refused, as a gateway refuses one: asked
+    /// to bind, with 321, as a request that fails validation; asked not to,
+    /// with 327.
     ///
     /// [`Wrapper::order_bound`](crate::api::wrapper::Wrapper::order_bound) does not follow from this call. It is fired once
     /// for each order the venue restates when the session opens that this
     /// session did not place, pairing the venue's permanent id with the order
     /// id it is reached under here.
-    pub fn req_auto_open_orders(&self, _b_auto_bind: bool) {}
+    pub fn req_auto_open_orders(&self, b_auto_bind: bool) {
+        if self.shared.orders.api_client_id() == 0 { return; }
+        self.refuse_session(&if b_auto_bind {
+            Refusal::validation("only the client numbered zero can bind orders entered elsewhere")
+        } else {
+            Refusal {
+                code: Refusal::AUTO_BIND_NOT_THIS_CLIENT,
+                message: "orders entered elsewhere are bound to the client numbered zero".into(),
+            }
+        });
+    }
 
     /// Request execution reports. Matches `reqExecutions` in C++.
     /// Replays stored executions (optionally filtered), firing `exec_details` +

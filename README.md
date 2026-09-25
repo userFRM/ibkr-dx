@@ -891,8 +891,8 @@ Rust: `EClientConfig.gateway`. Python: `ibkr_dx.configure()`.
 Order IDs survive restarts in `ibkr-dx/order-ids.json` under the user's data
 directory: `$XDG_DATA_HOME` (or `~/.local/share`) on Linux,
 `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows.
-The file keeps a separate next ID for each account and API client ID (Rust
-uses client 0), keyed by the SHA-256 digest of the account rather than the
+The file keeps a separate next ID for each account and API client ID (the one
+stated at connect), keyed by the SHA-256 digest of the account rather than the
 account number; a file keyed by account numbers is rewritten that way when a
 session opens it. `next_order_id()` saves a reservation under an exclusive lock
 before returning; a fresh session starts above that counter and venue replay.
@@ -1031,7 +1031,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,201 | No |
+| Rust, unit and integration | 3,203 | No |
 | Python | 1,181 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |

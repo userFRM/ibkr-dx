@@ -182,8 +182,8 @@ impl ClientCore {
         }
     }
 
-    /// The API client this client's orders are placed under. The Python
-    /// surface names one at connect; the Rust surface places under nought.
+    /// The API client this client's orders are placed under, the one either
+    /// surface names at connect.
     pub(crate) fn set_api_client_id(&self, client_id: i32) {
         self.attached_orders.lock().unwrap().client_id = client_id;
     }

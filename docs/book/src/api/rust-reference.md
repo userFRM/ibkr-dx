@@ -25,7 +25,7 @@ pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `config` | `&EClientConfig` | Connection configuration (username, password, host, paper, core_id). |
+| `config` | `&EClientConfig` | Connection configuration (username, password, host, paper, client_id, core_id). |
 
 **Returns:** `Result<Self, Box<dyn std::error::Error>>`
 
@@ -41,7 +41,7 @@ pub fn connect_with_events( config: &EClientConfig, capacity: usize, ) -> Result
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `config` | `&EClientConfig` | Connection configuration (username, password, host, paper, core_id). |
+| `config` | `&EClientConfig` | Connection configuration (username, password, host, paper, client_id, core_id). |
 | `capacity` | `usize` |  |
 
 **Returns:** `Result<(Self, Receiver<Event>), Box<dyn std::error::Error>>`
@@ -1150,10 +1150,10 @@ pub fn req_completed_orders(&self, api_only: bool)
 
 #### `req_auto_open_orders`
 
-Automatically bind future orders to this client. What binding asks for is the default here: this session is told about every order on the account, whoever entered it. Nothing goes to the venue. On a gateway, client 0's flag turns binding on or off; here every session is already told about every order, so `b_auto_bind` changes nothing. This surface names no client, so there is no other client to refuse. `Wrapper::order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
+Automatically bind future orders to this client. What binding asks for is the default here: this session is told about every order on the account, whoever entered it. Nothing goes to the venue. On a gateway, client 0's flag turns binding on or off; here every session is already told about every order, so `b_auto_bind` changes nothing. Any client but 0 is refused, as a gateway refuses one: asked to bind, with 321, as a request that fails validation; asked not to, with 327. `Wrapper::order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
 
 ```rust
-pub fn req_auto_open_orders(&self, _b_auto_bind: bool)
+pub fn req_auto_open_orders(&self, b_auto_bind: bool)
 ```
 
 | Parameter | Type | Description |

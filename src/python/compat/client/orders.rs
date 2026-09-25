@@ -533,8 +533,9 @@ impl EClient {
 
     /// Binding orders entered elsewhere to this client.
     ///
-    /// Served for client 0. Any other client is refused with 327, as a gateway
-    /// refuses a client other than 0. On a gateway, client 0's flag turns
+    /// Served for client 0. Any other client is refused, as a gateway refuses a
+    /// client other than 0: asked to bind, with 321, as a request that fails
+    /// validation; asked not to, with 327. On a gateway, client 0's flag turns
     /// binding on or off; here what binding asks for is the default, since this
     /// session is told about every order on the account, whoever entered it.
     /// So `b_auto_bind` changes nothing whichever way it is set, and nothing
@@ -552,14 +553,15 @@ impl EClient {
         // placed them. The refusal is the only observable part.
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         if self.client_id.load(std::sync::atomic::Ordering::Acquire) != 0 {
-            crate::python::compat::client::stubs::report_unserviceable_with(
-                self,
-                -1,
-                crate::error_codes::Refusal::AUTO_BIND_NOT_THIS_CLIENT,
-                "orders entered elsewhere are bound to the client numbered zero",
-            );
+            let (code, reason) = if b_auto_bind {
+                (crate::error_codes::Refusal::VALIDATION,
+                 "only the client numbered zero can bind orders entered elsewhere")
+            } else {
+                (crate::error_codes::Refusal::AUTO_BIND_NOT_THIS_CLIENT,
+                 "orders entered elsewhere are bound to the client numbered zero")
+            };
+            crate::python::compat::client::stubs::report_unserviceable_with(self, -1, code, reason);
         }
-        let _ = b_auto_bind;
         Ok(())
     }
 

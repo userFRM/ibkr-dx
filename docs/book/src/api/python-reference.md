@@ -975,7 +975,7 @@ def req_all_open_orders()
 
 #### `req_auto_open_orders`
 
-Binding orders entered elsewhere to this client.  Served for client 0. Any other client is refused with 327, as a gateway refuses a client other than 0. On a gateway, client 0's flag turns binding on or off; here what binding asks for is the default, since this session is told about every order on the account, whoever entered it. So `b_auto_bind` changes nothing whichever way it is set, and nothing goes to the venue.  `order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
+Binding orders entered elsewhere to this client.  Served for client 0. Any other client is refused, as a gateway refuses a client other than 0: asked to bind, with 321, as a request that fails validation; asked not to, with 327. On a gateway, client 0's flag turns binding on or off; here what binding asks for is the default, since this session is told about every order on the account, whoever entered it. So `b_auto_bind` changes nothing whichever way it is set, and nothing goes to the venue.  `order_bound` does not follow from this call. It is fired once for each order the venue restates when the session opens that this session did not place, pairing the venue's permanent id with the order id it is reached under here.
 
 ```python
 def req_auto_open_orders(b_auto_bind)

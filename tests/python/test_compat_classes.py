@@ -403,10 +403,11 @@ def test_ewrapper_pnl_callbacks():
 def test_auto_binding_is_refused_only_for_a_client_that_is_not_zero():
     """Nothing is sent to the wire for this request.
 
-    It is refused for any client id but the one those orders bind to, and
-    otherwise sets state that does not apply here: this session hears about
-    every order on the account either way, so the refusal is the observable
-    part.
+    It is refused for any client id but the one those orders bind to, as a
+    gateway refuses it: asked to bind, as a request that fails validation, and
+    asked not to, with 327. Otherwise it sets state that does not apply here:
+    this session hears about every order on the account either way, so the
+    refusal is the observable part.
     """
     from ibkr_dx import EClient, EWrapper
 
@@ -424,14 +425,16 @@ def test_auto_binding_is_refused_only_for_a_client_that_is_not_zero():
 
     # Nothing names a client, so nothing is refused.
     c.req_auto_open_orders(True)
+    c.req_auto_open_orders(False)
     c._test_dispatch_once()
-    assert not [e for e in w.errors if e[0] == 327]
+    assert not w.errors, w.errors
 
     # A client that is not the one those orders bind to is told so.
     c._test_set_client_id(7)
     c.req_auto_open_orders(True)
+    c.req_auto_open_orders(False)
     c._test_dispatch_once()
-    assert [e for e in w.errors if e[0] == 327], w.errors
+    assert [code for code, _ in w.errors] == [321, 327], w.errors
 
 
 def test_solving_an_option_answers_rather_than_refusing():

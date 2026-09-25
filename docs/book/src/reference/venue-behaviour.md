@@ -257,11 +257,12 @@ on a gateway as here. How long either waits for the model is on
 
 ## Order IDs across sessions
 
-The next order ID is retained per account and API client ID. Rust uses client
-0; Python uses the `client_id` / `clientId` stated at connect. The saved counter
-raises `next_valid_id` and Rust `order_id_floor`, which reads the same ID, at
-connect, and venue replay can raise them further. Orders absent from that
-replay still leave their saved counter behind.
+The next order ID is retained per account and API client ID: the one stated at
+connect, `EClientConfig::client_id` in Rust and `client_id` / `clientId` in
+Python, zero on both unless stated. The saved counter raises `next_valid_id`
+and Rust `order_id_floor`, which reads the same ID, at connect, and venue
+replay can raise them further. Orders absent from that replay still leave their
+saved counter behind.
 
 Both surfaces state `next_valid_id` once a session has connected, after the
 venue has named the orders the account is working: Python before `connect()`

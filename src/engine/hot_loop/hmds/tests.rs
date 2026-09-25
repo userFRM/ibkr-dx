@@ -3070,3 +3070,45 @@ fn a_days_bar_kept_up_to_date_rolls_over_to_the_next_session() {
         ],
     );
 }
+
+/// Every bar in a frame reaches the requests it belongs to.
+///
+/// The venue puts one record for each stream with a bar to state in a frame.
+/// This frame, as captured with an all-hours and a regular-hours stream open on
+/// one future, states the same five-second bar for both: the regular-hours
+/// stream first, then the all-hours one. Only the first record was read, so
+/// the all-hours request heard one bar in forty seconds while the other heard
+/// eight.
+#[test]
+fn every_bar_in_a_frame_reaches_the_request_it_belongs_to() {
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    hmds.rtbar_subs.push(("rt_1001".into(), 40, Some(1), 0.25, 1.0));
+    hmds.rtbar_subs.push(("rt_1003".into(), 41, Some(2), 0.25, 1.0));
+    let frame = b"8=O\x019=0064\x0135=G\x01\x01\x50\
+        \x00\x00\x00\x02\x6a\xb6\xa6\x51\x0c\x0f\x3a\xa9\x1d\xb0\x14\x90\x00\x00\xe1\x80\x3f\
+        \x00\x00\x00\x01\x6a\xb6\xa6\x51\x0c\x0f\x3a\xa9\x1d\xb0\x14\x90\x00\x00\xe1\x80\x3f\
+        \x018349=5F23A01E\x01";
+    hmds.process_hmds_message(frame, &mut None, &shared, &None, &mut HeartbeatState::new());
+    let heard: Vec<(u32, u32)> = shared.market.drain_real_time_bars().iter()
+        .map(|(req_id, bar)| (*req_id, bar.timestamp)).collect();
+    // 20260925-16:50:25 UTC, the time both records state.
+    assert_eq!(heard, [(41, 1_790_355_025), (40, 1_790_355_025)]);
+
+    // Each record states its own time and bar, and each is read for its own.
+    let records: Vec<u8> = [(2u32, 1_790_355_025u32, 10_000, 5), (1, 1_790_355_030, 10_100, 7)]
+        .into_iter()
+        .flat_map(|(stream, at, ticks, volume)| {
+            let payload = crate::control::historical::tests::single_tick_payload(ticks, volume);
+            [&stream.to_be_bytes()[..], &at.to_be_bytes(), &[payload.len() as u8], &payload].concat()
+        })
+        .collect();
+    let mut frame = b"8=O\x019=0\x0135=G\x01".to_vec();
+    frame.extend_from_slice(&(records.len() as u16 * 8).to_be_bytes());
+    frame.extend_from_slice(&records);
+    frame.extend_from_slice(b"\x018349=AABBCCDD\x01");
+    hmds.process_hmds_message(&frame, &mut None, &shared, &None, &mut HeartbeatState::new());
+    let heard: Vec<(u32, u32, f64, f64)> = shared.market.drain_real_time_bars().iter()
+        .map(|(req_id, bar)| (*req_id, bar.timestamp, bar.close, bar.volume)).collect();
+    assert_eq!(heard, [(41, 1_790_355_025, 2_500.0, 5.0), (40, 1_790_355_030, 2_525.0, 7.0)]);
+}

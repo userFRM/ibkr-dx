@@ -9960,6 +9960,61 @@ fn req_pnl_single_carries_the_named_account() {
         ControlCommand::SubscribePnl { req_id: 7, account, .. } if account == "DU999")));
 }
 
+/// A session is the client it connected as: its orders go out under that
+/// client and are reported under it, on `open_order` and on `order_status`;
+/// an order the venue restates under that client is reached by the number it
+/// was placed under; and binding orders entered elsewhere, which a gateway
+/// leaves to client 0, is refused to it, with 321 when asked to bind and 327
+/// when asked not to. This surface took no client id, so every order a session
+/// placed was reported as client 0's whatever the caller meant it to be.
+#[test]
+fn a_session_is_the_client_it_connected_as() {
+    #[derive(Default)]
+    struct Heard(Vec<(&'static str, i64)>);
+    impl Wrapper for Heard {
+        fn open_order(&mut self, _: i64, _: &Contract, order: &Order, _: &crate::types::model::OrderState) {
+            self.0.push(("open_order", i64::from(order.client_id)));
+        }
+        fn order_status(
+            &mut self, _: i64, _: &str, _: f64, _: f64, _: f64, _: i64, _: i64, _: f64,
+            client_id: i64, _: &str, _: f64,
+        ) {
+            self.0.push(("order_status", client_id));
+        }
+        fn error(&mut self, _: i64, code: i64, _: &str, _: &str) {
+            self.0.push(("error", code));
+        }
+    }
+    let (shared, core) = session_state(&EClientConfig { client_id: 7, ..Default::default() });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut client = EClient::from_parts(shared.clone(), tx, std::thread::spawn(|| {}), "DU123".into());
+    client.core = core;
+    client.core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
+    let rx = Engine::new(rx, &shared);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.try_place_order(86, &spy(), &order).expect("placed");
+    rx.try_recv().expect("the order goes out");
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 86, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0.0, remaining_qty: 1.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut heard = Heard::default();
+    client.process_msgs(&mut heard);
+    client.req_auto_open_orders(true);
+    client.req_auto_open_orders(false);
+    client.process_msgs(&mut heard);
+    assert_eq!(heard.0, [("open_order", 7), ("order_status", 7), ("error", 321), ("error", 327)]);
+    // Placed as 9500 in an earlier session under this client, and restated.
+    shared.orders.note_attached_order_metadata(9000, crate::bridge::AttachedOrderMetadata {
+        api_order_id: Some(9500), api_client_id: Some(7), ..Default::default()
+    });
+    client.core.learn_order_identity(&shared, 9000);
+    assert_eq!(client.core.wire_order_id(9500), Some(9000));
+}
+
 /// A fill's client is the one that placed the order where the report names
 /// none. One pass announced `order_status` under the placing client and filed
 /// the same print under client zero, so a caller replaying its own fills by

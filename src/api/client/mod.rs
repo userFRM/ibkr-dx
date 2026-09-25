@@ -119,6 +119,14 @@ pub struct EClientConfig {
     /// there — so what is named here is only where to knock. Name one for a
     /// test, or to knock at a particular region.
     pub host: String,
+    /// The API client id this session connects as, as a gateway is given one
+    /// at connect.
+    ///
+    /// Every order the session places goes out under it and is reported under
+    /// it, on `open_order` and on `order_status`; the next order id kept across
+    /// sessions is kept for it; and `req_auto_open_orders` is refused to any
+    /// client but 0, as a gateway refuses it. Zero unless set.
+    pub client_id: i32,
     /// Refuse to send anything that places, changes or withdraws an order.
     ///
     /// The gateway had this as a setting of its own, and the other client here
@@ -702,6 +710,23 @@ fn caller_auth(config: &EClientConfig, gateway: &GatewayConfig) -> crate::gatewa
     }
 }
 
+/// What a session's two sides start from: the client it places and is reported
+/// under, on both, and on the caller's side whether it may trade at all.
+///
+/// Extracted for the reason [`gateway_config`] is. Stated inline, the client id
+/// was a zero written in two places, and every order a session placed went out
+/// and came back as client 0's whatever the caller connected as.
+fn session_state(config: &EClientConfig) -> (Arc<SharedState>, ClientCore) {
+    let shared = Arc::new(SharedState::new());
+    shared.orders.set_api_client_id(config.client_id);
+    let core = ClientCore::new();
+    core.set_api_client_id(config.client_id);
+    // Stated before the client is handed back, so a caller cannot place
+    // anything between the session opening and the setting taking hold.
+    core.set_readonly(config.readonly);
+    (shared, core)
+}
+
 impl EClient {
     /// Connect to IB and start the engine.
     ///
@@ -783,8 +808,7 @@ impl EClient {
         }
         let session_token_bytes = session.token.clone();
 
-        let shared = Arc::new(SharedState::new());
-        shared.orders.set_api_client_id(0);
+        let (shared, core) = session_state(config);
         // Before the engine's threads exist, so nothing reads a setting that
         // can still change.
         shared.set_settings(gw_config.settings.clone());
@@ -821,12 +845,6 @@ impl EClient {
                     prepared.0.take().unwrap().run_with_panic_recovery();
                 }
             })?;
-
-        let core = ClientCore::new();
-        core.set_api_client_id(0);
-        // Stated before the client is handed back, so a caller cannot place
-        // anything between the session opening and the setting taking hold.
-        core.set_readonly(config.readonly);
 
         let client = Self {
             shared,

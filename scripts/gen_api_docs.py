@@ -92,7 +92,7 @@ PARAM_DOCS: dict[str, str] = {
     "group_name": "Account group name (e.g. `\"All\"`).",
     "manual_order_cancel_time": "Manual cancel time (empty for immediate).",
     "order_cancel": "What the withdrawal states about itself: an `OrderCancel`, or a manual time alone. `\"\"` states nothing, and so does `None` from Python.",
-    "config": "Connection configuration (username, password, host, paper, core_id).",
+    "config": "Connection configuration (username, password, host, paper, client_id, core_id).",
     "ib_key_timeout_secs": "Live second-factor approval timeout in seconds (default ~18 min). Lower it to fail fast on unattended live logins; ignored for paper.",
     "ib_key_token_sub_type": "Fallback second-factor token sub-type (default `\"2a\"`), used only when the server states none for the session; ignored for paper.",
     "code_provider": "Callable `(factor, display_id, avth_url) -> str` returning the second-factor code. `factor` is `\"ibkey\"` (the code shown for `display_id`) or `\"authenticator\"` (the account's current code). Required for authenticator accounts, which have no push to fall back to; ignored for paper.",

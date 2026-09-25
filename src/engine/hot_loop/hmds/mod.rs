@@ -1774,63 +1774,68 @@ impl HmdsState {
         };
         let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
         let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
-        if body.len() < 11 { return; }
-        let ticker_id = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-        let timestamp = u32::from_be_bytes([body[6], body[7], body[8], body[9]]);
-        let payload_len = body[10] as usize;
-        if body.len() < 11 + payload_len { return; }
-        let payload = &body[11..11 + payload_len];
-        // Every request reading the stream is handed the bar under its own
-        // number. The venue numbers every query for one contract's bars the
-        // same, so one stream answers each caller of them; handed to the first
-        // alone, the second caller heard nothing. A request kept up to date can
-        // stand twice under one number, and hears each bar once.
-        let mut served = Vec::new();
-        for (_, req_id, tid, min_tick, size_tick) in &self.rtbar_subs {
-            if *tid != Some(ticker_id) || served.contains(req_id) {
-                continue;
-            }
-            served.push(*req_id);
-            let Some(mut bar) =
-                crate::control::historical::decode_bar_payload(payload, *min_tick, *size_tick)
-            else {
-                continue;
-            };
-            bar.timestamp = timestamp;
-            // A caller keeping bars up to date asked for its own bar size, so
-            // what it hears is the bar it asked for as it stands, not the
-            // five-second one this was folded from.
-            let Some(forming) = self.forming_bars.iter_mut().find(|f| f.req_id == *req_id) else {
-                shared.market.push_real_time_bar(*req_id, bar);
-                continue;
-            };
-            // A day's bar past the session the history stated belongs to one
-            // of the contract's own sessions: its liquid ones for regular
-            // hours, its trading ones otherwise.
-            let asked = self.rtbar_resub.iter().find(|r| r.req_id == *req_id);
-            let sessions = match asked {
-                Some(asked)
-                    if forming.seconds == crate::control::historical::BarSize::Day1.seconds()
-                        && !forming.daily_session.is_some_and(|(start, end)| start <= timestamp && timestamp < end) =>
-                {
-                    let read = shared.reference.contract_schedule(asked.con_id as u32, |schedule| {
-                        sessions_of(if asked.use_rth { &schedule.liquid_hours } else { &schedule.trading_hours })
-                    });
-                    match read {
-                        Some(sessions) => sessions,
-                        None => {
-                            let wanted = (asked.con_id as u32, asked.exchange.clone());
-                            if !self.schedules_wanted.contains(&wanted) {
-                                self.schedules_wanted.push(wanted);
+        // A frame carries a record for each stream with a bar to state, one
+        // after another, and a gateway reads every one of them. Read only as
+        // far as the first, a second stream's bar was lost whenever the venue
+        // put it in the same frame, as it does for two streams open at once.
+        let mut records = body.get(2..).unwrap_or_default();
+        while records.len() >= 9 {
+            let ticker_id = u32::from_be_bytes([records[0], records[1], records[2], records[3]]);
+            let timestamp = u32::from_be_bytes([records[4], records[5], records[6], records[7]]);
+            let Some(payload) = records.get(9..9 + records[8] as usize) else { return };
+            records = &records[9 + payload.len()..];
+            // Every request reading the stream is handed the bar under its own
+            // number. The venue numbers every query for one contract's bars the
+            // same, so one stream answers each caller of them; handed to the first
+            // alone, the second caller heard nothing. A request kept up to date can
+            // stand twice under one number, and hears each bar once.
+            let mut served = Vec::new();
+            for (_, req_id, tid, min_tick, size_tick) in &self.rtbar_subs {
+                if *tid != Some(ticker_id) || served.contains(req_id) {
+                    continue;
+                }
+                served.push(*req_id);
+                let Some(mut bar) =
+                    crate::control::historical::decode_bar_payload(payload, *min_tick, *size_tick)
+                else {
+                    continue;
+                };
+                bar.timestamp = timestamp;
+                // A caller keeping bars up to date asked for its own bar size, so
+                // what it hears is the bar it asked for as it stands, not the
+                // five-second one this was folded from.
+                let Some(forming) = self.forming_bars.iter_mut().find(|f| f.req_id == *req_id) else {
+                    shared.market.push_real_time_bar(*req_id, bar);
+                    continue;
+                };
+                // A day's bar past the session the history stated belongs to one
+                // of the contract's own sessions: its liquid ones for regular
+                // hours, its trading ones otherwise.
+                let asked = self.rtbar_resub.iter().find(|r| r.req_id == *req_id);
+                let sessions = match asked {
+                    Some(asked)
+                        if forming.seconds == crate::control::historical::BarSize::Day1.seconds()
+                            && !forming.daily_session.is_some_and(|(start, end)| start <= timestamp && timestamp < end) =>
+                    {
+                        let read = shared.reference.contract_schedule(asked.con_id as u32, |schedule| {
+                            sessions_of(if asked.use_rth { &schedule.liquid_hours } else { &schedule.trading_hours })
+                        });
+                        match read {
+                            Some(sessions) => sessions,
+                            None => {
+                                let wanted = (asked.con_id as u32, asked.exchange.clone());
+                                if !self.schedules_wanted.contains(&wanted) {
+                                    self.schedules_wanted.push(wanted);
+                                }
+                                Vec::new()
                             }
-                            Vec::new()
                         }
                     }
-                }
-                _ => Vec::new(),
-            };
-            let now = forming.fold(&bar, &sessions);
-            shared.market.push_bar_in_session(*req_id, now, forming.daily_session);
+                    _ => Vec::new(),
+                };
+                let now = forming.fold(&bar, &sessions);
+                shared.market.push_bar_in_session(*req_id, now, forming.daily_session);
+            }
         }
     }
 
