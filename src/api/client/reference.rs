@@ -52,7 +52,8 @@ impl EClient {
     /// Request historical data. Matches `reqHistoricalData` in C++.
     ///
     /// With `keep_up_to_date`, the bar still forming is folded here from the
-    /// stream the venue sends, and it opens on a whole multiple of its own
+    /// stream the venue sends, going on from the history's last bar as a
+    /// gateway's does, and a new one opens on a whole multiple of its own
     /// length counted from the epoch. For every size up to an hour that is the
     /// clock boundary a caller expects. A `1 day` bar is the session the
     /// history last stated and, once that ends, the contract's own session the

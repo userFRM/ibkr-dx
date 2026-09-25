@@ -388,7 +388,9 @@ sent: a gateway reads each and sends nothing for it on the orders this client
 places, and neither does this client. 1 is not carried by this client, and
 it says so on itself rather than being quietly dropped. 6 more are what the
 venue fills in on the way back, which an order being placed does not carry
-out.
+out. The last, `transmit`, is acted on here rather than sent: an order held
+back is kept until one in its family transmits, which is what a gateway does
+with it.
 
 The 23 include the three retired instructions described below, a basis-point
 offset and its kind, a bond's accrued interest, an auction strategy, a

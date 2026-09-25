@@ -331,12 +331,9 @@ fn a_bar_the_venue_aggregated_is_read_from_the_date_it_states() {
     assert_eq!(resp.bars.len(), 1);
     assert_eq!(resp.bars[0].time, "20260309", "the week it covers");
     assert_eq!(resp.bars[0].close, 662.29);
-    // And where it ends. This client already reasons that the venue's bounds
-    // are Monday to Friday — it refuses to keep a week up to date on the
-    // strength of it — and then read the start under both spellings and the
-    // end under neither, so the bound it reasoned from reached no caller. The
-    // last bar of a series is normally partial, and this is what tells a
-    // finished week from a running one.
+    // And where it ends, which the start does not say. The last bar of a
+    // series is normally partial, and this is what tells a finished week from
+    // a running one.
     assert_eq!(resp.bars[0].end, "20260314", "and the day it closes on");
 }
 

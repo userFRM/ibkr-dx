@@ -216,7 +216,8 @@ fn hist_exchange(exchange: &str) -> String {
 /// The venue answers a request to keep bars up to date with the bars so far
 /// and nothing after them: the query is closed as soon as it is answered, on
 /// both connections it can be sent over. What it does keep sending is
-/// five-second bars, which is what the bar still forming is made of.
+/// five-second bars, which the bar still forming is made of, on top of the
+/// last of the bars so far.
 #[derive(Clone)]
 pub(crate) struct FormingBar {
     /// The caller's request, which its updates are delivered under.
@@ -865,17 +866,41 @@ impl HmdsState {
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| states(&resp.query_id, qid.as_str())) {
                             let (answered, req_id) = self.pending_historical[pos].clone();
                             let is_complete = resp.is_complete;
-                            if let Some(forming) = self.forming_bars.iter_mut().find(|f| f.req_id == req_id)
-                                && forming.seconds == crate::control::historical::BarSize::Day1.seconds()
+                            // The bar still forming goes on from the history's
+                            // last, as a gateway's does: a five-second bar
+                            // inside it is folded into it. A day's is its
+                            // session; a week and a month are dated rather
+                            // than timed. Five-second bars are sent as the
+                            // stream sends them, and go on from nothing.
+                            use crate::control::historical::BarSize;
+                            if let Some(forming) = self.forming_bars.iter_mut()
+                                .find(|f| f.req_id == req_id && f.seconds != BarSize::Sec5.seconds())
                             {
+                                let day = forming.seconds == BarSize::Day1.seconds();
+                                let at = |stamped: &str| {
+                                    crate::protocol::datetime::ib_datetime_to_unix(stamped)
+                                        .or_else(|| crate::protocol::datetime::day_number(stamped).map(|days| days * 86_400))
+                                        .and_then(|at| u32::try_from(at).ok())
+                                };
                                 for bar in &resp.bars {
-                                    let (Some(start), Some(end)) = (
-                                        crate::protocol::datetime::ib_datetime_to_unix(&bar.time).and_then(|at| u32::try_from(at).ok()),
-                                        crate::protocol::datetime::ib_datetime_to_unix(&bar.end).and_then(|at| u32::try_from(at).ok()),
-                                    ) else { continue };
-                                    if start < end && forming.daily_session.is_none_or(|(held, _)| start >= held) {
+                                    // A page arriving afterwards can describe an earlier
+                                    // bar: a day's is held against the session the
+                                    // history stated, any other against the bar in hand.
+                                    let held = if day { forming.daily_session.map_or(0, |(start, _)| start) } else { forming.bar.timestamp };
+                                    let Some(start) = at(&bar.time).filter(|start| *start >= held) else { continue };
+                                    forming.opened_at = if day {
+                                        let Some(end) = at(&bar.end).filter(|end| start < *end) else { continue };
                                         forming.daily_session = Some((start, end));
-                                    }
+                                        start
+                                    } else {
+                                        opening(forming.seconds, start)
+                                    };
+                                    let volume = bar.volume as f64;
+                                    forming.bar = crate::types::RealTimeBar {
+                                        timestamp: start, open: bar.open, high: bar.high, low: bar.low,
+                                        close: bar.close, volume, wap: bar.wap, count: bar.count,
+                                    };
+                                    forming.weighted = bar.wap * volume;
                                 }
                             }
                             // Activity on this query — push the idle deadline out.

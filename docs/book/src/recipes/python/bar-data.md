@@ -22,12 +22,14 @@ One `historical_data` callback per bar, in time order, then one
 `historical_data_end` carrying the first and last timestamps of the range that
 was served.
 
-With `keep_up_to_date=True` the bar still forming is folded from the live
-five-second stream. A daily session supplied with the history keeps its
-opening and end across UTC midnight. Its updates use the session end's date
-on the series' timezone, as the history does, under both date-format settings.
-Timed daily history is returned as `yyyyMMdd`; explicit weekly and monthly
-date strings are preserved.
+With `keep_up_to_date=True` the bar still forming goes on from the history's
+last bar, as a gateway's does: the live five-second bars inside it are folded
+into the open, high, low and volume the venue stated for it. Five-second bars
+are sent as the stream sends them. A daily session supplied with the history
+keeps its opening and end across UTC midnight. Its updates use the session
+end's date on the series' timezone, as the history does, under both
+date-format settings. Timed daily history is returned as `yyyyMMdd`; explicit
+weekly and monthly date strings are preserved.
 
 When that session ends, the next bar is the contract's own session that the
 next five-second bar falls in — its liquid hours for regular hours, its trading
@@ -39,12 +41,6 @@ are not in hand does the next bar open at midnight UTC. Intraday bars open on
 whole multiples of their length from the epoch; a week opens on Monday and a
 month on its first day at midnight UTC. Updates to these calendar bars remain
 dates under both date-format settings.
-
-**The bar still forming starts from the five-second bars the stream sends after
-the request, not from the venue's own current bar.** Until the next bar opens —
-for a week up to five trading days, for a month up to a month — every update's
-open, high, low and volume count only what traded since the request. A gateway
-continues the venue's own bar.
 
 ## The shorter form
 

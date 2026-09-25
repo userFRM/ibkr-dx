@@ -225,7 +225,11 @@ gateway takes, as [Limits](./limits.md) says.
   multiplier, or, where no set names the class, the only set or else the first
   for its last trading day at its multiplier — the time to the option's
   expiry, the currency's rate for its term and the dividends above. A side's
-  greeks are replaced only by four that can be worked out. The time runs to the
+  greeks are replaced only by four that can be worked out. Its theta is held
+  to no more than its time value, its price less its intrinsic value, as a
+  gateway holds it; a side with no price has no time value to hold it to, so
+  where its theta falls its greeks are not replaced: it keeps those it had, or
+  states none. The time runs to the
   option's last trading day at the time of day its definition states (read as
   a gateway reads it, so 2400 is the next day's midnight), or at the end of
   that day's last liquid session, on the zone its sessions are stated on, or,

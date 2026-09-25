@@ -278,9 +278,10 @@ impl BarSize {
     /// of their length: a week opens on its Monday and a month on its first
     /// day, both at midnight UTC, which is where a gateway folds them. The
     /// venue states the bounds of the bars it aggregated — `date` and
-    /// `endDate` — and they are Monday to Friday and the first of the month to
-    /// the last. A day opens at midnight, which is a boundary, and is
-    /// documented as the one it is.
+    /// `endDate` — and they run from a week's first trading day to the
+    /// Saturday after it, and from a month's to the first of the next. A day
+    /// opens at midnight, which is a boundary, and is documented as the one
+    /// it is.
     ///
     /// This is what this client can form, not what the venue accepts — nothing
     /// on the wire says a size may not be kept up to date. The list it replaces
@@ -421,13 +422,9 @@ pub struct HistoricalBar {
     pub count: i32,
     /// When the bar closed, as the venue states it.
     ///
-    /// A bar the venue aggregated states its own bounds — a week runs Monday
-    /// to Friday and a month the first to the last — and those bounds are not
-    /// derivable from the start. This client already reasons from their
-    /// existence: it refuses to keep a week or a month up to date precisely
-    /// because a bar folded locally opens on a Thursday and runs thirty days
-    /// from 1970, where the venue's does not. And then it read the start under
-    /// both spellings and the end under neither.
+    /// A bar the venue aggregated states its own bounds, and those bounds are
+    /// not derivable from the start: a week is stated from its first trading
+    /// day to the Saturday after it, and a month to the first of the next.
     ///
     /// The last bar of any series is normally partial. Stated, this says where
     /// the bar actually ends, so a caller can tell a finished week from a

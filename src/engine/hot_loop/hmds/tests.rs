@@ -2941,35 +2941,80 @@ fn an_unreadable_scan_batch_does_not_end_the_scan() {
     assert_eq!(said, [(crate::types::model::ErrorOrigin::Request { id: 9, ends: false }, 162)]);
 }
 
+/// A bar kept up to date goes on from the one the history ended on, as a
+/// gateway goes on from it: a five-second bar inside it is folded into it, so
+/// the bar keeps the open, the high, the volume and the average the venue
+/// stated for it. A day's is its session, kept across midnight UTC; a week is
+/// dated rather than timed. Started from the first five-second bar instead,
+/// the day's open and high were lost. A page arriving afterwards can describe
+/// an earlier bar, and the bar goes on from the later one. Five-second bars
+/// are sent as the stream sends them, one at the history's last stamp too.
 #[test]
-fn a_daily_update_keeps_the_session_bounds_across_midnight() {
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    hmds.pending_historical.push(("daily".into(), 21));
-    hmds.keep_up_to_date_reqs.insert(21);
-    hmds.forming_bars.push(FormingBar {
-        req_id: 21, seconds: 86_400, opened_at: 0, daily_session: None,
-        bar: Default::default(), weighted: 0.0,
-    });
-    let frame = String::from_utf8(make_bar_msg("daily", true)).unwrap()
-        .replace("20260714-13:30:00</time>", "20260923-22:00:00</time><endTime>20260924-21:00:00</endTime>");
-    hmds.process_hmds_message(frame.as_bytes(), &mut None, &shared, &None, &mut HeartbeatState::new());
-    let start = crate::protocol::datetime::ib_datetime_to_unix("20260923-22:00:00").unwrap() as u32;
-    let end = crate::protocol::datetime::ib_datetime_to_unix("20260924-21:00:00").unwrap() as u32;
-    assert_eq!(hmds.forming_bars[0].daily_session, Some((start, end)));
-    // A page arriving afterwards can describe an earlier session.
-    let older = frame.replace("20260923", "20260922").replace("20260924", "20260923");
-    hmds.process_hmds_message(older.as_bytes(), &mut None, &shared, &None, &mut HeartbeatState::new());
-    let forming = &mut hmds.forming_bars[0];
-    assert_eq!(forming.daily_session, Some((start, end)));
-    for timestamp in [start, start + 3 * 3600, end - 5] {
-        let bar = forming.fold(&crate::types::RealTimeBar {
-            timestamp, open: 1.0, high: 2.0, low: 0.5, close: 1.5,
-            volume: 10.0, wap: 1.0, count: 1,
-        }, &[]);
-        assert_eq!(bar.timestamp, start);
+fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
+    use crate::control::historical::BarSize;
+    let at = |stamped: &str| crate::protocol::datetime::ib_datetime_to_unix(stamped).unwrap() as u32;
+    let merged = |opened| (opened, 100.0, 100.7, 0.5, 1.5, 1030.0, (100.2 * 1000.0 + 30.0) / 1030.0, 13);
+    // The bar's length, the history's last bar, the one before it, the
+    // five-second bars that follow, and the bar they leave: its opening,
+    // open, high, low, close, volume, average and count.
+    for (size, last, before, inside, expected) in [
+        (
+            BarSize::Day1,
+            "<time>20260923-22:00:00</time><endTime>20260924-21:00:00</endTime>",
+            "<time>20260922-22:00:00</time><endTime>20260923-21:00:00</endTime>",
+            vec!["20260923-22:00:00", "20260924-01:00:00", "20260924-20:59:55"],
+            merged("20260923-22:00:00"),
+        ),
+        (
+            BarSize::Hour1,
+            "<time>20260714-13:30:00</time><endTime>20260714-14:00:00</endTime>",
+            "<time>20260714-12:00:00</time><endTime>20260714-13:00:00</endTime>",
+            vec!["20260714-13:45:00", "20260714-13:50:00", "20260714-13:59:55"],
+            merged("20260714-13:30:00"),
+        ),
+        (
+            BarSize::Week1,
+            "<date>20260309</date><endDate>20260314</endDate>",
+            "<date>20260302</date><endDate>20260307</endDate>",
+            vec!["20260310-14:00:00", "20260311-14:00:00", "20260313-19:59:55"],
+            merged("20260309-00:00:00"),
+        ),
+        (
+            BarSize::Sec5,
+            "<time>20260714-13:30:00</time><endTime>20260714-13:30:05</endTime>",
+            "<time>20260714-13:29:55</time><endTime>20260714-13:30:00</endTime>",
+            vec!["20260714-13:30:00"],
+            ("20260714-13:30:00", 1.0, 2.0, 0.5, 1.5, 10.0, 1.0, 1),
+        ),
+    ] {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        hmds.pending_historical.push(("kept".into(), 21));
+        hmds.keep_up_to_date_reqs.insert(21);
+        hmds.forming_bars.push(FormingBar {
+            req_id: 21, seconds: size.seconds(), opened_at: 0, daily_session: None,
+            bar: Default::default(), weighted: 0.0,
+        });
+        let page = |bounds: &str| String::from_utf8(make_bar_msg("kept", true)).unwrap()
+            .replace("<time>20260714-13:30:00</time>", bounds);
+        for bounds in [last, before] {
+            hmds.process_hmds_message(page(bounds).as_bytes(), &mut None, &shared, &None, &mut HeartbeatState::new());
+        }
+        let forming = &mut hmds.forming_bars[0];
+        for stamped in inside {
+            forming.fold(&crate::types::RealTimeBar {
+                timestamp: at(stamped), open: 1.0, high: 2.0, low: 0.5, close: 1.5,
+                volume: 10.0, wap: 1.0, count: 1,
+            }, &[]);
+        }
+        let bar = forming.bar;
+        let (opened, open, high, low, close, volume, wap, count) = expected;
+        assert_eq!(
+            (bar.timestamp, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.wap, bar.count),
+            (at(opened), open, high, low, close, volume, wap, count),
+            "{size:?}",
+        );
     }
-    assert_eq!(forming.bar.volume, 30.0);
 }
 
 /// A day's bar kept up to date rolls over to the next session when the one

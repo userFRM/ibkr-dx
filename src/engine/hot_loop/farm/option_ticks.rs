@@ -655,6 +655,10 @@ impl FarmState {
                         futures_style: false,
                         quanto: false,
                     };
+                    // A side with no price is taken in as a price that is not
+                    // a number, as a gateway's model takes it: a falling
+                    // theta is then held to a time value that cannot be
+                    // worked out, and the side keeps the greeks it had.
                     let value = crate::options::model::calculate(&input, Some(prices[side]));
                     let greeks = [value.delta, value.gamma, value.vega, value.theta];
                     greeks.iter().all(|g| g.is_finite()).then_some(greeks)

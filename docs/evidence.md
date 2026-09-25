@@ -214,15 +214,15 @@ client's own allocation; what a gateway answers the same way is on
   satisfy this, and the interface this client mirrors encourages one counter
   for both.
 - **`keepUpToDate` queries are closed on first response.** Continuation is
-  provided by folding the 5-second bar stream into the requested bar size.
+  provided by folding the 5-second bar stream into the requested bar size,
+  going on from the history's last bar as a gateway does.
   Daily updates retain the session bounds supplied with the history and use
   its end date in the series' timezone. When that session ends, the next one is
   the contract's own session holding the next five-second bar, dated the same
   way; UTC calendar boundaries are used only while the contract's sessions are
   not in hand. A contract whose definition no lookup has stated is looked up
   first, as a gateway looks up a request's contract, to ask for them. A week and a month are folded on the calendar, opening on the Monday and on
-  the 1st at midnight UTC, and start from the stream rather than from the
-  venue's current bar.
+  the 1st at midnight UTC.
 - **The option-exercise interest rate series is not served.**
   `OptExInterestRate` is accepted as a tick query against an option contract
   and rejected by name against the underlying, and every window tested returns
@@ -246,7 +246,7 @@ states when that session logged in.
 | The heartbeat is the interval the venue answered with | ✅ Supported | The interval a logon proposes is not what it is held to; the answer is read from the logon response and applied on every reconnect |
 | A reconnect follows the venue | ✅ Supported | It uses the hosts this session reached the venue through, on the port the venue named in its redirect, and stops walking hosts when one answers and refuses |
 | The first connect knocks on the next door when one does not answer | ✅ Supported | One host per region. A door that answers and refuses ends the walk, so a refused logon is not repeated at every door |
-| An order id is counted from what the account is working | ✅ Supported | An order id belongs to the account, not the process, and the venue refuses one while the order under it is still working. Nothing is kept on disk: at each connect the venue replays what the account is working, and ids count from one past the highest of those — from one when nothing is working |
+| An order id is counted from what was used and what the account is working | ✅ Supported | An order id belongs to the account, not the process, and the venue refuses one while the order under it is still working. The next id is kept on disk for each account and API client, in `ibkr-dx/order-ids.json` under the user's data directory unless `order_id_file` names another file (an empty path keeps none). At each connect the venue replays what the account is working, and ids count from the higher of the one kept and one past the highest of those — from one when neither states any. A new order under an id below the one kept is refused with 103, as through a gateway |
 | A session survives losing its connection | ✅ Supported | A dropped connection is rebuilt on the session already open, with no second factor: five forced drops recovered in 2-8s, and an eight hour session rode through its losses unattended |
 | A session does not survive its process | ✅ Documented | The venue holds a session for a socket, not for an account: killed without logging out, it was already gone forty seconds later, and a later start is answered with a handshake. A session is therefore bound to the socket that opened it, so a restart is a fresh logon and an uninterrupted session is not. What that costs an account with a second factor has not been measured here; a paper session presents none |
 | A session that has ended answers at once | ✅ Supported | Requests made after a terminal loss are refused with 504 immediately, rather than waiting out a timeout each. Every request already answered keeps the venue's answer |
@@ -288,11 +288,6 @@ These are this client's own.
   Offline tests cover preset loading, construction and engine holds; a complete
   preset-values answer and attached family still need venue confirmation.
   See [attached orders](book/src/reference/limits.md#attached-orders).
-- **An exercise is sent without the moneyness check a gateway makes when
-  `override` is false.** A gateway waits for the venue's word on where the
-  option stands and refuses an exercise out of the money or a lapse in it.
-  This client does not ask for that word: it sends the exercise as given, and
-  says so in the log where `override` is false.
 - **Bars are asked along a contract's id history for the folded series of a
   day or less.** A gateway asks every bar query for a stock or a fund along
   the ids, tickers and listings the contract traded under, and a week or a

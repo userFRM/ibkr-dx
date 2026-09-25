@@ -856,10 +856,9 @@ saying so — rather than as a zero that reads like a price. Where this client
 works something out itself, the call that does it says so: the P&L figures,
 worked out from the venue's figures against the session's prices; the bars
 that continue a `keepUpToDate` request, formed from the venue's five-second
-bars, a week and a month on the calendar, starting from the stream rather than
-from the venue's current bar; a book kept at the size asked for; and the answer
-to a price or a volatility the caller supplies, solved against the venue's
-published model.
+bars on the history's last bar, a week and a month on the calendar; a book kept
+at the size asked for; and the answer to a price or a volatility the caller
+supplies, solved against the venue's published model.
 
 ### Second factor and sessions
 
