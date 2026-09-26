@@ -75,6 +75,11 @@ impl TestEngine {
                     keep_up_to_date: *keep_up_to_date,
                 });
             }
+            if let ControlCommand::Place(placement) = &cmd
+                && !placement.order.algo_strategy.is_empty()
+            {
+                self.answer_algorithms();
+            }
             if order || question {
                 let _ = self.into.send(cmd);
             } else {
@@ -86,6 +91,31 @@ impl TestEngine {
             .map(|req| format!("{:?}", ControlCommand::Order(req)))
             .collect();
         self.out.extend(built);
+    }
+}
+
+impl TestEngine {
+    /// Answer what an order through an algorithm is held to as the venue
+    /// answered it on a paper session, through the engine's own reading of
+    /// the venue's messages: AAPL's definition, which names its algorithm
+    /// provider group, the list of algorithm documents, and the documents for
+    /// the share algorithms.
+    fn answer_algorithms(&mut self) {
+        let frame = |fields: &str| fields.replace('|', "\x01");
+        let definition = frame(include_str!("../../../control/fixtures/secdef_aapl.txt").trim_end());
+        let list = frame(
+            "35=U|6040=81|6597=FOXRIVER/STK:FOXRIVER-AE,FOXRIVER-AL-COMMON;IBALGO/BAG:IBALGO-AE,IBALGO-AL-BAG;IBALGO/CASH:IBALGO-AE,IBALGO-AL-CASH;IBALGO/EC:IBALGO-AE,IBALGO-AL-EC;IBALGO/FUT:IBALGO-AE,IBALGO-AL-FUT;IBALGO/OPT:IBALGO-AE,IBALGO-AL-OPT;IBALGO/STK:IBALGO-AE,IBALGO-AL-STK;IBALGO/CFD:IBALGO-AE,IBALGO-AL-STK;IBALGO/WAR:IBALGO-AE,IBALGO-AL-WAR;JONES/STK:JONES-AE,JONES-AL-COMMON;QBALGO/FUT:QBALGO-AE,QBALGO-AL-FUT;QBALGOIEU/FUT:QBALGOIEU-AE,QBALGOIEU-AL-FUT;QBALGOIUS/FUT:QBALGOIUS-AE,QBALGOIUS-AL-FUT|",
+        );
+        let documents = [
+            ("IBALGO-AE", include_str!("../../../control/fixtures/algorithms_ibalgo_ae.xml")),
+            ("IBALGO-AL-STK", include_str!("../../../control/fixtures/algorithms_ibalgo_al_stk.xml")),
+        ];
+        self.engine.inject_ccp_message(definition.as_bytes());
+        self.engine.inject_ccp_message(list.as_bytes());
+        for (name, xml) in documents {
+            let answer = format!("35=U\x016040=54\x016364={name}\x016118={xml}\x01");
+            self.engine.inject_ccp_message(answer.as_bytes());
+        }
     }
 }
 

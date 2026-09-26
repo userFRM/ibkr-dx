@@ -267,7 +267,11 @@ fn read_integer(value: &str) -> i32 {
 /// Read the members that follow a price specification's selector at `index`
 /// into `spec`, and return the index of the last one read. A specification
 /// this reader keeps no field for has its members passed over.
-fn read_members(fields: &[&(u32, String)], mut index: usize, spec: &mut Option<PriceSpec>) -> usize {
+fn read_members(
+    fields: &[&(u32, String)],
+    mut index: usize,
+    spec: &mut Option<PriceSpec>,
+) -> usize {
     while let Some((member, value)) = fields.get(index + 1).copied() {
         if !(4085..=4088).contains(member) {
             break;
@@ -419,21 +423,26 @@ pub struct PresetInstrument<'a> {
 
 /// The security types a gateway holds a preset of its own for, in the order it
 /// makes them: each type the logon permits orders on (tag 6652) in the
-/// gateway's own order of types, combinations and product-delivery contracts
-/// whatever it permits, then contracts for difference, funds and bills where
-/// it left them out. Securities lending takes the `SLB` feature as well, and
-/// physical delivery the `PHYSDEL` feature.
-pub fn preset_types(permitted: impl Fn(&str) -> bool, enabled: impl Fn(&str) -> bool) -> Vec<&'static str> {
+/// order a gateway lists its types, combinations and product-delivery
+/// contracts whatever it permits, then contracts for difference, funds and
+/// bills where
+/// it left them out, and securities lending where the session offers the
+/// `SLB` feature. Physical delivery takes the `PHYSDEL` feature as well.
+pub fn preset_types(
+    permitted: impl Fn(&str) -> bool,
+    enabled: impl Fn(&str) -> bool,
+) -> Vec<&'static str> {
     const TYPES: [&str; 24] = [
-        "STK", "CFD", "OPT", "FOP", "WAR", "IOPT", "FUT", "FWD", "COMB", "CASH", "IND", "BOND", "BILL", "FUND", "SLB",
-        "News", "CMDTY", "BSK", "ICU", "ICS", "PHYSS", "CRYPTO", "PDC", "EC",
+        "STK", "CFD", "OPT", "FOP", "WAR", "IOPT", "FUT", "FWD", "COMB", "CASH", "IND", "BOND",
+        "BILL", "FUND", "SLB", "News", "CMDTY", "BSK", "ICU", "ICS", "PHYSS", "CRYPTO", "PDC",
+        "EC",
     ];
     let mut types: Vec<_> = TYPES
         .into_iter()
         .filter(|kind| match *kind {
             "COMB" => true,
             "PDC" => true,
-            "SLB" => permitted(kind) && enabled("SLB"),
+            "SLB" => permitted(kind),
             "PHYSS" => permitted(kind) && enabled("PHYSDEL"),
             _ => permitted(kind),
         })
@@ -476,7 +485,7 @@ struct PresetNode {
 }
 
 impl<'a> PresetTree<'a> {
-    /// Lay the list over the gateway's own tree: an entry naming a node the
+    /// Lay the list over the tree a gateway holds: an entry naming a node the
     /// tree holds takes its place, the last such entry holding it; one naming
     /// a symbol under a type the tree holds is added under it, strategies
     /// first and then by symbol, ignoring case; any other is dropped. Then
@@ -513,7 +522,9 @@ impl<'a> PresetTree<'a> {
                 tree.nodes[held].entry = Some(at);
                 continue;
             }
-            let Some(parent) = tree.type_node(&security_type).filter(|_| !symbol.is_empty()) else { continue };
+            let Some(parent) = tree.type_node(&security_type).filter(|_| !symbol.is_empty()) else {
+                continue;
+            };
             let strategy = tree.flags[at].strategy;
             let ranked = |tree: &Self, child: usize| {
                 let other = tree.flags_of(child).strategy;
@@ -526,7 +537,8 @@ impl<'a> PresetTree<'a> {
                 .iter()
                 .position(|&child| ranked(&tree, child).is_lt())
                 .unwrap_or(tree.nodes[parent].children.len());
-            tree.nodes.push(PresetNode { entry: Some(at), ..node(&security_type, &symbol, parent) });
+            tree.nodes
+                .push(PresetNode { entry: Some(at), ..node(&security_type, &symbol, parent) });
             let added = tree.nodes.len() - 1;
             tree.nodes[parent].children.insert(place, added);
         }
@@ -536,7 +548,11 @@ impl<'a> PresetTree<'a> {
                 continue;
             }
             let Some(chosen) = tree.find(&security_type, &symbol) else { continue };
-            let within = if tree.nodes[chosen].children.is_empty() { tree.nodes[chosen].parent } else { chosen };
+            let within = if tree.nodes[chosen].children.is_empty() {
+                tree.nodes[chosen].parent
+            } else {
+                chosen
+            };
             tree.flags_mut(within).active = false;
             for child in tree.nodes[within].children.clone() {
                 if tree.flags_of(child).strategy {
@@ -555,7 +571,11 @@ impl<'a> PresetTree<'a> {
     }
 
     fn type_node(&self, security_type: &str) -> Option<usize> {
-        self.nodes[0].children.iter().copied().find(|&child| self.nodes[child].security_type == security_type)
+        self.nodes[0]
+            .children
+            .iter()
+            .copied()
+            .find(|&child| self.nodes[child].security_type == security_type)
     }
 
     /// The node standing for a type and symbol: the root for neither.
@@ -586,7 +606,7 @@ impl<'a> PresetTree<'a> {
 }
 
 /// Select the account's preset for an instrument as a gateway does from its
-/// tree. `None` is a node holding the gateway's own defaults, which it asks
+/// tree. `None` is a node at the defaults a gateway holds for it, which it
 /// the venue nothing about.
 ///
 /// The node for the instrument's security type is taken, or the root where
@@ -620,18 +640,30 @@ pub fn select_preset_key<'a>(
             return active;
         }
         let within = tree.nodes[node].security_type.clone();
-        if let Some(chosen) = settled.get(&within).and_then(|(kind, symbol)| tree.find(kind, symbol)) {
+        if let Some(chosen) =
+            settled.get(&within).and_then(|(kind, symbol)| tree.find(kind, symbol))
+        {
             return chosen;
         }
         let chosen = if now(node).active {
             node
         } else {
-            tree.nodes[node].children.iter().copied().find(|&child| now(child).active).unwrap_or(node)
+            tree.nodes[node]
+                .children
+                .iter()
+                .copied()
+                .find(|&child| now(child).active)
+                .unwrap_or(node)
         };
-        settled.insert(within, (tree.nodes[chosen].security_type.clone(), tree.nodes[chosen].symbol.clone()));
+        settled.insert(
+            within,
+            (tree.nodes[chosen].security_type.clone(), tree.nodes[chosen].symbol.clone()),
+        );
         chosen
     };
-    let security_type = if matches!(instrument.security_type, "BAG" | "PDC") || instrument.symbol == "IECombo" {
+    let security_type = if matches!(instrument.security_type, "BAG" | "PDC")
+        || instrument.symbol == "IECombo"
+    {
         "COMB"
     } else if instrument.security_type == "CFD" && instrument.underlying_security_type == "CASH" {
         "CASH"
@@ -641,7 +673,11 @@ pub fn select_preset_key<'a>(
     let selected = match tree.type_node(security_type) {
         Some(kind) => {
             let child = |symbol: &str| {
-                tree.nodes[kind].children.iter().copied().find(|&child| tree.nodes[child].symbol == symbol)
+                tree.nodes[kind]
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|&child| tree.nodes[child].symbol == symbol)
             };
             let mut chosen = None;
             if !instrument.symbol.is_empty() {
@@ -655,8 +691,12 @@ pub fn select_preset_key<'a>(
         None => act(0),
     };
     let flags = now(selected);
-    let selected =
-        if !matches!(security_type, "" | "*" | "UNK") && flags.strategy && !flags.active { 0 } else { selected };
+    let selected = if !matches!(security_type, "" | "*" | "UNK") && flags.strategy && !flags.active
+    {
+        0
+    } else {
+        selected
+    };
     tree.nodes[selected].entry.map(|at| tree.listed[at].0)
 }
 
@@ -1019,7 +1059,14 @@ mod tests {
         instrument: PresetInstrument<'_>,
         enabled: bool,
     ) -> Option<&'a str> {
-        select_preset_key(entries, &|_| None, instrument, TYPES, enabled, &mut SettledPresets::new())
+        select_preset_key(
+            entries,
+            &|_| None,
+            instrument,
+            TYPES,
+            enabled,
+            &mut SettledPresets::new(),
+        )
     }
 
     /// A gateway takes the node for the instrument's security type, which
@@ -1036,7 +1083,12 @@ mod tests {
             (PresetInstrument { security_type: "WAR", ..stock() }, true, Some("s=STK")),
             (PresetInstrument { security_type: "WAR", ..stock() }, false, Some("u=ANY")),
         ] {
-            assert_eq!(select(&entries, instrument, enabled), selected, "{} {enabled}", instrument.security_type);
+            assert_eq!(
+                select(&entries, instrument, enabled),
+                selected,
+                "{} {enabled}",
+                instrument.security_type
+            );
         }
         assert_eq!(select(&[], stock(), true), None);
     }
@@ -1049,13 +1101,29 @@ mod tests {
     fn the_active_entry_is_the_one_the_list_makes_active_last() {
         let other = PresetInstrument { symbol: "OTHER", ..stock() };
         for (entries, enabled, selected) in [
-            (&[("s=STK", ""), ("s=STK&tc=Zulu", "st=1&a=1"), ("s=STK&tc=Alpha", "st=1&a=1")][..], false, "s=STK"),
-            (&[("s=STK", ""), ("s=STK&tc=Zulu", "st=1&a=1"), ("s=STK&tc=Alpha", "st=1&a=1")], true, "s=STK&tc=Zulu"),
-            (&[("s=STK", "a=1"), ("s=STK&tc=Zulu", "st=1&a=1"), ("s=STK&tc=Alpha", "st=1&a=1")], true, "s=STK"),
+            (
+                &[("s=STK", ""), ("s=STK&tc=Zulu", "st=1&a=1"), ("s=STK&tc=Alpha", "st=1&a=1")][..],
+                false,
+                "s=STK",
+            ),
+            (
+                &[("s=STK", ""), ("s=STK&tc=Zulu", "st=1&a=1"), ("s=STK&tc=Alpha", "st=1&a=1")],
+                true,
+                "s=STK&tc=Zulu",
+            ),
+            (
+                &[("s=STK", "a=1"), ("s=STK&tc=Zulu", "st=1&a=1"), ("s=STK&tc=Alpha", "st=1&a=1")],
+                true,
+                "s=STK",
+            ),
             (&[("s=STK", ""), ("s=STK&tc=A", "a=1"), ("s=STK&tc=B", "a=1")], true, "s=STK&tc=B"),
             (&[("s=STK", "a=1"), ("s=STK&tc=B", "a=1")], true, "s=STK&tc=B"),
         ] {
-            assert_eq!(select(&list(entries), other, enabled), Some(selected), "{entries:?} {enabled}");
+            assert_eq!(
+                select(&list(entries), other, enabled),
+                Some(selected),
+                "{entries:?} {enabled}"
+            );
         }
     }
 
@@ -1069,15 +1137,28 @@ mod tests {
         let strategy = list(&[("u=ANY", ""), ("s=STK", ""), ("s=STK&tc=S", "st=1&a=1")]);
         let mut settled = SettledPresets::new();
         let unanswered = |_: &str| None;
-        let inactive = |key: &str| (key == "s=STK&tc=S").then(|| PresetAttributes::parse("st=1&a=0"));
-        assert_eq!(select_preset_key(&strategy, &unanswered, other, TYPES, true, &mut settled), Some("s=STK&tc=S"));
-        assert_eq!(select_preset_key(&strategy, &inactive, other, TYPES, true, &mut settled), Some("u=ANY"));
+        let inactive =
+            |key: &str| (key == "s=STK&tc=S").then(|| PresetAttributes::parse("st=1&a=0"));
+        assert_eq!(
+            select_preset_key(&strategy, &unanswered, other, TYPES, true, &mut settled),
+            Some("s=STK&tc=S")
+        );
+        assert_eq!(
+            select_preset_key(&strategy, &inactive, other, TYPES, true, &mut settled),
+            Some("u=ANY")
+        );
 
         let child = list(&[("s=STK", ""), ("s=STK&tc=Y", "")]);
         let mut settled = SettledPresets::new();
         let active = |key: &str| (key == "s=STK&tc=Y").then(|| PresetAttributes::parse("a=1"));
-        assert_eq!(select_preset_key(&child, &unanswered, other, TYPES, true, &mut settled), Some("s=STK"));
-        assert_eq!(select_preset_key(&child, &active, other, TYPES, true, &mut settled), Some("s=STK"));
+        assert_eq!(
+            select_preset_key(&child, &unanswered, other, TYPES, true, &mut settled),
+            Some("s=STK")
+        );
+        assert_eq!(
+            select_preset_key(&child, &active, other, TYPES, true, &mut settled),
+            Some("s=STK")
+        );
         assert_eq!(
             select_preset_key(&child, &active, other, TYPES, true, &mut SettledPresets::new()),
             Some("s=STK&tc=Y")

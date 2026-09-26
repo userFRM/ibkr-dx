@@ -3,6 +3,7 @@
 
 use super::{ApiOrder, Refusal, SharedState};
 use crate::bridge::MoneyOrderTerms;
+use crate::control::algorithms::Algorithms;
 use crate::control::contracts::{ContractDefinition, SecurityType};
 use crate::types::Side;
 
@@ -26,6 +27,10 @@ const CRYPTO_STOP_BUY: i32 = 10292;
 const FUND_SIZE_PLACES: i32 = 10207;
 /// A crypto stated by an amount and a size both.
 const CRYPTO_CASH_AND_SIZE: i32 = 10293;
+/// A replace of an order for part of a share through the API.
+const FRACTIONAL_NOT_MODIFIED: i32 = 10242;
+/// A placement of an order for part of a share through the API.
+const FRACTIONAL_NOT_PLACED: i32 = 10243;
 
 /// The order types a logon's lists name for orders at market, at a limit, on
 /// a stop and on a stop with a limit.
@@ -51,6 +56,7 @@ pub(crate) fn refusals(
     shared: &SharedState,
     order: &ApiOrder,
     definition: &ContractDefinition,
+    algorithms: Option<&Algorithms>,
 ) -> Vec<Refusal> {
     let terms = shared.reference.money_orders();
     let amount = stated_amount(order);
@@ -100,7 +106,7 @@ pub(crate) fn refusals(
             }
         }
     }
-    if amount.is_some() && !takes_an_amount(shared, &terms, order, definition) {
+    if amount.is_some() && !takes_an_amount(shared, &terms, order, definition, algorithms) {
         return vec![Refusal::stated(
             CASH_QUANTITY_NOT_FOR_THIS_ORDER,
             "Cash Quantity cannot be used for this order",
@@ -130,13 +136,16 @@ pub(crate) fn refusals(
                  non-zero cashQty.",
             )];
         }
-        // ponytail: a fund whose rule deals in parts of a unit, where the
-        // logon does not keep funds to whole units, is held to the places
-        // its rule's size format states, which this client does not read;
-        // those sales are not checked here.
-        let whole_units = shared.reference.enables("NOMFFRACMR")
-            || finest_size(shared, definition).is_none_or(|finest| finest >= 1.0);
-        if !buy && whole_units && Decimal::of(quantity, 18).fraction().len() > 3 {
+        // Three places, or, where the fund's rule deals in parts of a unit and
+        // the logon does not keep funds to whole units, the most its rule
+        // shows a size to, and no limit where it shows none.
+        let in_parts = !shared.reference.enables("NOMFFRACMR")
+            && finest_size(shared, definition).is_some_and(|finest| finest < 1.0);
+        let limit = if in_parts { size_places(shared, definition) } else { Some(3) };
+        if !buy
+            && limit
+                .is_some_and(|limit| Decimal::of(quantity, 18).fraction().len() > limit as usize)
+        {
             dropped = Some(Refusal::stated(
                 FUND_SIZE_PLACES,
                 "For funds non-zero Order Size cannot contain more than 3 decimals.",
@@ -195,12 +204,14 @@ const FUND_TICK: u32 = 8482;
 /// its order types list `CASHQTY`; a share where nothing it is allocated to
 /// needs a permission the logon withholds, the venue would size it by an
 /// amount ([`sized_by_amount`]), the logon takes amounts on shares for the
-/// order's type, and the order goes through an algorithm; nothing else.
+/// order's type, and the order goes through an algorithm that takes an amount
+/// ([`amount_through`]); nothing else.
 fn takes_an_amount(
     shared: &SharedState,
     terms: &MoneyOrderTerms,
     order: &ApiOrder,
     definition: &ContractDefinition,
+    algorithms: Option<&Algorithms>,
 ) -> bool {
     let kind = order.order_type_named().unwrap_or_default();
     let buy = order.side() == Ok(Side::Buy);
@@ -209,17 +220,142 @@ fn takes_an_amount(
         SecurityType::Crypto => !matches!(kind, "STP" | "LMT") && !(kind == "MKT" && !buy),
         SecurityType::Forex if takes(definition, "CASHQTY") => true,
         SecurityType::Stock => {
-            let allocation = [&order.fa_group, &order.fa_method, &order.fa_percentage];
-            let allocated = !order.fa_group.is_empty()
-                || (allocation.iter().any(|field| !field.is_empty())
-                    && !order.model_code.is_empty());
+            let allocated = !order.fa_group.is_empty() || !order.model_code.is_empty();
             !(allocated && !listed(&terms.order_types, "ALLOC"))
                 && sized_by_amount(shared, terms, definition)
                 && listed(&terms.order_types, list_name(kind))
-                && !order.algo_strategy.is_empty()
+                && amount_through(order, algorithms)
         }
         _ => false,
     }
+}
+
+/// An algorithm the definitions do not hold under the name an order gives.
+const ALGORITHM_NOT_DEFINED: i32 = 439;
+/// An algorithm an order may not go through.
+const ALGORITHM_NOT_ALLOWED: i32 = 442;
+/// Algorithms on a contract a gateway does not put them on.
+const ALGORITHMS_NOT_SUPPORTED: i32 = 10015;
+
+/// What a gateway refuses of an order through an algorithm on a contract
+/// before it asks for the algorithm's definition: a fund traded at its
+/// settlement or a contract on the settlement venue, and a contract priced
+/// other than in currency (10015). A gateway leaves the order's number taken
+/// after these.
+pub(crate) fn algorithm_gate(definition: &ContractDefinition, named: &str) -> Option<Refusal> {
+    let text = if definition.stock_type == "ETMF" {
+        format!(
+            "<html>Algo Orders cannot be created for {named} because this product <br>is NextShares \
+             exchange-traded managed fund.<br> It is quoted in, and trades in, an offset<br>from the \
+             future/today's closing Net Asset Value (NAV), which is stated in pennies.<br>The Last price shown \
+             reflects the intraday indicative NAV as distributed by NASDAQ.<br>To calculate monetary value of a \
+             bid, ask or a trade, the exchange will<br>add offset (positive or negative) to the closing NAV</html> "
+        )
+    } else if definition.exchange == "CFETAS" {
+        format!(
+            "<html>Algo Orders cannot be created for {named} because this product<br>is a CFE TAS contract that \
+             trades at settlement.<br>It is quoted in, and trades in, a premium equal to<br>the daily settlement \
+             price plus/minus <br>an optional, specified offset.<br>The actual transaction amount is determined \
+             subsequent to the transaction<br>based on the daily settlement price of the contract.</html>"
+        )
+    } else {
+        let rule = definition.ev_rule.split(':').next().unwrap_or_default();
+        let priced_otherwise = !definition.ev_rule.trim().is_empty()
+            && !rule.eq_ignore_ascii_case("factor")
+            && !rule.eq_ignore_ascii_case("etmf");
+        if !priced_otherwise {
+            return None;
+        }
+        "The algo orders are not supported because product is trading on the basis other than currency price"
+            .to_string()
+    };
+    Some(Refusal::stated(ALGORITHMS_NOT_SUPPORTED, text))
+}
+
+/// What a gateway refuses of an order through an algorithm, against the
+/// venue's definitions for the contract, before it checks anything else about
+/// the order: no definitions at all, or an algorithm the overnight session
+/// does not take for an order that trades in it (442); an algorithm not
+/// defined under that name, or defined without a parameter naming it (439);
+/// then the parameters as [`crate::control::algorithms::check`] holds them.
+/// `zoneless` is told of a moment stated without a zone.
+pub(crate) fn algorithm_refusal(
+    algorithms: Option<&Algorithms>,
+    contract: &super::ApiContract,
+    definition: &ContractDefinition,
+    order: &ApiOrder,
+    zoneless: &mut dyn FnMut(),
+) -> Result<(), Refusal> {
+    let not_allowed = || {
+        Refusal::stated(ALGORITHM_NOT_ALLOWED, "Specified algorithm is not allowed for this order.")
+    };
+    let not_defined = || {
+        Refusal::stated(
+            ALGORITHM_NOT_DEFINED,
+            "Order processing failed. Algorithm definition not found",
+        )
+    };
+    let algorithms = algorithms.ok_or_else(not_allowed)?;
+    let (provider, algorithm) = algorithms.find(&order.algo_strategy).ok_or_else(not_defined)?;
+    if !algorithm.has_strategy_selector(provider) {
+        return Err(not_defined());
+    }
+    let overnight =
+        matches!(contract.exchange.as_str(), "OVERNIGHT" | "IBEOS") || order.include_overnight;
+    if overnight && !algorithm.allow_overnight {
+        return Err(not_allowed());
+    }
+    let stated: Vec<(&str, &str)> = order
+        .algo_params
+        .iter()
+        .map(|stated| (stated.tag.as_str(), stated.value.as_str()))
+        .collect();
+    let side = order.action.to_uppercase();
+    let kind = order.order_type_named().unwrap_or(&order.order_type);
+    let primary = if definition.primary_exchange.is_empty() {
+        &definition.exchange
+    } else {
+        &definition.primary_exchange
+    };
+    crate::control::algorithms::check(
+        provider,
+        algorithm,
+        &stated,
+        &side,
+        kind,
+        |name| takes(definition, name),
+        primary,
+        zoneless,
+    )
+    .map_err(|(code, text)| Refusal::stated(code, text))
+}
+
+/// Where an order's algorithm is one of the provider IBALGO's, whether it
+/// takes an amount ([`amount_through`]); `None` for any other.
+pub(crate) fn ibalgo_amount(algorithms: Option<&Algorithms>, order: &ApiOrder) -> Option<bool> {
+    let (provider, _) = algorithms?.find(&order.algo_strategy)?;
+    provider.name.eq_ignore_ascii_case("IBALGO").then(|| amount_through(order, algorithms))
+}
+
+/// Whether the algorithm an order goes through takes an amount, as a gateway
+/// asks it: the algorithm the order names, as its own parameter naming it
+/// states it, is one the provider IBALGO defines with a parameter named
+/// `monetaryValue`.
+fn amount_through(order: &ApiOrder, algorithms: Option<&Algorithms>) -> bool {
+    let Some(algorithms) = algorithms.filter(|algorithms| !algorithms.is_empty()) else {
+        return false;
+    };
+    let Some((provider, algorithm)) = algorithms.find(&order.algo_strategy) else { return false };
+    let selector =
+        algorithm.every_parameter(provider).find(|parameter| parameter.strategy_selector);
+    let named = selector
+        .and_then(|selector| {
+            order.algo_params.iter().find(|parameter| parameter.tag == selector.short_name)
+        })
+        .map_or(algorithm.short_name.as_str(), |parameter| parameter.value.as_str());
+    algorithms.find(named).is_some_and(|(provider, algorithm)| {
+        provider.name.eq_ignore_ascii_case("IBALGO") && algorithm.takes(provider, "monetaryValue")
+    })
 }
 
 /// Whether the venue would size an order stated by an amount on this
@@ -237,8 +373,7 @@ pub(crate) fn sized_by_amount(
     let in_parts = finest_size(shared, definition).is_some_and(|finest| finest < 1.0);
     let open = takes(definition, "CASHQTY");
     let basic = |list: &str| BASIC_TYPES.iter().any(|name| listed(list, name));
-    let opened = shared.reference.order_permissions().contains_key("CRYPTO")
-        || ((terms.account || shared.reference.refusals_told()) && basic(&terms.types));
+    let opened = parts_or_crypto(shared);
     let whole_units = fund && shared.reference.enables("NOMFFRACMR");
     let by_logon = opened
         && ((!share && in_parts && !whole_units)
@@ -250,6 +385,53 @@ pub(crate) fn sized_by_amount(
         && definition.stock_type != "ETMF"
         && definition.exchange != "CFETAS"
         && (by_logon || by_contract || by_type)
+}
+
+/// Whether the login may trade parts of a unit or crypto, as a gateway works
+/// it out once for the session: the account may trade crypto, or it takes
+/// parts of a unit (8335) or has refusals told (6130) and the logon's list for
+/// parts of a unit (8334) names a market, limit, stop or stop-limit order.
+pub(crate) fn parts_or_crypto(shared: &SharedState) -> bool {
+    let terms = shared.reference.money_orders();
+    shared.reference.order_permissions().contains_key("CRYPTO")
+        || ((terms.account || shared.reference.refusals_told())
+            && BASIC_TYPES.iter().any(|name| listed(&terms.types, name)))
+}
+
+/// What a gateway refuses of a share's or a warrant's order for part of a unit
+/// through the API, on a login that may trade parts of a unit or crypto: a
+/// placement stating one (10243), or a replace where the order working or the
+/// replace states one (10242), before anything else about the order.
+pub(crate) fn fractional_refusal(
+    shared: &SharedState,
+    sec_type: &str,
+    replacing: bool,
+    quantities: &[f64],
+) -> Option<Refusal> {
+    let refused = matches!(sec_type, "STK" | "WAR")
+        && quantities.iter().any(|quantity| quantity.fract() != 0.0)
+        && parts_or_crypto(shared);
+    refused.then(|| {
+        if replacing {
+            Refusal::stated(
+                FRACTIONAL_NOT_MODIFIED,
+                "Fractional-sized order cannot be modified via API. Please use desktop version to \
+                 revise this order.",
+            )
+        } else {
+            Refusal::stated(
+                FRACTIONAL_NOT_PLACED,
+                "Fractional-sized order cannot be placed via API. Please use desktop version to place \
+                 this order.",
+            )
+        }
+    })
+}
+
+/// The most places the contract's market rule shows a size to, where it
+/// states them.
+fn size_places(shared: &SharedState, definition: &ContractDefinition) -> Option<i32> {
+    shared.reference.market_rule(definition.market_rule_id? as i32)?.size_places
 }
 
 /// The finest size the contract's market rule states, across its bands.
@@ -635,6 +817,11 @@ pub(crate) fn estimate(
     let size = cash / rate * margin;
     let step = least_size(shared, definition);
     let size = half_up(size, -(step.log10() as i32));
+    // A rule stating a step of nought rounds to nothing a gateway reads
+    // back: its size works out to nought, and so does this one's.
+    if size.is_nan() {
+        return 0.0;
+    }
     let whole = size.ceil().min(f64::from(i32::MAX)).max(f64::from(i32::MIN));
     let in_parts = fractional_allowed(shared, order, venue, definition)
         && !held_to_regular_hours(shared, order);
@@ -645,17 +832,16 @@ pub(crate) fn estimate(
 /// The size a gateway resizes its own record of a working order to when a
 /// replace changes the amount, where it worked the order's size out: the
 /// amount at the margin over the order's price, less what has filled, up to
-/// the places of the finest size on a contract dealt in parts, up to a whole
-/// unit where parts of a unit are not open to it, and to a lot. `None` leaves
-/// the record as it is: the order's price is not one. The replace states the
-/// caller's size on the wire all the same.
+/// the most places the rule shows a size to on a contract dealt in parts, up
+/// to a whole unit where parts of a unit are not open to it, and to a lot.
+/// `None` leaves the record as it is: the order's price is not one, or the
+/// rule shows a size to no stated places. The replace states the caller's
+/// size on the wire all the same.
 ///
 /// The order's price is its limit, or, on a buy, the live ask where the limit
 /// is above it, and on a sale the live bid where the limit is below it; its
 /// stop, trailing stop or starting price, by type; the record's for an order
 /// at market.
-// ponytail: a gateway rounds a size dealt in parts up to its rule's size
-// format, which this client does not read; the finest size's places stand in.
 pub(crate) fn resized(
     shared: &SharedState,
     order: &ApiOrder,
@@ -685,9 +871,11 @@ pub(crate) fn resized(
     }
     let size = (margin * order.cash_qty / price - filled).max(0.0);
     let size = match finest_size(shared, definition).filter(|finest| *finest < 1.0) {
-        Some(finest) => {
-            let places = Decimal::of(finest, 18).fraction().len() as i32;
-            let scale = 10_f64.powi(places);
+        // Up to the most places the rule shows a size to; a rule showing none
+        // leaves nothing a gateway can round to, and the record as it is.
+        Some(_) => {
+            let places = size_places(shared, definition)?;
+            let scale = 10_f64.powi(places.min(18));
             (Decimal::of(size, 6).value() * scale).ceil() / scale
         }
         None if !fractional_allowed(shared, order, venue, definition)
@@ -813,7 +1001,7 @@ fn least_size(shared: &SharedState, definition: &ContractDefinition) -> f64 {
 /// contract states its flag or its rule deals in parts; an algorithm, an
 /// allocation or a model is one the logon or contract opens parts of a unit
 /// to; nothing about the order rules them out (a name among its references
-/// that a gateway's own windows use, the accumulate-distribute algorithm, a
+/// that the windows of a gateway use, the accumulate-distribute algorithm, a
 /// container, a scale); a share's account, type and time in force take them
 /// and it routes through a venue that chooses; and it opens a position only
 /// where the logon lets parts of a unit do so.

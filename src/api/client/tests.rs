@@ -324,6 +324,25 @@ fn a_short_bracket_reads_its_exits_the_way_a_sell_does() {
     assert!(client.place_bracket(&c, "SELL", 1.0, 100.0, 110.0, 90.0).is_err());
 }
 
+/// SPY's definition, naming its algorithm provider group, and the venue's
+/// definitions of the share algorithms under it, as a paper session answered
+/// them: what an order through an algorithm is held to.
+fn algorithms_defined(shared: &SharedState) {
+    shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+        con_id: 756733,
+        symbol: "SPY".into(),
+        sec_type: crate::control::contracts::SecurityType::Stock,
+        exchange: "SMART".into(),
+        algo_group: "IBALGO".into(),
+        ..Default::default()
+    });
+    shared.reference.set_algorithms(
+        [("IBALGO/STK".to_string(), vec!["IBALGO-AE".to_string(), "IBALGO-AL-STK".to_string()])].into(),
+    );
+    shared.reference.note_algorithm_document("IBALGO-AE", include_str!("../../control/fixtures/algorithms_ibalgo_ae.xml"));
+    shared.reference.note_algorithm_document("IBALGO-AL-STK", include_str!("../../control/fixtures/algorithms_ibalgo_al_stk.xml"));
+}
+
 /// Helper: SPY contract.
 pub(crate) fn spy() -> Contract {
     Contract {
@@ -3166,9 +3185,10 @@ fn place_order_short_sell_side() {
 fn place_order_algo_vwap() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
+    algorithms_defined(&shared);
     let order = Order {
         action: "BUY".into(), total_quantity: 1000.0, order_type: "LMT".into(),
-        lmt_price: 150.0, algo_strategy: "vwap".into(),
+        lmt_price: 150.0, algo_strategy: "Vwap".into(),
         algo_params: vec![TagValue { tag: "maxPctVol".into(), value: "0.1".into() }],
         ..Default::default()
     };
@@ -3217,6 +3237,7 @@ fn a_preview_is_refused_for_a_type_this_client_cannot_send() {
 fn an_algo_order_states_the_limit_it_is_sent_as() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
+    algorithms_defined(&shared);
     let market_with_algo = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(),
         algo_strategy: "Adaptive".into(),
@@ -4163,6 +4184,7 @@ fn place_order_adaptive_rejects_unknown_priority() {
 fn place_order_adaptive_defaults_priority_when_absent() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
+    algorithms_defined(&shared);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
         lmt_price: 150.0, algo_strategy: "Adaptive".into(), ..Default::default()

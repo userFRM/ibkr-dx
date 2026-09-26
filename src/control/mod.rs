@@ -11,6 +11,7 @@
 //! binaries, benchmarks and integration tests in this repository reach it.
 
 pub mod adjustments;
+pub mod algorithms;
 pub(crate) mod aggregate_exchanges;
 pub mod calendar;
 pub mod contracts;

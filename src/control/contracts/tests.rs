@@ -2007,19 +2007,27 @@ mod size_table_tests {
         assert_eq!(rules[0].price_increments[0].increment, 0.01);
         assert_eq!(rules[0].size_increments.len(), 1, "the size band is read");
         assert_eq!(rules[0].size_increments[0].increment, 40.0);
+        assert_eq!(rules[0].size_places, None, "no size display table");
 
         let def = parse_secdef_response(data, true).expect("the definition parses");
         assert_eq!(def.min_tick, 0.01, "the price table gives the tick");
         assert_eq!(def.suggested_size_increment, 40.0, "the size table gives the size");
 
         // Each table opens with the places its bands are shown to, as the
-        // venue states them: the price display's first band is the one kept.
+        // venue states them: the price display's first band is the one kept,
+        // and the size display's widest.
         let shown = b"35=d\x01320=R1\x016008=756733\x0155=SPY\x01\
                       6019=1\x016031=26\x016022=1\x016023=0\x016024=4\x016025=2\x01\
                       6026=1\x016023=0\x016027=0.01\x016028=0\x016029=1\x016023=0\x016024=6\x016025=0\x01\
                       6030=1\x016023=1\x016027=1\x01";
         let rules = parse_market_rules(shown);
         assert_eq!(rules[0].price_places, Some(2));
+        assert_eq!(rules[0].size_places, Some(0));
+        let widest = b"35=d\x01320=R1\x016008=479624278\x0155=BTC\x01\
+                       6019=1\x016031=2806\x016022=1\x016023=0\x016024=6\x016025=2\x01\
+                       6026=1\x016023=0\x016027=0.25\x016028=0\x016029=2\x016023=0\x016024=6\x016025=8\x01\
+                       6023=1\x016024=6\x016025=4\x016030=1\x016023=0\x016027=0.00000001\x01";
+        assert_eq!(parse_market_rules(widest)[0].size_places, Some(8));
         assert_eq!((rules[0].price_increments[0].increment, rules[0].size_increments[0].increment), (0.01, 1.0));
     }
 

@@ -38,6 +38,10 @@ class _Recorder(EWrapper):
 
 SPY_CON_ID = 756733
 COMBO_CON_ID = 28812380
+# The share an order through an algorithm is placed on: the test engine
+# answers for it, and for the algorithms it names, as the venue answered on a
+# paper session.
+AAPL_CON_ID = 265598
 
 
 def _session():
@@ -48,6 +52,7 @@ def _session():
     # contracts placed on are given theirs here.
     client._test_map_con_id(SPY_CON_ID, 0)
     client._test_map_con_id(COMBO_CON_ID, 1)
+    client._test_map_con_id(AAPL_CON_ID, 2)
     return recorder, client
 
 
@@ -63,6 +68,13 @@ def _spy():
     contract = Contract()
     contract.symbol, contract.secType, contract.exchange, contract.currency = "SPY", "STK", "SMART", "USD"
     contract.conId = SPY_CON_ID
+    return contract
+
+
+def _aapl():
+    contract = Contract()
+    contract.symbol, contract.secType, contract.exchange, contract.currency = "AAPL", "STK", "SMART", "USD"
+    contract.conId = AAPL_CON_ID
     return contract
 
 
@@ -153,7 +165,7 @@ def test_an_algo_order_built_as_the_sample_builds_one_carries_its_parameters():
     assert order.algo_params is order.algoParams
 
     recorder, client = _session()
-    client.place_order(1003, _spy(), order)
+    client.place_order(1003, _aapl(), order)
     _, sent = _read_back(recorder, client, 1003)
     assert sent.algoStrategy == "Twap"
     assert [(tv.tag, tv.value) for tv in sent.algoParams] == [
@@ -187,7 +199,7 @@ def test_a_bare_bool_on_a_modelled_strategy_is_taken_as_the_flag():
     order.algoParams.append(TagValue("allowPastEndTime", True))
 
     recorder, client = _session()
-    client.place_order(1009, _spy(), order)
+    client.place_order(1009, _aapl(), order)
     _, sent = _read_back(recorder, client, 1009)
     assert [(tv.tag, tv.value) for tv in sent.algoParams] == [("allowPastEndTime", "True")]
 
@@ -308,7 +320,7 @@ def test_an_order_handed_back_by_a_callback_holds_real_lists_too():
     order.algoParams.append(TagValue("startTime", "09:00:00 US/Eastern"))
 
     recorder, client = _session()
-    client.place_order(1008, _spy(), order)
+    client.place_order(1008, _aapl(), order)
     _, sent = _read_back(recorder, client, 1008)
     sent.algoParams.append(TagValue("endTime", "16:00:00 US/Eastern"))
     assert [tv.tag for tv in sent.algoParams] == ["startTime", "endTime"]

@@ -1,0 +1,656 @@
+# java.version=25.0.2.0.101 tzdata=2026a
+MIT	MIT	false	Samoa Standard Time	Samoa Daylight Time	GMT+13:00	GMT+14:00
+US/Samoa	US/Samoa	false	American Samoa Standard Time	American Samoa Daylight Time	SST	SST
+HST	HST	false	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HST	HDT
+US/Alaska	US/Alaska	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+PST	PST	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+MST	MST	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+MST7MDT	MST7MDT	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Chicago	America/Chicago	true	Central Standard Time	Central Daylight Time	CST	CDT
+EST	EST	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+EST5EDT	EST5EDT	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+Etc/Greenwich	Etc/Greenwich	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+GB	GB	true	Greenwich Mean Time	British Summer Time	GMT	BST
+UCT	UCT	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+CET	CET	true	Central European Standard Time	Central European Summer Time	CET	CEST
+ECT	ECT	true	Central European Standard Time	Central European Summer Time	CET	CEST
+MET	MET	true	Central European Standard Time	Central European Summer Time	CET	CEST
+ART	ART	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+EET	EET	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+EAT	EAT	false	East Africa Time	GMT+03:00	EAT	EAT
+Israel	Israel	true	Israel Standard Time	Israel Daylight Time	IST	IDT
+IST	IST	false	India Standard Time	GMT+06:30	IST	IST
+CTT	CTT	false	China Standard Time	China Daylight Time	CST	CDT
+JST	JST	false	Japan Standard Time	Japan Daylight Time	JST	JDT
+Africa/Abidjan	Africa/Abidjan	false	Greenwich Mean Time	Abidjan Daylight Time	GMT	GMT
+Africa/Accra	Africa/Accra	false	Greenwich Mean Time	Accra Daylight Time	GMT	GMT
+Africa/Addis_Ababa	Africa/Addis_Ababa	false	East Africa Time	Addis Ababa Daylight Time	EAT	EAT
+Africa/Algiers	Africa/Algiers	false	Central European Standard Time	Central European Summer Time	CET	CEST
+Africa/Asmara	Africa/Asmara	false	East Africa Time	Asmara Daylight Time	EAT	EAT
+Africa/Asmera	Africa/Asmera	false	East Africa Time	Asmara Daylight Time	EAT	EAT
+Africa/Bamako	Africa/Bamako	false	Greenwich Mean Time	Bamako Daylight Time	GMT	GMT
+Africa/Bangui	Africa/Bangui	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Banjul	Africa/Banjul	false	Greenwich Mean Time	Banjul Daylight Time	GMT	GMT
+Africa/Bissau	Africa/Bissau	false	Greenwich Mean Time	Bissau Daylight Time	GMT	GMT
+Africa/Blantyre	Africa/Blantyre	false	Central Africa Time	Blantyre Daylight Time	CAT	CAT
+Africa/Brazzaville	Africa/Brazzaville	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Bujumbura	Africa/Bujumbura	false	Central Africa Time	Bujumbura Daylight Time	CAT	CAT
+Africa/Cairo	Africa/Cairo	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Africa/Casablanca	Africa/Casablanca	false	Casablanca Standard Time	Casablanca Daylight Time	GMT	GMT+01:00
+Africa/Ceuta	Africa/Ceuta	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Africa/Conakry	Africa/Conakry	false	Greenwich Mean Time	Conakry Daylight Time	GMT	GMT
+Africa/Dakar	Africa/Dakar	false	Greenwich Mean Time	Dakar Daylight Time	GMT	GMT
+Africa/Dar_es_Salaam	Africa/Dar_es_Salaam	false	East Africa Time	Dar es Salaam Daylight Time	EAT	EAT
+Africa/Djibouti	Africa/Djibouti	false	East Africa Time	Djibouti Daylight Time	EAT	EAT
+Africa/Douala	Africa/Douala	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/El_Aaiun	Africa/El_Aaiun	false	El Aaiun Standard Time	El Aaiun Daylight Time	GMT	GMT+01:00
+Africa/Freetown	Africa/Freetown	false	Greenwich Mean Time	Freetown Daylight Time	GMT	GMT
+Africa/Gaborone	Africa/Gaborone	false	Central Africa Time	Gaborone Daylight Time	CAT	CAT
+Africa/Harare	Africa/Harare	false	Central Africa Time	Harare Daylight Time	CAT	CAT
+Africa/Johannesburg	Africa/Johannesburg	false	South Africa Standard Time	Johannesburg Daylight Time	SAST	SAST
+Africa/Juba	Africa/Juba	false	Central Africa Time	Juba Daylight Time	CAT	CAT
+Africa/Kampala	Africa/Kampala	false	East Africa Time	Kampala Daylight Time	EAT	EAT
+Africa/Khartoum	Africa/Khartoum	false	Central Africa Time	Khartoum Daylight Time	CAT	CAT
+Africa/Kigali	Africa/Kigali	false	Central Africa Time	Kigali Daylight Time	CAT	CAT
+Africa/Kinshasa	Africa/Kinshasa	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Lagos	Africa/Lagos	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Libreville	Africa/Libreville	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Lome	Africa/Lome	false	Greenwich Mean Time	Lome Daylight Time	GMT	GMT
+Africa/Luanda	Africa/Luanda	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Lubumbashi	Africa/Lubumbashi	false	Central Africa Time	Lubumbashi Daylight Time	CAT	CAT
+Africa/Lusaka	Africa/Lusaka	false	Central Africa Time	Lusaka Daylight Time	CAT	CAT
+Africa/Malabo	Africa/Malabo	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Maputo	Africa/Maputo	false	Central Africa Time	Maputo Daylight Time	CAT	CAT
+Africa/Maseru	Africa/Maseru	false	South Africa Standard Time	Maseru Daylight Time	SAST	SAST
+Africa/Mbabane	Africa/Mbabane	false	South Africa Standard Time	Mbabane Daylight Time	SAST	SAST
+Africa/Mogadishu	Africa/Mogadishu	false	East Africa Time	Mogadishu Daylight Time	EAT	EAT
+Africa/Monrovia	Africa/Monrovia	false	Greenwich Mean Time	Monrovia Daylight Time	GMT	GMT
+Africa/Nairobi	Africa/Nairobi	false	East Africa Time	Nairobi Daylight Time	EAT	EAT
+Africa/Ndjamena	Africa/Ndjamena	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Niamey	Africa/Niamey	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Nouakchott	Africa/Nouakchott	false	Greenwich Mean Time	Nouakchott Daylight Time	GMT	GMT
+Africa/Ouagadougou	Africa/Ouagadougou	false	Greenwich Mean Time	Ouagadougou Daylight Time	GMT	GMT
+Africa/Porto-Novo	Africa/Porto-Novo	false	West Africa Standard Time	West Africa Summer Time	WAT	WAT
+Africa/Sao_Tome	Africa/Sao_Tome	false	Greenwich Mean Time	São Tomé Daylight Time	GMT	GMT
+Africa/Timbuktu	Africa/Timbuktu	false	Greenwich Mean Time	Bamako Daylight Time	GMT	GMT
+Africa/Tripoli	Africa/Tripoli	false	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Africa/Tunis	Africa/Tunis	false	Central European Standard Time	Central European Summer Time	CET	CEST
+Africa/Windhoek	Africa/Windhoek	false	Central Africa Time	Windhoek Daylight Time	CAT	CAT
+America/Adak	America/Adak	true	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HAST	HADT
+America/Anchorage	America/Anchorage	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+America/Anguilla	America/Anguilla	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Antigua	America/Antigua	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Araguaina	America/Araguaina	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Buenos_Aires	America/Argentina/Buenos_Aires	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Catamarca	America/Argentina/Catamarca	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/ComodRivadavia	America/Argentina/ComodRivadavia	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Cordoba	America/Argentina/Cordoba	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Jujuy	America/Argentina/Jujuy	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/La_Rioja	America/Argentina/La_Rioja	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Mendoza	America/Argentina/Mendoza	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Rio_Gallegos	America/Argentina/Rio_Gallegos	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Salta	America/Argentina/Salta	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/San_Juan	America/Argentina/San_Juan	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/San_Luis	America/Argentina/San_Luis	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Tucuman	America/Argentina/Tucuman	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Argentina/Ushuaia	America/Argentina/Ushuaia	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Aruba	America/Aruba	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Asuncion	America/Asuncion	false	Paraguay Standard Time	Paraguay Summer Time	GMT-03:00	GMT-02:00
+America/Atikokan	America/Atikokan	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Atka	America/Atka	true	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HAST	HADT
+America/Bahia	America/Bahia	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Bahia_Banderas	America/Bahia_Banderas	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Barbados	America/Barbados	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Belem	America/Belem	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Belize	America/Belize	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Blanc-Sablon	America/Blanc-Sablon	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Boa_Vista	America/Boa_Vista	false	Amazon Standard Time	Amazon Summer Time	GMT-04:00	GMT-03:00
+America/Bogota	America/Bogota	false	Colombia Standard Time	Colombia Summer Time	GMT-05:00	GMT-04:00
+America/Boise	America/Boise	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Buenos_Aires	America/Buenos_Aires	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Cambridge_Bay	America/Cambridge_Bay	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Campo_Grande	America/Campo_Grande	false	Amazon Standard Time	Amazon Summer Time	GMT-04:00	GMT-03:00
+America/Cancun	America/Cancun	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Caracas	America/Caracas	false	Venezuela Time	Caracas Daylight Time	GMT-04:00	GMT-04:00
+America/Catamarca	America/Catamarca	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Cayenne	America/Cayenne	false	French Guiana Time	Cayenne Daylight Time	GMT-03:00	GMT-03:00
+America/Cayman	America/Cayman	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Chicago	America/Chicago	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Chihuahua	America/Chihuahua	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Ciudad_Juarez	America/Ciudad_Juarez	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Coral_Harbour	America/Coral_Harbour	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Cordoba	America/Cordoba	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Costa_Rica	America/Costa_Rica	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Coyhaique	America/Coyhaique	false	Coyhaique Standard Time	Coyhaique Daylight Time	GMT-03:00	GMT-02:00
+America/Creston	America/Creston	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Cuiaba	America/Cuiaba	false	Amazon Standard Time	Amazon Summer Time	GMT-04:00	GMT-03:00
+America/Curacao	America/Curacao	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Danmarkshavn	America/Danmarkshavn	false	Greenwich Mean Time	Danmarkshavn Daylight Time	GMT	GMT
+America/Dawson	America/Dawson	false	Yukon Time	Dawson Daylight Time	MST	MST
+America/Dawson_Creek	America/Dawson_Creek	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Denver	America/Denver	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Detroit	America/Detroit	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Dominica	America/Dominica	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Edmonton	America/Edmonton	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Eirunepe	America/Eirunepe	false	Acre Standard Time	Acre Summer Time	GMT-05:00	GMT-04:00
+America/El_Salvador	America/El_Salvador	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Ensenada	America/Ensenada	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+America/Fort_Nelson	America/Fort_Nelson	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Fort_Wayne	America/Fort_Wayne	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Fortaleza	America/Fortaleza	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Glace_Bay	America/Glace_Bay	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Godthab	America/Godthab	true	Greenland Standard Time	Greenland Summer Time	GMT-02:00	GMT-01:00
+America/Goose_Bay	America/Goose_Bay	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Grand_Turk	America/Grand_Turk	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Grenada	America/Grenada	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Guadeloupe	America/Guadeloupe	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Guatemala	America/Guatemala	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Guayaquil	America/Guayaquil	false	Ecuador Time	Guayaquil Daylight Time	GMT-05:00	GMT-04:00
+America/Guyana	America/Guyana	false	Guyana Time	Guyana Daylight Time	GMT-04:00	GMT-04:00
+America/Halifax	America/Halifax	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Havana	America/Havana	true	Cuba Standard Time	Cuba Daylight Time	CST	CDT
+America/Hermosillo	America/Hermosillo	false	Mexican Pacific Standard Time	Mexican Pacific Daylight Time	MST	MDT
+America/Indiana/Indianapolis	America/Indiana/Indianapolis	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Indiana/Knox	America/Indiana/Knox	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Indiana/Marengo	America/Indiana/Marengo	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Indiana/Petersburg	America/Indiana/Petersburg	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Indiana/Tell_City	America/Indiana/Tell_City	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Indiana/Vevay	America/Indiana/Vevay	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Indiana/Vincennes	America/Indiana/Vincennes	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Indiana/Winamac	America/Indiana/Winamac	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Indianapolis	America/Indianapolis	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Inuvik	America/Inuvik	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Iqaluit	America/Iqaluit	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Jamaica	America/Jamaica	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Jujuy	America/Jujuy	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Juneau	America/Juneau	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+America/Kentucky/Louisville	America/Kentucky/Louisville	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Kentucky/Monticello	America/Kentucky/Monticello	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Knox_IN	America/Knox_IN	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Kralendijk	America/Kralendijk	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/La_Paz	America/La_Paz	false	Bolivia Time	La Paz Daylight Time	GMT-04:00	GMT-03:00
+America/Lima	America/Lima	false	Peru Standard Time	Peru Summer Time	GMT-05:00	GMT-04:00
+America/Los_Angeles	America/Los_Angeles	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+America/Louisville	America/Louisville	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Lower_Princes	America/Lower_Princes	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Maceio	America/Maceio	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Managua	America/Managua	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Manaus	America/Manaus	false	Amazon Standard Time	Amazon Summer Time	GMT-04:00	GMT-03:00
+America/Marigot	America/Marigot	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Martinique	America/Martinique	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Matamoros	America/Matamoros	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Mazatlan	America/Mazatlan	false	Mexican Pacific Standard Time	Mexican Pacific Daylight Time	MST	MDT
+America/Mendoza	America/Mendoza	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Menominee	America/Menominee	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Merida	America/Merida	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Metlakatla	America/Metlakatla	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+America/Mexico_City	America/Mexico_City	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Miquelon	America/Miquelon	true	St. Pierre & Miquelon Standard Time	St. Pierre & Miquelon Daylight Time	GMT-03:00	GMT-02:00
+America/Moncton	America/Moncton	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Monterrey	America/Monterrey	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Montevideo	America/Montevideo	false	Uruguay Standard Time	Uruguay Summer Time	GMT-03:00	GMT-02:00
+America/Montreal	America/Montreal	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Montserrat	America/Montserrat	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Nassau	America/Nassau	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/New_York	America/New_York	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Nipigon	America/Nipigon	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Nome	America/Nome	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+America/Noronha	America/Noronha	false	Fernando de Noronha Standard Time	Fernando de Noronha Summer Time	GMT-02:00	GMT-01:00
+America/North_Dakota/Beulah	America/North_Dakota/Beulah	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/North_Dakota/Center	America/North_Dakota/Center	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/North_Dakota/New_Salem	America/North_Dakota/New_Salem	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Nuuk	America/Nuuk	true	Greenland Standard Time	Greenland Summer Time	GMT-02:00	GMT-01:00
+America/Ojinaga	America/Ojinaga	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Panama	America/Panama	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Pangnirtung	America/Pangnirtung	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Paramaribo	America/Paramaribo	false	Suriname Time	Paramaribo Daylight Time	GMT-03:00	GMT-03:00
+America/Phoenix	America/Phoenix	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Port-au-Prince	America/Port-au-Prince	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Port_of_Spain	America/Port_of_Spain	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Porto_Acre	America/Porto_Acre	false	Acre Standard Time	Acre Summer Time	GMT-05:00	GMT-04:00
+America/Porto_Velho	America/Porto_Velho	false	Amazon Standard Time	Amazon Summer Time	GMT-04:00	GMT-03:00
+America/Puerto_Rico	America/Puerto_Rico	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Punta_Arenas	America/Punta_Arenas	false	Punta Arenas Standard Time	Punta Arenas Daylight Time	GMT-03:00	GMT-02:00
+America/Rainy_River	America/Rainy_River	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Rankin_Inlet	America/Rankin_Inlet	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Recife	America/Recife	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Regina	America/Regina	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Resolute	America/Resolute	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Rio_Branco	America/Rio_Branco	false	Acre Standard Time	Acre Summer Time	GMT-05:00	GMT-04:00
+America/Rosario	America/Rosario	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+America/Santa_Isabel	America/Santa_Isabel	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+America/Santarem	America/Santarem	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Santiago	America/Santiago	true	Chile Standard Time	Chile Summer Time	GMT-04:00	GMT-03:00
+America/Santo_Domingo	America/Santo_Domingo	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Sao_Paulo	America/Sao_Paulo	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+America/Scoresbysund	America/Scoresbysund	true	Greenland Standard Time	Greenland Summer Time	GMT-02:00	GMT-01:00
+America/Shiprock	America/Shiprock	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+America/Sitka	America/Sitka	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+America/St_Barthelemy	America/St_Barthelemy	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/St_Johns	America/St_Johns	true	Newfoundland Standard Time	Newfoundland Daylight Time	NST	NDT
+America/St_Kitts	America/St_Kitts	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/St_Lucia	America/St_Lucia	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/St_Thomas	America/St_Thomas	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/St_Vincent	America/St_Vincent	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Swift_Current	America/Swift_Current	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Tegucigalpa	America/Tegucigalpa	false	Central Standard Time	Central Daylight Time	CST	CDT
+America/Thule	America/Thule	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Thunder_Bay	America/Thunder_Bay	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Tijuana	America/Tijuana	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+America/Toronto	America/Toronto	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+America/Tortola	America/Tortola	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Vancouver	America/Vancouver	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+America/Virgin	America/Virgin	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+America/Whitehorse	America/Whitehorse	false	Yukon Time	Whitehorse Daylight Time	MST	MST
+America/Winnipeg	America/Winnipeg	true	Central Standard Time	Central Daylight Time	CST	CDT
+America/Yakutat	America/Yakutat	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+America/Yellowknife	America/Yellowknife	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+Antarctica/Casey	Antarctica/Casey	false	Australian Western Standard Time	Australian Western Daylight Time	AWST	AWDT
+Antarctica/Davis	Antarctica/Davis	false	Davis Time	Davis Daylight Time	GMT+07:00	GMT+07:00
+Antarctica/DumontDUrville	Antarctica/DumontDUrville	false	Dumont d’Urville Time	Dumont-d’Urville Daylight Time	GMT+10:00	GMT+10:00
+Antarctica/Macquarie	Antarctica/Macquarie	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Antarctica/Mawson	Antarctica/Mawson	false	Mawson Time	Mawson Daylight Time	GMT+05:00	GMT+05:00
+Antarctica/McMurdo	Antarctica/McMurdo	true	New Zealand Standard Time	New Zealand Daylight Time	NZST	NZDT
+Antarctica/Palmer	Antarctica/Palmer	false	Palmer Standard Time	Palmer Daylight Time	GMT-03:00	GMT-02:00
+Antarctica/Rothera	Antarctica/Rothera	false	Rothera Time	Rothera Daylight Time	GMT-03:00	GMT-03:00
+Antarctica/South_Pole	Antarctica/South_Pole	true	New Zealand Standard Time	New Zealand Daylight Time	NZST	NZDT
+Antarctica/Syowa	Antarctica/Syowa	false	Syowa Time	Syowa Daylight Time	GMT+03:00	GMT+03:00
+Antarctica/Troll	Antarctica/Troll	true	Greenwich Mean Time	Troll Daylight Time	GMT	GMT
+Antarctica/Vostok	Antarctica/Vostok	false	Vostok Time	Vostok Daylight Time	GMT+05:00	GMT+05:00
+Arctic/Longyearbyen	Arctic/Longyearbyen	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Asia/Aden	Asia/Aden	false	Arabian Standard Time	Arabian Daylight Time	GMT+03:00	GMT+03:00
+Asia/Almaty	Asia/Almaty	false	Kazakhstan Time	Almaty Daylight Time	GMT+05:00	GMT+06:00
+Asia/Amman	Asia/Amman	false	Amman Standard Time	Amman Daylight Time	GMT+03:00	GMT+04:00
+Asia/Anadyr	Asia/Anadyr	false	Anadyr Standard Time	Anadyr Summer Time	GMT+12:00	GMT+13:00
+Asia/Aqtau	Asia/Aqtau	false	Kazakhstan Time	Aqtau Daylight Time	GMT+05:00	GMT+06:00
+Asia/Aqtobe	Asia/Aqtobe	false	Kazakhstan Time	Aqtobe Daylight Time	GMT+05:00	GMT+06:00
+Asia/Ashgabat	Asia/Ashgabat	false	Turkmenistan Standard Time	Turkmenistan Summer Time	GMT+05:00	GMT+06:00
+Asia/Ashkhabad	Asia/Ashkhabad	false	Turkmenistan Standard Time	Turkmenistan Summer Time	GMT+05:00	GMT+06:00
+Asia/Atyrau	Asia/Atyrau	false	Kazakhstan Time	Atyrau Daylight Time	GMT+05:00	GMT+06:00
+Asia/Baghdad	Asia/Baghdad	false	Arabian Standard Time	Arabian Daylight Time	GMT+03:00	GMT+04:00
+Asia/Bahrain	Asia/Bahrain	false	Arabian Standard Time	Arabian Daylight Time	GMT+03:00	GMT+03:00
+Asia/Baku	Asia/Baku	false	Azerbaijan Standard Time	Azerbaijan Summer Time	GMT+04:00	GMT+05:00
+Asia/Bangkok	Asia/Bangkok	false	Indochina Time	Bangkok Daylight Time	GMT+07:00	GMT+07:00
+Asia/Barnaul	Asia/Barnaul	false	Barnaul Standard Time	Barnaul Daylight Time	GMT+07:00	GMT+08:00
+Asia/Beirut	Asia/Beirut	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Asia/Bishkek	Asia/Bishkek	false	Kyrgyzstan Time	Bishkek Daylight Time	GMT+06:00	GMT+07:00
+Asia/Brunei	Asia/Brunei	false	Brunei Time	Brunei Daylight Time	GMT+08:00	GMT+08:20
+Asia/Calcutta	Asia/Calcutta	false	India Standard Time	Kolkata Daylight Time	IST	IST
+Asia/Chita	Asia/Chita	false	Yakutsk Standard Time	Yakutsk Summer Time	GMT+09:00	GMT+10:00
+Asia/Choibalsan	Asia/Choibalsan	false	Ulaanbaatar Standard Time	Ulaanbaatar Summer Time	GMT+08:00	GMT+09:00
+Asia/Chongqing	Asia/Chongqing	false	China Standard Time	China Daylight Time	CST	CDT
+Asia/Chungking	Asia/Chungking	false	China Standard Time	China Daylight Time	CST	CDT
+Asia/Colombo	Asia/Colombo	false	India Standard Time	Colombo Daylight Time	IST	IST
+Asia/Dacca	Asia/Dacca	false	Bangladesh Standard Time	Bangladesh Summer Time	GMT+06:00	GMT+07:00
+Asia/Damascus	Asia/Damascus	false	Damascus Standard Time	Damascus Daylight Time	GMT+03:00	GMT+04:00
+Asia/Dhaka	Asia/Dhaka	false	Bangladesh Standard Time	Bangladesh Summer Time	GMT+06:00	GMT+07:00
+Asia/Dili	Asia/Dili	false	Timor-Leste Time	Dili Daylight Time	GMT+09:00	GMT+09:00
+Asia/Dubai	Asia/Dubai	false	Gulf Standard Time	Dubai Daylight Time	GMT+04:00	GMT+04:00
+Asia/Dushanbe	Asia/Dushanbe	false	Tajikistan Time	Dushanbe Daylight Time	GMT+05:00	GMT+06:00
+Asia/Famagusta	Asia/Famagusta	true	Famagusta Standard Time	Famagusta Daylight Time	EET	EEST
+Asia/Gaza	Asia/Gaza	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Asia/Harbin	Asia/Harbin	false	China Standard Time	China Daylight Time	CST	CDT
+Asia/Hebron	Asia/Hebron	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Asia/Ho_Chi_Minh	Asia/Ho_Chi_Minh	false	Indochina Time	Ho Chi Minh City Daylight Time	GMT+07:00	GMT+07:00
+Asia/Hong_Kong	Asia/Hong_Kong	false	Hong Kong Standard Time	Hong Kong Summer Time	HKT	HKST
+Asia/Hovd	Asia/Hovd	false	Hovd Standard Time	Hovd Summer Time	GMT+07:00	GMT+08:00
+Asia/Irkutsk	Asia/Irkutsk	false	Irkutsk Standard Time	Irkutsk Summer Time	GMT+08:00	GMT+09:00
+Asia/Istanbul	Asia/Istanbul	false	Istanbul Standard Time	Istanbul Daylight Time	GMT+03:00	GMT+04:00
+Asia/Jakarta	Asia/Jakarta	false	Western Indonesia Time	Jakarta Daylight Time	WIB	WIB
+Asia/Jayapura	Asia/Jayapura	false	Eastern Indonesia Time	Jayapura Daylight Time	WIT	WIT
+Asia/Jerusalem	Asia/Jerusalem	true	Israel Standard Time	Israel Daylight Time	IST	IDT
+Asia/Kabul	Asia/Kabul	false	Afghanistan Time	Kabul Daylight Time	GMT+04:30	GMT+04:30
+Asia/Kamchatka	Asia/Kamchatka	false	Kamchatka Standard Time	Kamchatka Summer Time	GMT+12:00	GMT+13:00
+Asia/Karachi	Asia/Karachi	false	Pakistan Standard Time	Pakistan Summer Time	PKT	PKST
+Asia/Kashgar	Asia/Kashgar	false	Urumqi Standard Time	Urumqi Daylight Time	GMT+06:00	GMT+06:00
+Asia/Kathmandu	Asia/Kathmandu	false	Nepal Time	Kathmandu Daylight Time	GMT+05:45	GMT+05:45
+Asia/Katmandu	Asia/Katmandu	false	Nepal Time	Kathmandu Daylight Time	GMT+05:45	GMT+05:45
+Asia/Khandyga	Asia/Khandyga	false	Yakutsk Standard Time	Yakutsk Summer Time	GMT+09:00	GMT+10:00
+Asia/Kolkata	Asia/Kolkata	false	India Standard Time	Kolkata Daylight Time	IST	IST
+Asia/Krasnoyarsk	Asia/Krasnoyarsk	false	Krasnoyarsk Standard Time	Krasnoyarsk Summer Time	GMT+07:00	GMT+08:00
+Asia/Kuala_Lumpur	Asia/Kuala_Lumpur	false	Malaysia Time	Kuala Lumpur Daylight Time	GMT+08:00	GMT+08:20
+Asia/Kuching	Asia/Kuching	false	Brunei Time	Kuching Daylight Time	GMT+08:00	GMT+08:20
+Asia/Kuwait	Asia/Kuwait	false	Arabian Standard Time	Arabian Daylight Time	GMT+03:00	GMT+03:00
+Asia/Macao	Asia/Macao	false	China Standard Time	China Daylight Time	CST	CDT
+Asia/Macau	Asia/Macau	false	China Standard Time	China Daylight Time	CST	CDT
+Asia/Magadan	Asia/Magadan	false	Magadan Standard Time	Magadan Summer Time	GMT+11:00	GMT+12:00
+Asia/Makassar	Asia/Makassar	false	Central Indonesia Time	Makassar Daylight Time	WITA	WITA
+Asia/Manila	Asia/Manila	false	Philippine Standard Time	Philippine Summer Time	PST	PDT
+Asia/Muscat	Asia/Muscat	false	Gulf Standard Time	Muscat Daylight Time	GMT+04:00	GMT+04:00
+Asia/Nicosia	Asia/Nicosia	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Asia/Novokuznetsk	Asia/Novokuznetsk	false	Krasnoyarsk Standard Time	Krasnoyarsk Summer Time	GMT+07:00	GMT+08:00
+Asia/Novosibirsk	Asia/Novosibirsk	false	Novosibirsk Standard Time	Novosibirsk Summer Time	GMT+07:00	GMT+08:00
+Asia/Omsk	Asia/Omsk	false	Omsk Standard Time	Omsk Summer Time	GMT+06:00	GMT+07:00
+Asia/Oral	Asia/Oral	false	Kazakhstan Time	Oral Daylight Time	GMT+05:00	GMT+06:00
+Asia/Phnom_Penh	Asia/Phnom_Penh	false	Indochina Time	Phnom Penh Daylight Time	GMT+07:00	GMT+07:00
+Asia/Pontianak	Asia/Pontianak	false	Western Indonesia Time	Pontianak Daylight Time	WIB	WIB
+Asia/Pyongyang	Asia/Pyongyang	false	Korean Standard Time	Korean Daylight Time	KST	KST
+Asia/Qatar	Asia/Qatar	false	Arabian Standard Time	Arabian Daylight Time	GMT+03:00	GMT+03:00
+Asia/Qostanay	Asia/Qostanay	false	Kazakhstan Time	Kostanay Daylight Time	GMT+05:00	GMT+06:00
+Asia/Qyzylorda	Asia/Qyzylorda	false	Kazakhstan Time	Qyzylorda Daylight Time	GMT+05:00	GMT+06:00
+Asia/Rangoon	Asia/Rangoon	false	Myanmar Time	Yangon Daylight Time	GMT+06:30	GMT+06:30
+Asia/Riyadh	Asia/Riyadh	false	Arabian Standard Time	Arabian Daylight Time	GMT+03:00	GMT+03:00
+Asia/Saigon	Asia/Saigon	false	Indochina Time	Ho Chi Minh City Daylight Time	GMT+07:00	GMT+07:00
+Asia/Sakhalin	Asia/Sakhalin	false	Sakhalin Standard Time	Sakhalin Summer Time	GMT+11:00	GMT+12:00
+Asia/Samarkand	Asia/Samarkand	false	Uzbekistan Standard Time	Uzbekistan Summer Time	GMT+05:00	GMT+06:00
+Asia/Seoul	Asia/Seoul	false	Korean Standard Time	Korean Daylight Time	KST	KST
+Asia/Shanghai	Asia/Shanghai	false	China Standard Time	China Daylight Time	CST	CDT
+Asia/Singapore	Asia/Singapore	false	Singapore Standard Time	Singapore Daylight Time	GMT+08:00	GMT+08:20
+Asia/Srednekolymsk	Asia/Srednekolymsk	false	Srednekolymsk Standard Time	Srednekolymsk Daylight Time	GMT+11:00	GMT+12:00
+Asia/Taipei	Asia/Taipei	false	Taiwan Standard Time	Taiwan Daylight Time	CST	CDT
+Asia/Tashkent	Asia/Tashkent	false	Uzbekistan Standard Time	Uzbekistan Summer Time	GMT+05:00	GMT+06:00
+Asia/Tbilisi	Asia/Tbilisi	false	Georgia Standard Time	Georgia Summer Time	GMT+04:00	GMT+05:00
+Asia/Tehran	Asia/Tehran	false	Iran Standard Time	Iran Daylight Time	GMT+03:30	GMT+04:30
+Asia/Tel_Aviv	Asia/Tel_Aviv	true	Israel Standard Time	Israel Daylight Time	IST	IDT
+Asia/Thimbu	Asia/Thimbu	false	Bhutan Time	Thimphu Daylight Time	GMT+06:00	GMT+06:00
+Asia/Thimphu	Asia/Thimphu	false	Bhutan Time	Thimphu Daylight Time	GMT+06:00	GMT+06:00
+Asia/Tokyo	Asia/Tokyo	false	Japan Standard Time	Japan Daylight Time	JST	JDT
+Asia/Tomsk	Asia/Tomsk	false	Tomsk Standard Time	Tomsk Daylight Time	GMT+07:00	GMT+08:00
+Asia/Ujung_Pandang	Asia/Ujung_Pandang	false	Central Indonesia Time	Makassar Daylight Time	WITA	WITA
+Asia/Ulaanbaatar	Asia/Ulaanbaatar	false	Ulaanbaatar Standard Time	Ulaanbaatar Summer Time	GMT+08:00	GMT+09:00
+Asia/Ulan_Bator	Asia/Ulan_Bator	false	Ulaanbaatar Standard Time	Ulaanbaatar Summer Time	GMT+08:00	GMT+09:00
+Asia/Urumqi	Asia/Urumqi	false	Urumqi Standard Time	Urumqi Daylight Time	GMT+06:00	GMT+06:00
+Asia/Ust-Nera	Asia/Ust-Nera	false	Vladivostok Standard Time	Vladivostok Summer Time	GMT+10:00	GMT+11:00
+Asia/Vientiane	Asia/Vientiane	false	Indochina Time	Vientiane Daylight Time	GMT+07:00	GMT+07:00
+Asia/Vladivostok	Asia/Vladivostok	false	Vladivostok Standard Time	Vladivostok Summer Time	GMT+10:00	GMT+11:00
+Asia/Yakutsk	Asia/Yakutsk	false	Yakutsk Standard Time	Yakutsk Summer Time	GMT+09:00	GMT+10:00
+Asia/Yangon	Asia/Yangon	false	Cocos Islands Time	Yangon Daylight Time	GMT+06:30	GMT+06:30
+Asia/Yekaterinburg	Asia/Yekaterinburg	false	Yekaterinburg Standard Time	Yekaterinburg Summer Time	GMT+05:00	GMT+06:00
+Asia/Yerevan	Asia/Yerevan	false	Armenia Standard Time	Armenia Summer Time	GMT+04:00	GMT+05:00
+Atlantic/Azores	Atlantic/Azores	true	Azores Standard Time	Azores Summer Time	GMT-01:00	GMT
+Atlantic/Bermuda	Atlantic/Bermuda	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+Atlantic/Canary	Atlantic/Canary	true	Western European Standard Time	Western European Summer Time	WET	WEST
+Atlantic/Cape_Verde	Atlantic/Cape_Verde	false	Cape Verde Standard Time	Cape Verde Summer Time	GMT-01:00	GMT
+Atlantic/Faeroe	Atlantic/Faeroe	true	Western European Standard Time	Western European Summer Time	WET	WEST
+Atlantic/Faroe	Atlantic/Faroe	true	Western European Standard Time	Western European Summer Time	WET	WEST
+Atlantic/Jan_Mayen	Atlantic/Jan_Mayen	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Atlantic/Madeira	Atlantic/Madeira	true	Western European Standard Time	Western European Summer Time	WET	WEST
+Atlantic/Reykjavik	Atlantic/Reykjavik	false	Greenwich Mean Time	Reykjavik Daylight Time	GMT	GMT
+Atlantic/South_Georgia	Atlantic/South_Georgia	false	South Georgia Time	South Georgia Daylight Time	GMT-02:00	GMT-02:00
+Atlantic/St_Helena	Atlantic/St_Helena	false	Greenwich Mean Time	St. Helena Daylight Time	GMT	GMT
+Atlantic/Stanley	Atlantic/Stanley	false	Falkland Islands Standard Time	Falkland Islands Summer Time	GMT-03:00	GMT-02:00
+Australia/ACT	Australia/ACT	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Adelaide	Australia/Adelaide	true	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+Australia/Brisbane	Australia/Brisbane	false	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Broken_Hill	Australia/Broken_Hill	true	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+Australia/Canberra	Australia/Canberra	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Currie	Australia/Currie	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Darwin	Australia/Darwin	false	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+Australia/Eucla	Australia/Eucla	false	Australian Central Western Standard Time	Australian Central Western Daylight Time	GMT+08:45	GMT+09:45
+Australia/Hobart	Australia/Hobart	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/LHI	Australia/LHI	true	Lord Howe Standard Time	Lord Howe Daylight Time	GMT+10:30	GMT+11:00
+Australia/Lindeman	Australia/Lindeman	false	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Lord_Howe	Australia/Lord_Howe	true	Lord Howe Standard Time	Lord Howe Daylight Time	GMT+10:30	GMT+11:00
+Australia/Melbourne	Australia/Melbourne	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/NSW	Australia/NSW	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/North	Australia/North	false	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+Australia/Perth	Australia/Perth	false	Australian Western Standard Time	Australian Western Daylight Time	AWST	AWDT
+Australia/Queensland	Australia/Queensland	false	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/South	Australia/South	true	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+Australia/Sydney	Australia/Sydney	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Tasmania	Australia/Tasmania	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/Victoria	Australia/Victoria	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+Australia/West	Australia/West	false	Australian Western Standard Time	Australian Western Daylight Time	AWST	AWDT
+Australia/Yancowinna	Australia/Yancowinna	true	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+Brazil/Acre	Brazil/Acre	false	Acre Standard Time	Acre Summer Time	GMT-05:00	GMT-04:00
+Brazil/DeNoronha	Brazil/DeNoronha	false	Fernando de Noronha Standard Time	Fernando de Noronha Summer Time	GMT-02:00	GMT-01:00
+Brazil/East	Brazil/East	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+Brazil/West	Brazil/West	false	Amazon Standard Time	Amazon Summer Time	GMT-04:00	GMT-03:00
+CET	CET	true	Central European Standard Time	Central European Summer Time	CET	CEST
+CST6CDT	CST6CDT	true	Central Standard Time	Central Daylight Time	CST	CDT
+Canada/Atlantic	Canada/Atlantic	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+Canada/Central	Canada/Central	true	Central Standard Time	Central Daylight Time	CST	CDT
+Canada/Eastern	Canada/Eastern	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+Canada/Mountain	Canada/Mountain	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+Canada/Newfoundland	Canada/Newfoundland	true	Newfoundland Standard Time	Newfoundland Daylight Time	NST	NDT
+Canada/Pacific	Canada/Pacific	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+Canada/Saskatchewan	Canada/Saskatchewan	false	Central Standard Time	Central Daylight Time	CST	CDT
+Canada/Yukon	Canada/Yukon	false	Yukon Time	Whitehorse Daylight Time	MST	MST
+Chile/Continental	Chile/Continental	true	Chile Standard Time	Chile Summer Time	GMT-04:00	GMT-03:00
+Chile/EasterIsland	Chile/EasterIsland	true	Easter Island Standard Time	Easter Island Summer Time	GMT-06:00	GMT-05:00
+Cuba	Cuba	true	Cuba Standard Time	Cuba Daylight Time	CST	CDT
+EET	EET	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+EST5EDT	EST5EDT	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+Egypt	Egypt	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Eire	Eire	true	Greenwich Mean Time	Irish Standard Time	GMT	IST
+Etc/GMT	Etc/GMT	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Etc/GMT+0	Etc/GMT+0	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Etc/GMT+1	Etc/GMT+1	false	GMT-01:00	GMT-01:00	GMT-01:00	GMT-01:00
+Etc/GMT+10	Etc/GMT+10	false	GMT-10:00	GMT-10:00	GMT-10:00	GMT-10:00
+Etc/GMT+11	Etc/GMT+11	false	GMT-11:00	GMT-11:00	GMT-11:00	GMT-11:00
+Etc/GMT+12	Etc/GMT+12	false	GMT-12:00	GMT-12:00	GMT-12:00	GMT-12:00
+Etc/GMT+2	Etc/GMT+2	false	GMT-02:00	GMT-02:00	GMT-02:00	GMT-02:00
+Etc/GMT+3	Etc/GMT+3	false	GMT-03:00	GMT-03:00	GMT-03:00	GMT-03:00
+Etc/GMT+4	Etc/GMT+4	false	GMT-04:00	GMT-04:00	GMT-04:00	GMT-04:00
+Etc/GMT+5	Etc/GMT+5	false	GMT-05:00	GMT-05:00	GMT-05:00	GMT-05:00
+Etc/GMT+6	Etc/GMT+6	false	GMT-06:00	GMT-06:00	GMT-06:00	GMT-06:00
+Etc/GMT+7	Etc/GMT+7	false	GMT-07:00	GMT-07:00	GMT-07:00	GMT-07:00
+Etc/GMT+8	Etc/GMT+8	false	GMT-08:00	GMT-08:00	GMT-08:00	GMT-08:00
+Etc/GMT+9	Etc/GMT+9	false	GMT-09:00	GMT-09:00	GMT-09:00	GMT-09:00
+Etc/GMT-0	Etc/GMT-0	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Etc/GMT-1	Etc/GMT-1	false	GMT+01:00	GMT+01:00	GMT+01:00	GMT+01:00
+Etc/GMT-10	Etc/GMT-10	false	GMT+10:00	GMT+10:00	GMT+10:00	GMT+10:00
+Etc/GMT-11	Etc/GMT-11	false	GMT+11:00	GMT+11:00	GMT+11:00	GMT+11:00
+Etc/GMT-12	Etc/GMT-12	false	GMT+12:00	GMT+12:00	GMT+12:00	GMT+12:00
+Etc/GMT-13	Etc/GMT-13	false	GMT+13:00	GMT+13:00	GMT+13:00	GMT+13:00
+Etc/GMT-14	Etc/GMT-14	false	GMT+14:00	GMT+14:00	GMT+14:00	GMT+14:00
+Etc/GMT-2	Etc/GMT-2	false	GMT+02:00	GMT+02:00	GMT+02:00	GMT+02:00
+Etc/GMT-3	Etc/GMT-3	false	GMT+03:00	GMT+03:00	GMT+03:00	GMT+03:00
+Etc/GMT-4	Etc/GMT-4	false	GMT+04:00	GMT+04:00	GMT+04:00	GMT+04:00
+Etc/GMT-5	Etc/GMT-5	false	GMT+05:00	GMT+05:00	GMT+05:00	GMT+05:00
+Etc/GMT-6	Etc/GMT-6	false	GMT+06:00	GMT+06:00	GMT+06:00	GMT+06:00
+Etc/GMT-7	Etc/GMT-7	false	GMT+07:00	GMT+07:00	GMT+07:00	GMT+07:00
+Etc/GMT-8	Etc/GMT-8	false	GMT+08:00	GMT+08:00	GMT+08:00	GMT+08:00
+Etc/GMT-9	Etc/GMT-9	false	GMT+09:00	GMT+09:00	GMT+09:00	GMT+09:00
+Etc/GMT0	Etc/GMT0	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Etc/Greenwich	Etc/Greenwich	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Etc/UCT	Etc/UCT	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+Etc/UTC	Etc/UTC	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+Etc/Universal	Etc/Universal	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+Etc/Zulu	Etc/Zulu	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+Europe/Amsterdam	Europe/Amsterdam	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Andorra	Europe/Andorra	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Astrakhan	Europe/Astrakhan	false	Astrakhan Standard Time	Astrakhan Daylight Time	GMT+04:00	GMT+05:00
+Europe/Athens	Europe/Athens	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Belfast	Europe/Belfast	true	Greenwich Mean Time	British Summer Time	GMT	BST
+Europe/Belgrade	Europe/Belgrade	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Berlin	Europe/Berlin	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Bratislava	Europe/Bratislava	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Brussels	Europe/Brussels	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Bucharest	Europe/Bucharest	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Budapest	Europe/Budapest	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Busingen	Europe/Busingen	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Chisinau	Europe/Chisinau	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Copenhagen	Europe/Copenhagen	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Dublin	Europe/Dublin	true	Greenwich Mean Time	Irish Standard Time	GMT	IST
+Europe/Gibraltar	Europe/Gibraltar	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Guernsey	Europe/Guernsey	true	Greenwich Mean Time	British Summer Time	GMT	BST
+Europe/Helsinki	Europe/Helsinki	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Isle_of_Man	Europe/Isle_of_Man	true	Greenwich Mean Time	British Summer Time	GMT	BST
+Europe/Istanbul	Europe/Istanbul	false	Istanbul Standard Time	Istanbul Daylight Time	GMT+03:00	GMT+04:00
+Europe/Jersey	Europe/Jersey	true	Greenwich Mean Time	British Summer Time	GMT	BST
+Europe/Kaliningrad	Europe/Kaliningrad	false	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Kiev	Europe/Kiev	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Kirov	Europe/Kirov	false	Kirov Standard Time	Kirov Daylight Time	MSK	MSK
+Europe/Kyiv	Europe/Kyiv	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Lisbon	Europe/Lisbon	true	Western European Standard Time	Western European Summer Time	WET	WEST
+Europe/Ljubljana	Europe/Ljubljana	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/London	Europe/London	true	Greenwich Mean Time	British Summer Time	GMT	BST
+Europe/Luxembourg	Europe/Luxembourg	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Madrid	Europe/Madrid	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Malta	Europe/Malta	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Mariehamn	Europe/Mariehamn	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Minsk	Europe/Minsk	false	Moscow Standard Time	Moscow Summer Time	MSK	MSK
+Europe/Monaco	Europe/Monaco	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Moscow	Europe/Moscow	false	Moscow Standard Time	Moscow Summer Time	MSK	MSK
+Europe/Nicosia	Europe/Nicosia	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Oslo	Europe/Oslo	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Paris	Europe/Paris	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Podgorica	Europe/Podgorica	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Prague	Europe/Prague	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Riga	Europe/Riga	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Rome	Europe/Rome	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Samara	Europe/Samara	false	Samara Standard Time	Samara Summer Time	GMT+04:00	GMT+05:00
+Europe/San_Marino	Europe/San_Marino	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Sarajevo	Europe/Sarajevo	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Saratov	Europe/Saratov	false	Saratov Standard Time	Saratov Daylight Time	GMT+04:00	GMT+05:00
+Europe/Simferopol	Europe/Simferopol	false	Moscow Standard Time	Moscow Summer Time	MSK	MSK
+Europe/Skopje	Europe/Skopje	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Sofia	Europe/Sofia	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Stockholm	Europe/Stockholm	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Tallinn	Europe/Tallinn	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Tirane	Europe/Tirane	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Tiraspol	Europe/Tiraspol	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Ulyanovsk	Europe/Ulyanovsk	false	Ulyanovsk Standard Time	Ulyanovsk Daylight Time	GMT+04:00	GMT+05:00
+Europe/Uzhgorod	Europe/Uzhgorod	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Vaduz	Europe/Vaduz	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Vatican	Europe/Vatican	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Vienna	Europe/Vienna	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Vilnius	Europe/Vilnius	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Volgograd	Europe/Volgograd	false	Volgograd Standard Time	Volgograd Summer Time	MSK	MSK
+Europe/Warsaw	Europe/Warsaw	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Zagreb	Europe/Zagreb	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Europe/Zaporozhye	Europe/Zaporozhye	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+Europe/Zurich	Europe/Zurich	true	Central European Standard Time	Central European Summer Time	CET	CEST
+GB	GB	true	Greenwich Mean Time	British Summer Time	GMT	BST
+GB-Eire	GB-Eire	true	Greenwich Mean Time	British Summer Time	GMT	BST
+GMT	GMT	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+GMT0	GMT0	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Greenwich	Greenwich	false	Greenwich Mean Time	Greenwich Mean Time	GMT	GMT
+Hongkong	Hongkong	false	Hong Kong Standard Time	Hong Kong Summer Time	HKT	HKST
+Iceland	Iceland	false	Greenwich Mean Time	Reykjavik Daylight Time	GMT	GMT
+Indian/Antananarivo	Indian/Antananarivo	false	East Africa Time	Antananarivo Daylight Time	EAT	EAT
+Indian/Chagos	Indian/Chagos	false	Indian Ocean Time	Chagos Daylight Time	GMT+06:00	GMT+06:00
+Indian/Christmas	Indian/Christmas	false	Christmas Island Time	Christmas Island Daylight Time	GMT+07:00	GMT+07:00
+Indian/Cocos	Indian/Cocos	false	Cocos Islands Time	Cocos Islands Daylight Time	GMT+06:30	GMT+06:30
+Indian/Comoro	Indian/Comoro	false	East Africa Time	Comoro Daylight Time	EAT	EAT
+Indian/Kerguelen	Indian/Kerguelen	false	French Southern & Antarctic Time	Kerguelen Daylight Time	GMT+05:00	GMT+05:00
+Indian/Mahe	Indian/Mahe	false	Seychelles Time	Mahe Daylight Time	GMT+04:00	GMT+04:00
+Indian/Maldives	Indian/Maldives	false	French Southern & Antarctic Time	Maldives Daylight Time	GMT+05:00	GMT+05:00
+Indian/Mauritius	Indian/Mauritius	false	Mauritius Standard Time	Mauritius Summer Time	GMT+04:00	GMT+05:00
+Indian/Mayotte	Indian/Mayotte	false	East Africa Time	Mayotte Daylight Time	EAT	EAT
+Indian/Reunion	Indian/Reunion	false	Réunion Time	Réunion Daylight Time	GMT+04:00	GMT+04:00
+Iran	Iran	false	Iran Standard Time	Iran Daylight Time	GMT+03:30	GMT+04:30
+Israel	Israel	true	Israel Standard Time	Israel Daylight Time	IST	IDT
+Jamaica	Jamaica	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+Japan	Japan	false	Japan Standard Time	Japan Daylight Time	JST	JDT
+Kwajalein	Kwajalein	false	Marshall Islands Time	Kwajalein Daylight Time	GMT+12:00	GMT+12:00
+Libya	Libya	false	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+MET	MET	true	Central European Standard Time	Central European Summer Time	CET	CEST
+MST7MDT	MST7MDT	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+Mexico/BajaNorte	Mexico/BajaNorte	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+Mexico/BajaSur	Mexico/BajaSur	false	Mexican Pacific Standard Time	Mexican Pacific Daylight Time	MST	MDT
+Mexico/General	Mexico/General	false	Central Standard Time	Central Daylight Time	CST	CDT
+NZ	NZ	true	New Zealand Standard Time	New Zealand Daylight Time	NZST	NZDT
+NZ-CHAT	NZ-CHAT	true	Chatham Standard Time	Chatham Daylight Time	GMT+12:45	GMT+13:45
+Navajo	Navajo	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+PRC	PRC	false	China Standard Time	China Daylight Time	CST	CDT
+PST8PDT	PST8PDT	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+Pacific/Apia	Pacific/Apia	false	Samoa Standard Time	Samoa Daylight Time	GMT+13:00	GMT+14:00
+Pacific/Auckland	Pacific/Auckland	true	New Zealand Standard Time	New Zealand Daylight Time	NZST	NZDT
+Pacific/Bougainville	Pacific/Bougainville	false	Bougainville Standard Time	Bougainville Daylight Time	GMT+11:00	GMT+11:00
+Pacific/Chatham	Pacific/Chatham	true	Chatham Standard Time	Chatham Daylight Time	GMT+12:45	GMT+13:45
+Pacific/Chuuk	Pacific/Chuuk	false	Papua New Guinea Time	Chuuk Daylight Time	GMT+10:00	GMT+10:00
+Pacific/Easter	Pacific/Easter	true	Easter Island Standard Time	Easter Island Summer Time	GMT-06:00	GMT-05:00
+Pacific/Efate	Pacific/Efate	false	Vanuatu Standard Time	Vanuatu Summer Time	GMT+11:00	GMT+12:00
+Pacific/Enderbury	Pacific/Enderbury	false	Phoenix Islands Time	Enderbury Daylight Time	GMT+13:00	GMT+13:00
+Pacific/Fakaofo	Pacific/Fakaofo	false	Tokelau Time	Fakaofo Daylight Time	GMT+13:00	GMT+13:00
+Pacific/Fiji	Pacific/Fiji	false	Fiji Standard Time	Fiji Summer Time	GMT+12:00	GMT+13:00
+Pacific/Funafuti	Pacific/Funafuti	false	Tuvalu Time	Funafuti Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Galapagos	Pacific/Galapagos	false	Galapagos Time	Galapagos Daylight Time	GMT-06:00	GMT-05:00
+Pacific/Gambier	Pacific/Gambier	false	Gambier Time	Gambier Daylight Time	GMT-09:00	GMT-09:00
+Pacific/Guadalcanal	Pacific/Guadalcanal	false	Solomon Islands Time	Guadalcanal Daylight Time	GMT+11:00	GMT+11:00
+Pacific/Guam	Pacific/Guam	false	Chamorro Standard Time	Guam Daylight Time	ChST	ChST
+Pacific/Honolulu	Pacific/Honolulu	false	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HST	HDT
+Pacific/Johnston	Pacific/Johnston	false	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HST	HDT
+Pacific/Kanton	Pacific/Kanton	false	Phoenix Islands Time	Enderbury Daylight Time	GMT+13:00	GMT+13:00
+Pacific/Kiritimati	Pacific/Kiritimati	false	Line Islands Time	Kiritimati Daylight Time	GMT+14:00	GMT+14:00
+Pacific/Kosrae	Pacific/Kosrae	false	Kosrae Time	Kosrae Daylight Time	GMT+11:00	GMT+11:00
+Pacific/Kwajalein	Pacific/Kwajalein	false	Marshall Islands Time	Kwajalein Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Majuro	Pacific/Majuro	false	Marshall Islands Time	Majuro Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Marquesas	Pacific/Marquesas	false	Marquesas Time	Marquesas Daylight Time	GMT-09:30	GMT-09:30
+Pacific/Midway	Pacific/Midway	false	American Samoa Standard Time	American Samoa Daylight Time	SST	SST
+Pacific/Nauru	Pacific/Nauru	false	Nauru Time	Nauru Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Niue	Pacific/Niue	false	Niue Time	Niue Daylight Time	GMT-11:00	GMT-11:00
+Pacific/Norfolk	Pacific/Norfolk	true	Norfolk Island Standard Time	Norfolk Island Daylight Time	GMT+11:00	GMT+12:00
+Pacific/Noumea	Pacific/Noumea	false	New Caledonia Standard Time	New Caledonia Summer Time	GMT+11:00	GMT+12:00
+Pacific/Pago_Pago	Pacific/Pago_Pago	false	American Samoa Standard Time	American Samoa Daylight Time	SST	SST
+Pacific/Palau	Pacific/Palau	false	Palau Time	Palau Daylight Time	GMT+09:00	GMT+09:00
+Pacific/Pitcairn	Pacific/Pitcairn	false	Pitcairn Time	Pitcairn Daylight Time	GMT-08:00	GMT-08:00
+Pacific/Pohnpei	Pacific/Pohnpei	false	Solomon Islands Time	Pohnpei Daylight Time	GMT+11:00	GMT+11:00
+Pacific/Ponape	Pacific/Ponape	false	Solomon Islands Time	Pohnpei Daylight Time	GMT+11:00	GMT+11:00
+Pacific/Port_Moresby	Pacific/Port_Moresby	false	Dumont d’Urville Time	Port Moresby Daylight Time	GMT+10:00	GMT+10:00
+Pacific/Rarotonga	Pacific/Rarotonga	false	Cook Islands Standard Time	Cook Islands Summer Time	GMT-10:00	GMT-09:30
+Pacific/Saipan	Pacific/Saipan	false	Chamorro Standard Time	Saipan Daylight Time	ChST	ChST
+Pacific/Samoa	Pacific/Samoa	false	American Samoa Standard Time	American Samoa Daylight Time	SST	SST
+Pacific/Tahiti	Pacific/Tahiti	false	Tahiti Time	Tahiti Daylight Time	GMT-10:00	GMT-10:00
+Pacific/Tarawa	Pacific/Tarawa	false	Marshall Islands Time	Tarawa Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Tongatapu	Pacific/Tongatapu	false	Tonga Standard Time	Tonga Summer Time	GMT+13:00	GMT+14:00
+Pacific/Truk	Pacific/Truk	false	Chuuk Time	Chuuk Daylight Time	GMT+10:00	GMT+10:00
+Pacific/Wake	Pacific/Wake	false	Wake Island Time	Wake Island Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Wallis	Pacific/Wallis	false	Gilbert Islands Time	Wallis Daylight Time	GMT+12:00	GMT+12:00
+Pacific/Yap	Pacific/Yap	false	Papua New Guinea Time	Chuuk Daylight Time	GMT+10:00	GMT+10:00
+Poland	Poland	true	Central European Standard Time	Central European Summer Time	CET	CEST
+Portugal	Portugal	true	Western European Standard Time	Western European Summer Time	WET	WEST
+ROK	ROK	false	Korean Standard Time	Korean Daylight Time	KST	KST
+Singapore	Singapore	false	Singapore Standard Time	Singapore Daylight Time	GMT+08:00	GMT+08:20
+SystemV/AST4	SystemV/AST4	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+SystemV/AST4ADT	SystemV/AST4ADT	true	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+SystemV/CST6	SystemV/CST6	false	Central Standard Time	Central Daylight Time	CST	CDT
+SystemV/CST6CDT	SystemV/CST6CDT	true	Central Standard Time	Central Daylight Time	CST	CDT
+SystemV/EST5	SystemV/EST5	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+SystemV/EST5EDT	SystemV/EST5EDT	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+SystemV/HST10	SystemV/HST10	false	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HST	HDT
+SystemV/MST7	SystemV/MST7	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+SystemV/MST7MDT	SystemV/MST7MDT	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+SystemV/PST8	SystemV/PST8	false	Pitcairn Time	Pitcairn Time	GMT-08:00	GMT-08:00
+SystemV/PST8PDT	SystemV/PST8PDT	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+SystemV/YST9	SystemV/YST9	false	Gambier Time	Gambier Time	GMT-09:00	GMT-09:00
+SystemV/YST9YDT	SystemV/YST9YDT	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+Turkey	Turkey	false	Istanbul Standard Time	Istanbul Daylight Time	GMT+03:00	GMT+04:00
+UCT	UCT	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+US/Alaska	US/Alaska	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+US/Aleutian	US/Aleutian	true	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HAST	HADT
+US/Arizona	US/Arizona	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+US/Central	US/Central	true	Central Standard Time	Central Daylight Time	CST	CDT
+US/East-Indiana	US/East-Indiana	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+US/Eastern	US/Eastern	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+US/Hawaii	US/Hawaii	false	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HST	HDT
+US/Indiana-Starke	US/Indiana-Starke	true	Central Standard Time	Central Daylight Time	CST	CDT
+US/Michigan	US/Michigan	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+US/Mountain	US/Mountain	true	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+US/Pacific	US/Pacific	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+US/Samoa	US/Samoa	false	American Samoa Standard Time	American Samoa Daylight Time	SST	SST
+UTC	UTC	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+Universal	Universal	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+W-SU	W-SU	false	Moscow Standard Time	Moscow Summer Time	MSK	MSK
+WET	WET	true	Western European Standard Time	Western European Summer Time	WET	WEST
+Zulu	Zulu	false	Coordinated Universal Time	Coordinated Universal Time	UTC	UTC
+ECT	ECT	true	Central European Standard Time	Central European Summer Time	CET	CEST
+PRT	PRT	false	Atlantic Standard Time	Atlantic Daylight Time	AST	ADT
+CTT	CTT	false	China Standard Time	China Daylight Time	CST	CDT
+SST	SST	false	Solomon Islands Time	GMT+11:00	GMT+11:00	GMT+11:00
+MST	MST	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+AST	AST	true	Alaska Standard Time	Alaska Daylight Time	AKST	AKDT
+NST	NST	true	New Zealand Standard Time	New Zealand Daylight Time	NZST	NZDT
+HST	HST	false	Hawaii-Aleutian Standard Time	Hawaii-Aleutian Daylight Time	HST	HDT
+ACT	ACT	false	Australian Central Standard Time	Australian Central Daylight Time	ACST	ACDT
+BST	BST	false	Bangladesh Standard Time	Bangladesh Summer Time	GMT+06:00	GMT+07:00
+AET	AET	true	Australian Eastern Standard Time	Australian Eastern Daylight Time	AEST	AEDT
+IST	IST	false	India Standard Time	GMT+06:30	IST	IST
+CST	CST	true	Central Standard Time	Central Daylight Time	CST	CDT
+NET	NET	false	Armenia Standard Time	Armenia Summer Time	GMT+04:00	GMT+05:00
+AGT	AGT	false	Argentina Standard Time	Argentina Summer Time	GMT-03:00	GMT-02:00
+CAT	CAT	false	Central Africa Time	GMT+02:00	CAT	CAT
+MIT	MIT	false	Samoa Standard Time	Samoa Daylight Time	GMT+13:00	GMT+14:00
+BET	BET	false	Brasilia Standard Time	Brasilia Summer Time	GMT-03:00	GMT-02:00
+PST	PST	true	Pacific Standard Time	Pacific Daylight Time	PST	PDT
+ART	ART	true	Eastern European Standard Time	Eastern European Summer Time	EET	EEST
+JST	JST	false	Japan Standard Time	Japan Daylight Time	JST	JDT
+VST	VST	false	Indochina Time	GMT+07:00	GMT+07:00	GMT+07:00
+IET	IET	true	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+CNT	CNT	true	Newfoundland Standard Time	Newfoundland Daylight Time	NST	NDT
+PLT	PLT	false	Pakistan Standard Time	Pakistan Summer Time	PKT	PKST
+PNT	PNT	false	Mountain Standard Time	Mountain Daylight Time	MST	MDT
+EST	EST	false	Eastern Standard Time	Eastern Daylight Time	EST	EDT
+EAT	EAT	false	East Africa Time	GMT+03:00	EAT	EAT

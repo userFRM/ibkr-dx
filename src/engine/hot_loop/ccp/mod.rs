@@ -539,11 +539,9 @@ fn parse_algorithms(raw: &str) -> std::collections::HashMap<String, Vec<String>>
 }
 
 fn handle_algorithms(parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
-    let Some(raw) = parsed.get(&6597) else { return };
-    let offered = parse_algorithms(raw);
-    if offered.is_empty() {
-        return;
-    }
+    // A list naming nothing is an answer too: an order naming an algorithm is
+    // then refused, as a gateway refuses it.
+    let offered = parsed.get(&6597).map(|raw| parse_algorithms(raw)).unwrap_or_default();
     log::info!("Algorithms offered on {} provider and security type pairs", offered.len());
     shared.reference.set_algorithms(offered);
 }
@@ -1571,6 +1569,14 @@ impl CcpState {
                         // nowhere at all.
                         "42" => handle_venue_error(&parsed, shared),
                         "81" => handle_algorithms(&parsed, shared),
+                        "54" => {
+                            if let Some(name) = parsed.get(&6364) {
+                                shared.reference.note_algorithm_document(
+                                    name,
+                                    parsed.get(&6118).map_or("", String::as_str),
+                                );
+                            }
+                        }
                         // The venue moving a working order: it names the order
                         // and states the terms it has changed — where it is
                         // now working, what its limit now is, or both. Read by

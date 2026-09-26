@@ -240,9 +240,8 @@ status](venue-behaviour.md#a-message-beside-an-orders-status)). For some orders
 that description is not written here, and the message is not sent: a fund, a
 combination whose definition this session has not been answered, a
 structured product of a kind the venue names, and an order for an amount of
-money that carries an algorithm, which a gateway describes by
-the amount where the algorithm's definition takes one. A gateway sends each of
-them. A hedge the venue holds until its parent fills
+money that carries an algorithm whose definition this session does not hold
+yet. A gateway sends each of them. A hedge the venue holds until its parent fills
 is described without its size by a gateway; here its size is written. A
 gateway follows the strike of a derivative whose underlying trades in another
 currency with that currency, once it has looked the underlying up; here the

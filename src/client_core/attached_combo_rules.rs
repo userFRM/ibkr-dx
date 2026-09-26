@@ -143,6 +143,7 @@ mod tests {
             ],
             size_increments: vec![PriceIncrement { low_edge: 0.0, increment: size }],
             price_places: None,
+            size_places: None,
         }
     }
 

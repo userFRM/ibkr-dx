@@ -334,6 +334,14 @@ pub struct ReferenceState {
     island_granted: AtomicBool,
     /// Which algorithms the venue offers, by provider and security type.
     algorithms: Mutex<HashMap<String, Vec<String>>>,
+    /// Whether the venue has answered for the list of algorithm documents,
+    /// which it may answer with none.
+    algorithms_stated: AtomicBool,
+    /// The algorithm documents the venue has answered with, by name, as read;
+    /// `None` for one that does not read.
+    algorithm_documents: Mutex<HashMap<String, Option<crate::control::algorithms::Document>>>,
+    /// The documents asked for and not yet answered.
+    algorithm_documents_asked: Mutex<std::collections::HashSet<String>>,
     /// The order presets the account holds, by the key the venue names each
     /// set under, with its attributes and last-change time.
     order_presets: Mutex<PresetState>,
@@ -452,6 +460,9 @@ impl ReferenceState {
             executions_held_from: Mutex::new(None),
             island_granted: AtomicBool::new(false),
             algorithms: Mutex::new(HashMap::new()),
+            algorithms_stated: AtomicBool::new(false),
+            algorithm_documents: Mutex::new(HashMap::new()),
+            algorithm_documents_asked: Mutex::new(std::collections::HashSet::new()),
             order_presets: Mutex::new(PresetState { sequence: 2, ..Default::default() }),
             under_con_ids: Mutex::new(std::collections::HashMap::new()),
             dividend_schedules: Mutex::new(std::collections::HashMap::new()),
@@ -1942,6 +1953,60 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_algorithms(&self, algorithms: HashMap<String, Vec<String>>) {
         *self.algorithms.lock().unwrap() = algorithms;
+        self.algorithms_stated.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the venue has answered for the list of algorithm documents.
+    pub(crate) fn algorithms_stated(&self) -> bool {
+        self.algorithms_stated.load(Ordering::Relaxed)
+    }
+
+    /// Hold an algorithm document the venue answered with.
+    #[doc(hidden)] pub fn note_algorithm_document(&self, name: &str, xml: &str) {
+        let document = crate::control::algorithms::parse(xml);
+        if document.is_none() {
+            log::warn!("algorithm document {name} does not read");
+        }
+        self.algorithm_documents.lock().unwrap().insert(name.to_string(), document);
+        self.algorithm_documents_asked.lock().unwrap().remove(name);
+    }
+
+    /// The algorithms a contract's orders can go through, put together from
+    /// the documents held: `None` where the list or a document it names for
+    /// the contract is not held yet; `Some(None)` where they make no set, as
+    /// where the contract names no provider group.
+    pub(crate) fn algorithm_set(
+        &self,
+        definition: &crate::control::contracts::ContractDefinition,
+    ) -> Option<Option<crate::control::algorithms::Algorithms>> {
+        if definition.algo_group.is_empty() {
+            return Some(None);
+        }
+        if !self.algorithms_stated() {
+            return None;
+        }
+        let names = self.algorithm_names(definition);
+        self.algorithm_documents(&names).map(|documents| crate::control::algorithms::assemble(&documents))
+    }
+
+    /// The documents the list names for a contract's provider group and
+    /// security type.
+    pub(crate) fn algorithm_names(&self, definition: &crate::control::contracts::ContractDefinition) -> Vec<String> {
+        let key = format!("{}/{}", definition.algo_group, definition.sec_type.to_api_str());
+        self.algorithms.lock().unwrap().get(&key).cloned().unwrap_or_default()
+    }
+
+    /// The documents under these names, where every one is held.
+    pub(crate) fn algorithm_documents(&self, names: &[String]) -> Option<Vec<Option<crate::control::algorithms::Document>>> {
+        let held = self.algorithm_documents.lock().unwrap();
+        names.iter().map(|name| held.get(name).cloned()).collect()
+    }
+
+    /// Note a document asked for: `true` where nobody has asked for it yet,
+    /// and it is to be requested.
+    pub(crate) fn ask_algorithm_document(&self, name: &str) -> bool {
+        !self.algorithm_documents.lock().unwrap().contains_key(name)
+            && self.algorithm_documents_asked.lock().unwrap().insert(name.to_string())
     }
 
     /// Add feature tokens the venue states after logon. What logon already

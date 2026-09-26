@@ -106,12 +106,15 @@ struct Pending {
     watch: Option<i64>,
     loading: Option<super::attachments::Loading>,
     wire_id: Option<u64>,
+    /// Whether this placement has asked the venue for its list of algorithm
+    /// definitions, which a gateway asks once for each order that waits on it.
+    asked_algorithms: bool,
     deadline: std::time::Instant,
 }
 
 impl Pending {
     fn new(cmd: ControlCommand) -> Self {
-        Self { cmd, lookup: None, watch: None, loading: None, wire_id: None,
+        Self { cmd, lookup: None, watch: None, loading: None, wire_id: None, asked_algorithms: false,
             deadline: std::time::Instant::now() + super::ccp::CcpState::NAMING_TIMEOUT }
     }
 }
@@ -119,6 +122,12 @@ impl Pending {
 /// The series a gateway reads an option's standing in the money off: its
 /// intrinsic value, whether it is in the money, and its time value.
 const IN_THE_MONEY: u32 = 493;
+
+/// What a gateway warns of, once for each connection, where an order's
+/// algorithm is handed a moment without a zone.
+const ZONELESS_WARNING: &str = "Warning: You submitted request with date-time attributes without explicit time zone. \
+     Please switch to use yyyymmdd-hh:mm:ss in UTC or use instrument time zone, like US/Eastern. Implied time zone \
+     functionality will be removed in the next API release";
 
 /// The first number the engine opens its own watches under, apart from every
 /// number a caller may state.
@@ -185,6 +194,12 @@ pub(crate) struct Intake {
     /// asked again for every order, a program placing a hundred on one
     /// contract sends a hundred lookups for a name that has not changed.
     named: HashMap<String, api::Contract>,
+    /// The numbers of orders a gateway leaves taken without placing them: an
+    /// order through an algorithm on a contract it puts none on.
+    stuck: HashSet<i64>,
+    /// Whether this session has warned of a moment stated without a zone,
+    /// which a gateway warns of once for each connection.
+    warned_zoneless: bool,
 }
 
 impl Intake {
@@ -364,7 +379,7 @@ impl HotLoop {
 
     fn take_one(&mut self, pending: &mut Pending) -> Step {
         match &mut pending.cmd {
-            ControlCommand::Place(p) => self.take_placement(p, &mut pending.lookup, &mut pending.loading, &mut pending.wire_id, pending.deadline),
+            ControlCommand::Place(p) => self.take_placement(p, &mut pending.lookup, &mut pending.loading, &mut pending.wire_id, &mut pending.asked_algorithms, pending.deadline),
             ControlCommand::CancelOrder { order_id, stated } => {
                 let (order_id, stated) = (*order_id, stated.clone());
                 self.take_cancel(order_id, &stated)
@@ -403,6 +418,46 @@ impl HotLoop {
             i64::from(why.code),
             why.message,
         );
+    }
+
+    /// The venue's definitions of the algorithms a contract's orders can go
+    /// through, as a gateway gathers them: the list of documents, asked for
+    /// once by each order waiting on it; then each document the list names
+    /// for the contract's provider group and security type, asked for by the
+    /// first order that needs it; then put together. `None` while any is
+    /// awaited; `Some(None)` where they do not make a set, as where the
+    /// contract names no group.
+    fn algorithm_definitions(
+        &mut self,
+        definition: &ContractDefinition,
+        asked: &mut bool,
+    ) -> Option<Option<crate::control::algorithms::Algorithms>> {
+        use crate::control::algorithms;
+        if definition.algo_group.is_empty() {
+            return Some(None);
+        }
+        if !self.shared.reference.algorithms_stated() {
+            if !*asked {
+                *asked = true;
+                if let Err(error) = self.ccp.send_user_message(algorithms::list_request(), &mut self.ccp_conn, &mut self.hb) {
+                    log::warn!("the algorithm list was not asked for: {error}");
+                }
+            }
+            return None;
+        }
+        if let Some(held) = self.shared.reference.algorithm_set(definition) {
+            return Some(held);
+        }
+        let names = self.shared.reference.algorithm_names(definition);
+        for name in &names {
+            if self.shared.reference.ask_algorithm_document(name)
+                && let Err(error) =
+                    self.ccp.send_user_message(algorithms::document_request(name), &mut self.ccp_conn, &mut self.hb)
+            {
+                log::warn!("algorithm document {name} was not asked for: {error}");
+            }
+        }
+        None
     }
 
     /// The size a gateway works out for an order stated by an amount, from
@@ -538,7 +593,7 @@ impl HotLoop {
         Ok(true)
     }
 
-    fn take_placement(&mut self, p: &mut Placement, lookup: &mut Option<u32>, loading: &mut Option<super::attachments::Loading>, wire_id: &mut Option<u64>, deadline: std::time::Instant) -> Step {
+    fn take_placement(&mut self, p: &mut Placement, lookup: &mut Option<u32>, loading: &mut Option<super::attachments::Loading>, wire_id: &mut Option<u64>, asked_algorithms: &mut bool, deadline: std::time::Instant) -> Step {
         use crate::client_core::{attached_checks, attached_orders};
         let api_id = p.order_id as i64;
         p.order.order_id = api_id;
@@ -547,6 +602,10 @@ impl HotLoop {
         self.intake.attached.learn(&self.shared, order_id, p.order.client_id);
         let existing = self.intake.keeps_a_placement(order_id) || self.working(order_id);
         let op = if existing { OrderOp::Modify } else { OrderOp::Place };
+        if self.intake.stuck.contains(&api_id) {
+            self.refuse_order(api_id, op, Refusal::stated(2102, "Unable to modify this order as its still being processed."));
+            return Step::Done;
+        }
         let order_id = if let Some(wire) = *wire_id { wire } else {
         let reusable = std::cell::Cell::new(false);
         // Counted from the highest number used this session, saved before it
@@ -600,6 +659,71 @@ impl HotLoop {
                 }
             }
         }
+        // An order through an algorithm is held to the venue's own definition
+        // of it, as a gateway holds it before anything else about the order:
+        // the definitions are asked for the first time an order needs them.
+        let mut algorithms = None;
+        if !existing && p.contract.con_id != 0 && !p.order.algo_strategy.is_empty() {
+            // The contract's definition, and for an order on an overnight venue
+            // the definition on the smart route, which names its algorithms.
+            let overnight = matches!(p.contract.exchange.as_str(), "OVERNIGHT" | "IBEOS");
+            let smart = api::Contract { exchange: "SMART".into(), ..p.contract.clone() };
+            for needed in [Some(&p.contract), overnight.then_some(&smart)].into_iter().flatten() {
+                if attached_orders::contract_definition(&self.shared, needed).is_none() {
+                    match self.name_order_contract(&mut needed.clone(), lookup) {
+                        Ok(true) => {}
+                        Ok(false) => return Step::Waits,
+                        Err(why) => {
+                            self.refuse_order(api_id, op, why);
+                            return Step::Done;
+                        }
+                    }
+                }
+            }
+            let definition = attached_orders::contract_definition(&self.shared, &p.contract).unwrap_or_default();
+            // Named in the refusal by its symbol, without the slashes a gateway drops.
+            if let Some(why) = cash_quantity::algorithm_gate(&definition, &definition.symbol.replace('/', "")) {
+                self.intake.stuck.insert(api_id);
+                self.refuse_order(api_id, op, why);
+                return Step::Done;
+            }
+            if !p.order.algo_strategy.eq_ignore_ascii_case("AD") {
+                let named = if overnight {
+                    attached_orders::contract_definition(&self.shared, &smart).unwrap_or_default()
+                } else {
+                    definition.clone()
+                };
+                let held = match self.algorithm_definitions(&named, asked_algorithms) {
+                    Some(held) => held,
+                    None if std::time::Instant::now() < deadline => return Step::Waits,
+                    None => {
+                        self.refuse_order(api_id, op, Refusal::no_answer("Algorithm definitions timed out"));
+                        return Step::Done;
+                    }
+                };
+                let mut zoneless = false;
+                let refused = cash_quantity::algorithm_refusal(
+                    held.as_ref(), &p.contract, &definition, &p.order, &mut || zoneless = true,
+                );
+                if zoneless && !self.intake.warned_zoneless {
+                    self.intake.warned_zoneless = true;
+                    self.shared.orders.push_order_notice(order_id, op, 2174, ZONELESS_WARNING.to_string());
+                }
+                if let Err(why) = refused {
+                    self.refuse_order(api_id, op, why);
+                    return Step::Done;
+                }
+                algorithms = held;
+            }
+        }
+        if !existing
+            && let Some(why) = cash_quantity::fractional_refusal(
+                &self.shared, &p.contract.sec_type, false, &[p.order.total_quantity],
+            )
+        {
+            self.refuse_order(api_id, op, why);
+            return Step::Done;
+        }
         // Conditions stated to include the overnight session are refused, when
         // the order is placed, unless the logon enables them and the contract
         // trades on an overnight venue. A gateway asks this of the contract's
@@ -629,7 +753,10 @@ impl HotLoop {
         // An order stated by the cash it spends, or one for a fund, is checked
         // as a gateway checks it before sending it. The contract's definition
         // decides, so one not yet held is asked for.
-        if !existing && p.contract.con_id != 0 && (cash_quantity::stated_amount(&p.order).is_some() || p.contract.sec_type == "FUND") {
+        if !existing
+            && p.contract.con_id != 0
+            && (cash_quantity::stated_amount(&p.order).is_some() || p.contract.sec_type == "FUND")
+        {
             if attached_orders::contract_definition(&self.shared, &p.contract).is_none() {
                 match self.name_order_contract(&mut p.contract.clone(), lookup) {
                     Ok(true) => {}
@@ -641,7 +768,7 @@ impl HotLoop {
                 }
             }
             let refused = attached_orders::contract_definition(&self.shared, &p.contract)
-                .map(|definition| cash_quantity::refusals(&self.shared, &p.order, &definition))
+                .map(|definition| cash_quantity::refusals(&self.shared, &p.order, &definition, algorithms.as_ref()))
                 .unwrap_or_default();
             if !refused.is_empty() {
                 for why in refused {
@@ -799,9 +926,15 @@ impl HotLoop {
                 .get(&order_id)
                 .map(|placed| placed.order.clone())
                 .or_else(|| self.shared.orders.get_order_info(order_id).map(|info| info.order));
+            let working_size = resting.as_ref().map_or(0.0, |working| working.total_quantity);
             if let Some(refusal) = cash_quantity::modify_refusal(
                 &self.shared, p.contract.sec_type == "FUND", resting.as_ref(), &p.order,
             )
+            .or_else(|| {
+                cash_quantity::fractional_refusal(
+                    &self.shared, &p.contract.sec_type, true, &[working_size, p.order.total_quantity],
+                )
+            })
             .or_else(|| ClientCore::modify_refusal_of(resting, &p.order, Some(&self.shared)))
             {
                 self.refuse_order(api_id, OrderOp::Modify, refusal);
@@ -1628,6 +1761,11 @@ mod tests {
 
     use super::HotLoop;
 
+    /// The algorithm provider's document and its share algorithms, as the
+    /// venue answered them on a paper session.
+    const ALGORITHM_PROVIDER: &str = include_str!("../../control/fixtures/algorithms_ibalgo_ae.xml");
+    const SHARE_ALGORITHMS: &str = include_str!("../../control/fixtures/algorithms_ibalgo_al_stk.xml");
+
     /// Conditions that count the overnight session are placed only where the
     /// logon enables them and the contract trades on an overnight venue;
     /// anywhere else a gateway refuses them under 10371 and sends nothing. A
@@ -1747,15 +1885,27 @@ mod tests {
             order_type: &'static str,
             limit: f64,
             algo: &'static str,
+            /// The algorithm's parameters the order states.
+            params: &'static [(&'static str, &'static str)],
             total: f64,
             cash: f64,
             held: bool,
             /// The finest size the contract's rule deals in.
             finest: Option<f64>,
+            /// The most places the rule shows a size to.
+            size_places: Option<i32>,
             /// The live bid, ask and last trade, each with a size.
             market: Option<(f64, f64, f64)>,
             /// The fund's least amount, where it states one.
             tick: Option<&'static str>,
+            /// The margin percentage the account's preset states, where one
+            /// is seeded.
+            percent: Option<&'static str>,
+            /// A model the order is allocated to.
+            model: &'static str,
+            /// The logon's list of the order types it takes amounts on, where
+            /// a row states its own.
+            order_types: Option<&'static str>,
             refused: &'static [i64],
             text: &'static str,
             size: Option<&'static str>,
@@ -1771,12 +1921,17 @@ mod tests {
             order_type: "LMT",
             limit: 1.0,
             algo: "Adaptive",
+            params: &[],
             total: 0.0,
             cash: 50.0,
             held: true,
             finest: None,
+            size_places: None,
             market: None,
             tick: None,
+            percent: None,
+            model: "",
+            order_types: None,
             refused: &[],
             text: "",
             size: None,
@@ -1814,6 +1969,11 @@ mod tests {
         for row in [
             share.clone(),
             Row { what: "a share without an algorithm", algo: "", refused: &[10244], ..share.clone() },
+            Row {
+                what: "a share through an algorithm defined without an amount",
+                algo: "AccuDistr", params: &[("componentSize", "100"), ("timeBetweenOrders", "60")], refused: &[10244],
+                ..share.clone()
+            },
             Row { what: "a share on a type the logon takes no amounts on", order_type: "MIT", refused: &[10244], ..share.clone() },
             Row { what: "a definition not held", held: false, ..share.clone() },
             Row {
@@ -1823,6 +1983,36 @@ mod tests {
                 finest: Some(0.0001),
                 size: Some("31.25"),
                 held_at: Some(31.25),
+                ..share.clone()
+            },
+            Row {
+                what: "a share at the preset's whole margin over its limit",
+                features: &[], percent: Some("100"), limit: 2.0, finest: Some(0.0001),
+                size: Some("50"), held_at: Some(50.0),
+                ..share.clone()
+            },
+            Row {
+                what: "a preset margin past a hundred takes the default",
+                features: &[], percent: Some("101"), limit: 2.0, finest: Some(0.0001),
+                size: Some("31.25"), held_at: Some(31.25),
+                ..share.clone()
+            },
+            Row {
+                what: "a size worked out at a tie rounds half to even",
+                features: &[], limit: 20.0, finest: Some(0.01),
+                size: Some("3.12"), held_at: Some(3.12),
+                ..share.clone()
+            },
+            Row {
+                what: "a tie at an odd place rounds half to even up",
+                features: &[], cash: 19.76, limit: 20.0, finest: Some(0.01),
+                size: Some("1.24"), held_at: Some(1.24),
+                ..share.clone()
+            },
+            Row {
+                what: "a share allocated to a model on a logon taking no allocated amounts",
+                model: "MDL", order_types: Some("DAY,GTC,LMT,MKT,STP,STPLMT"),
+                refused: &[10244],
                 ..share.clone()
             },
             Row {
@@ -1845,7 +2035,7 @@ mod tests {
                 text: "The Cash Quantity size of 1000.505 does not conform to minimum variation of 0.01 for this contract",
                 ..pair.clone()
             },
-            Row { what: "a future, algorithm or not", sec_type: SecurityType::Future, refused: &[10244], ..share.clone() },
+            Row { what: "a future", sec_type: SecurityType::Future, algo: "", refused: &[10244], ..share.clone() },
             Row { what: "a pair in a currency not listed", currency: "XYZ", refused: &[10318], ..pair.clone() },
             Row { what: "a pair in a currency with a fixed rate", currency: "GBX", ..pair.clone() },
             crypto.clone(),
@@ -1898,17 +2088,46 @@ mod tests {
             Row { what: "a fund sold without a size", action: "SELL", cash: 0.0, refused: &[10204], ..fund.clone() },
             Row { what: "a fund sold by a size", action: "SELL", cash: 0.0, total: 3.0, size: Some("3"), ..fund.clone() },
             Row { what: "a fund sold by a size past three places", action: "SELL", cash: 0.0, total: 3.0001, refused: &[10207], ..fund.clone() },
+            Row {
+                what: "a fund dealt in parts sold to the places its rule shows",
+                action: "SELL", cash: 0.0, total: 3.0001, finest: Some(0.0001), size_places: Some(4), size: Some("3.0001"),
+                ..fund.clone()
+            },
+            Row {
+                what: "a fund dealt in parts sold past the places its rule shows",
+                action: "SELL", cash: 0.0, total: 3.00001, finest: Some(0.00001), size_places: Some(4), refused: &[10207],
+                ..fund.clone()
+            },
+            Row {
+                what: "a fund dealt in parts whose rule shows no places",
+                action: "SELL", cash: 0.0, total: 3.00001, finest: Some(0.00001), size: Some("3.00001"),
+                ..fund.clone()
+            },
         ] {
             let shared = Arc::new(SharedState::new());
             shared.orders.set_replay_done();
             shared.reference.set_enabled_features(row.features.iter().map(|f| f.to_string()).collect());
             shared.reference.set_money_orders(crate::bridge::MoneyOrderTerms {
-                order_types: "ALLOC,DAY,GTC,LMT,MKT,STP,STPLMT".into(),
+                order_types: row.order_types.unwrap_or("ALLOC,DAY,GTC,LMT,MKT,STP,STPLMT").into(),
                 product_defaults: "CASH,USD,25000,1000000,0.01".into(),
                 fixed_rates: "GBX:0.0132,USD:1".into(),
                 ..Default::default()
             });
             shared.reference.set_order_presets(Vec::new());
+            if let Some(percent) = row.percent {
+                shared.reference.set_order_permissions([("STK".to_string(), Vec::new())].into());
+                shared.reference.set_order_presets(vec![("s=STK".into(), "a=1".into(), "1".into())]);
+                let (request_key, _) = shared.reference.expect_order_preset_values("s=STK");
+                shared.reference.set_order_preset_values(crate::control::order_presets::PresetValues {
+                    request_key, key: "s=STK".into(), attributes: "a=1".into(), error: None,
+                    fields: vec![(4014, percent.to_string())],
+                });
+            }
+            shared.reference.set_algorithms(
+                [("IBALGO/STK".to_string(), vec!["IBALGO-AE".to_string(), "IBALGO-AL-STK".to_string()])].into(),
+            );
+            shared.reference.note_algorithm_document("IBALGO-AE", ALGORITHM_PROVIDER);
+            shared.reference.note_algorithm_document("IBALGO-AL-STK", SHARE_ALGORITHMS);
             if let Some(finest) = row.finest {
                 shared.reference.push_market_rules(vec![crate::control::contracts::MarketRule {
                     rule_id: 26,
@@ -1917,6 +2136,7 @@ mod tests {
                     price_increments: Vec::new(),
                     size_increments: vec![crate::control::contracts::PriceIncrement { low_edge: 0.0, increment: finest }],
                     price_places: None,
+                    size_places: row.size_places,
                 }]);
             }
             let definition = ContractDefinition {
@@ -1927,6 +2147,7 @@ mod tests {
                 order_types: vec!["LMT".into(), "CASHQTY".into()],
                 order_type_rules: vec![("LMT".into(), 1), ("CASHQTY".into(), 1)],
                 market_rule_id: row.finest.map(|_| 26),
+                algo_group: "IBALGO".into(),
                 unnamed_fields: row.tick.map(|tick| (8482, tick.to_string())).into_iter().collect(),
                 ..Default::default()
             };
@@ -1969,6 +2190,10 @@ mod tests {
                 total_quantity: row.total,
                 cash_qty: row.cash,
                 algo_strategy: row.algo.into(),
+                algo_params: row.params.iter().map(|(tag, value)| crate::types::model::TagValue {
+                    tag: tag.to_string(), value: value.to_string(),
+                }).collect(),
+                model_code: row.model.into(),
                 tif: "DAY".into(),
                 ..Default::default()
             };
@@ -2016,13 +2241,17 @@ mod tests {
     /// the account may trade crypto or the logon takes amounts on market,
     /// limit, stop or stop-limit orders; otherwise it goes, stating no size
     /// where the venue works it out, and the order worked out from its amount
-    /// is held at the size the new amount comes to.
+    /// is held at the size the new amount comes to, rounded up to the most
+    /// places the contract's rule shows a size to; a rule showing none leaves
+    /// it at the size the replace states.
     #[test]
     fn a_cash_order_is_not_replaced_where_a_gateway_refuses_it() {
-        for (crypto, order_types, refused, held_at) in [
-            (true, "", Some(10241), 0.4950495),
-            (false, "LMT", Some(10241), 0.4950495),
-            (false, "LMT/4", None, 0.594059),
+        for (crypto, order_types, size_places, refused, held_at) in [
+            (true, "", Some(8), Some(10241), 0.4950495),
+            (false, "LMT", Some(8), Some(10241), 0.4950495),
+            (false, "LMT/4", Some(8), None, 0.594059),
+            (false, "LMT/4", Some(2), None, 0.6),
+            (false, "LMT/4", None, None, 0.0),
         ] {
             let shared = Arc::new(SharedState::new());
             shared.orders.set_replay_done();
@@ -2040,6 +2269,7 @@ mod tests {
                 price_increments: Vec::new(),
                 size_increments: vec![crate::control::contracts::PriceIncrement { low_edge: 0.0, increment: 0.00000001 }],
                 price_places: None,
+                size_places,
             }]);
             shared.reference.cache_contract_definition(ContractDefinition {
                 con_id: 479624278,
@@ -2102,6 +2332,373 @@ mod tests {
             }
             let placed = engine.intake.placed.values().next().expect("placed");
             assert_eq!(placed.order.total_quantity, held_at, "{crypto} {order_types}");
+        }
+    }
+
+    /// An order through an algorithm is held to the venue's definition of it,
+    /// as a gateway holds it, before anything else is checked. A contract a
+    /// gateway puts no algorithms on — a fund traded at its settlement, the
+    /// settlement venue, a contract priced other than in currency — is refused
+    /// first (10015), and its order number stays taken (2102). Otherwise the
+    /// list of definitions is asked for, then each definition it names for the
+    /// contract's provider group and security type, and the order waits on
+    /// them. It is refused where the contract names no group or the list names
+    /// nothing for it (442); where the algorithm is not defined under the name
+    /// given (439); where a parameter is one the algorithm does not take (443)
+    /// or is its amount (10205); where a moment is not in a form a gateway
+    /// reads (10314), or a number does not read or falls outside its bounds, a
+    /// required parameter is missing or the contract does not take one
+    /// (441); where a text is not among its legal strings (145); and where
+    /// the order trades overnight through an algorithm the session does not
+    /// take (442). A moment without a zone is warned of, once (2174).
+    #[test]
+    fn an_algorithm_order_is_held_to_the_venues_definition() {
+        let list = "IBALGO/STK:IBALGO-AE,IBALGO-AL-STK;IBALGO/CASH:IBALGO-AE,IBALGO-AL-CASH";
+        #[derive(Clone)]
+        struct Row {
+            what: &'static str,
+            group: &'static str,
+            stock_type: &'static str,
+            ev_rule: &'static str,
+            algo: &'static str,
+            params: &'static [(&'static str, &'static str)],
+            overnight: bool,
+            stated: &'static str,
+            refused: &'static [i64],
+            text: &'static str,
+            warned: bool,
+        }
+        let defined = Row {
+            what: "an algorithm the venue defines",
+            group: "IBALGO",
+            stock_type: "COMMON",
+            ev_rule: "",
+            algo: "Adaptive",
+            params: &[("adaptivePriority", "Urgent")],
+            overnight: false,
+            stated: list,
+            refused: &[],
+            text: "",
+            warned: false,
+        };
+        let rows = [
+            defined.clone(),
+            Row { what: "a contract naming no provider group", group: "", refused: &[442], ..defined.clone() },
+            Row { what: "a list naming nothing for the contract", stated: "IBALGO/CASH:IBALGO-AE", refused: &[442], ..defined.clone() },
+            Row { what: "an algorithm not defined under the name", algo: "adaptive", params: &[], refused: &[439], ..defined.clone() },
+            Row {
+                what: "a parameter the algorithm does not take", params: &[("speed", "1")], refused: &[443],
+                text: "Order processing failed. Unknown algo attribute  :speed", ..defined.clone()
+            },
+            Row {
+                what: "an amount as the algorithm's parameter", algo: "Vwap", params: &[("monetaryValue", "100")],
+                refused: &[10205],
+                text: "Cash Quantity cannot be send in monetaryValue field in Algo . Please try sending in Cash Quantity field.",
+                ..defined.clone()
+            },
+            Row { what: "an overnight order through an algorithm the session does not take", algo: "Vwap", params: &[], overnight: true, refused: &[442], ..defined.clone() },
+            Row { what: "an overnight order through one it takes", overnight: true, ..defined.clone() },
+            Row { what: "a moment with a zone", algo: "Vwap", params: &[("startTime", "09:30:00 US/Eastern")], ..defined.clone() },
+            Row { what: "a moment in UTC", algo: "Vwap", params: &[("startTime", "20261002-13:30:00")], ..defined.clone() },
+            Row { what: "a moment without a zone", algo: "Vwap", params: &[("startTime", "09:30:00")], warned: true, ..defined.clone() },
+            Row { what: "a moment without seconds", algo: "Vwap", params: &[("startTime", "09:30 US/Eastern")], refused: &[10314], ..defined.clone() },
+            Row { what: "a moment in a zone never read", algo: "Vwap", params: &[("startTime", "09:30:00 CST")], refused: &[10314], ..defined.clone() },
+            Row { what: "a moment in a zone across the sea", algo: "Vwap", params: &[("startTime", "20261002 13:30:00 Europe/London")], ..defined.clone() },
+            Row {
+                what: "a number that does not read", algo: "Vwap", params: &[("maxPctVol", "abc")], refused: &[441],
+                text: "Algo attributes validation failed:maxPctVol=abc", ..defined.clone()
+            },
+            Row {
+                what: "a number past its bound, in its units", algo: "Vwap", params: &[("maxPctVol", "0.6")], refused: &[441],
+                text: "Algo attributes validation failed:\n'Max Percentage' is invalid: value is greater than maximum value 50.0.\n",
+                ..defined.clone()
+            },
+            Row { what: "a number within its bound, in its units", algo: "Vwap", params: &[("maxPctVol", "0.1")], ..defined.clone() },
+            Row {
+                what: "a required parameter missing", algo: "ArrivalPx", params: &[], refused: &[441],
+                text: "Algo attributes validation failed:\n'Max Percentage' is invalid: value is required.\n",
+                ..defined.clone()
+            },
+            Row {
+                what: "every failure, in the order a gateway's map reads them", algo: "PctVolPx", params: &[],
+                refused: &[441],
+                text: "Algo attributes validation failed:\n'Minimum Target Percentage' is invalid: value is required.\n\
+                       'Target Percentage' is invalid: value is required.\n\
+                       'Target Percentage Change Rate' is invalid: value is required.\n\
+                       'Maximum Target Percentage' is invalid: value is required.\n",
+                ..defined.clone()
+            },
+            Row {
+                what: "a text not among its legal strings", algo: "ArrivalPx", params: &[("maxPctVol", "0.1"), ("riskAversion", "Bold")],
+                refused: &[145], text: "Error in validating entry fields -Bold", ..defined.clone()
+            },
+            Row {
+                what: "a parameter the contract does not take", algo: "Vwap", params: &[("optoutOpeningAuction", "1")], refused: &[441],
+                text: "Algo attributes validation failed:\nThe usage of algorithm parameter optoutOpeningAuction is not allowed on NASDAQ",
+                ..defined.clone()
+            },
+            Row { what: "a fund traded at its settlement", stock_type: "ETMF", refused: &[10015, 2102], ..defined.clone() },
+            Row {
+                what: "a contract priced other than in currency", ev_rule: "aussieBond:1", refused: &[10015, 2102],
+                text: "The algo orders are not supported because product is trading on the basis other than currency price",
+                ..defined.clone()
+            },
+            Row { what: "a contract priced by a factor", ev_rule: "factor:0.5", ..defined.clone() },
+        ];
+        for row in rows {
+            let what = row.what;
+            let shared = Arc::new(SharedState::new());
+            shared.orders.set_replay_done();
+            shared.reference.cache_contract_definition(ContractDefinition {
+                con_id: 265598,
+                sec_type: SecurityType::Stock,
+                exchange: "SMART".into(),
+                primary_exchange: "NASDAQ".into(),
+                currency: "USD".into(),
+                algo_group: row.group.into(),
+                stock_type: row.stock_type.into(),
+                ev_rule: row.ev_rule.into(),
+                order_type_rules: vec![("LMT".into(), 1), ("ALGO".into(), 1)],
+                ..Default::default()
+            });
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            let (connection, mut peer) = Connection::for_test();
+            peer.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            engine.ccp_conn = Some(connection);
+            engine.set_account_id("DU1".into());
+            let (send, receive) = mpsc::channel();
+            engine.set_control_rx(receive);
+            let mut sent = || {
+                let mut wire = String::new();
+                let mut bytes = [0; 16384];
+                while let Ok(n) = peer.read(&mut bytes) {
+                    if n == 0 { break; }
+                    wire.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                }
+                wire.replace('\x01', "|")
+            };
+            let place = |engine: &mut HotLoop| {
+                shared.admit(&send, ControlCommand::Place(Box::new(Placement {
+                    order_id: 10,
+                    allocator: Arc::new(AtomicU64::new(11)),
+                    contract: Contract {
+                        con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(),
+                        exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+                    },
+                    order: Order {
+                        action: "BUY".into(), order_type: "LMT".into(), lmt_price: 1.0, total_quantity: 1.0,
+                        tif: "DAY".into(), algo_strategy: row.algo.into(), include_overnight: row.overnight,
+                        algo_params: row.params.iter().map(|(tag, value)| crate::types::model::TagValue {
+                            tag: tag.to_string(), value: value.to_string(),
+                        }).collect(),
+                        ..Default::default()
+                    },
+                    warnings: Vec::new(),
+                }))).unwrap();
+                engine.poll_once();
+            };
+            place(&mut engine);
+            let asked = sent();
+            let answer = |engine: &mut HotLoop, frame: String| {
+                engine.ccp.process_ccp_message(
+                    frame.as_bytes(), &mut None, &mut engine.context, &shared, &None, &mut engine.hb, "DU1",
+                );
+            };
+            let gated = !row.stock_type.eq("COMMON") || row.ev_rule.starts_with("aussie");
+            if !row.group.is_empty() && !gated {
+                assert_eq!(asked.matches("|6040=80|").count(), 1, "{what}: the list asked for once: {asked}");
+                answer(&mut engine, format!("35=U\x016040=81\x016597={}\x01", row.stated));
+                engine.poll_once();
+                let asked = sent();
+                let names: &[&str] = if row.stated == list { &["IBALGO-AE", "IBALGO-AL-STK"] } else { &[] };
+                for name in names {
+                    assert_eq!(asked.matches(&format!("|6040=53|6364={name}|")).count(), 1, "{what}: {name}: {asked}");
+                }
+                answer(&mut engine, format!("35=U\x016040=54\x016364=IBALGO-AE\x016118={ALGORITHM_PROVIDER}\x01"));
+                answer(&mut engine, format!("35=U\x016040=54\x016364=IBALGO-AL-STK\x016118={SHARE_ALGORITHMS}\x01"));
+            } else {
+                assert!(!asked.contains("|6040=80|"), "{what}: nothing asked: {asked}");
+            }
+            engine.poll_once();
+            engine.poll_once();
+            if gated {
+                // The same number placed again.
+                place(&mut engine);
+                engine.poll_once();
+            }
+            let wire = sent();
+            let told = shared.drain_refused();
+            assert_eq!(told.iter().map(|(_, code, _)| *code).collect::<Vec<_>>(), row.refused, "{what}");
+            if !row.text.is_empty() {
+                assert_eq!(told[0].2, row.text, "{what}");
+            }
+            if row.refused == [10314] {
+                assert!(told[0].2.starts_with("startTime: The date, time, or time-zone entered is invalid."), "{what}: {}", told[0].2);
+            }
+            let warned: Vec<_> = shared.orders.drain_order_notices().into_iter().map(|(_, code, _)| code).collect();
+            assert_eq!(warned, if row.warned { vec![2174] } else { vec![] }, "{what}");
+            assert_eq!(wire.contains("35=D|"), row.refused.is_empty(), "{what}: {wire}");
+        }
+    }
+
+    /// A moment stated without a zone is warned of once for each connection:
+    /// the first such order of the session is read after the warning under
+    /// 2174, and no later one is warned of again.
+    #[test]
+    fn a_moment_without_a_zone_is_warned_of_once_for_the_connection() {
+        let shared = Arc::new(SharedState::new());
+        shared.orders.set_replay_done();
+        shared.reference.cache_contract_definition(ContractDefinition {
+            con_id: 265598,
+            sec_type: SecurityType::Stock,
+            exchange: "SMART".into(),
+            primary_exchange: "NASDAQ".into(),
+            currency: "USD".into(),
+            algo_group: "IBALGO".into(),
+            order_type_rules: vec![("LMT".into(), 1), ("ALGO".into(), 1)],
+            ..Default::default()
+        });
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (connection, mut peer) = Connection::for_test();
+        peer.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        engine.ccp_conn = Some(connection);
+        engine.set_account_id("DU1".into());
+        let (send, receive) = mpsc::channel();
+        engine.set_control_rx(receive);
+        let mut sent = || {
+            let mut wire = String::new();
+            let mut bytes = [0; 16384];
+            while let Ok(n) = peer.read(&mut bytes) {
+                if n == 0 { break; }
+                wire.push_str(&String::from_utf8_lossy(&bytes[..n]));
+            }
+            wire.replace('\x01', "|")
+        };
+        let place = |engine: &mut HotLoop, order_id: u64, allocator: u64| {
+            shared.admit(&send, ControlCommand::Place(Box::new(Placement {
+                order_id,
+                allocator: Arc::new(AtomicU64::new(allocator)),
+                contract: Contract {
+                    con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(),
+                    exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+                },
+                order: Order {
+                    action: "BUY".into(), order_type: "LMT".into(), lmt_price: 1.0,
+                    total_quantity: 1.0, tif: "DAY".into(), algo_strategy: "Vwap".into(),
+                    algo_params: vec![crate::types::model::TagValue {
+                        tag: "startTime".into(), value: "09:30:00".into(),
+                    }],
+                    ..Default::default()
+                },
+                warnings: Vec::new(),
+            }))).unwrap();
+            engine.poll_once();
+        };
+        let answer = |engine: &mut HotLoop, frame: String| {
+            engine.ccp.process_ccp_message(
+                frame.as_bytes(), &mut None, &mut engine.context, &shared, &None, &mut engine.hb, "DU1",
+            );
+        };
+        place(&mut engine, 10, 11);
+        let asked = sent();
+        assert_eq!(asked.matches("|6040=80|").count(), 1, "the list asked for once: {asked}");
+        answer(&mut engine, "35=U\x016040=81\x016597=IBALGO/STK:IBALGO-AE,IBALGO-AL-STK\x01".into());
+        engine.poll_once();
+        let asked = sent();
+        assert!(asked.contains("|6040=53|6364=IBALGO-AE|"), "{asked}");
+        answer(&mut engine, format!("35=U\x016040=54\x016364=IBALGO-AE\x016118={ALGORITHM_PROVIDER}\x01"));
+        answer(&mut engine, format!("35=U\x016040=54\x016364=IBALGO-AL-STK\x016118={SHARE_ALGORITHMS}\x01"));
+        engine.poll_once();
+        engine.poll_once();
+        let wire = sent();
+        assert!(wire.contains("35=D|"), "the first order goes: {wire}");
+        let warned: Vec<_> = shared.orders.drain_order_notices().into_iter().map(|(_, code, _)| code).collect();
+        assert_eq!(warned, [2174], "the first zone-less moment is warned of");
+        place(&mut engine, 12, 13);
+        engine.poll_once();
+        engine.poll_once();
+        let wire = sent();
+        assert!(wire.contains("35=D|"), "the second order goes: {wire}");
+        let warned: Vec<_> = shared.orders.drain_order_notices().into_iter().map(|(_, code, _)| code).collect();
+        assert!(warned.is_empty(), "and no later one of the session is");
+        assert!(shared.drain_refused().is_empty(), "neither order is refused");
+    }
+
+    /// An order for part of a share or a warrant is refused through the API
+    /// on a login that may trade parts of a unit or crypto, as a gateway
+    /// refuses it: placed (10243), or replaced where the order working or the
+    /// replace states part of a unit (10242). On any other login, and on any
+    /// other contract, it goes.
+    #[test]
+    fn an_order_for_part_of_a_share_is_refused_through_the_api() {
+        // What the row is, the contract's type, whether the login takes parts
+        // of a unit, the size placed, the size a replace states, and what is
+        // refused.
+        type Row = (&'static str, &'static str, bool, f64, Option<f64>, &'static [i64]);
+        let rows: [Row; 6] = [
+            ("part of a share", "STK", true, 1.5, None, &[10243]),
+            ("part of a warrant", "WAR", true, 0.5, None, &[10243]),
+            ("a whole share", "STK", true, 2.0, None, &[]),
+            ("part of a share on a login that takes no parts", "STK", false, 1.5, None, &[]),
+            ("a replace for part of a share", "STK", true, 2.0, Some(1.5), &[10242]),
+            ("a whole replace", "STK", true, 2.0, Some(3.0), &[]),
+        ];
+        for (what, sec_type, parts, placed, replaced, refused) in rows {
+            let shared = Arc::new(SharedState::new());
+            shared.orders.set_replay_done();
+            if parts {
+                shared.reference.set_money_orders(crate::bridge::MoneyOrderTerms {
+                    types: "DAY,GTC,LMT,MKT".into(),
+                    account: true,
+                    ..Default::default()
+                });
+            }
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            let (connection, mut peer) = Connection::for_test();
+            peer.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            engine.ccp_conn = Some(connection);
+            engine.set_account_id("DU1".into());
+            let (send, receive) = mpsc::channel();
+            engine.set_control_rx(receive);
+            let mut sent = || {
+                let mut wire = String::new();
+                let mut bytes = [0; 16384];
+                while let Ok(n) = peer.read(&mut bytes) {
+                    if n == 0 { break; }
+                    wire.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                }
+                wire.replace('\x01', "|")
+            };
+            let mut place = |quantity: f64| {
+                shared.admit(&send, ControlCommand::Place(Box::new(Placement {
+                    order_id: 10,
+                    allocator: Arc::new(AtomicU64::new(11)),
+                    contract: Contract {
+                        con_id: 265598, symbol: "X".into(), sec_type: sec_type.into(),
+                        exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+                    },
+                    order: Order {
+                        action: "BUY".into(), order_type: "LMT".into(), lmt_price: 1.0,
+                        total_quantity: quantity, tif: "DAY".into(), ..Default::default()
+                    },
+                    warnings: Vec::new(),
+                }))).unwrap();
+                (0..3).for_each(|_| engine.poll_once());
+            };
+            place(placed);
+            let first = sent();
+            let told: Vec<_> = shared.drain_refused().into_iter().map(|(_, code, _)| code).collect();
+            let Some(replaced) = replaced else {
+                assert_eq!(told, refused, "{what}");
+                assert_eq!(first.contains("35=D|"), refused.is_empty(), "{what}: {first}");
+                continue;
+            };
+            assert!(told.is_empty() && first.contains("35=D|"), "{what}: working first");
+            place(replaced);
+            let wire = sent();
+            let told: Vec<_> = shared.drain_refused().into_iter().map(|(_, code, _)| code).collect();
+            assert_eq!(told, refused, "{what}");
+            assert_eq!(wire.contains("35=G|"), refused.is_empty(), "{what}: {wire}");
         }
     }
 }

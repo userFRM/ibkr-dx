@@ -59,6 +59,8 @@ pub const TAG_IB_PRIMARY_EXCHANGE: u32 = 6470;
 pub const TAG_IB_ORDER_TYPES: u32 = 6431;
 /// FIX tag 6430: the key selecting an order-type table.
 pub const TAG_IB_ORDER_TYPE_KEY: u32 = 6430;
+/// FIX tag 6599: the group of algorithm providers beside an order-type table.
+pub const TAG_IB_ALGO_GROUP: u32 = 6599;
 /// FIX tag 6523: the contract's market classification.
 pub const TAG_IB_MARKET_CLASSIFICATION: u32 = 6523;
 /// FIX tag 6031: the market rule id.
@@ -552,6 +554,9 @@ pub struct ContractDefinition {
     /// The size the venue states apart from any rule, tag 6581, as stated;
     /// nought where it states none.
     pub suggested_size: f64,
+    /// The group of algorithm providers the contract's orders go through, tag
+    /// 6599 beside its order-type table; empty where none is stated.
+    pub algo_group: String,
     /// How many decimal places its prices carry.
     pub last_price_precision: f64,
     /// How many its sizes carry.
@@ -679,6 +684,7 @@ impl Default for ContractDefinition {
             size_increment: 0.0,
             suggested_size_increment: 0.0,
             suggested_size: 0.0,
+            algo_group: String::new(),
             last_price_precision: 0.0,
             last_size_precision: 0.0,
             settlement_method: String::new(),
@@ -1052,7 +1058,7 @@ pub fn parse_secdef_response(
 fn parse_secdef_record(
     data: &[u8],
     island_for_nasdaq: bool,
-    order_type_tables: &HashMap<String, Vec<(String, i32)>>,
+    order_type_tables: &HashMap<String, OrderTypeTable>,
     classifications: &HashMap<u32, String>,
 ) -> Option<ContractDefinition> {
     let tags = fix::fix_parse(data);
@@ -1601,6 +1607,10 @@ pub struct MarketRule {
     /// How many places the rule's first price band is displayed to (6025),
     /// where it states one.
     pub price_places: Option<i32>,
+    /// The most places a size is shown to, the largest of the size display
+    /// table's bands (6025 after 6029); `None` where the rule states no such
+    /// table.
+    pub size_places: Option<i32>,
 }
 
 fn parse_market_classifications(data: &[u8]) -> HashMap<u32, String> {
@@ -1621,8 +1631,8 @@ fn parse_market_classifications(data: &[u8]) -> HashMap<u32, String> {
     classifications
 }
 
-fn parse_order_type_tables(data: &[u8]) -> HashMap<String, Vec<(String, i32)>> {
-    let mut tables = HashMap::new();
+fn parse_order_type_tables(data: &[u8]) -> HashMap<String, OrderTypeTable> {
+    let mut tables: HashMap<String, OrderTypeTable> = HashMap::new();
     let mut in_table = false;
     let mut key = None;
     for (tag, value) in tag_sequence(data) {
@@ -1638,7 +1648,12 @@ fn parse_order_type_tables(data: &[u8]) -> HashMap<String, Vec<(String, i32)>> {
                         let simulation = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
                         (name, simulation)
                     }).collect();
-                    tables.insert(key.clone(), entries);
+                    tables.entry(key.clone()).or_default().0 = entries;
+                }
+            }
+            TAG_IB_ALGO_GROUP if in_table => {
+                if let Some(key) = key.as_ref() {
+                    tables.entry(key.clone()).or_default().1 = value;
                 }
             }
             _ => {},
@@ -1647,9 +1662,14 @@ fn parse_order_type_tables(data: &[u8]) -> HashMap<String, Vec<(String, i32)>> {
     tables
 }
 
-fn apply_order_type_table(definition: &mut ContractDefinition, tables: &HashMap<String, Vec<(String, i32)>>) {
+/// An order-type table, and the algorithm group stated beside it.
+type OrderTypeTable = (Vec<(String, i32)>, String);
+
+fn apply_order_type_table(definition: &mut ContractDefinition, tables: &HashMap<String, OrderTypeTable>) {
     if definition.order_type_key.is_empty() && tables.is_empty() { return; }
-    definition.order_type_rules = tables.get(&definition.order_type_key).cloned().unwrap_or_default();
+    let (rules, group) = tables.get(&definition.order_type_key).cloned().unwrap_or_default();
+    definition.order_type_rules = rules;
+    definition.algo_group = group;
     definition.order_types = definition.order_type_rules.iter().map(|(name, _)| name.clone()).collect();
 }
 
@@ -1680,6 +1700,7 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
     let mut filling = Table::Price;
     let mut in_rules = false;
     let mut display_places = false;
+    let mut size_places = false;
 
     for (tag, val) in &tags {
         match *tag {
@@ -1695,6 +1716,7 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
                     price_increments: Vec::new(),
                     size_increments: Vec::new(),
                     price_places: None,
+                    size_places: None,
                 });
                 if let Some(rule) = current.take() {
                     rules.push(rule);
@@ -1723,13 +1745,24 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
             // The price display table opens the rule and names, per band, the
             // places a price is shown to: the first band's is the one a
             // gateway rounds a strike to.
-            6022 => display_places = true,
+            6022 => {
+                display_places = true;
+                size_places = false;
+            }
+            // The size display table, whose widest band is the most places a
+            // size is shown to.
+            6029 => {
+                size_places = true;
+                if let Some(rule) = &mut current { rule.size_places = None; }
+            }
             6025 => {
-                if let Some(ref mut rule) = current
-                    && display_places
-                {
-                    display_places = false;
-                    rule.price_places = val.parse().ok();
+                if let Some(ref mut rule) = current {
+                    if display_places {
+                        display_places = false;
+                        rule.price_places = val.parse().ok();
+                    } else if size_places && let Ok(places) = val.parse::<i32>() {
+                        rule.size_places = Some(rule.size_places.map_or(places, |held| held.max(places)));
+                    }
                 }
             }
             TAG_LOW_EDGE => {
@@ -1749,6 +1782,7 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
                         }
             }
             TAG_PRICE_INCREMENT_COUNT => {
+                size_places = false;
                 filling = Table::Price;
                 pending_low_edge = None;
                 if let Some(rule) = &mut current { rule.price_increments.clear(); }
@@ -1756,6 +1790,7 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
             // Opens the size table rather than ending the rule: the sizes a
             // contract may be dealt in are stated after this count.
             TAG_SIZE_INCREMENT_COUNT => {
+                size_places = false;
                 filling = Table::Size;
                 pending_low_edge = None;
                 if let Some(rule) = &mut current { rule.size_increments.clear(); }

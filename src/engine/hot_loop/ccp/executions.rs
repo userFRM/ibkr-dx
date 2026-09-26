@@ -709,7 +709,14 @@ fn tell_the_venues_message(
         whole_listing: shared.reference.enables("SEPLSTDIV"),
         isin_with_cusip: shared.reference.enables("CUSIPD"),
         order_type: crate::types::ord_type_fix_str(order.ord_type),
-        algo: !info.order.algo_strategy.is_empty(),
+        algo: if info.order.algo_strategy.is_empty() {
+            None
+        } else {
+            match shared.reference.algorithm_set(&contract) {
+                None => Some(None),
+                Some(held) => crate::client_core::cash_quantity::ibalgo_amount(held.as_ref(), &info.order).map(Some),
+            }
+        },
         money: message::Money {
             types: &terms.types,
             order_types: &terms.order_types,

@@ -507,7 +507,7 @@ the account trade, and lays the account's list over them: an entry for a
 security type takes its place, and one for a symbol sits beneath its type.
 An order takes the entry for its symbol (for a currency pair, its local
 symbol first), else its type's, and where the list names nothing for the
-type, the gateway's own defaults, for which the venue is asked nothing.
+type, the defaults a gateway holds for it, for which the venue is asked nothing.
 Where the session's `PRESETS` feature is on, the entry the list made active
 stands for its type: of strategies, the first active one in the list, since
 each clears the strategies beside it; of other entries, the last. A strategy
@@ -689,10 +689,10 @@ amount, and this client refuses it the same way, in the same order:
 | 10292 | *"Stop Buy order is not allowed for this instrument"*: a stop to buy a crypto |
 | 10318 | *"This order doesn't support fractional quantity trading"*: a currency pair stating part of a unit as its size, or an amount with parts of a unit where its currency moves in whole units or the logon waives the currency's least amount (`NOCASHQTYPRECISION`) |
 | 10317 | *"The Cash Quantity size of … does not conform to minimum variation of … for this contract"*: an amount that is not a whole number of its currency's least amount; a fund bought by an amount with more places than the fund's own least amount, where the logon offers `MFCASHQTYINCR` |
-| 10244 | *"Cash Quantity cannot be used for this order"*: a crypto as a stop, a limit or a sale at market; a currency pair whose order types do not list `CASHQTY`; a fund sold by an amount; a share unless it goes through an algorithm, on an order type the logon takes amounts on, allocated only where the logon permits it, on a contract the venue sizes by an amount; any other contract |
+| 10244 | *"Cash Quantity cannot be used for this order"*: a crypto as a stop, a limit or a sale at market; a currency pair whose order types do not list `CASHQTY`; a fund sold by an amount; a share unless it goes through an algorithm whose definition takes an amount, on an order type the logon takes amounts on, allocated only where the logon permits it, on a contract the venue sizes by an amount; any other contract |
 | 10203 | a fund bought with a quantity, or without an amount |
 | 10204 | a fund sold with an amount, or without a quantity |
-| 10207 | a fund sold by a size of more than three places |
+| 10207 | a fund sold by a size of more places than a fund's size is stated to: three, or, where the fund's rule deals in parts of a unit and the logon does not keep funds whole (`NOMFFRACMR`), the most its rule shows a size to, and no limit where it shows none |
 | 10206 | an amount of more than two places, where the currency's least amount is waived or is a whole unit |
 | 10293 | *"Cryptocurrency Cash Quantity order cannot specify size"*: a crypto stating a size beside its amount |
 | 10241 | a replace of an order stated by an amount, where the account may trade crypto or the logon takes amounts on market, limit, stop or stop-limit orders |
@@ -721,12 +721,62 @@ lot where the order's venue deals in them. Where the venue does not work the
 size out, it is raised by the margin the account preset states (a quarter
 where it states none). A replace goes with the caller's size, and a gateway
 then resizes its own record of an order whose size it worked out to the new
-amount.
+amount, on a contract dealt in parts of a unit rounded up to the most places
+its rule shows a size to; where the rule shows none, the record keeps the
+replace's size.
 
 A share's order through an algorithm takes an amount only where the
-algorithm's own definition names one. Those definitions come from the venue
-on requests this client does not make, so such an order is sent and the
-venue decides.
+algorithm's own definition names one: of the venue's share algorithms, every
+one but accumulate-distribute does.
+
+## An order through an algorithm
+
+A gateway puts no algorithm on a fund traded at its settlement (tag 8077
+`ETMF`), on the settlement venue (tag 207 `CFETAS`), or on a contract priced
+other than in currency (a rule on tag 6858 other than `factor` or `etmf`). It
+refuses such an order, 10015, with its words for each, and leaves the order's
+number taken: placed again under that number, the order is refused, 2102
+*"Unable to modify this order as its still being processed."* So does this
+client.
+
+The venue defines each algorithm an order can name, and a gateway holds an
+order to that definition before it checks anything else about it. The first
+time an order names an algorithm it asks for the list of definitions
+(`35=U 6040=80`, answered on tag 6597), then each definition the list names
+for the contract's provider group (tag 6599 of its definition) and security
+type (`6040=53`, answered by `6040=54` with the definition on tag 6118); the
+order waits on them, and they are held for the session. So does this client,
+and it refuses, with a gateway's codes and words:
+
+| | |
+| --- | --- |
+| 442 | *"Specified algorithm is not allowed for this order."*: a contract naming no provider group, or definitions that make no set; an order trading overnight through an algorithm the overnight session does not take |
+| 439 | *"Order processing failed. Algorithm definition not found"*: an algorithm not defined under the name the order gives, which is read as stated |
+| 443 | *"Order processing failed. Unknown algo attribute  :…"*: a parameter the algorithm does not take |
+| 10205 | *"Cash Quantity cannot be send in monetaryValue field in Algo . Please try sending in Cash Quantity field."*: an amount stated as the algorithm's own parameter rather than as the order's cash quantity |
+| 10314 | *"…: The date, time, or time-zone entered is invalid. …"*: a moment in a form a gateway does not read — it reads `yyyymmdd-hh:mm:ss` in UTC, or `hh:mm:ss` with an eight-digit date before it and a zone after it where they are stated; it never reads the zones `CST`, `IST`, `BST`, `AST`, `GST` or `AMT` |
+| 441 | *"Algo attributes validation failed:…"*: a number that does not read, as `tag=value`; a parameter the contract's primary exchange does not take; and every required parameter missing and every number outside its bounds, one line each, in the order a gateway's hash map of the parameters reads them, not the order stated. A number is read in the units its definition states, so a percentage of volume of 0.1 is ten |
+| 145 | *"Error in validating entry fields -…"*: a text that is not one of its legal strings |
+
+A moment stated without a zone is read on the local clock, and a gateway
+warns of it once for each connection, 2174, before it reads it. The warning
+is the same here.
+
+An order's warning is described by its amount, where it is stated in cash
+and goes through one of those algorithms, where the algorithm's definition
+takes one.
+
+## An order for part of a share
+
+A login that may trade parts of a unit or crypto — the account may trade
+crypto, or it takes parts of a unit (8335) or has refusals told (6130) and the
+logon's list for parts of a unit (8334) names a market, limit, stop or
+stop-limit order — cannot place an order for part of a share or a warrant
+through the API: a gateway refuses it, 10243 *"Fractional-sized order cannot
+be placed via API. Please use desktop version to place this order."*, and a
+replace where the order or the replace states part of a unit, 10242
+*"Fractional-sized order cannot be modified via API. Please use desktop
+version to revise this order."* So does this client.
 
 ## What the account may trade
 

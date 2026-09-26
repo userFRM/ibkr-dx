@@ -115,6 +115,7 @@ A user message carries what it is for on tag 6040.
 | `20` |
 | `36` |
 | `42` |
+| `54` |
 | `60` |
 | `75` |
 | `77` |

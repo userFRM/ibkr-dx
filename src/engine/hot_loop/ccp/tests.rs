@@ -4430,7 +4430,7 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
     use crate::control::contracts::{ContractDefinition, MarketRule, OptionRight, PriceIncrement, SecurityType};
     const TIME: &str = "Warning: your order will not be placed at the exchange until 2026-09-25 09:30:00 US/Eastern";
     let rule = |id: i32, size: f64| MarketRule {
-        rule_id: id, negative_prices: false, price_magnifier: 0, price_places: Some(2),
+        rule_id: id, negative_prices: false, price_magnifier: 0, price_places: Some(2), size_places: None,
         price_increments: vec![PriceIncrement { low_edge: 0.0, increment: 0.01 }],
         size_increments: vec![PriceIncrement { low_edge: 0.0, increment: size }],
     };
@@ -4520,11 +4520,14 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
         stated: &'a [(u32, &'a str)], refusals_told: bool, features: &'a [&'a str], faq: Option<&'a str>,
         money: crate::bridge::MoneyOrderTerms, algo: &'a str, ladder: Option<i64>, size_fraction: &'a str,
         cancelling: bool, told: Option<(i32, String)>,
+        /// Whether the venue's algorithm definitions are held.
+        defined: bool,
     }
     let row = |what, contract, side, qty: f64, told: &str| Row {
         what, contract, size: 1.0, side, qty, cash: 0.0, client: 0, stated: &[(6360, "TIME"), (6361, TIME)],
         refusals_told: false, features: &[], faq: None, money: Default::default(), algo: "", ladder: None,
         size_fraction: "", cancelling: false, told: Some((399, format!("Order Message: {told} {TIME}"))),
+        defined: false,
     };
     // A logon that takes shares for an amount on market and limit orders, and
     // states the dollar to a cent. Its list names the order types.
@@ -4535,6 +4538,7 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
     let share_by_amount = ContractDefinition {
         order_types: vec!["CASHQTY".into()], order_type_rules: vec![("CASHQTY".into(), 1)], ..share.clone()
     };
+    let algorithmic = ContractDefinition { algo_group: "IBALGO".into(), ..share_by_amount.clone() };
     let refused = |what, stated, told: Option<(i32, &str)>| Row {
         stated, refusals_told: true, told: told.map(|(code, text)| (code, text.to_string())),
         ..row(what, share.clone(), Side::Buy, 100.0, "")
@@ -4602,7 +4606,15 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
         },
         Row {
             cash: 500.25, money: by_amount.clone(), algo: "Adaptive", told: None,
-            ..row("a share by amount with an algorithm", share_by_amount.clone(), Side::Buy, 0.0, "")
+            ..row("a share by amount with an algorithm not yet defined", algorithmic.clone(), Side::Buy, 0.0, "")
+        },
+        Row {
+            cash: 500.25, money: by_amount.clone(), algo: "Adaptive", defined: true,
+            ..row("a share by amount with an algorithm that takes one", algorithmic.clone(), Side::Buy, 0.0, "BUY 500.25 USD AAPL NASDAQ.NMS")
+        },
+        Row {
+            cash: 500.25, money: by_amount.clone(), algo: "AccuDistr", defined: true,
+            ..row("a share by amount with an algorithm that takes none", algorithmic.clone(), Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS")
         },
         Row {
             cash: 500.25, money: by_amount.clone(),
@@ -4690,7 +4702,7 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
     ];
     for Row {
         what, contract, size, side, qty, cash, client, stated, refusals_told, features, faq, money, algo, ladder,
-        size_fraction, cancelling, told,
+        size_fraction, cancelling, told, defined,
     } in rows {
         let mut context = Context::new();
         let instrument = context.register_instrument(756733);
@@ -4713,6 +4725,15 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
         shared.reference.set_misc_urls(faq.map(|base| ("faq_base_url".to_string(), base.to_string())).into_iter().collect());
         shared.reference.push_market_rules(vec![rule(26, size)]);
         shared.reference.cache_contract_definition(contract);
+        if defined {
+            shared.reference.set_algorithms(
+                [("IBALGO/STK".to_string(), vec!["IBALGO-AE".to_string(), "IBALGO-AL-STK".to_string()])].into(),
+            );
+            shared.reference.note_algorithm_document("IBALGO-AE", include_str!("../../../control/fixtures/algorithms_ibalgo_ae.xml"));
+            shared.reference.note_algorithm_document(
+                "IBALGO-AL-STK", include_str!("../../../control/fixtures/algorithms_ibalgo_al_stk.xml"),
+            );
+        }
         shared.orders.push_order_info(42, RichOrderInfo {
             contract: api::Contract { con_id: 756733, exchange: "SMART".into(), ..Default::default() },
             order: api::Order { client_id: client, cash_qty: cash, algo_strategy: algo.into(), ..Default::default() },

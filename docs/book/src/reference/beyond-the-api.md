@@ -42,14 +42,17 @@ reason on the error callback.
 
 ## Which algorithms this account may use
 
-Keyed by provider and security type, also stated at logon.
+Keyed by provider and security type: the documents that define them, as the
+venue lists them. The list is asked for the first time an order names an
+algorithm, as a gateway asks it, and is empty until then.
 
 ```python
 client.algorithms()                          # 13 keys: 'IBALGO/STK', 'FOXRIVER/STK', …
 client.algorithms_for("STK")                 # ['FOXRIVER-AE', 'IBALGO-AE', 'JONES-AE', …]
 ```
 
-An algorithm absent here is one an order naming it is refused for.
+An order is held to the definitions the list names for its contract (see [an
+order through an algorithm](venue-behaviour.md#an-order-through-an-algorithm)).
 
 ## Which order defaults the account holds
 

@@ -41,8 +41,10 @@ pub(super) struct Described<'a> {
     pub isin_with_cusip: bool,
     /// The order's type as the venue names it (tag 40).
     pub order_type: &'a str,
-    /// Whether the order carries an algorithm.
-    pub algo: bool,
+    /// Where the order goes through one of the provider IBALGO's
+    /// algorithms, whether its definition takes an amount: `Some(None)` where
+    /// the definitions are not held, and `None` for an order through none.
+    pub algo: Option<Option<bool>>,
     /// What the logon states about orders for an amount of money.
     pub money: Money<'a>,
     /// The part of a unit the logon has sizes shown to on a contract that
@@ -495,21 +497,23 @@ fn size_text(order: &Described<'_>) -> Option<String> {
 /// Whether a gateway describes an order for an amount of money by that amount:
 /// a crypto currency's always; a currency pair's where the venue takes an
 /// amount for it; a share's where the logon takes amounts on shares for the
-/// order's type and the share, its rule or the logon allows one. `None` where
-/// the order carries an algorithm, which decides it by its own definition.
+/// order's type and the share, its rule or the logon allows one. An order
+/// through one of the provider IBALGO's algorithms is described by an amount
+/// where the algorithm's definition takes one, and on a pair that takes
+/// amounts; `None` where the definitions are not held.
 fn takes_money(order: &Described<'_>) -> Option<bool> {
-    if order.algo {
-        return None;
-    }
     let def = order.contract;
     let m = &order.money;
     let takes = |name: &str| cash_quantity::takes(def, name);
+    let pair_by_amount = def.sec_type == SecurityType::Forex && takes("CASHQTY");
+    if let Some(defined) = order.algo {
+        return defined.map(|by_amount| pair_by_amount || by_amount);
+    }
     let crypto = def.sec_type == SecurityType::Crypto;
     if crypto {
         return Some(true);
     }
     let share = def.sec_type == SecurityType::Stock;
-    let pair_by_amount = def.sec_type == SecurityType::Forex && takes("CASHQTY");
     let in_parts = deals_in_fractions(order.rule);
     let plain = |list: &str| cash_quantity::BASIC_TYPES.iter().any(|name| listed(list, name));
     let opened = m.crypto || ((m.account || m.refusals_told) && plain(m.types));

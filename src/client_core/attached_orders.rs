@@ -551,6 +551,7 @@ mod tests {
             price_increments: vec![PriceIncrement { low_edge: 0.0, increment: 0.01 }],
             size_increments: vec![],
             price_places: None,
+            size_places: None,
         }]);
         shared.reference.set_order_presets(vec![("s=STK".into(), "a=1".into(), "1".into())]);
         let (request_key, _answer) = shared.reference.expect_order_preset_values("s=STK");
@@ -673,6 +674,7 @@ mod tests {
             price_increments: vec![PriceIncrement { low_edge: 0.0, increment: 0.25 }],
             size_increments: vec![],
             price_places: None,
+            size_places: None,
         }]);
         shared.reference.cache_attached_quote_contract(
             super::super::attached_quote_contract::key(&contract),
