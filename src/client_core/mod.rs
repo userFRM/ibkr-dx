@@ -5740,7 +5740,8 @@ impl ClientCore {
         }
     }
 
-    /// A bar request withdrawn: nothing answers under its number any longer.
+    /// A bar request withdrawn, or ended on a refusal: nothing answers under
+    /// its number any longer.
     pub fn forget_historical(&self, req_id: u32) {
         self.historical_asks.lock().unwrap().remove(&i64::from(req_id));
     }

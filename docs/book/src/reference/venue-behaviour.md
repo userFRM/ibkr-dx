@@ -169,6 +169,10 @@ with every one of them, as a gateway does.
 - A head timestamp states the contract's type and exchange as a gateway states
   them, however they were spelled: a stock is `STK`, given as `CS` or in lower
   case, and a Nasdaq listing is `NASDAQ`, given as `ISLAND`.
+- A bar request, a head timestamp or a histogram asked under the number of a
+  bar request still answering is refused with 386, *Duplicate ticker ID for
+  API historical data query*, as a gateway refuses it, and the bar request
+  goes on answering.
 - A fundamental report is asked about a stock alone. A gateway refuses one on
   a contract stated as any other type, or stating none, before looking it up,
   with *Please enter a valid security type* under 321; so does this client.

@@ -24,6 +24,9 @@ class BarsWrapper(EWrapper):
     def error(self, req_id, error_time, code, msg, advanced=""):
         if code not in (2104, 2106, 2158):
             print(f"[error] {code}: {msg}")
+        # A refused request is told the error alone: no end follows it.
+        if req_id == 1:
+            self.done.set()
 
 
 w = BarsWrapper()
@@ -52,7 +55,7 @@ c.req_historical_data(
 )
 
 if not w.done.wait(timeout=30):
-    raise RuntimeError("historical_data_end not received")
+    raise RuntimeError("the bar request was not answered")
 
 print(f"bars: {len(w.bars)}")
 if w.bars:

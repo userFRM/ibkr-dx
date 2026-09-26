@@ -555,6 +555,8 @@ pub enum Record {
     HistoricalError((api::ErrorOrigin, i32, String)),
     /// Bars answering a request.
     HistoricalData((u32, HistoricalResponse)),
+    /// A bar request ended with no end of its own.
+    HistoricalOver(u32),
     /// An order this session did not place, paired with the number it is
     /// reached under.
     OrderBound((i64, i64, i64)),
@@ -910,6 +912,12 @@ impl super::SharedState {
             cut,
             |(id, _)| kept_back(answer, request(*id)),
             Record::HistoricalData,
+            &mut out,
+        );
+        r.historical_over.take_below(
+            cut,
+            |id| kept_back(answer, request(*id)),
+            Record::HistoricalOver,
             &mut out,
         );
         r.orders_bound.take_below(cut, |_| kept_back(None, None), Record::OrderBound, &mut out);

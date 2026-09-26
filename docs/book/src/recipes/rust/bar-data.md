@@ -10,7 +10,8 @@ this whenever you need a finished series rather than a live feed.
 - `req_historical_data`, which takes every argument the request carries:
   `req_id`, contract, `end_date_time`, `duration`, `bar_size`, `what_to_show`,
   `use_rth`, `format_date`, `keep_up_to_date`.
-- Pumping the callbacks with `process_msgs` until `historical_data_end` lands.
+- Pumping the callbacks with `process_msgs` until `historical_data_end` lands,
+  or the request's refusal does.
 - Reading OHLCV out of `BarData`.
 
 An empty `end_date_time` means now. `use_rth: true` keeps the series inside
@@ -22,8 +23,11 @@ seconds. `keep_up_to_date: false` asks for closed bars only.
 One `historical_data` callback per bar, in time order, then one
 `historical_data_end` carrying the first and last timestamps of the range that
 was served. A request whose bars are refused once it has been handed over is
-told why on `error`, and a `historical_data_end` follows, where a gateway
-states no end after a refusal.
+told why on `error`, and nothing follows it: a gateway states no end after a
+refusal, so a program waiting for the end stops on the error too. A request
+kept up to date whose five-second stream the venue refuses is told why on
+`error` and kept up to date no longer: nothing follows once its history is in,
+and a history still to come arrives with its end.
 
 With `keep_up_to_date: true` the bar still forming goes on from the history's
 last bar, as a gateway's does: the live five-second bars inside it are folded

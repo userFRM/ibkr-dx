@@ -381,7 +381,9 @@ impl EClient {
 
         // The venue may answer in parts. Keep what each part carries and stop
         // on the one that says it is the last, rather than on the first: a
-        // series cut at the first part is short and says nothing about it.
+        // series cut at the first part is short and says nothing about it. A
+        // refused one — a series that could not be folded among them — ends on
+        // its refusal, which the wait hands back: no end follows it.
         let mut bars = Vec::new();
         let mut zone = String::new();
         let what = format!("a bar request for {} {}", contract.sec_type, contract.symbol);
@@ -398,14 +400,6 @@ impl EClient {
             }
             None
         })?;
-        // A series that could not be folded — an action this client cannot
-        // classify, a factor it cannot read — is ended with nothing in it and
-        // the reason stated beside it. The empty completion above releases
-        // the wait, so the reason is read here rather than handed back as
-        // though nothing were the answer.
-        if let Some((code, msg)) = shared.reference.take_error_for(req_id as u32) {
-            return Err(PyRuntimeError::new_err(format!("{msg} ({code})")));
-        }
 
         Ok(bars
             .into_iter()

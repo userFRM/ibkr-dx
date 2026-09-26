@@ -657,6 +657,8 @@ impl EClient {
                 say_error!(self, py, shared, origin, i64::from(code), &msg);
             }
             Record::HistoricalTaken(taken) => self.core.historical_taken(&taken),
+            // A bar request that ended on its refusal, as on the other surface.
+            Record::HistoricalOver(req_id) => self.core.forget_historical(req_id),
             Record::HistoricalData((req_id, response)) => {
                 let is_update = self.core.historical_answered(req_id as i64);
                 self.core.note_historical_zone(req_id as i64, &response.timezone);

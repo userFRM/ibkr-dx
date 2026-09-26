@@ -1477,13 +1477,10 @@ impl HotLoop {
                         log::error!("historical req_id={req_id}: {told}");
                         // Refused without ending anything, as the duplicate
                         // number below it is: a number already answering goes
-                        // on answering. Released with an empty terminal
-                        // response, the live request's end fired before its
-                        // bars had arrived and every bar after it went out as
-                        // an update. Nothing waits on that sentinel here —
-                        // the surfaces refuse this before it is sent, so only
-                        // a caller on the control channel reaches it, and
-                        // those do not wait.
+                        // on answering, and its caller's side keeps what it
+                        // holds of it. The surfaces refuse this before it is
+                        // sent, so only a caller on the control channel
+                        // reaches it.
                         push_hmds_refusal(
                             &self.shared, req_id, crate::error_codes::Refusal::VALIDATION,
                             told, false,
@@ -1841,7 +1838,7 @@ impl HotLoop {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_histogram_request(req_id, contract.con_id as u32, &contract.sec_type, &contract.exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_histogram_request(req_id, contract.con_id as u32, &contract.sec_type, &contract.exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
@@ -4037,10 +4034,9 @@ pub(crate) const HMDS_UNAVAILABLE: &str = "Historical data service connection is
 
 /// Surface an "HMDS unavailable" error for `req_id` when the historical-data
 /// socket isn't connected. Told under the not-connected code
-/// via `push_historical_error` for the consumer's `error()` callback, plus —
-/// for historical-bar requests only — a terminal empty-bars response so
-/// `historical_data_end` fires. Without this, requests issued while HMDS is
-/// down hang silently.
+/// via `push_historical_error` for the consumer's `error()` callback, which
+/// ends a bar request as a refusal ends it. Without this, requests issued
+/// while HMDS is down hang silently.
 pub(crate) fn push_hmds_unavailable(shared: &SharedState, req_id: u32, from_historical: bool) {
     // Under the number for a request made with no connection to send it on,
     // not the data service's own.
@@ -4077,8 +4073,8 @@ fn con_id_beyond_the_wire(cmd: &ControlCommand) -> Option<i64> {
     u32::try_from(con_id).is_err().then_some(con_id)
 }
 
-/// Surface an HMDS-side request failure: error 162 plus, for bar requests,
-/// the terminal completion sentinel so a blocked wait unblocks.
+/// Surface an HMDS-side request failure: error 162, which ends a bar request
+/// as a refusal ends it.
 pub(crate) fn push_hmds_error(shared: &SharedState, req_id: u32, message: String, from_historical: bool) {
     const HMDS_ERROR_CODE: i32 = 162;
     push_hmds_refusal(shared, req_id, HMDS_ERROR_CODE, message, from_historical);
@@ -4089,6 +4085,10 @@ pub(crate) fn push_hmds_error(shared: &SharedState, req_id: u32, message: String
 /// A request refused before it is sent is not the service reporting a
 /// difficulty with one it answered, and a caller branching on the number reads
 /// the two apart.
+///
+/// A bar request the refusal ends is told only the error, as a gateway tells
+/// it: no `historical_data_end` follows. Its caller's side is told it is over,
+/// so what it kept of the request goes with it.
 pub(crate) fn push_hmds_refusal(
     shared: &SharedState,
     req_id: u32,
@@ -4098,15 +4098,7 @@ pub(crate) fn push_hmds_refusal(
 ) {
     shared.reference.push_historical_error(req_id, code, message);
     if from_historical {
-        shared.reference.push_historical_data(
-            req_id,
-            crate::control::historical::HistoricalResponse {
-                query_id: String::new(),
-                timezone: String::new(),
-                is_complete: true,
-                bars: Vec::new(),
-            },
-        );
+        shared.reference.push_historical_over(req_id);
     }
 }
 
@@ -7840,22 +7832,24 @@ mod tests {
     /// The service reported no difficulty with a request it never saw. A
     /// caller branching on the service's number retried against a service it
     /// had not asked, which is every request made inside a reconnect window.
+    ///
+    /// A bar request is told the error alone, as a gateway tells a refusal,
+    /// and its caller's side is told the request is over; any other request
+    /// is told the error.
     #[test]
-    fn push_hmds_unavailable_historical_emits_error_and_terminal_sentinel() {
-        let shared = SharedState::new();
-        push_hmds_unavailable(&shared, 7, true);
+    fn push_hmds_unavailable_tells_the_error_alone() {
+        for (from_historical, over) in [(true, vec![7]), (false, vec![])] {
+            let shared = SharedState::new();
+            push_hmds_unavailable(&shared, 7, from_historical);
 
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, 7);
-        assert_eq!(errors[0].1, 504, "the request never left, so nothing answered it");
-        assert!(errors[0].2.contains("not available"));
-
-        let hist = shared.reference.drain_historical_data();
-        assert_eq!(hist.len(), 1, "terminal sentinel required so historical_data_end fires");
-        assert_eq!(hist[0].0, 7);
-        assert!(hist[0].1.is_complete);
-        assert!(hist[0].1.bars.is_empty());
+            let errors = shared.reference.drain_historical_errors();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].0, 7);
+            assert_eq!(errors[0].1, 504, "the request never left, so nothing answered it");
+            assert!(errors[0].2.contains("not available"));
+            assert!(shared.reference.drain_historical_data().is_empty(), "and no end follows it");
+            assert_eq!(hmds::tests::over(&shared), over, "a bar request ({from_historical}) is over");
+        }
     }
 
     /// A price between -1 and 0 has a whole part of 0, so the sign lives only
@@ -7971,20 +7965,6 @@ mod tests {
                 assert!(ours >= floor && ours < ceiling, "rung {rung}: {ours:?}");
             }
         }
-    }
-
-    #[test]
-    fn push_hmds_unavailable_non_historical_emits_error_without_sentinel() {
-        let shared = SharedState::new();
-        push_hmds_unavailable(&shared, 42, false);
-
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, 42);
-        assert_eq!(errors[0].1, 504, "the request never left, so nothing answered it");
-        // Head-ts / histogram / ticks / schedule / scanner / news / fundamental:
-        // no bar-stream consumer waiting for historical_data_end.
-        assert!(shared.reference.drain_historical_data().is_empty());
     }
 
     /// The tags a `35=Q` ack bound are dead the moment the subscription is

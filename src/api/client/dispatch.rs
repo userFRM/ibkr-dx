@@ -529,12 +529,14 @@ impl EClient {
             }
 
             // What the venue refused under a request, in its place: a book's
-            // reset ahead of the levels that follow it, a query error ahead
-            // of the empty end that follows it.
+            // reset ahead of the levels that follow it.
             Record::HistoricalError((origin, code, msg)) => {
                 wrapper.error_from(origin, raised_now(), i64::from(code), &msg, "");
             }
             Record::HistoricalTaken(taken) => self.core.historical_taken(&taken),
+            // A bar request that ended on its refusal: nothing answers under
+            // the number after it, and the caller heard only the error.
+            Record::HistoricalOver(req_id) => self.core.forget_historical(req_id),
             // Historical data → historical_data + historical_data_end, and
             // after that end, historical_data_update. A keep-up-to-date
             // request answers once with the history and then keeps speaking;

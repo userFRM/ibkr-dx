@@ -239,8 +239,10 @@ fn conadj_response_frame_is_skipped_without_disturbing_pending() {
     assert!(shared.reference.drain_historical_errors().is_empty());
 }
 
+/// A bar request the venue refuses is told the error alone, as a gateway
+/// tells it, and its caller's side is told the request is over.
 #[test]
-fn query_error_releases_historical_and_emits_error_and_end_sentinel() {
+fn a_refused_bar_request_is_told_the_error_alone() {
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
@@ -269,12 +271,22 @@ fn query_error_releases_historical_and_emits_error_and_end_sentinel() {
     assert_eq!(errors[0].1, 162);
     assert_eq!(errors[0].2, "Invalid time length");
 
-    let hist = shared.reference.drain_historical_data();
-    assert_eq!(hist.len(), 1, "terminal sentinel must be queued for historical req");
-    assert_eq!(hist[0].0, 11);
-    assert!(hist[0].1.is_complete);
-    assert!(hist[0].1.bars.is_empty());
+    assert!(shared.reference.drain_historical_data().is_empty(), "and no end follows it");
+    assert_eq!(over(&shared), [11], "the request is over");
 }
+
+/// The bar requests the engine has said are over, as the caller's side reads
+/// them.
+pub(in crate::engine::hot_loop) fn over(shared: &SharedState) -> Vec<u32> {
+    shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+        .into_iter()
+        .filter_map(|(_, record)| match record {
+            crate::bridge::Record::HistoricalOver(id) => Some(id),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A head timestamp the connection cannot carry is refused, not recorded as
 /// pending. Pushed unconditionally, a request with no connection sat pending
 /// with no answer ever coming.
@@ -392,54 +404,30 @@ fn scanner_parameters_on_a_dead_connection_is_reported_not_dropped() {
 // ── unknown bar_size rejects at the engine too (backstop for
 // raw control-channel callers; the client validates synchronously) ──
 
+/// A bar size or a series this client cannot name is refused at the engine
+/// too, under the number for a malformed request rather than the data
+/// service's own, and no end follows the refusal.
 #[test]
-fn engine_rejects_unknown_bar_size_with_error_and_sentinel() {
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    let mut conn: Option<Connection> = None;
+fn engine_rejects_an_unknown_bar_size_or_series_with_an_error_alone() {
+    for (bar_size, what_to_show, named) in [("1 minute", "TRADES", "bar_size"), ("1 hour", "GRAVITY", "")] {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
 
-    hmds.send_historical_request_ex(9, 756733, "", "2 d", "1 minute", "TRADES",
-        true, false, false, "SPY", "STK", "SMART", &mut conn, &mut hb, &shared);
+        hmds.send_historical_request_ex(9, 756733, "", "2 D", bar_size, what_to_show,
+            true, false, false, "SPY", "STK", "SMART", &mut conn, &mut hb, &shared);
 
-    assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");
-    let errors = shared.reference.drain_historical_errors();
-    assert_eq!(errors.len(), 1);
-    assert_eq!(
-        errors[0].1, 321,
-        "the request is malformed, not a difficulty the service had with one it answered",
-    );
-    assert!(errors[0].2.contains("bar_size"), "got: {}", errors[0].2);
-    let hist = shared.reference.drain_historical_data();
-    assert_eq!(hist.len(), 1, "terminal sentinel must unblock waiters");
-    assert!(hist[0].1.is_complete);
-}
-
-/// The same for a series this client cannot name.
-///
-/// Its sibling above covers the bar size; this covers the other argument the
-/// same function reads, and pins both numbers so neither drifts back onto the
-/// data service's own.
-#[test]
-fn engine_rejects_unknown_what_to_show_with_error_and_sentinel() {
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    let mut conn: Option<Connection> = None;
-
-    hmds.send_historical_request_ex(9, 756733, "", "2 D", "1 hour", "GRAVITY",
-        true, false, false, "SPY", "STK", "SMART", &mut conn, &mut hb, &shared);
-
-    assert!(hmds.pending_historical.is_empty(), "a refused request does not go pending");
-    let errors = shared.reference.drain_historical_errors();
-    assert_eq!(errors.len(), 1);
-    assert_eq!(
-        errors[0].1, 321,
-        "the request is malformed, not a difficulty the service had with one it answered",
-    );
-    let hist = shared.reference.drain_historical_data();
-    assert_eq!(hist.len(), 1, "and a caller waiting on it is released");
-    assert!(hist[0].1.is_complete);
+        assert!(hmds.pending_historical.is_empty(), "{bar_size} {what_to_show}: a refused request does not go pending");
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].1, 321,
+            "the request is malformed, not a difficulty the service had with one it answered",
+        );
+        assert!(errors[0].2.contains(named), "got: {}", errors[0].2);
+        assert!(shared.reference.drain_historical_data().is_empty(), "{bar_size} {what_to_show}: and no end follows it");
+    }
 }
 
 // ── a query waits for the venue ──
@@ -915,12 +903,12 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
 
         let series = shared.reference.drain_historical_data();
         let errors = shared.reference.drain_historical_errors();
-        assert_eq!(series.len(), 1, "{what}: the stretches are filed as one series, or ended");
-        assert!(series[0].1.is_complete, "{what}: and it says it is the whole answer");
-        let bars: Vec<(String, f64, i64)> =
-            series[0].1.bars.iter().map(|b| (b.time.clone(), b.close, b.volume)).collect();
         match filed {
             Ok(wanted) => {
+                assert_eq!(series.len(), 1, "{what}: the stretches are filed as one series");
+                assert!(series[0].1.is_complete, "{what}: and it says it is the whole answer");
+                let bars: Vec<(String, f64, i64)> =
+                    series[0].1.bars.iter().map(|b| (b.time.clone(), b.close, b.volume)).collect();
                 let wanted: Vec<(String, f64, i64)> =
                     wanted.iter().map(|(at, close, volume)| (at.to_string(), *close, *volume)).collect();
                 assert_eq!(bars, wanted, "{what}: oldest first across the stretches");
@@ -936,7 +924,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                 }
             }
             Err(why) => {
-                assert!(bars.is_empty(), "{what}: {bars:?}");
+                assert!(series.is_empty(), "{what}: no bar and no end: {series:?}");
                 assert_eq!(errors.len(), 1, "{what}: {errors:?}");
                 assert_eq!((errors[0].0, errors[0].1, errors[0].2.as_str()), (42, 162, why), "{what}");
             }
@@ -1091,9 +1079,9 @@ fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
 }
 
 /// When the venue refuses the actions the adjusted series needs, the request is
-/// a bar request that failed: it is answered on the bar channels — the error
-/// and the terminal sentinel — rather than handed back unadjusted or left
-/// waiting on a fold that will never come.
+/// a bar request that failed: it is told the error, and nothing after it, as a
+/// gateway tells it, rather than handed back unadjusted or left waiting on a
+/// fold that will never come.
 #[test]
 fn an_adjusted_request_whose_actions_are_refused_is_a_stated_refusal() {
     let (conn, mut peer) = Connection::for_test();
@@ -1121,10 +1109,10 @@ fn an_adjusted_request_whose_actions_are_refused_is_a_stated_refusal() {
     let errors = shared.reference.drain_historical_errors();
     assert_eq!(errors.len(), 1, "the caller is told why");
     assert_eq!(errors[0].0, 42);
-    let filed = shared.reference.drain_historical_data();
-    assert_eq!(filed.len(), 1, "and the series is ended so a waiting caller is released");
-    assert!(filed[0].1.is_complete);
-    assert!(filed[0].1.bars.is_empty(), "no unadjusted bar is handed back under the adjusted name");
+    assert!(
+        shared.reference.drain_historical_data().is_empty(),
+        "no unadjusted bar is handed back under the adjusted name, and no end follows",
+    );
 }
 
 /// And the stream half goes with it, on the same rule the batch keeps.
@@ -1406,10 +1394,11 @@ fn a_trades_request_with_an_action_nobody_can_name_is_refused() {
     let errors = shared.reference.drain_historical_errors();
     assert_eq!(errors.len(), 1, "the caller is told why");
     assert_eq!(errors[0].0, 42);
-    let filed = shared.reference.drain_historical_data();
-    assert_eq!(filed.len(), 1, "and the series is ended so a waiting caller is released");
-    assert!(filed[0].1.is_complete);
-    assert!(filed[0].1.bars.is_empty(), "no raw bar is handed back under an adjusted name");
+    assert!(
+        shared.reference.drain_historical_data().is_empty(),
+        "no raw bar is handed back under an adjusted name, and no end follows",
+    );
+    assert_eq!(over(&shared), [42], "and the request is over");
 }
 
 /// A gateway asks every bar query for a stock or a fund along the contract's
@@ -2708,27 +2697,57 @@ fn an_unreadable_eoq_page_withdraws_the_stream_at_the_venue() {
 /// whole request, and the number is freed with it. Left flagged, every later
 /// request under the number was refused as a duplicate of one the caller had
 /// been told had failed.
+///
+/// Its caller's side lets go of it too: at the refusal where its history is
+/// in, and once its history is filed where that was still being put together.
+/// Told the error alone, that side kept the request as one still kept up to
+/// date for the rest of the session.
 #[test]
 fn a_refused_stream_half_frees_the_number_it_was_kept_up_to_date_under() {
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    let mut conn: Option<Connection> = None;
-    hmds.keep_up_to_date_reqs.insert(9);
-    hmds.rtbar_subs.push(("rt_4002".to_string(), 9, None, 0.01, 1.0));
-    hmds.forming_bars.push(FormingBar {
-        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
-    });
-    let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<QueryError>\n\t<id>rt_4002</id>\n\t<error>no</error>\n</QueryError>\n";
-    let mut msg = Vec::new();
-    msg.extend_from_slice(b"35=W\x016118=");
-    msg.extend_from_slice(xml.as_bytes());
-    msg.push(0x01);
-    hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+    for history_in in [true, false] {
+        let mut hmds = HmdsState::new();
+        let (client, _rx, shared) = crate::api::client::tests::test_client();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        shared.reference.push_historical_taken(crate::bridge::HistoricalTaken {
+            req_id: 9, format_date: 1, end_date_time: String::new(), duration: "1 D".into(),
+            bar_size: "1 min".into(), keep_up_to_date: true,
+        });
+        if history_in {
+            shared.reference.push_historical_data(9, crate::control::historical::HistoricalResponse {
+                query_id: String::new(), timezone: String::new(), is_complete: true, bars: Vec::new(),
+            });
+        } else {
+            hmds.held.push(HeldSeries {
+                req_id: 9, fold: Fold::None, bars: Vec::new(), timezone: String::new(),
+                actions_query: None, actions: None, complete: false, along: Default::default(),
+            });
+        }
+        client.process_msgs(&mut crate::api::wrapper::tests::RecordingWrapper::default());
+        assert_eq!(client.core.historical_answered(9), history_in, "its history is in: {history_in}");
+        hmds.pending_historical.push(("hist_4001".to_string(), 9));
+        hmds.keep_up_to_date_reqs.insert(9);
+        hmds.rtbar_subs.push(("rt_4002".to_string(), 9, None, 0.01, 1.0));
+        hmds.forming_bars.push(FormingBar {
+            req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
+        });
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<QueryError>\n\t<id>rt_4002</id>\n\t<error>no</error>\n</QueryError>\n";
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"35=W\x016118=");
+        msg.extend_from_slice(xml.as_bytes());
+        msg.push(0x01);
+        hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
 
-    assert!(hmds.rtbar_subs.iter().all(|(_, rid, ..)| *rid != 9), "the stream is gone");
-    assert!(!hmds.keep_up_to_date_reqs.contains(&9), "and the number is freed");
-    assert!(hmds.forming_bars.iter().all(|f| f.req_id != 9), "and the half-built bar with it");
+        assert!(hmds.rtbar_subs.iter().all(|(_, rid, ..)| *rid != 9), "the stream is gone");
+        assert!(!hmds.keep_up_to_date_reqs.contains(&9), "and the number is freed");
+        assert!(hmds.forming_bars.iter().all(|f| f.req_id != 9), "and the half-built bar with it");
+        // The history's last page, where it is still to come.
+        hmds.process_hmds_message(&super::make_bar_msg("hist_4001", true), &mut conn, &shared, &None, &mut hb);
+        let mut heard = crate::api::wrapper::tests::RecordingWrapper::default();
+        client.process_msgs(&mut heard);
+        assert!(heard.events.iter().any(|e| e.starts_with("error:9:")), "the caller is told: {:?}", heard.events);
+        assert!(!client.core.historical_answered(9), "and its caller's side lets go of it: {history_in}");
+    }
 }
 
 /// A series that cannot be folded fails the whole request, so the stream half
@@ -3106,8 +3125,7 @@ fn a_standalone_actions_query_the_engine_gives_up_holds_nothing() {
 /// send that fails is on no path that later fails it. The caller was told the
 /// actions could not be asked for and the series stayed held behind it —
 /// waiting on an answer to a request that never left — until the connection
-/// was torn down, when it was told a second time and given the end it should
-/// have had at once.
+/// was torn down, when it was told a second time.
 #[test]
 fn a_series_whose_actions_could_not_be_asked_for_is_let_go() {
     let mut hmds = HmdsState::new();
@@ -3130,10 +3148,8 @@ fn a_series_whose_actions_could_not_be_asked_for_is_let_go() {
     let errors = shared.reference.drain_historical_errors();
     assert_eq!(errors.len(), 1, "told once, here, rather than again at teardown");
     assert_eq!(errors[0].0, 21);
-    let ended = shared.reference.drain_historical_data();
-    assert_eq!(ended.len(), 1, "and given the end that lets a blocked caller go");
-    assert!(ended[0].1.is_complete);
-    assert!(ended[0].1.bars.is_empty());
+    assert!(shared.reference.drain_historical_data().is_empty(), "and no end follows it");
+    assert_eq!(over(&shared), [21], "and the request is over");
 }
 
 /// A request kept up to date whose batch the venue refuses is a request that
@@ -3260,6 +3276,9 @@ fn a_disconnect_does_not_resurrect_a_failed_request_s_stream() {
 /// contracts were sorted together and folded on the first contract's actions,
 /// and the caller was handed one series with two contracts in it and two ends.
 /// The second request's own series was never completed and nothing sweeps it.
+///
+/// A head timestamp or a histogram under the number is refused alike, as a
+/// gateway refuses either under the number of a live bar request.
 #[test]
 fn a_number_already_answering_a_historical_query_is_not_given_another() {
     let mut hmds = HmdsState::new();
@@ -3287,17 +3306,32 @@ fn a_number_already_answering_a_historical_query_is_not_given_another() {
         1,
         "only one query is in flight under the number",
     );
+    // A head timestamp and a histogram under it are refused alike, as a
+    // gateway refuses them.
+    hmds.send_head_timestamp_request(9, &crate::types::ContractRef {
+        con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default()
+    }, "TRADES", true, false, 1, &mut conn, &mut hb, &shared);
+    hmds.send_histogram_request(9, 756733, "STK", "SMART", true, "3 days", &mut conn, &mut hb, &shared);
+    assert!(
+        hmds.pending_head_ts.is_empty() && hmds.pending_histogram.is_empty(),
+        "neither goes out under the number",
+    );
     let errors = shared.reference.drain_historical_errors();
-    assert_eq!(errors.len(), 1, "the caller is told: {errors:?}");
-    assert_eq!(errors[0], (9, 386, errors[0].2.clone()), "under the number that names it");
-    // Nothing ends the request that is answering. Released with an empty
-    // terminal response under the number, the live request's end fired
-    // before its bars had arrived, and every bar after went out as an update.
-    // No waiting call can be refused here — they number themselves apart.
+    assert_eq!(errors.len(), 3, "the caller is told each time: {errors:?}");
+    assert!(
+        errors.iter().all(|(id, code, text)| {
+            (*id, *code, text.as_str()) == (9, 386, "Duplicate ticker ID for API historical data query")
+        }),
+        "under the number that names it, in a gateway's words: {errors:?}",
+    );
+    // Nothing ends the request that is answering: ended, its caller's side
+    // let go of what it keeps of it, and its bars went out dated as nobody
+    // asked.
     assert!(
         shared.reference.drain_historical_data().is_empty(),
         "and the request that is answering is left to answer",
     );
+    assert!(over(&shared).is_empty(), "and is not told it is over");
 }
 
 /// A number already running a scan does not take a second.
@@ -3335,7 +3369,7 @@ fn a_number_already_running_a_scan_is_not_given_another() {
 ///
 /// The unreadable page was warned and the stream left to go on, which is
 /// right once the history is in; before that there is no history to go on
-/// from — no end fired, later pages went on extending a series nobody could
+/// from — nothing was told, later pages went on extending a series nobody could
 /// be handed, and the number could never be used again.
 #[test]
 fn an_unreadable_page_ends_a_kept_up_to_date_request_still_assembling() {
@@ -3359,7 +3393,7 @@ fn an_unreadable_page_ends_a_kept_up_to_date_request_still_assembling() {
     assert!(hmds.held.iter().all(|a| a.req_id != 9), "and the series with it");
     assert!(!hmds.keep_up_to_date_reqs.contains(&9), "and the stream half");
     assert!(shared.reference.drain_historical_errors().iter().any(|e| e.0 == 9), "the caller is told");
-    assert!(shared.reference.drain_historical_data().iter().any(|(rid, r)| *rid == 9 && r.is_complete), "and given its end");
+    assert!(shared.reference.drain_historical_data().is_empty(), "and no end follows it");
 }
 
 /// A scan whose subscribe did not go out is refused, not recorded as running.

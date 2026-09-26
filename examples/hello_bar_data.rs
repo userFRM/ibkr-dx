@@ -13,7 +13,7 @@ use ibkr_dx::api::wrapper::Wrapper;
 #[derive(Default)]
 struct State {
     bars: Vec<BarData>,
-    end_seen: bool,
+    done: bool,
 }
 
 struct BarsWrapper {
@@ -25,10 +25,14 @@ impl Wrapper for BarsWrapper {
         self.state.lock().unwrap().bars.push(bar.clone());
     }
     fn historical_data_end(&mut self, _req_id: i64, _start: &str, _end: &str) {
-        self.state.lock().unwrap().end_seen = true;
+        self.state.lock().unwrap().done = true;
     }
     fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         eprintln!("[error] req_id={req_id} code={code} msg={msg}");
+        // A refused request is told the error alone: no end follows it.
+        if req_id == 1 {
+            self.state.lock().unwrap().done = true;
+        }
     }
 }
 
@@ -56,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         client.process_msgs(&mut wrapper);
-        if state.lock().unwrap().end_seen { break; }
+        if state.lock().unwrap().done { break; }
         std::thread::sleep(Duration::from_millis(20));
     }
 

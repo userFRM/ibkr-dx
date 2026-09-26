@@ -174,6 +174,7 @@ pub struct ReferenceState {
     ours_in_flight: Mutex<std::collections::HashSet<(RecordKind, i64)>>,
     pub(super) historical_taken: Queue<HistoricalTaken>,
     pub(super) historical_data: Queue<(u32, HistoricalResponse)>,
+    pub(super) historical_over: Queue<u32>,
     pub(super) head_timestamps: Queue<(u32, HeadTimestampResponse)>,
     pub(super) contract_details: Queue<(u32, ContractDefinition)>,
     pub(super) contract_details_end: Queue<u32>,
@@ -372,6 +373,7 @@ impl ReferenceState {
             ours_in_flight: Mutex::new(Default::default()),
             historical_taken: Queue::new(stamps),
             historical_data: Queue::with_capacity(stamps, 16),
+            historical_over: Queue::new(stamps),
             head_timestamps: Queue::with_capacity(stamps, 8),
             contract_details: Queue::with_capacity(stamps, 16),
             contract_details_end: Queue::with_capacity(stamps, 8),
@@ -1113,6 +1115,13 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
         self.historical_data.push((req_id, response));
+    }
+
+    /// A bar request ended with no end of its own: refused, or failed after
+    /// its history. A gateway states only the error, and nothing answers under
+    /// the number after it.
+    #[doc(hidden)] pub fn push_historical_over(&self, req_id: u32) {
+        self.historical_over.push(req_id);
     }
 
     #[doc(hidden)] pub fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {

@@ -1192,10 +1192,16 @@ impl HmdsState {
                                 // its number is freed: left flagged, every
                                 // later request under it was refused as a
                                 // duplicate of one the caller was told failed.
+                                //
+                                // Past its history the request ends here, and
+                                // its caller's side is told so; one whose
+                                // history is still being put together is told
+                                // once that history is filed.
                                 if self.keep_up_to_date_reqs.remove(&req_id) {
                                     self.forming_bars.retain(|f| f.req_id != req_id);
                                     if !self.held.iter().any(|h| h.req_id == req_id) {
                                         self.pending_historical.retain(|(_, rid)| *rid != req_id);
+                                        from_historical = true;
                                     }
                                 }
                                 released_req_id = Some(req_id);
@@ -1245,9 +1251,8 @@ impl HmdsState {
                         }
                         // A bar request whose pages, or whose actions, the venue
                         // refused is a bar request that failed: what was held is
-                        // dropped and the caller is answered on the bar channels,
-                        // terminal sentinel and all, rather than left waiting on
-                        // a series that will never complete.
+                        // dropped and the caller is told why, rather than left
+                        // waiting on a series that will never complete.
                         //
                         // Only for a refusal of one of its own two queries. The
                         // lists above do not share a number space — the comment
@@ -1289,22 +1294,11 @@ impl HmdsState {
                                 log::warn!(
                                     "HMDS QueryError req_id={req_id} query_id={query_id:?}: {error_msg}"
                                 );
-                                shared.reference.push_historical_error(req_id, HMDS_ERROR_CODE, error_msg.clone());
-                                // Surface a terminal sentinel for historical-bar
-                                // consumers
-                                // that wait on historical_data_end. Empty response with
-                                // is_complete=true unblocks the existing dispatch path.
-                                if from_historical {
-                                    shared.reference.push_historical_data(
-                                        req_id,
-                                        crate::control::historical::HistoricalResponse {
-                                            query_id: query_id.clone().unwrap_or_default(),
-                                            timezone: String::new(),
-                                            is_complete: true,
-                                            bars: Vec::new(),
-                                        },
-                                    );
-                                }
+                                // A bar request is told the error alone, as
+                                // a gateway tells it, and ends on it.
+                                super::push_hmds_refusal(
+                                    shared, req_id, HMDS_ERROR_CODE, error_msg, from_historical,
+                                );
                             }
                             None => {
                                 log::warn!(
@@ -2107,6 +2101,29 @@ fn build_tbt_query(
         hb.last_hmds_sent = Instant::now();
     }
 
+    /// Whether a bar request answers under `req_id`, its series held or its
+    /// query open, and if so the second query refused under it, as a gateway
+    /// refuses a bar request, a head timestamp or a histogram under the number
+    /// of a live bar request, before anything of the second exists.
+    pub(crate) fn refused_as_a_second_query(&self, req_id: u32, shared: &SharedState) -> bool {
+        let answering = self.held.iter().any(|held| held.req_id == req_id)
+            || self.pending_historical.iter().any(|(_, id)| *id == req_id);
+        if answering {
+            // Refused without ending anything: the request that is answering
+            // goes on answering. Ended, its caller's side would let go of what
+            // it keeps of the live one, whose bars would then go out dated as
+            // nobody asked.
+            super::push_hmds_refusal(
+                shared,
+                req_id,
+                DUPLICATE_HISTORICAL_QUERY,
+                "Duplicate ticker ID for API historical data query".into(),
+                false,
+            );
+        }
+        answering
+    }
+
     /// Whether the query went out. A refusal — a second query under a live
     /// number, an argument the query cannot state — is reported to the caller
     /// here and answered false, so the caller sends nothing else on its
@@ -2157,25 +2174,7 @@ fn build_tbt_query(
         // Refused here, which is the one place both surfaces and a raw
         // control-channel caller pass through, and before the query id is
         // drawn so nothing is left behind.
-        if self.held.iter().any(|held| held.req_id == req_id)
-            || self.pending_historical.iter().any(|(_, id)| *id == req_id)
-        {
-            // Refused without ending anything: the request that is answering
-            // goes on answering. Released with an empty terminal response
-            // under the number, the live request's end fired before its bars
-            // had arrived and every bar after went out as an update. No
-            // waiting call can reach this refusal — they number themselves
-            // apart — so nothing waits on that sentinel.
-            super::push_hmds_refusal(
-                shared,
-                req_id,
-                DUPLICATE_HISTORICAL_QUERY,
-                format!(
-                    "request {req_id} is already answering a historical query: \
-                     withdraw it before asking for another under the same number",
-                ),
-                false,
-            );
+        if self.refused_as_a_second_query(req_id, shared) {
             return false;
         }
 
@@ -2545,9 +2544,9 @@ fn build_tbt_query(
     ///
     /// Filed as one complete response, which the dispatch pass delivers bar by
     /// bar and then ends. A fold that cannot be made — an action this client
-    /// cannot classify, a factor it cannot read — is a stated refusal with the
-    /// terminal sentinel rather than the raw price handed back under an
-    /// adjusted name.
+    /// cannot classify, a factor it cannot read — is a stated refusal that ends
+    /// the request rather than the raw price handed back under an adjusted
+    /// name.
     fn try_file_held(
         &mut self, req_id: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState,
         shared: &SharedState, event_tx: &Option<EventSink>,
@@ -2621,6 +2620,12 @@ fn build_tbt_query(
                 shared.reference.push_historical_data(entry.req_id, resp);
                 if let Some(data) = for_event {
                     emit(event_tx, Event::HistoricalData { req_id: entry.req_id, data });
+                }
+                // A request not kept up to date ends with its history, and
+                // its caller's side is told so: one whose stream the venue
+                // refused while this was put together no longer is.
+                if !self.keep_up_to_date_reqs.contains(&entry.req_id) {
+                    shared.reference.push_historical_over(entry.req_id);
                 }
             }
             Err(why) => {
@@ -2727,6 +2732,9 @@ fn build_tbt_query(
     }
 
     pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, contract: &crate::types::ContractRef, what_to_show: &str, use_rth: bool, include_expired: bool, format_date: i32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        if self.refused_as_a_second_query(req_id, shared) {
+            return;
+        }
         let con_id = contract.con_id;
         // The head-timestamp table, which is the bar one and the rate: this
         // was a third divergent copy with a silent TRADES fallback.
@@ -3124,15 +3132,7 @@ fn build_tbt_query(
             shared.reference.stop_waiting_for_adjustments(req_id);
         } else {
             self.held.retain(|a| a.req_id != req_id);
-            shared.reference.push_historical_data(
-                req_id,
-                crate::control::historical::HistoricalResponse {
-                    query_id: String::new(),
-                    timezone: String::new(),
-                    is_complete: true,
-                    bars: Vec::new(),
-                },
-            );
+            shared.reference.push_historical_over(req_id);
         }
     }
 
@@ -3361,7 +3361,11 @@ fn build_tbt_query(
         }
     }
 
-    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        if self.refused_as_a_second_query(req_id, shared) {
+            return;
+        }
         let req = crate::control::histogram::HistogramRequest {
             // Its own query name, so two histograms in flight are told apart
             // by the id each goes out under.
@@ -3572,7 +3576,7 @@ fn scaled_size(counted: u64, size_tick: f64) -> i64 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 /// Whether a response answers the query named by `qid`.
 ///
