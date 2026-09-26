@@ -356,13 +356,13 @@ impl EClient {
                 self.connected.store(false, Ordering::Release);
                 if !by_design {
                     say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 1100,
-                        "Connectivity between client and server has been lost");
+                        &shared.reference.connectivity_lost());
                 }
             }
-            Record::ConnectionRestored => {
+            Record::ConnectionRestored(farms) => {
                 self.connected.store(true, Ordering::Release);
                 say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 1102,
-                    "Connectivity between client and server has been restored - data maintained");
+                    &shared.reference.connectivity_restored(&farms));
             }
             // One of the connections the venue keeps data on went away or
             // came back, under the number the venue reports it under.

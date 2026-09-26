@@ -4079,9 +4079,8 @@ impl CcpState {
         // say the venue had not been heard from since.
         for (_, portfolio) in shared.account_portfolios() { portfolio.account_download_is_pending(); }
         self.fail_pending_lookups(shared, event_tx);
-        // Don't emit Event::Disconnected — auto-reconnect handles CCP drops
-        // transparently.
-        // Python is only notified if reconnect exhausts retries.
+        // The client is told of the drop by the loop's next pass, which tells
+        // it of every drop of this connection, however it is found.
     }
 
     /// Report every lookup still waiting on the connection as failed, and

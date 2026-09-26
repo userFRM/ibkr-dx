@@ -415,13 +415,14 @@ impl SharedState {
         self.connection_lost_by_design.load(Ordering::Acquire)
     }
 
-    /// The connection came back after a loss. Hot-loop side. Said once, as
-    /// the connected flag flips back.
+    /// The connection came back after a loss, with what is said of the data
+    /// farms beside it. Hot-loop side. Said once, as the connected flag flips
+    /// back.
     #[doc(hidden)]
     #[inline]
-    pub fn set_connection_restored(&self) {
+    pub fn set_connection_restored(&self, farms: String) {
         if !self.link_up.swap(true, Ordering::AcqRel) {
-            self.session_records.push(Record::ConnectionRestored);
+            self.session_records.push(Record::ConnectionRestored(farms));
         }
         self.notify();
     }
@@ -441,7 +442,7 @@ impl SharedState {
     /// The same for the notices that it came back.
     #[doc(hidden)]
     pub fn take_connection_restored(&self) -> bool {
-        !self.session_records.take_if(|r| matches!(r, Record::ConnectionRestored)).is_empty()
+        !self.session_records.take_if(|r| matches!(r, Record::ConnectionRestored(_))).is_empty()
     }
 
     /// One of the connections the venue keeps data on went away or came back.
@@ -687,7 +688,7 @@ mod tests {
             .into_iter()
             .filter_map(|(_, r)| match r {
                 Record::ConnectionLost { by_design } => Some(Some(by_design)),
-                Record::ConnectionRestored => Some(None),
+                Record::ConnectionRestored(_) => Some(None),
                 _ => None,
             })
             .collect()
@@ -723,13 +724,13 @@ mod tests {
     #[test]
     fn a_loss_and_its_recovery_are_each_one_record() {
         let shared = SharedState::new();
-        shared.set_connection_restored();
+        shared.set_connection_restored(String::new());
         assert!(connection_records(&shared).is_empty(), "a recovery from nothing says nothing");
 
         shared.set_connection_lost();
         shared.set_connection_lost();
-        shared.set_connection_restored();
-        shared.set_connection_restored();
+        shared.set_connection_restored(String::new());
+        shared.set_connection_restored(String::new());
         shared.set_connection_lost();
         assert_eq!(
             connection_records(&shared),

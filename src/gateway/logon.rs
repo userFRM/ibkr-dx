@@ -77,6 +77,10 @@ pub(super) struct LogonAck {
     pub refusals_told: bool,
     /// The broker the login is with where the logon names one, tag 6053.
     pub broker: String,
+    /// What the logon names the broker for short, tag 6322.
+    pub short_broker: String,
+    /// The product the logon names this session as, tag 6054.
+    pub product: String,
     /// What the logon states about orders for an amount of money: the
     /// security types and order types it takes them on (tags 8334 and 8351),
     /// whether the account takes them (tag 8335), and each product's default
@@ -359,6 +363,8 @@ impl LogonAck {
             if let Some(v) = fields.get(&6571) { keep_first(&mut ack.white_branding_id, v, "6571"); }
             if let Some(v) = fields.get(&6130) { ack.refusals_told |= v.starts_with('1'); }
             if let Some(v) = fields.get(&6053) { keep_first(&mut ack.broker, v, "6053"); }
+            if let Some(v) = fields.get(&6322) { keep_first(&mut ack.short_broker, v, "6322"); }
+            if let Some(v) = fields.get(&6054) { keep_first(&mut ack.product, v, "6054"); }
             if let Some(v) = fields.get(&8334) { keep_first(&mut ack.money_orders.types, v, "8334"); }
             if let Some(v) = fields.get(&8351) { keep_first(&mut ack.money_orders.order_types, v, "8351"); }
             if let Some(v) = fields.get(&8335) { ack.money_orders.account |= v.contains('1'); }
@@ -1650,8 +1656,8 @@ mod tests {
     /// it: a list with an account in it. A gateway takes `AllNonProp` for the
     /// account figures only where it does. So are whether it asks for the
     /// venue's refusals on status reports to be told, the login's broker, what
-    /// it states about orders for an amount of money, and the part of a unit
-    /// it has sizes shown to.
+    /// it states about orders for an amount of money, the part of a unit it
+    /// has sizes shown to, and the names a connectivity notice gives each end.
     #[test]
     fn the_logon_says_whether_it_names_accounts_all_non_prop_leaves_out() {
         for (stated, named) in [(Some("DU2,DU3"), true), (Some(","), false), (Some(""), false), (None, false)] {
@@ -1692,6 +1698,11 @@ mod tests {
         let mut wire = answered_with(&[&[(35, "A"), (1, "DU111111"), (8079, "0.000001")]]);
         let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
         assert_eq!(ack.size_fraction, "0.000001");
+        // And what it names the broker for short, and the product this session
+        // is, which name the two ends of a connectivity notice.
+        let mut wire = answered_with(&[&[(35, "A"), (1, "DU111111"), (6322, "Partner"), (6054, "Partner Trader")]]);
+        let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
+        assert_eq!((ack.short_broker.as_str(), ack.product.as_str()), ("Partner", "Partner Trader"));
     }
 
     /// The ACK is not always the first message the venue sends, and what it

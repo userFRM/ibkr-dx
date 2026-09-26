@@ -1099,7 +1099,7 @@ impl EClient {
     /// The connection coming back, as the engine says it (test-only).
     #[doc(hidden)]
     fn _test_push_reconnect_event(&self) -> PyResult<()> {
-        self.shared_state()?.set_connection_restored();
+        self.shared_state()?.set_connection_restored(String::new());
         Ok(())
     }
 
@@ -1125,7 +1125,7 @@ impl EClient {
     /// The same as `_test_push_reconnect_event` (test-only).
     #[doc(hidden)]
     fn _test_set_connection_restored(&self) -> PyResult<()> {
-        self.shared_state()?.set_connection_restored();
+        self.shared_state()?.set_connection_restored(String::new());
         Ok(())
     }
 

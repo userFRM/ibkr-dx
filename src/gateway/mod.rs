@@ -358,6 +358,9 @@ pub struct Gateway {
     pub refusals_told: bool,
     /// The broker the login is with where the logon names one.
     pub broker: String,
+    /// What the logon names the broker for short, and the product it names
+    /// this session as.
+    pub names: (String, String),
     /// What the logon states about orders for an amount of money.
     pub money_orders: crate::bridge::MoneyOrderTerms,
     /// The part of a unit a size is shown to on a contract that states no
@@ -2469,6 +2472,8 @@ impl Gateway {
             white_branding_id,
             refusals_told,
             broker,
+            short_broker,
+            product,
             money_orders,
             size_fraction,
             raw_misc_urls,
@@ -2658,6 +2663,7 @@ impl Gateway {
             white_branding_id,
             refusals_told,
             broker,
+            names: (short_broker, product),
             money_orders,
             size_fraction,
             misc_urls: parse_misc_urls(&raw_misc_urls),
@@ -2820,6 +2826,7 @@ impl Gateway {
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
         shared.reference.set_refusals_told(self.refusals_told);
         shared.reference.set_broker(self.broker.clone());
+        shared.reference.set_names(self.names.0.clone(), self.names.1.clone());
         shared.reference.set_money_orders(self.money_orders.clone());
         shared.reference.set_size_fraction(self.size_fraction.clone());
 

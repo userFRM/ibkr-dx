@@ -3741,7 +3741,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
 
             // It came back, and went again before anybody read either.
             shared.set_connection_lost();
-            shared.set_connection_restored();
+            shared.set_connection_restored(String::new());
             shared.set_connection_lost();
 
             client.dispatch_once(py, &shared).unwrap();
@@ -3773,7 +3773,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 "an outage nobody was told of still reads as connected",
             );
 
-            shared.set_connection_restored();
+            shared.set_connection_restored(String::new());
             client.dispatch_once(py, &shared).unwrap();
             assert!(
                 client.connected.load(Ordering::Relaxed),

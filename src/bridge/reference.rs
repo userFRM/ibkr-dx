@@ -311,6 +311,9 @@ pub struct ReferenceState {
     refusals_told: AtomicBool,
     /// The broker the logon names the login as being with (tag 6053).
     broker: Mutex<String>,
+    /// What the logon names the broker for short (tag 6322), and the product
+    /// it names this session as (tag 6054), each empty where it names none.
+    names: Mutex<(String, String)>,
     /// What the logon states about orders for an amount of money.
     money_orders: Mutex<MoneyOrderTerms>,
     /// The part of a unit a size is shown to on a contract that states no
@@ -436,6 +439,7 @@ impl ReferenceState {
             all_non_prop_leaves_out: AtomicBool::new(false),
             refusals_told: AtomicBool::new(false),
             broker: Mutex::new(String::new()),
+            names: Mutex::new((String::new(), String::new())),
             money_orders: Mutex::new(MoneyOrderTerms::default()),
             size_fraction: Mutex::new(String::new()),
             executions_held_from: Mutex::new(None),
@@ -1606,6 +1610,45 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_broker(&self, broker: String) {
         *self.broker.lock().unwrap() = broker;
+    }
+
+    #[doc(hidden)] pub fn set_names(&self, short_broker: String, product: String) {
+        *self.names.lock().unwrap() = (short_broker, product);
+    }
+
+    /// What a gateway says as the trading connection goes: 1100.
+    pub(crate) fn connectivity_lost(&self) -> String {
+        format!("Connectivity between {} has been lost.", self.connectivity_between())
+    }
+
+    /// What a gateway says as it comes back: 1102, with the data farms as they
+    /// stand.
+    pub(crate) fn connectivity_restored(&self, farms: &str) -> String {
+        format!("Connectivity between {} has been restored - data maintained.{farms}", self.connectivity_between())
+    }
+
+    /// Who the connectivity notices name at each end, as a gateway names them
+    /// from the logon: the broker's short name, or IBKR where the logon names
+    /// Interactive Brokers or no broker at all; and the product, TWS where it
+    /// is Trader Workstation and Trader Workstation where the logon names none.
+    fn connectivity_between(&self) -> String {
+        let broker = self.broker();
+        let (short_broker, product) = self.names.lock().unwrap().clone();
+        let company = if !short_broker.trim().is_empty() {
+            short_broker
+        } else if broker.is_empty() || broker.contains("Interactive Brokers") {
+            "IBKR".to_string()
+        } else {
+            broker
+        };
+        let product = if product.starts_with("Trader Workstation") {
+            "TWS".to_string()
+        } else if product.is_empty() {
+            "Trader Workstation".to_string()
+        } else {
+            product
+        };
+        format!("{company} and {product}")
     }
 
     /// What the logon states about orders for an amount of money.

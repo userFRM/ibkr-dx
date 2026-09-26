@@ -212,15 +212,17 @@ impl EClient {
             Record::ConnectionLost { by_design } => {
                 self.connected.store(false, Ordering::Release);
                 if !by_design {
-                    wrapper.error_from(ErrorOrigin::Session, raised_now(), 1100, "Connectivity between client and server has been lost", "");
+                    wrapper.error_from(ErrorOrigin::Session, raised_now(), 1100, &self.shared.reference.connectivity_lost(), "");
                 }
             }
-            // 1102 rather than 1101: the reconnect re-establishes the
-            // subscriptions itself. Pushed only as the connection comes back
-            // after a loss that was pushed, so it always follows its 1100.
-            Record::ConnectionRestored => {
+            // 1102 rather than 1101: a gateway says 1101 only while
+            // contract-definition requests it sends in the background of its
+            // own are still unanswered, and this client sends no such
+            // requests. Pushed only as the connection comes back after a loss
+            // that was pushed, so it always follows its 1100.
+            Record::ConnectionRestored(farms) => {
                 self.connected.store(true, Ordering::Release);
-                wrapper.error_from(ErrorOrigin::Session, raised_now(), 1102, "Connectivity between client and server has been restored - data maintained", "");
+                wrapper.error_from(ErrorOrigin::Session, raised_now(), 1102, &self.shared.reference.connectivity_restored(&farms), "");
             }
             // One of the connections the venue keeps data on went away or came
             // back, said under the number the venue reports it under. A

@@ -1975,7 +1975,7 @@ fn a_restore_without_a_loss_the_caller_saw_is_not_announced() {
 
     // The surface believes it is connected — it never processed a loss. A
     // restore lands on its own.
-    shared.set_connection_restored();
+    shared.set_connection_restored(String::new());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(
@@ -1986,7 +1986,7 @@ fn a_restore_without_a_loss_the_caller_saw_is_not_announced() {
     // A loss the caller is told about, then a recovery, is announced.
     shared.set_connection_lost();
     client.process_msgs(&mut w);
-    shared.set_connection_restored();
+    shared.set_connection_restored(String::new());
     client.process_msgs(&mut w);
     assert!(
         w.events.iter().any(|e| e.starts_with("error:-1:1102:")),
@@ -1995,38 +1995,52 @@ fn a_restore_without_a_loss_the_caller_saw_is_not_announced() {
 }
 
 /// A loss and the recovery from it, both queued before a read, are said in
-/// the order they happened, and the session reads as connected after them.
+/// the order they happened, in a gateway's words, and the session reads as
+/// connected after them.
 ///
 /// Each is a record pushed as the connection flag flips, so the read hands
 /// them over in their order rather than reconciling two flags it happens to
-/// find raised together.
+/// find raised together. The words name each end as a gateway names it from
+/// the logon, and the recovery states the data farms as they stand.
 #[test]
 fn a_loss_and_its_recovery_in_one_read_are_said_in_order() {
-    let (client, _rx, shared) = test_client();
-    assert!(client.is_connected(), "connected to begin with");
+    for (broker, short_broker, product, between) in [
+        ("Interactive Brokers", "", "", "IBKR and Trader Workstation"),
+        ("", "", "", "IBKR and Trader Workstation"),
+        ("A Partner", "", "Trader Workstation", "A Partner and TWS"),
+        ("A Partner", "Partner", "Partner Trader", "Partner and Partner Trader"),
+    ] {
+        let (client, _rx, shared) = test_client();
+        assert!(client.is_connected(), "connected to begin with");
+        shared.reference.set_broker(broker.into());
+        shared.reference.set_names(short_broker.into(), product.into());
 
-    shared.set_connection_lost();
-    shared.set_connection_restored();
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
+        shared.set_connection_lost();
+        shared.set_connection_restored(" All data farms are connected: usfarm; ushmds.".into());
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
 
-    assert!(
-        client.is_connected(),
-        "the session came back and this surface holds it down: {:?}", w.events,
-    );
-    let announced: Vec<&String> = w
-        .events
-        .iter()
-        .filter(|e| e.starts_with("error:-1:1100:") || e.starts_with("error:-1:1102:"))
-        .collect();
-    assert_eq!(
-        announced.len(), 2,
-        "the loss and the recovery are both said: {:?}", w.events,
-    );
-    assert!(
-        announced[0].starts_with("error:-1:1100:"),
-        "and the loss is said before the recovery from it: {announced:?}",
-    );
+        assert!(
+            client.is_connected(),
+            "the session came back and this surface holds it down: {:?}", w.events,
+        );
+        let announced: Vec<&String> = w
+            .events
+            .iter()
+            .filter(|e| e.starts_with("error:-1:1100:") || e.starts_with("error:-1:1102:"))
+            .collect();
+        assert_eq!(
+            announced,
+            [
+                &format!("error:-1:1100:Connectivity between {between} has been lost."),
+                &format!(
+                    "error:-1:1102:Connectivity between {between} has been restored - data maintained. \
+                     All data farms are connected: usfarm; ushmds."
+                ),
+            ],
+            "the loss and then the recovery, as a gateway says them",
+        );
+    }
 }
 
 /// A session that goes away while a question is being answered still tells the
@@ -7549,7 +7563,7 @@ fn engine_connection_loss_fires_connection_closed_once() {
     assert!(!client.is_connected(), "is_connected must turn false");
 
     // Its return.
-    shared.set_connection_restored();
+    shared.set_connection_restored(String::new());
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("error:-1:1102:")), "{:?}", w.events);
     assert!(client.is_connected());
@@ -8050,7 +8064,7 @@ fn the_last_thing_the_connection_did_is_what_a_caller_is_told() {
 
     // Lost, recovered, and lost again before anyone looked.
     shared.set_connection_lost();
-    shared.set_connection_restored();
+    shared.set_connection_restored(String::new());
     shared.set_connection_lost();
     client.process_msgs(&mut w);
 
@@ -8068,7 +8082,7 @@ fn the_last_thing_the_connection_did_is_what_a_caller_is_told() {
     let (client, _rx, shared) = test_client();
     let mut w = RecordingWrapper::default();
     shared.set_connection_lost();
-    shared.set_connection_restored();
+    shared.set_connection_restored(String::new());
     client.process_msgs(&mut w);
     assert!(client.is_connected(), "the connection came back");
 }

@@ -223,7 +223,7 @@ fn the_sessions_words_and_a_streams_words_say_what_they_are_about() {
     let (client, _rx, shared) = test_client();
     client.map_req_instrument(4, 0);
     shared.set_connection_lost();
-    shared.set_connection_restored();
+    shared.set_connection_restored(String::new());
     shared.market.push_venue_error("the venue says so".into());
     shared.market.push_companion_refusal(0, 1, "not this series".into());
     shared.market.push_subscription_failure(0, "no such contract".into());

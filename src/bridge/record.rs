@@ -456,8 +456,9 @@ pub enum Record {
         /// A stop asked for, for which nothing is said: its end is `Closed`.
         by_design: bool,
     },
-    /// The connection came back after an announced loss.
-    ConnectionRestored,
+    /// The connection came back after an announced loss, with what is said of
+    /// the data farms beside it.
+    ConnectionRestored(String),
     /// One of the venue's data connections went away or came back.
     VenueData((VenueDataConnection, bool)),
     /// The session's last record.
