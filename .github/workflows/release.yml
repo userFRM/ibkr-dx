@@ -112,13 +112,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Intel macOS is built on the Apple silicon runner for the Intel
-        # target, with an Intel interpreter that runs there translated.
         platform:
           - { name: linux-x86_64, os: ubuntu-latest }
           - { name: linux-aarch64, os: ubuntu-24.04-arm }
           - { name: macos-arm64, os: macos-latest }
-          - { name: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, arch: x64 }
+          - { name: macos-x86_64, os: macos-15-intel }
           - { name: windows-x86_64, os: windows-latest }
         python: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
     steps:
@@ -128,7 +126,6 @@ jobs:
         id: python
         with:
           python-version: ${{ matrix.python }}
-          architecture: ${{ matrix.platform.arch }}
 
       - name: Build
         uses: PyO3/maturin-action@v1
@@ -139,7 +136,6 @@ jobs:
           # The TLS layer links OpenSSL, and the manylinux image carries the
           # library without its headers.
           before-script-linux: dnf install -y openssl-devel
-          target: ${{ matrix.platform.target }}
           args: >-
             --release --out dist --interpreter
             ${{ runner.os == 'Linux' && format('python{0}', matrix.python) || steps.python.outputs.python-path }}
