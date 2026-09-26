@@ -8259,6 +8259,32 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
     assert!((charged[0].commission_and_fees - 1.000003).abs() < 1e-9);
     assert_eq!(charged[0].currency, "USD", "as the venue charges it, not as the contract is priced");
     assert!(shared.orders.drain_charges().is_empty(), "read once");
+
+    // What the fill realised and a bond's yield, beside the charge: stated,
+    // unstated, and stated as nothing, which is how an opening fill reads.
+    for (exec_id, stated, (realized_pnl, yield_amount, yield_redemption_date)) in [
+        // From a captured session, a fill that closed a position.
+        ("00025b49.6ab28ffe.01.01", &[(6099, "90.482015"), (8189, "8.780597")][..], (90.482015, f64::MAX, 0)),
+        ("00025b49.6ab28ffe.02.01", &[], (f64::MAX, f64::MAX, 0)),
+        ("00025b49.6ab28ffe.03.01", &[(6099, "0")], (f64::MAX, f64::MAX, 0)),
+        ("00025b49.6ab28ffe.04.01", &[(6099, "0"), (236, "4.25"), (696, "20301215")], (f64::MAX, 4.25, 20301215)),
+    ] {
+        let shared = SharedState::new();
+        let mut parsed = std::collections::HashMap::from([
+            (crate::protocol::fix::TAG_EXEC_ID, exec_id.to_string()),
+            (crate::protocol::fix::TAG_TRADE_CHARGE, "13.022195".to_string()),
+            (crate::protocol::fix::TAG_TRADE_CHARGE_CURRENCY, "USD".to_string()),
+        ]);
+        parsed.extend(stated.iter().map(|(tag, value)| (*tag, value.to_string())));
+        super::handle_trade_charge(&parsed, &shared);
+        let charged = shared.orders.drain_charges();
+        assert_eq!(charged.len(), 1, "{exec_id}");
+        assert_eq!(
+            (charged[0].realized_pnl, charged[0].yield_amount, charged[0].yield_redemption_date),
+            (realized_pnl, yield_amount, yield_redemption_date),
+            "{exec_id}",
+        );
+    }
 }
 
 /// A record naming no execution, or stating no charge, says nothing — and

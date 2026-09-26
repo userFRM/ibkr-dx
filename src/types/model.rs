@@ -1758,8 +1758,9 @@ impl CommissionAndFeesReport {
     /// and a fill on a contract denominated in anything else would otherwise
     /// report a cost in a currency it was not charged in.
     ///
-    /// A fill states no realised P&L and no yield, and `f64::MAX` is how a
-    /// field carrying no value is written on this surface.
+    /// What it realised and a bond's yield are left unset, `f64::MAX`, which
+    /// is how a field carrying no value is written on this surface. The venue
+    /// states them beside the charge, where it has them.
     pub fn charged(exec_id: &str, commission_and_fees: f64, currency: &str) -> Self {
         Self {
             exec_id: exec_id.to_string(),

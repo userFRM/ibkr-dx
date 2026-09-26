@@ -187,7 +187,8 @@ fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
 ///
 /// The quantities and the price on this record are the same fill the
 /// execution report already carried, and are left alone: booking the fill
-/// from both is how it would be counted twice. Only what it cost is taken.
+/// from both is how it would be counted twice. Only what it cost and what it
+/// realised are taken.
 fn handle_trade_charge(parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
     let Some(exec_id) = parsed.get(&fix::TAG_EXEC_ID).filter(|s| !s.is_empty()) else {
         return;
@@ -199,11 +200,35 @@ fn handle_trade_charge(parsed: &std::collections::HashMap<u32, String>, shared: 
     else {
         return;
     };
-    shared.orders.push_charge(crate::types::model::CommissionAndFeesReport::charged(
-        exec_id,
-        charged,
-        parsed.get(&fix::TAG_TRADE_CHARGE_CURRENCY).map(String::as_str).unwrap_or(""),
-    ));
+    // What the fill realised (6099) and a bond's yield (236), where the record
+    // states them. One it does not state is unset, and so is one it states as
+    // "nan"; a figure it states and this cannot read leaves the record
+    // unreported, as a charge it cannot read does.
+    let figure = |tag| match parsed.get(&tag).map(String::as_str) {
+        None => Some(f64::MAX),
+        Some(stated) if stated.eq_ignore_ascii_case("nan") => Some(f64::MAX),
+        Some(stated) => stated.parse::<f64>().ok(),
+    };
+    let (Some(realized), Some(yield_amount)) = (figure(6099), figure(236)) else {
+        return;
+    };
+    shared.orders.push_charge(crate::types::model::CommissionAndFeesReport {
+        // Nothing realised is unset, as a gateway reports it: an opening fill
+        // states 0 here.
+        realized_pnl: if realized == 0.0 { f64::MAX } else { realized },
+        yield_amount,
+        // The redemption the yield is measured to, where 696 states it as a
+        // date.
+        yield_redemption_date: parsed.get(&696)
+            .filter(|date| date.len() == 8)
+            .and_then(|date| date.parse().ok())
+            .unwrap_or(0),
+        ..crate::types::model::CommissionAndFeesReport::charged(
+            exec_id,
+            charged,
+            parsed.get(&fix::TAG_TRADE_CHARGE_CURRENCY).map(String::as_str).unwrap_or(""),
+        )
+    });
 }
 
 /// What the venue says went wrong.

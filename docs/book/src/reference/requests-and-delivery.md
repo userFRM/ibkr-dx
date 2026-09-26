@@ -24,7 +24,9 @@ notices, registrations and order reports share that order. Quotes, positions,
 account figures and other conflated state follow the records of a read. A
 record arriving during a read waits for the next read. A fill and its status
 from one report are delivered as `order_status`, then `exec_details`; the
-commission report follows where the venue states it.
+commission report follows where the venue states it. It carries the realized
+P&L and a bond's yield where the venue states them beside the charge, and the
+unset value where it states none or, for the P&L, zero.
 
 Python request refusals also wait for `poll()` or `run()`. A 504 about a feed or
 trading connection that ended within an admitted session follows the earlier
