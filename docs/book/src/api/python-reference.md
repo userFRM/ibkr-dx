@@ -65,7 +65,7 @@ def disconnect()
 
 #### `is_connected`
 
-Whether there is a session to make requests on.  False before `connect` and after `disconnect`, and false from the moment the engine gives the session up — which it writes down itself. The record saying so is delivered only by a read, and a program that drives its own loop, or none at all, is told nowhere else: it read connected on a session that was over, and went on issuing requests into it. The Rust surface answers this the same way.
+Whether there is a session to make requests on.  False before `connect` and after `disconnect`, and false from the moment the engine gives the session up — which it writes down itself. True while a lost connection to the venue is being rebuilt, between the 1100 and the 1102, as a program connected to a gateway reads it: the gateway's socket stays up. The record saying so is delivered only by a read, and a program that drives its own loop, or none at all, is told nowhere else: it read connected on a session that was over, and went on issuing requests into it. The Rust surface answers this the same way.
 
 ```python
 def is_connected()
@@ -279,7 +279,7 @@ def get_account_id()
 
 #### `session_over`
 
-Whether this session is finished rather than merely disconnected: closed by `disconnect()`, or given up on by the engine. A loss the engine is still working on is neither — `is_connected()` reads false between the 1100 and the 1102, and a request made then is carried when the transports come back.
+Whether this session is finished rather than merely disconnected: closed by `disconnect()`, or given up on by the engine. A loss the engine is still working on is neither — `is_connected()` reads true between the 1100 and the 1102, and a request made then is carried when the transports come back.
 
 ```python
 def session_over()

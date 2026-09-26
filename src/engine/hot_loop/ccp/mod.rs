@@ -78,10 +78,9 @@ const COMPLETED_ORDERS_TIMEOUT: Duration =
 
 /// How long the question waits for the replay of what the account is working.
 ///
-/// The wait every other reader of that replay keeps, and for the same reason:
-/// an account with nothing working never names an order, so the replay ends
-/// without saying so and this is what says it has had long enough. Held for as
-/// long as the *window* instead, one question spent twelve seconds waiting and
+/// The wait every other reader of that replay keeps where the venue does not
+/// end the replay. Held for as long as the *window* instead, one question
+/// spent twelve seconds waiting and
 /// the window behind it another twelve, against a caller that waits fifteen —
 /// so the caller was handed an empty answer, or paid twelve seconds for one the
 /// venue gives at once, on every call and on exactly the accounts most likely
@@ -813,10 +812,6 @@ pub(crate) fn maturity_tag(maturity: &str) -> Option<u32> {
 /// indistinguishable from one that has not started.
 const RECOVERY_PUSH_GRACE: Duration = Duration::from_secs(30);
 
-/// The same wait once the push has sent its own terminator. What is coming has
-/// come; this only covers a fill report arriving just behind it.
-const RECOVERY_TERMINATOR_GRACE: Duration = Duration::from_secs(2);
-
 pub(crate) struct CcpState {
     /// Every execution this session has booked, kept for the session. Every
     /// logon states the day's executions again, and a gateway sets no bound on
@@ -836,14 +831,10 @@ pub(crate) struct CcpState {
     /// message behind — its evidence is an absence, and absence only means
     /// something once the recovery push is known to be complete. Armed
     /// generously at reconnect so the sweep still runs when the push says
-    /// nothing at all, and re-armed tightly when the push's own terminator
-    /// arrives. Cleared on a disconnect so a second drop before the
+    /// nothing at all, and brought to now by the report that ends the push.
+    /// Cleared on a disconnect so a second drop before the
     /// sweep cancels it rather than reaping against a dead session.
     pub(crate) recovery_sweep_at: Option<Instant>,
-    /// Whether this connection has hydrated an order from the server's account
-    /// of what is working. Separates the replay's terminator from the echo that
-    /// looks like it.
-    pub(crate) hydrated_any: bool,
     /// (req_id, is_single_shot). Single-shot = known-conId lookup whose
     /// first 35=d reply is also the last (server emits no 323=5/6 terminator
     /// for these). Multi-record by-symbol/matching-symbols requests push
@@ -1198,7 +1189,6 @@ impl CcpState {
             charges_told: HashMap::new(),
             disconnected: false,
             recovery_sweep_at: None,
-            hydrated_any: false,
             pending_secdef: Vec::new(),
             pending_matching_symbols: Vec::new(),
             matching_symbols_abandoned: None,
@@ -3935,13 +3925,11 @@ impl CcpState {
         // path and only one of the two callers was ever released. Asked one at
         // a time, each has a sentinel of its own.
         //
-        // The replay half of that wait has an end: an account with nothing
-        // working ends its replay without naming an order, and naming one is
-        // what says the replay has begun — so a question held for it would
-        // wait for ever on exactly the accounts most likely to ask. Held for
-        // as long as a replay could take, and then asked anyway. The window is
-        // not on a clock here: it has one of its own, and the sweep shuts it
-        // before it sends anything behind it.
+        // The replay half of that wait has an end: the replay's own, or, where
+        // the venue does not end it, as long as a replay could take, and then
+        // the question is asked anyway. The window is not on a clock here: it
+        // has one of its own, and the sweep shuts it before it sends anything
+        // behind it.
         let hold_until = *self
             .replay_hold_until
             .get_or_insert_with(|| Instant::now() + COMPLETED_ORDERS_HOLD);
@@ -4233,10 +4221,8 @@ impl CcpState {
         if self.completed_orders_open {
             return;
         }
-        // The replay of an account with nothing working ends without naming an
-        // order, and it is naming one that says the replay has begun — so a
-        // question held for it would wait for ever on such an account. Held
-        // for as long as the replay could take and then asked anyway.
+        // Held for the replay, and where the venue does not end it, for as
+        // long as the replay could take, and then asked anyway.
         if !shared.orders.replay_done() && Instant::now() < waited_since {
             return;
         }
@@ -4252,6 +4238,26 @@ impl CcpState {
         if *left > 0 {
             *left -= 1;
             self.send_completed_orders_request(asked_on, ccp_conn, hb, shared);
+        }
+    }
+
+    /// What the venue names on this connection is over, or an answer to what
+    /// it has finished is: the report stating its contract `*` ends both, as a
+    /// gateway reads it, on an account working nothing as on any other.
+    pub(crate) fn end_what_the_venue_names(&mut self, shared: &SharedState) {
+        // A caller waiting on the answer waits on this: the answer is a run of
+        // ordinary reports and nothing else says it is over.
+        if self.completed_orders_open {
+            self.completed_orders_open = false;
+            self.deliver_finished_orders(shared);
+            self.end_completed_orders(self.completed_orders_asked_on, shared);
+            log::info!("The venue has stated everything it has finished");
+        }
+        shared.orders.set_replay_done();
+        // What the drop left in doubt is judged now: the venue has named what
+        // it was going to name.
+        if self.recovery_sweep_at.is_some() {
+            self.recovery_sweep_at = Some(Instant::now());
         }
     }
 
@@ -4300,7 +4306,6 @@ impl CcpState {
         // it Uncertain — while the venue's account was still on its way, which
         // is how the same order is placed twice. Cleared here, that caller
         // waits for the new push the way it waited for the first.
-        self.hydrated_any = false;
         shared.orders.replay_is_pending();
         // And the account itself. The same flag, for the same reason: a
         // caller asking what the account holds was answered from the pre-drop

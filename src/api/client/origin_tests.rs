@@ -188,34 +188,6 @@ fn the_executions_notice_does_not_end_the_request_and_its_answer_follows() {
     );
 }
 
-/// The open-orders notice is not the question's end: the orders and their
-/// end follow it.
-#[test]
-fn the_open_orders_notice_does_not_end_the_question_and_its_answer_follows() {
-    let (client, rx, shared) = test_client();
-    // The venue has begun naming what is working and does not finish within
-    // the wait.
-    shared.orders.replay_is_pending();
-    shared.orders.note_naming_began();
-    client.track_order_for_test(3, spy(), limit(), 0);
-    client.req_open_orders();
-    crate::api::client::tests::the_engine_answers(&rx, &shared);
-    let mut told = Told::default();
-    client.process_msgs(&mut told);
-    assert_eq!(
-        told.0,
-        [
-            format!(
-                "{:?} {}",
-                ErrorOrigin::Question { q: Question::OpenOrders, ends: false },
-                crate::error_codes::Refusal::NO_ANSWER,
-            ),
-            "open_order 3".to_string(),
-            "open_order_end".to_string(),
-        ],
-    );
-}
-
 /// What belongs to no request is the session's; a refusal ends its request,
 /// and a word about a companion of a quote does not end the quote.
 #[test]

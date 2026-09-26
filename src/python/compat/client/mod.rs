@@ -719,6 +719,9 @@ impl EClient {
     ///
     /// False before `connect` and after `disconnect`, and false from the
     /// moment the engine gives the session up — which it writes down itself.
+    /// True while a lost connection to the venue is being rebuilt, between the
+    /// 1100 and the 1102, as a program connected to a gateway reads it: the
+    /// gateway's socket stays up.
     /// The record saying so is delivered only by a read, and a program that
     /// drives its own loop, or none at all, is told nowhere else: it read
     /// connected on a session that was over, and went on issuing requests
@@ -735,7 +738,8 @@ impl EClient {
     // and the doc says why. Not a stand-in: a number nothing stated is worse
     // than a clear absence, because a program decides on it.
 
-    /// No session: before `connect`, after `disconnect`, and after a loss.
+    /// No session: before `connect`, after `disconnect`, and after the engine
+    /// gives the session up.
     #[classattr]
     const DISCONNECTED: i32 = 0;
     /// The length of `connect`: the connection is claimed before the logon and
@@ -1082,7 +1086,7 @@ impl EClient {
 
     /// Whether this session is finished rather than merely disconnected:
     /// closed by `disconnect()`, or given up on by the engine. A loss the
-    /// engine is still working on is neither — `is_connected()` reads false
+    /// engine is still working on is neither — `is_connected()` reads true
     /// between the 1100 and the 1102, and a request made then is carried when
     /// the transports come back.
     fn session_over(&self) -> bool {
@@ -1603,8 +1607,8 @@ impl EClient {
     /// before they land, the floor is nothing and the id handed out is one a
     /// fill spent long ago, which the venue refuses as a duplicate — so the
     /// first order of a session is the one that cannot be placed. Bounded, and
-    /// paid once per connection, because an account with nothing working never
-    /// sees the replay end. The interpreter is released for the wait. Answers
+    /// paid once per connection, so a naming that does not end does not hold
+    /// the caller. The interpreter is released for the wait. Answers
     /// `false` where the bound ran out first, or where no session has come up
     /// to name anything.
     pub(crate) fn wait_for_the_replay(&self, py: Python<'_>) -> bool {
@@ -3744,26 +3748,27 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     ///
     /// The engine's flags say which way the connection last went; the events
     /// are the announcement, and the channel carrying them drops what it
-    /// cannot hold. A restore still queued when the session went again was
-    /// read as the state, so this surface reported a dead session as up while
-    /// the other read it as down.
+    /// cannot hold. A restore still queued when the engine gave the session
+    /// up was read as the state, so this surface reported a dead session as
+    /// up while the other read it as down.
     #[test]
     fn a_restore_left_in_the_backlog_is_not_read_as_the_state() {
         Python::initialize();
         Python::attach(|py| {
             let (client, _rx, shared, _w) = wired_client(py);
             let client = client.borrow(py);
+            client.connected.store(true, Ordering::Relaxed);
 
-            // It came back, and went again before anybody read either.
+            // It came back, and the session ended before anybody read either.
             shared.set_connection_lost();
             shared.set_connection_restored(String::new());
-            shared.set_connection_lost();
+            shared.close_admission();
 
             client.dispatch_once(py, &shared).unwrap();
 
             assert!(
-                !client.connected.load(Ordering::Relaxed),
-                "the session is down, whatever is still queued behind that",
+                !client.is_connected(),
+                "the session is over, whatever is still queued behind that",
             );
         });
     }
@@ -3771,29 +3776,66 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     /// The engine records which way the connection last went in flags it
     /// always writes, and announces it on a channel that drops what it cannot
     /// hold. A client that reads only the notice is told nothing by an outage
-    /// it fell behind on: it goes on reporting a connection that is gone, and
-    /// goes on reporting one that came back as gone.
+    /// it fell behind on — and reads what the flags say whatever it missed:
+    /// connected between the 1100 and the 1102, as a program on a gateway
+    /// reads it, and not connected only once the session is over.
     #[test]
     fn a_connection_that_went_and_came_back_is_read_without_the_notice() {
         Python::initialize();
         Python::attach(|py| {
             let (client, _rx, shared, _w) = wired_client(py);
             let client = client.borrow(py);
+            client.connected.store(true, Ordering::Relaxed);
 
             // Nothing is queued in either case: this is the notice dropped.
             shared.set_connection_lost();
             client.dispatch_once(py, &shared).unwrap();
             assert!(
-                !client.connected.load(Ordering::Relaxed),
-                "an outage nobody was told of still reads as connected",
+                client.is_connected(),
+                "an outage nobody was told of reads connected until the session is over",
             );
 
             shared.set_connection_restored(String::new());
             client.dispatch_once(py, &shared).unwrap();
             assert!(
-                client.connected.load(Ordering::Relaxed),
-                "a session that came back still reads as disconnected",
+                client.is_connected(),
+                "a session that came back reads as connected",
             );
+
+            shared.close_admission();
+            assert!(
+                !client.is_connected(),
+                "a session the engine gave up reads as not connected",
+            );
+        });
+    }
+
+    /// A stream numbered past what the request carries is refused rather than
+    /// narrowed. Narrowed, the venue's refusal of it came back under a number
+    /// another request was using, and this one stayed open with nothing to
+    /// withdraw it by.
+    #[test]
+    fn a_tick_by_tick_stream_is_refused_a_req_id_the_request_cannot_carry() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, rx, shared, _w) = wired_client(py);
+            client.get().connected.store(true, Ordering::Relaxed);
+            let contract = Py::new(py, Contract {
+                con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
+                ..Default::default()
+            }).unwrap();
+            // Reported as a gateway reports a number it cannot read, rather
+            // than raised: the request is refused under its own number's
+            // refusal, and nothing reaches the engine.
+            client
+                .call_method1(
+                    py, "req_tick_by_tick_data",
+                    (u32::MAX as i64 + 1, &contract, "Last", 0i32, false),
+                )
+                .unwrap();
+            let told: Vec<i64> = shared.drain_refused().into_iter().map(|(_, code, _)| code).collect();
+            assert_eq!(told, [crate::error_codes::REQUEST_NOT_READ as i64], "got {told:?}");
+            assert!(rx.try_recv().is_err(), "a refused req_id must reach no engine command");
         });
     }
 

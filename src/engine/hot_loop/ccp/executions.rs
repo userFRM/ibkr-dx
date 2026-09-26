@@ -1,4 +1,4 @@
-use super::{CcpState, RECOVERY_TERMINATOR_GRACE};
+use super::CcpState;
 use std::time::Instant;
 
 use crate::bridge::{Event, RichOrderInfo, SharedState};
@@ -1384,11 +1384,10 @@ impl CcpState {
             Some("2") => Some(Side::Sell),
             Some("5") => Some(Side::ShortSell),
             other => {
-                // The sentinel that terminates a recovery burst, and the
-                // mass-status echo, both parse to id 0 and carry no side.
-                // Warning about those once per connect would cry wolf on
-                // the one signal that matters when a real record is
-                // refused.
+                // A report naming no order this can read parses to id 0
+                // and carries no side. Warning about those once per
+                // connect would cry wolf on the one signal that matters
+                // when a real record is refused.
                 if clord_id != 0 {
                     log::warn!(
                         "Recovery record for order {clord_id} has Side={other:?}; not tracking it",
@@ -1494,7 +1493,6 @@ impl CcpState {
                 tif: tif_byte,
                 stop_price: stop_price_i64,
             });
-            self.hydrated_any = true;
             shared.orders.note_naming_began();
             // And said to the caller, which is the half that was missing. This
             // order was not placed here: the venue replayed it when the
@@ -1680,6 +1678,14 @@ impl CcpState {
         } else {
             parsed
         };
+        // The report stating its contract `*` ends what the venue names on a
+        // connection, and each answer to what it has finished, as a gateway
+        // reads it: on an account working nothing it follows the day's
+        // executions directly.
+        if parsed.get(&55).map(String::as_str) == Some("*") {
+            self.end_what_the_venue_names(shared);
+            return;
+        }
         // CCP recovery push format A (, captured against live):
         // 35=8 with 150=0/39=0, tag 11 carries `<permId>.0`, the originating
         // orderId is in tag 6121. For these, prefer 6121 as the local key so
@@ -2177,67 +2183,15 @@ impl CcpState {
             }
         }
 
-        // Drop the sentinel/end-of-stream record (ClOrdID="*"/"0"/absent → parses
-        // to 0). Real orders are assigned monotonic IDs via next_order_id and
-        // never collide with 0. The recovery-push terminator (11='*') lands here.
-        // The terminator is a record the venue writes as such: it names the
-        // order `*` or `0`, or names none at all. A number this cannot read is
-        // not that — read as the terminator, one bad row shut the window and
-        // handed the rest of the answer to the live path, where a report
-        // stating a fill is a fill.
-        let is_the_terminator = match parsed.get(&11) {
-            None => true,
-            Some(named) => {
-                let named = named.trim();
-                named.is_empty()
-                    || named == "*"
-                    || named.split('.').next().unwrap_or(named) == "0"
-            }
-        };
-        if clord_id == 0 && !is_the_terminator {
+        // A report naming no order this can read is dropped: the report that
+        // ends a naming states its contract `*` and was read above, and the
+        // day-list record ahead of it names no order at all.
+        if clord_id == 0 {
             log::debug!(
                 "ExecReport: a report names an order this cannot read ({:?}); it is dropped, \
                  and it is not the end of anything",
                 parsed.get(&11),
             );
-            return;
-        }
-        if clord_id == 0 {
-            log::debug!("ExecReport: dropping sentinel record (ClOrdID=0/*) sym={:?} status={:?}",
-                parsed.get(&55), parsed.get(&39));
-            // The same sentinel ends the answer to what the venue has
-            // finished. A caller waiting on that waits on this: the answer is
-            // a run of ordinary reports and nothing else says it is over.
-            if self.completed_orders_open {
-                self.completed_orders_open = false;
-                self.deliver_finished_orders(shared);
-                self.end_completed_orders(self.completed_orders_asked_on, shared);
-                log::info!("The venue has stated everything it has finished");
-            }
-            // Everything already working has now been named. The same record
-            // shape also carries a mass-status echo that arrives before any
-            // order, so this only counts once at least one has come through —
-            // otherwise a caller is told the replay is over before it starts.
-            // Shortening the sweep is gated the same way, for the same reason:
-            // an echo that precedes every order is not the push saying it is
-            // finished, and the sweep releasing the hold is what lets the
-            // queued cancels and modifies go out — released on the strength
-            // of that echo, they name ids the push has not confirmed and the
-            // venue refuses, leaving the orders live there.
-            if self.hydrated_any {
-                shared.orders.set_replay_done();
-                // The push said everything it was going to say, so the orders
-                // it left out can be judged without waiting out the whole
-                // grace. Only ever brought forward: this arm is reached by any
-                // report whose order id does not read, not by the terminator
-                // alone, so assigning the deadline outright pushed it back
-                // every time one arrived and a steady trickle of them meant
-                // the sweep never ran.
-                if let Some(at) = self.recovery_sweep_at {
-                    self.recovery_sweep_at =
-                        Some(at.min(Instant::now() + RECOVERY_TERMINATOR_GRACE));
-                }
-            }
             return;
         }
 

@@ -1,11 +1,12 @@
 """Each change of the connection is said once, in the order it happened.
 
 The engine pushes a record as the connection goes and another as it comes
-back, each only when the connection's state actually changes. A read says
-each in its place: 1100 for the loss, 1102 for the recovery. Nothing is
-reconciled from flags at the read, so a notice cannot be lost to a full
-channel, said twice, or collapsed with the one after it.
-`isConnected()` reads the same state throughout.
+back. A read says each in its place: 1100 for the loss, 1102 for the
+recovery. Nothing is reconciled from flags at the read, so a notice cannot be
+lost to a full channel, said twice, or collapsed with the one after it.
+`isConnected()` reads true throughout, as a program connected to a gateway
+reads it: the gateway's socket stays up while its connection to the venue is
+down.
 """
 
 import ibkr_dx
@@ -32,16 +33,9 @@ def test_a_loss_is_announced():
     c._test_set_connection_lost()
     c.poll()
     assert w.codes == [1100], f"the loss left the caller uninformed: {w.codes}"
-    assert not c.isConnected()
-
-
-def test_a_loss_said_twice_by_the_engine_is_one_notice():
-    """Only a change is a record: a second word of the same loss is none."""
-    w, c = _connected()
-    c._test_set_connection_lost()
-    c._test_push_disconnect_event()
-    c.poll()
-    assert w.codes == [1100], f"the loss was announced twice: {w.codes}"
+    assert c.isConnected(), "a gateway's socket stays up through the outage"
+    assert c.conn_state == c.CONNECTED
+    assert not c.session_over()
 
 
 def test_a_restore_is_announced():

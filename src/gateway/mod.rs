@@ -800,8 +800,12 @@ fn doors_after(host: &str) -> Vec<String> {
 /// Held only until the logon is written. From there a session may be open at
 /// the venue, and it is owed a goodbye rather than a closed socket, so the
 /// attempt is let finish and whoever receives it says the goodbye.
+///
+/// Beside it, the sockets an attempt opened and let go without a session on
+/// them: redirected, or refused, or cut on the way. A gateway says each such
+/// connection's close to its programs as the connection going.
 #[derive(Default)]
-pub struct InFlight(std::sync::Mutex<Option<TcpStream>>);
+pub struct InFlight(std::sync::Mutex<Option<TcpStream>>, std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU32);
 
 impl InFlight {
     /// Keep a handle on the socket just opened, then read the flag: a stop
@@ -809,10 +813,17 @@ impl InFlight {
     /// rather than going on to open a session nobody is waiting for.
     pub(crate) fn hold(&self, socket: &TcpStream, cancel: &std::sync::atomic::AtomicBool) -> io::Result<()> {
         *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(socket.try_clone()?);
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(cancelled_by_the_client("CCP reconnect"));
         }
         Ok(())
+    }
+
+    /// The sockets attempts opened and let go without a session on them since
+    /// this was last asked, a stop's own left out.
+    pub(crate) fn take_gone(&self) -> u32 {
+        self.2.swap(0, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Close whatever the attempt has open, so a read or write in flight on it
@@ -839,7 +850,12 @@ fn reconnect_port() -> u16 {
 
 /// In a test, the listener it stands in the venue's place.
 #[cfg(test)]
-static RECONNECT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(AUTH_PORT);
+pub(crate) static RECONNECT_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(AUTH_PORT);
+
+/// Held by a test for as long as it points the reconnect at a listener of its
+/// own: the port is one for the process.
+#[cfg(test)]
+pub(crate) static RECONNECT_PORT_HELD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 fn reconnect_port() -> u16 {
@@ -899,8 +915,12 @@ pub fn reconnect_ccp(
     // a socket closed under a read reads as a broken connection, and read that
     // way the recovery would be scheduled again for a stop the caller asked for.
     if result.is_err() && cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        in_flight.1.store(0, std::sync::atomic::Ordering::Release);
         return Err(cancelled_by_the_client("CCP reconnect"));
     }
+    // Every socket the attempt opened went, bar the one it hands over.
+    let opened = in_flight.1.swap(0, std::sync::atomic::Ordering::AcqRel);
+    in_flight.2.fetch_add(opened.saturating_sub(u32::from(result.is_ok())), std::sync::atomic::Ordering::AcqRel);
     result
 }
 

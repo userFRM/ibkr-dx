@@ -68,6 +68,9 @@ const COMMANDS_PER_LAP: usize = 64;
 /// How long the return of the trading connection waits for the data farms
 /// before it is said with the ones still down, as a gateway waits.
 const FARMS_AWAITED: std::time::Duration = std::time::Duration::from_secs(30);
+/// How often the farms are looked at again while that return waits on them,
+/// as a gateway looks.
+const FARMS_LOOKED_AT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Longest plausible gap between two liveness checks.
 ///
 /// A gap above this means the check did not run. Silence measured across it is
@@ -111,10 +114,16 @@ pub struct HotLoop {
     /// Whether a loss of the trading connection was announced to the client,
     /// and its return not yet.
     loss_announced: bool,
+    /// Whether the drop of the trading connection now installed was said. Each
+    /// connection that goes is said, the one that replaced a lost one too.
+    drop_said: bool,
     /// When the connection that replaced a lost one finished naming what is
     /// working. The return is announced from here, once every data farm is
     /// back or thirty seconds have passed.
     back_since: Option<Instant>,
+    /// When the data farms are next looked at for that return: a second after
+    /// the last look found one down.
+    farms_looked_at_next: Option<Instant>,
     /// Set when a reconnect failed for a reason repeating cannot fix. The
     /// scheduler stops rather than climbing a ladder forever against a server
     /// that has already given its answer.
@@ -513,7 +522,9 @@ impl HotLoop {
             ccp_next_attempt_at: None,
             farm_next_attempt_at: None,
             loss_announced: false,
+            drop_said: false,
             back_since: None,
+            farms_looked_at_next: None,
             reconnect_halted: None,
             reconnect_cfg: Default::default(),
             budget: Default::default(),
@@ -2652,6 +2663,8 @@ impl HotLoop {
             auth.host = landed;
         }
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id, &self.shared);
+        // A connection of its own, whose drop is said again.
+        self.drop_said = false;
     }
 
     /// Give up any transport that can no longer be written to, or whose
@@ -2759,9 +2772,7 @@ impl HotLoop {
         // pass that tells the client of a lost trading connection does not
         // tell it a second time. One loss is one notice, whichever comes first.
         if !self.loss_announced {
-            self.loss_announced = true;
-            self.shared.set_connection_lost();
-            emit(&self.event_tx, Event::Disconnected);
+            self.say_the_drop();
         }
         // And nothing is left to take an answer from. A worker already dialling
         // still finishes, and its answer would otherwise be installed on the
@@ -2942,47 +2953,73 @@ impl HotLoop {
     /// Tell the client the trading connection went, and that it is back, as a
     /// gateway tells it.
     ///
-    /// 1100 as the connection goes, whether or not it is rebuilt at once. 1102
-    /// once the connection that replaced it has named what is working, with
-    /// the data farms as they stand: at once where every one is carrying
-    /// traffic, and otherwise once they are or thirty seconds have passed,
-    /// saying which are and which are not. 1102 rather than 1101: a gateway
-    /// says 1101 only while contract-definition requests it sends in the
-    /// background of its own are still unanswered, and this client sends no
-    /// such requests. A data farm going on its own is not
-    /// the trading connection going, and is said under its own numbers.
+    /// 1100 as the connection goes, whether or not it is rebuilt at once, and
+    /// again for a connection that replaced it and went before its return was
+    /// said. 1102 once the connection that replaced it has named what is
+    /// working, with the data farms as they stand: at once where every one is
+    /// carrying traffic, and otherwise at a look each second after, once they
+    /// are or thirty seconds have passed, saying which are and which are not.
+    /// 1102 rather than 1101: a gateway says 1101 only while
+    /// contract-definition requests it sends in the background of its own are
+    /// still unanswered, and this client sends no such requests. A data farm
+    /// going on its own is not the trading connection going, and is said
+    /// under its own numbers.
     fn say_what_the_trading_connection_did(&mut self) {
         if self.ccp.disconnected {
             self.back_since = None;
-            if !self.loss_announced {
-                self.loss_announced = true;
-                self.shared.set_connection_lost();
-                emit(&self.event_tx, Event::Disconnected);
-            }
+            self.farms_looked_at_next = None;
+            self.say_the_drop();
             return;
         }
-        if !self.loss_announced || self.shared.orders.replay_settled().is_none() {
+        if !self.loss_announced || !self.shared.orders.replay_done() {
             return;
         }
-        let since = *self.back_since.get_or_insert_with(Instant::now);
+        let now = Instant::now();
+        let since = *self.back_since.get_or_insert(now);
+        if self.farms_looked_at_next.is_some_and(|next| now < next) {
+            return;
+        }
         let farms = self.data_farms();
         let named = |up: bool| farms.iter().filter(|(_, is_up)| *is_up == up).map(|(name, _)| *name)
             .collect::<Vec<_>>().join("; ");
         let said = if farms.iter().all(|(_, up)| *up) {
             format!(" All data farms are connected: {}.", named(true))
-        } else if since.elapsed() > FARMS_AWAITED {
+        } else if now.duration_since(since) > FARMS_AWAITED {
             format!(
                 " The following farms are connected: {}. The following farms are not connected: {}.",
                 named(true), named(false),
             )
         } else {
+            self.farms_looked_at_next = Some(now + FARMS_LOOKED_AT);
             return;
         };
         self.loss_announced = false;
         self.back_since = None;
+        self.farms_looked_at_next = None;
         log::info!("Connection restored — subscriptions re-established");
         self.shared.set_connection_restored(said);
         emit(&self.event_tx, Event::Reconnected);
+    }
+
+    /// Each socket a reconnect opened and let go without a session on it —
+    /// redirected, refused, or cut on the way — said as the connection going,
+    /// as a gateway says the close of each connection it opened.
+    fn say_what_the_attempt_let_go(&mut self) {
+        for _ in 0..self.ccp_in_flight.take_gone() {
+            self.drop_said = false;
+            self.say_the_drop();
+        }
+    }
+
+    /// Say the trading connection went, once for each connection that goes.
+    fn say_the_drop(&mut self) {
+        if self.drop_said {
+            return;
+        }
+        self.drop_said = true;
+        self.loss_announced = true;
+        self.shared.set_connection_lost();
+        emit(&self.event_tx, Event::Disconnected);
     }
 
     /// The data farms this session holds, by the name the venue routed each
@@ -3361,6 +3398,7 @@ impl HotLoop {
                     self.pending_ccp_reconnect = None;
                     return;
                 }
+                self.say_what_the_attempt_let_go();
                 self.reconnect_ccp(conn);
                 self.ccp_connected_at = Some(Instant::now());
                 self.clear_halt_if_it_was_not_settled();
@@ -3369,6 +3407,7 @@ impl HotLoop {
                 self.pending_ccp_reconnect = None;
             }
             Ok(Err(e)) => {
+                self.say_what_the_attempt_let_go();
                 let reason = retry::DisconnectReason::from_error(&e);
                 log::error!(
                     "CCP auto-reconnect failed (attempt {}): {} — {}",
@@ -6855,6 +6894,8 @@ mod tests {
     /// Told only once three attempts to rebuild it had failed, a drop rebuilt
     /// sooner reached the client as nothing at all, and its return was told as
     /// the logon answered, before the venue had named a single working order.
+    /// A connection that replaced a lost one and went before its return was
+    /// said is told as going too, and the farms are looked at a second apart.
     #[test]
     fn the_trading_connection_going_and_coming_back_is_told_as_a_gateway_tells_it() {
         let shared = Arc::new(SharedState::new());
@@ -6915,8 +6956,8 @@ mod tests {
         assert!(heard.try_recv().is_err(), "and once");
 
         // Back, and not yet told: the venue has named nothing on it yet.
-        hl.ccp.disconnected = false;
-        shared.orders.replay_is_pending();
+        let (ccp, _ccp_peer) = Connection::for_test();
+        hl.reconnect_ccp(ccp);
         shared.orders.note_naming_began();
         hl.say_what_the_trading_connection_did();
         assert!(heard.try_recv().is_err(), "the return waits for the naming");
@@ -6931,18 +6972,113 @@ mod tests {
         // seconds, then told with the farms that are and are not connected.
         hl.ccp.disconnected = true;
         hl.say_what_the_trading_connection_did();
-        hl.ccp.disconnected = false;
+        let (ccp, _ccp_peer) = Connection::for_test();
+        hl.reconnect_ccp(ccp);
+        shared.orders.set_replay_done();
         hl.hmds_conn = None;
         hl.say_what_the_trading_connection_did();
         assert!(matches!(heard.try_recv(), Ok(Event::Disconnected)));
         assert!(heard.try_recv().is_err(), "a farm still down holds the return back");
         hl.back_since = Some(Instant::now() - FARMS_AWAITED - std::time::Duration::from_secs(1));
         hl.say_what_the_trading_connection_did();
+        assert!(heard.try_recv().is_err(), "the farms are looked at again a second after the last look");
+        hl.farms_looked_at_next = Some(Instant::now());
+        hl.say_what_the_trading_connection_did();
         assert!(matches!(heard.try_recv(), Ok(Event::Reconnected)));
         assert_eq!(
             restored(&shared),
             [" The following farms are connected: usfarm; secdefil. The following farms are not connected: ushmds."],
         );
+
+        // Gone again; the connection that replaces it goes too before its
+        // return is said, and that is told as well. A farm that comes back
+        // between two looks is said at the next look, not before.
+        let lost = |shared: &SharedState| shared
+            .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
+            .into_iter()
+            .filter(|(_, record)| matches!(record, crate::bridge::Record::ConnectionLost { .. }))
+            .count();
+        let (hmds, _hmds_peer) = Connection::for_test();
+        hl.ccp.disconnected = true;
+        hl.say_what_the_trading_connection_did();
+        let (ccp, _ccp_peer) = Connection::for_test();
+        hl.reconnect_ccp(ccp);
+        shared.orders.set_replay_done();
+        hl.say_what_the_trading_connection_did();
+        hl.ccp.disconnected = true;
+        hl.say_what_the_trading_connection_did();
+        assert!(matches!(heard.try_recv(), Ok(Event::Disconnected)));
+        assert!(matches!(heard.try_recv(), Ok(Event::Disconnected)), "the replacing connection's drop is told");
+        assert_eq!(lost(&shared), 2, "a 1100 for each connection that went");
+        let (ccp, _ccp_peer) = Connection::for_test();
+        hl.reconnect_ccp(ccp);
+        shared.orders.set_replay_done();
+        hl.say_what_the_trading_connection_did();
+        hl.hmds_conn = Some(hmds);
+        hl.say_what_the_trading_connection_did();
+        assert!(heard.try_recv().is_err(), "the farm is looked at again a second after the last look");
+        hl.farms_looked_at_next = Some(Instant::now());
+        hl.say_what_the_trading_connection_did();
+        assert!(matches!(heard.try_recv(), Ok(Event::Reconnected)));
+    }
+
+    /// A socket a reconnect opened and let go without a session on it is told
+    /// as the connection going, as a gateway tells the close of every
+    /// connection it opened: here the venue's door answers and closes again.
+    #[test]
+    fn a_socket_a_reconnect_opened_and_let_go_is_told_as_the_connection_going() {
+        let _port = crate::gateway::RECONNECT_PORT_HELD.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        crate::gateway::RECONNECT_PORT.store(
+            listener.local_addr().unwrap().port(), std::sync::atomic::Ordering::Relaxed,
+        );
+        let shared = Arc::new(SharedState::new());
+        let (events, heard) = std::sync::mpsc::sync_channel(8);
+        let mut hl = HotLoop::new(shared, Some(EventSink::new(events, Default::default())), None);
+        hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
+            account_id: String::new(),
+            trading_port: None,
+            hmds_port: None,
+            secdef_port: None,
+            logged_in_at: String::new(),
+            alternate_hosts: Vec::new(),
+            settings: Default::default(),
+            host: "127.0.0.1".into(),
+            username: String::new(),
+            password: zeroize::Zeroizing::new(String::new()),
+            paper: true,
+            code_provider: None,
+            ib_key_timeout_secs: crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
+            ib_key_token_sub_type: crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
+            session_key: Default::default(),
+            session_token: Default::default(),
+            server_session_id: String::new(),
+            hw_info: String::new(),
+            encoded: String::new(),
+            hmds_host: String::new(),
+            hmds_farm: String::new(),
+            trading_host: String::new(),
+            trading_farm: String::new(),
+            secdef_host: String::new(),
+            secdef_farm: String::new(),
+        });
+        hl.ccp.disconnected = true;
+        hl.say_what_the_trading_connection_did();
+        assert!(matches!(heard.try_recv(), Ok(Event::Disconnected)));
+
+        hl.spawn_ccp_reconnect();
+        drop(listener.accept().expect("the attempt's connection"));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while hl.pending_ccp_reconnect.is_some() {
+            assert!(Instant::now() < deadline, "the attempt never came back");
+            hl.poll_ccp_reconnect();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(heard.try_recv(), Ok(Event::Disconnected)), "the socket's close is told");
+        assert!(heard.try_recv().is_err(), "once");
+        crate::gateway::RECONNECT_PORT.store(crate::config::AUTH_PORT, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// A second market-data-farm outage is announced too, not only the first.

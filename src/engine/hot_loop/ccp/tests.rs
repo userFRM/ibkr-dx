@@ -9,81 +9,42 @@ use crate::types::model as api;
 use crate::bridge::RichOrderInfo;
 use crate::types::{PositionInfo, Price, Side, PRICE_SCALE, QTY_SCALE};
 
-/// A second sentinel report brings the reconciliation forward, never back.
+/// The report stating its contract `*` ends what the venue names on a
+/// connection, on an account working nothing as on any other, and the record
+/// of the day's list ahead of it ends nothing.
 ///
-/// The deadline is shortened when the push says it has finished, so orders it
-/// left out can be judged without waiting out the whole grace. This arm is
-/// reached by any report whose order id does not read, not by that terminator
-/// alone, so assigning the deadline outright pushed it back each time one
-/// arrived — and under a steady trickle the sweep that reports those orders
-/// never ran at all.
+/// On an account working nothing the venue states the day's executions, a
+/// record naming no order and no contract, and then that report. Both were
+/// read as the end by the order number they do not state, so neither could be
+/// told from the other: the naming was taken as never finishing, a program
+/// asking what it had working waited out a bound for it, and what the drop
+/// left in doubt waited thirty seconds to be judged. Frames as captured.
 #[test]
-fn a_later_sentinel_does_not_push_the_reconciliation_back() {
+fn the_naming_ends_at_the_report_stating_its_contract_as_a_star() {
     let mut ccp = CcpState::new();
     let mut context = Context::new();
     let shared = SharedState::new();
-
-    let soon = Instant::now() + Duration::from_millis(1);
-    ccp.recovery_sweep_at = Some(soon);
-
-    // The push has named an order, so the record that follows is its end
-    // and may bring the reconciliation forward.
-    let order = exec_report_frame(&[
-        (11, "7.0"), (150, "0"), (39, "0"), (54, "1"), (6008, "756733"), (38, "100"),
-    ]);
-    ccp.handle_exec_report(&order, b"", &mut context, &shared, &None, "DU111111");
-
-    // A report whose order id does not read, which is what reaches that arm.
-    let mut parsed = std::collections::HashMap::new();
-    parsed.insert(11u32, "*".to_string());
-    parsed.insert(35u32, "8".to_string());
-    ccp.handle_exec_report(&parsed, b"", &mut context, &shared, &None, "DU111111");
-
-    let after = ccp.recovery_sweep_at.expect("the deadline is still set");
-    assert!(
-        after <= soon,
-        "a sentinel may bring the reconciliation forward and must not delay it",
-    );
-}
-
-/// A record that parses to no order reaches the sentinel arm before the
-/// push has named anything, and it is not the push's end — the same shape
-/// arrives as a mass-status echo ahead of every order. Shortening the
-/// sweep on it let the held cancels and modifies out before the push had
-/// named the orders they name, carrying ids the venue refuses. The
-/// deadline only moves once at least one order has come through.
-#[test]
-fn the_sweep_is_not_shortened_by_a_record_that_precedes_every_order() {
-    let mut ccp = CcpState::new();
-    let mut context = Context::new();
-    let shared = SharedState::new();
-
     let far = Instant::now() + Duration::from_secs(30);
     ccp.recovery_sweep_at = Some(far);
+    shared.orders.replay_is_pending();
 
-    // A record whose order id does not read, arriving before the push has
-    // named anything.
-    let echo = exec_report_frame(&[(11, "*")]);
-    ccp.handle_exec_report(&echo, b"", &mut context, &shared, &None, "DU111111");
+    let day_list: std::collections::HashMap<u32, String> = [
+        (35u32, "8"), (6556, "today4"), (17, "82302.1790356535.0"), (32, "*"),
+    ].iter().map(|(k, v)| (*k, v.to_string())).collect();
+    ccp.handle_exec_report(&day_list, b"", &mut context, &shared, &None, "DU111111");
+    assert!(!shared.orders.replay_done(), "the day's list is not the end of the naming");
+    assert_eq!(ccp.recovery_sweep_at, Some(far));
 
-    assert_eq!(
-        ccp.recovery_sweep_at,
-        Some(far),
-        "nothing has been named yet, so this is not the push's end and the deadline stands",
-    );
-
-    // Once an order has come through, the same record is the push's end
-    // and shortens the wait.
-    let order = exec_report_frame(&[
-        (11, "7.0"), (150, "0"), (39, "0"), (54, "1"), (6008, "756733"), (38, "100"),
+    let end = exec_report_frame(&[
+        (11, "*"), (17, "82302.1790356536.2"), (150, "0"), (20, "3"), (39, "0"), (55, "*"),
+        (38, "0"), (32, "0"), (31, "0.00"), (14, "0"), (151, "0"), (6, "0"), (54, "1"), (37, "*"),
+        (40, "2"), (59, "0"),
     ]);
-    ccp.handle_exec_report(&order, b"", &mut context, &shared, &None, "DU111111");
-    ccp.handle_exec_report(&echo, b"", &mut context, &shared, &None, "DU111111");
-
-    let after = ccp.recovery_sweep_at.expect("the deadline is still set");
+    ccp.handle_exec_report(&end, b"", &mut context, &shared, &None, "DU111111");
+    assert!(shared.orders.replay_done(), "an account working nothing is named to its end");
     assert!(
-        after < far,
-        "once the push has named an order, its ending record brings the reconciliation forward",
+        ccp.recovery_sweep_at.is_some_and(|at| at <= Instant::now()),
+        "and what the drop left in doubt is judged at once",
     );
 }
 
@@ -3761,6 +3722,7 @@ fn a_second_question_waits_for_the_first_sentinel_however_late() {
         let mut parsed = std::collections::HashMap::new();
         parsed.insert(11u32, "*".to_string());
         parsed.insert(35u32, "8".to_string());
+        parsed.insert(55u32, "*".to_string());
         parsed
     };
 
@@ -4116,6 +4078,7 @@ fn an_answer_is_not_handed_a_half_described_order() {
     let mut sentinel = std::collections::HashMap::new();
     sentinel.insert(11u32, "*".to_string());
     sentinel.insert(35u32, "8".to_string());
+    sentinel.insert(55u32, "*".to_string());
     ccp.handle_exec_report(&sentinel, b"", &mut context, &shared, &None, "");
 
     let finished: Vec<u64> =
@@ -7534,7 +7497,6 @@ fn a_reconnect_waits_for_the_new_account_of_what_is_working() {
     let mut ccp = CcpState::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
-    ccp.hydrated_any = true;
     shared.orders.set_replay_done();
 
     let (conn, _peer) = crate::protocol::connection::Connection::for_test();
@@ -7542,7 +7504,6 @@ fn a_reconnect_waits_for_the_new_account_of_what_is_working() {
     ccp.reconnect(conn, &mut ccp_conn, &mut hb, "DU1", &shared);
 
     assert!(!shared.orders.replay_done(), "the new connection has named nothing yet");
-    assert!(!ccp.hydrated_any, "and nothing has been hydrated from it");
 }
 
 /// A reconnect has not stated what the account holds either.

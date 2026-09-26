@@ -209,9 +209,12 @@ impl EClient {
             // The connection going, said under 1100 unless it was asked for:
             // a stop's end is the session's last record, and the reference
             // client answers `disconnect()` with `connection_closed` alone.
+            // Still connected otherwise, as a program is to a gateway, whose
+            // socket stays up while its own connection to the venue is down.
             Record::ConnectionLost { by_design } => {
-                self.connected.store(false, Ordering::Release);
-                if !by_design {
+                if by_design {
+                    self.connected.store(false, Ordering::Release);
+                } else {
                     wrapper.error_from(ErrorOrigin::Session, raised_now(), 1100, &self.shared.reference.connectivity_lost(), "");
                 }
             }
@@ -221,7 +224,6 @@ impl EClient {
             // requests. Pushed only as the connection comes back after a loss
             // that was pushed, so it always follows its 1100.
             Record::ConnectionRestored(farms) => {
-                self.connected.store(true, Ordering::Release);
                 wrapper.error_from(ErrorOrigin::Session, raised_now(), 1102, &self.shared.reference.connectivity_restored(&farms), "");
             }
             // One of the connections the venue keeps data on went away or came

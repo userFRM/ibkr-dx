@@ -390,8 +390,9 @@ impl SharedState {
 
     /// The connection went. Hot-loop side.
     ///
-    /// Said once, as the connected flag flips: a halt after a loss already
-    /// said, or a second transport going with the first, says nothing more.
+    /// Each drop the engine says is a record, the drop of a connection that
+    /// replaced a lost one too: the engine says each once. A stop asked for
+    /// after a loss already said says nothing more.
     /// The record carries whether the loss was asked for, which is decided
     /// here rather than by a later reader. A shutdown records its own reason
     /// and records it after any venue-side drop, so deriving this afterwards
@@ -403,7 +404,7 @@ impl SharedState {
         let by_design = self.reference.session_over()
             == Some(crate::reliability::retry::DisconnectReason::ByDesign.as_str());
         self.connection_lost_by_design.store(by_design, Ordering::Release);
-        if self.link_up.swap(false, Ordering::AcqRel) {
+        if self.link_up.swap(false, Ordering::AcqRel) || !by_design {
             self.session_records.push(Record::ConnectionLost { by_design });
         }
         self.notify();
@@ -717,10 +718,9 @@ mod tests {
         assert_eq!(connection_records(&asked), [Some(true)]);
     }
 
-    /// A loss is said once and its recovery once, as the connected flag flips:
-    /// a second transport going with the first, or a halt after a loss already
-    /// said, says nothing more, and a recovery with no loss before it is no
-    /// recovery.
+    /// Each drop said is a record, and a recovery one record after them: a
+    /// recovery with no loss before it is no recovery, and a stop asked for
+    /// after a loss adds none.
     #[test]
     fn a_loss_and_its_recovery_are_each_one_record() {
         let shared = SharedState::new();
@@ -732,10 +732,12 @@ mod tests {
         shared.set_connection_restored(String::new());
         shared.set_connection_restored(String::new());
         shared.set_connection_lost();
+        shared.reference.set_session_over(crate::reliability::retry::DisconnectReason::ByDesign.as_str());
+        shared.set_connection_lost();
         assert_eq!(
             connection_records(&shared),
-            [Some(false), None, Some(false)],
-            "one 1100, one 1102, and the loss that followed",
+            [Some(false), Some(false), None, Some(false)],
+            "a 1100 for each drop, one 1102, and nothing for the stop after them",
         );
         assert!(!shared.link_up());
     }

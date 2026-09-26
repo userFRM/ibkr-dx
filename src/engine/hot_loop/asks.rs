@@ -33,10 +33,6 @@ const NOT_WHOLE_HOLDINGS: &str = "the account had not finished stating its holdi
 const NOT_WHOLE_FIGURES: &str = "the account had not finished stating its figures within the \
     wait, so what follows is what this session already held rather than what the account holds";
 
-/// Said ahead of an open-orders answer the naming had not finished for.
-const NOT_WHOLE_ORDERS: &str = "the venue had not finished naming this account's working orders \
-    within the wait, so what follows is what had arrived rather than what is working";
-
 /// One question held until what it is answered from has been stated.
 struct Held {
     ask: Ask,
@@ -158,7 +154,16 @@ impl Asks {
                         }
                     }
                 }
-                Ask::OpenOrders(_) | Ask::NextValidId => match replay {
+                // Held until the venue has named what is working to its end,
+                // however long that takes, as a gateway holds it.
+                Ask::OpenOrders(_) => {
+                    let named = shared.orders.replay_done();
+                    if named {
+                        held.answer(named, shared);
+                    }
+                    named
+                }
+                Ask::NextValidId => match replay {
                     None => false,
                     Some(named) => {
                         held.answer(named || !shared.orders.naming_began(), shared);
@@ -244,12 +249,7 @@ impl Held {
                     ledger_and_nlv: *ledger_and_nlv,
                 }
             }
-            Ask::OpenOrders(q) => {
-                if !whole {
-                    notice(ErrorOrigin::Question { q: *q, ends: false }, NOT_WHOLE_ORDERS);
-                }
-                Answer::OpenOrders(*q)
-            }
+            Ask::OpenOrders(q) => Answer::OpenOrders(*q),
             Ask::NextValidId => {
                 // No error travels with an id, so this is said where it can be
                 // said. The floor is whatever had been named by then, which is

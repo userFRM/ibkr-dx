@@ -350,17 +350,19 @@ impl EClient {
             Record::Closed => {}
             // The connection going, said under 1100 unless it was asked for,
             // and its return under 1102. Each is a record, pushed as the
-            // connection flag flips, so they are said in the order they
-            // happened and each once.
+            // engine says it, so they are said in the order they happened.
+            // Still connected through them, as a program is to a gateway,
+            // whose socket stays up while its own connection to the venue is
+            // down.
             Record::ConnectionLost { by_design } => {
-                self.connected.store(false, Ordering::Release);
-                if !by_design {
+                if by_design {
+                    self.connected.store(false, Ordering::Release);
+                } else {
                     say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 1100,
                         &shared.reference.connectivity_lost());
                 }
             }
             Record::ConnectionRestored(farms) => {
-                self.connected.store(true, Ordering::Release);
                 say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 1102,
                     &shared.reference.connectivity_restored(&farms));
             }

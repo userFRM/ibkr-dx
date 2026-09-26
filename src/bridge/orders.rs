@@ -55,11 +55,10 @@ struct Replay {
     began: bool,
     /// When the wait for that naming gives up, shared by everyone waiting.
     ///
-    /// An account with nothing working never sees the naming end, so a wait
-    /// entered on every call ran to its bound every time. Set when a
-    /// connection comes up — the venue starts the naming then — and replaced
-    /// with the next one on a reconnect, so each connection pays the bound
-    /// once and every caller in that window waits for the same moment.
+    /// Set when a connection comes up — the venue starts the naming then —
+    /// and replaced with the next one on a reconnect, so each connection pays
+    /// the bound once and every caller in that window waits for the same
+    /// moment.
     deadline: Option<Instant>,
 }
 
@@ -863,15 +862,13 @@ impl OrderState {
         self.what_if_responses.push(response);
     }
 
-    /// The server has finished naming what is already working.
     /// Whether the venue has named anything at all on this connection.
     ///
     /// Distinct from the naming being over: an account working nothing is
-    /// named with nothing, and the record that ends the naming cannot be told
-    /// from the one that precedes it, so an empty account never sees the
-    /// naming finish. A caller that has to say what its withdrawal did not
-    /// cover needs to know which of the two it is looking at — with nothing
-    /// named there is nothing uncovered to warn about.
+    /// named with nothing before the report that ends the naming. A caller
+    /// that has to say what its withdrawal did not cover needs to know which
+    /// of the two it is looking at — with nothing named there is nothing
+    /// uncovered to warn about.
     #[doc(hidden)] pub fn note_naming_began(&self) {
         self.replay.lock().unwrap().began = true;
     }
@@ -893,9 +890,10 @@ impl OrderState {
     /// Wait for the venue to finish naming the orders already working, and
     /// say whether it did.
     ///
-    /// Bounded, because an account with nothing working never sees the
-    /// naming end and waiting forever for it would be worse than proceeding.
-    /// The bound is one deadline per connection, anchored to the moment the
+    /// The venue ends the naming with a report of its own, on an account
+    /// working nothing as on any other; the wait is bounded all the same, so a
+    /// naming that does not end does not hold the caller. The bound is one
+    /// deadline per connection, anchored to the moment the
     /// connection came up rather than set by the first caller to wait: the
     /// venue starts the naming then, so a first request that waits the bound
     /// out does not spend a later caller's wait, and once it has passed

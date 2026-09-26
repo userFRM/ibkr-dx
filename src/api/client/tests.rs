@@ -3937,44 +3937,6 @@ fn a_global_cancel_says_when_the_venue_has_not_finished_naming() {
     );
 }
 
-/// Asking what the account is working before the venue has finished naming it
-/// answers with what had arrived, and that is exactly what an account working
-/// nothing looks like. The caller is told which of the two it is reading, so a
-/// strategy does not take a partial snapshot for a flat account and place
-/// again what it already has on.
-#[test]
-fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
-    #[derive(Default)]
-    struct Heard {
-        told: Vec<(i64, i64, String)>,
-        ended: usize,
-    }
-    impl Wrapper for Heard {
-        fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _adv: &str) {
-            self.told.push((req_id, code, message.to_string()));
-        }
-        fn open_order_end(&mut self) { self.ended += 1; }
-    }
-
-    let (client, rx, shared) = test_client();
-    // The venue began naming and never said it had finished. An account that
-    // was named nothing at all is the other case, and says nothing — there is
-    // no missing order to warn about.
-    shared.orders.note_naming_began();
-    let mut heard = Heard::default();
-    client.req_all_open_orders(); the_engine_answers(&rx, &shared); client.process_msgs(&mut heard);
-    assert_eq!(heard.ended, 1, "what had arrived is still delivered, and still ends");
-    assert!(
-        heard.told.iter().any(|(req_id, code, message)| {
-            *req_id == -1
-                && *code == crate::error_codes::Refusal::NO_ANSWER as i64
-                && message.contains("had not finished naming")
-        }),
-        "the caller is told the snapshot is not known to be whole: {:?}",
-        heard.told,
-    );
-}
-
 // ═══════════════════════════════════════════════════════════════════
 //  Order validation — aux_price guards
 // ═══════════════════════════════════════════════════════════════════
@@ -6170,6 +6132,7 @@ fn process_msgs_dispatches_inactive_reason_as_error() {
 #[test]
 fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
     let (client, rx, shared) = test_client();
+    shared.orders.set_replay_done();
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
@@ -6224,6 +6187,7 @@ fn an_order_is_stated_as_a_gateway_holds_it_before_the_venue_answers() {
     }
     let (client, rx, shared) = test_client();
     shared.set_session_account("DU123");
+    shared.orders.set_replay_done();
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LIMIT".into(),
         lmt_price: 100.0, tif: "DAY".into(), transmit: true, ..Default::default()
@@ -7580,12 +7544,14 @@ fn engine_connection_loss_fires_connection_closed_once() {
     assert!(w.events.is_empty(), "no callbacks before the connection is lost");
 
     // A loss the engine is still working to recover: said under 1100, as the
-    // other surface says it, not as the session's end.
+    // other surface says it, not as the session's end. Still connected, as a
+    // program is to a gateway whose connection to the venue is down.
     shared.set_connection_lost();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("error:-1:1100:")), "{:?}", w.events);
     assert!(!w.events.iter().any(|e| e == "connection_closed"), "the session is not over: {:?}", w.events);
-    assert!(!client.is_connected(), "is_connected must turn false");
+    assert!(client.is_connected(), "a gateway's socket stays up through the outage");
+    assert!(!client.session_over());
 
     // Its return.
     shared.set_connection_restored(String::new());
@@ -8076,42 +8042,6 @@ fn the_millisecond_clock_keeps_what_the_second_one_drops() {
     near(heard.millis[1], 1_786_795_200_250, "and a quarter of it besides");
 }
 
-/// A session that came back and went again is not a connected session.
-///
-/// Loss and recovery were two flags with no order between them. Both raised,
-/// the dispatcher applied recovery last whichever way the connection had
-/// actually gone — so a client reported itself connected to a socket that had
-/// dropped, and nothing was left pending to correct it.
-#[test]
-fn the_last_thing_the_connection_did_is_what_a_caller_is_told() {
-    let (client, _rx, shared) = test_client();
-    let mut w = RecordingWrapper::default();
-
-    // Lost, recovered, and lost again before anyone looked.
-    shared.set_connection_lost();
-    shared.set_connection_restored(String::new());
-    shared.set_connection_lost();
-    client.process_msgs(&mut w);
-
-    assert!(!client.is_connected(), "the connection went and did not come back");
-    let said: Vec<&str> = w.events.iter()
-        .filter(|e| e.starts_with("error:-1:1100:") || e.starts_with("error:-1:1102:"))
-        .map(|e| &e[..13])
-        .collect();
-    assert_eq!(
-        said, ["error:-1:1100", "error:-1:1102", "error:-1:1100"],
-        "and the caller is told each of the three, in the order they happened: {:?}", w.events,
-    );
-
-    // The other way round: a recovery after a loss stands.
-    let (client, _rx, shared) = test_client();
-    let mut w = RecordingWrapper::default();
-    shared.set_connection_lost();
-    shared.set_connection_restored(String::new());
-    client.process_msgs(&mut w);
-    assert!(client.is_connected(), "the connection came back");
-}
-
 /// A request made while the engine is still rebuilding a lost connection is
 /// carried, and only one made after the session has ended is refused.
 ///
@@ -8135,7 +8065,7 @@ fn a_request_during_a_recoverable_loss_is_carried_and_one_after_the_end_is_refus
     // Announced lost, with the engine still working on it: no end recorded.
     shared.set_connection_lost();
     client.process_msgs(&mut w);
-    assert!(!client.is_connected(), "the loss was announced");
+    assert!(w.events.iter().any(|e| e.starts_with("error:-1:1100:")), "the loss was announced");
 
     client.positions_requested.store(true, Ordering::Release);
     client.cancel_positions(); the_engine_answers(&rx, &shared);
@@ -11928,7 +11858,6 @@ fn the_connection_is_described_as_the_reference_client_describes_it() {
     // A lost connection the engine is recovering is not the session's end.
     shared.set_connection_lost();
     client.process_msgs(&mut w);
-    assert!(!client.is_connected());
     assert_eq!(client.server_version(), Some(217), "held while the connection is recovered");
     assert_eq!(client.tws_connection_time().as_deref(), Some("20260924-13:30:00"));
 

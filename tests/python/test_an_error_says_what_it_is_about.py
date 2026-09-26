@@ -142,22 +142,6 @@ def test_the_executions_notice_does_not_end_the_request_and_its_answer_follows()
     ], w.said
 
 
-def test_the_open_orders_notice_does_not_end_the_question_and_its_answer_follows():
-    w = Origins()
-    c = connected(w, replay_done=False)
-    c._test_begin_order_replay()
-    c._test_track_order(3, 0, "SPY", "BUY", 1, 100.0)
-    c.reqOpenOrders()
-    # Held until the naming's bound has passed, then answered with a notice.
-    deadline = time.monotonic() + 6
-    while not w.said and time.monotonic() < deadline:
-        c.poll()
-        time.sleep(0.02)
-    notice, *rest = w.said
-    assert notice[:5] == ("Question", -1, False, None, "OpenOrders"), w.said
-    assert rest == [("open_order", 3), ("open_order_end",)], w.said
-
-
 def test_a_global_cancel_refused_is_the_sessions():
     w = Origins()
     c = connected(w, readonly=True)

@@ -1006,15 +1006,22 @@ Connections are independent: a quote feed reconnecting does not disturb an
 order in flight.
 
 As on a gateway, the caller hears 1100 as the trading connection drops, and
-1102 once the connection that replaced it has named the working orders, with
-the data farms as they stand: at once where every one is connected, and
-otherwise once they are or thirty seconds have passed, naming the ones that are
-not. The words name the broker and the product as the logon names them,
+again for each connection opened in its place that goes before its return is
+said, one a reconnect opened and let go on the way included; and 1102 once the
+connection that replaced it has named the working orders, with the data farms
+as they stand: at once where every one is connected, and otherwise at a look
+each second, once they are or thirty seconds have passed, naming the ones that
+are not. The words name the broker and the product as the logon names them,
 "Connectivity between IBKR and Trader Workstation has been lost." for a login
 with Interactive Brokers. A data farm dropping on its own is said under its own
-numbers, not 1100. Working orders keep the status they were last given: as on a
-gateway, nothing is said of them at the drop, and the venue restates each one
-after the reconnect. An order the venue does not restate keeps its last status.
+numbers, not 1100. The session stays connected throughout, as a program's
+socket to a gateway does: `is_connected()` reads true between the 1100 and the
+1102, and false only once the session is over. A request made meanwhile is
+carried when the connection comes back; a question of what is working is
+answered once the venue has named it to its end. Working orders keep the status
+they were last given: as on a gateway, nothing is said of them at the drop, and
+the venue restates each one after the reconnect. An order the venue does not
+restate keeps its last status.
 </details>
 
 <details>
@@ -1064,10 +1071,10 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,205 | No |
-| Python | 1,190 | No |
+| Rust, unit and integration | 3,195 | No |
+| Python | 1,188 | No |
 | Rust, live | 9 | Yes |
-| Python, live | 124 | Yes |
+| Python, live | 123 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |
 
 Every published count is checked against what is actually there, so a number in

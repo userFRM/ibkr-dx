@@ -34,7 +34,6 @@ def test_the_level_is_the_newest_gate_carried_and_none_before_a_session():
     # reference client rides it out holding the number.
     c._test_set_connection_lost()
     c._test_dispatch_once()
-    assert not c.isConnected()
     assert c.serverVersion() == 217
     c.disconnect()
     assert c.serverVersion() is None

@@ -991,39 +991,6 @@ w = W()",
         });
     }
 
-    /// Asking what the account is working before the venue has finished
-    /// naming it answers with what had arrived, and that is what an account
-    /// working nothing looks like. The caller is told which of the two it is
-    /// reading, so a strategy does not take a partial snapshot for a flat
-    /// account and place again what it already has on.
-    #[test]
-    fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, rx, shared, wrapper) = wired_client(py);
-            // The venue began naming and never said it had finished. An
-            // account named nothing at all is the other case, and is told
-            // nothing — there is no missing order to warn about.
-            shared.orders.note_naming_began();
-            client.req_open_orders(py).unwrap();
-            crate::api::client::tests::the_engine_answers(&rx, &shared);
-            client.dispatch_once(py, &shared).unwrap();
-            let calls = wrapper.bind(py).getattr("calls").unwrap();
-            let told: Vec<(String, i64, i64, i64, String, String)> = (0..calls.len().unwrap())
-                .filter_map(|i| calls.get_item(i).unwrap().extract().ok())
-                .collect();
-            assert!(
-                told.iter().any(|(name, req_id, _, code, message, _)| {
-                    name == "error"
-                        && *req_id == -1
-                        && *code == crate::error_codes::Refusal::NO_ANSWER as i64
-                        && message.contains("had not finished naming")
-                }),
-                "the caller is told the snapshot is not known to be whole: {told:?}",
-            );
-        });
-    }
-
     /// An order placed under client zero keeps that client id when another
     /// session reads it back, and an order this session placed reads under
     /// the client it went out under.

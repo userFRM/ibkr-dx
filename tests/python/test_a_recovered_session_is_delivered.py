@@ -49,7 +49,6 @@ def test_the_recovery_arrives_on_a_later_pass():
     c._test_push_disconnect_event()
     c.poll()
     assert w.codes == [1100], w.codes
-    assert not c.isConnected()
 
     c._test_push_reconnect_event()
     c.poll()

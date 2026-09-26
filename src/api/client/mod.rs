@@ -1003,7 +1003,9 @@ impl EClient {
 
     /// False after [`disconnect()`](EClient::disconnect), after the engine
     /// has ended the session, and after a `process_msgs()` call that
-    /// observed the engine stopping.
+    /// observed the engine stopping. True while a lost connection to the
+    /// venue is being rebuilt, between the 1100 and the 1102, as a program
+    /// connected to a gateway reads it: the gateway's socket stays up.
     ///
     /// The engine records an ended session itself. A shape that never pumps
     /// `process_msgs` hears of it nowhere else, and kept saying connected
@@ -1016,7 +1018,7 @@ impl EClient {
     /// Whether this session is finished rather than merely disconnected:
     /// closed by [`disconnect()`](EClient::disconnect), or given up on by the
     /// engine, which records why. A loss the engine is still working on is
-    /// neither — `is_connected()` reads false between the 1100 and the 1102,
+    /// neither — `is_connected()` reads true between the 1100 and the 1102,
     /// and a request made then is carried when the transports come back.
     /// Refused under 504 there, a withdrawal was left unapplied and the feed
     /// came back with the session; the reference client serves that window.

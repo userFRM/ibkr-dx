@@ -1,7 +1,5 @@
 """
-- error(1100) fires when engine emits Disconnected event (heartbeat timeout, etc.)
 - connection_closed fires when run loop exits
-- is_connected() returns False after disconnect event
 """
 import os, threading, time
 import pytest
@@ -35,27 +33,6 @@ class RecordingWrapper(EWrapper):
 
     def connection_closed(self):
         self.connection_closed_fired.set()
-
-
-def test_disconnect_event_fires_error_1100():
-    """Inject a Disconnected event via test helper, verify error(1100) callback."""
-    wrapper = RecordingWrapper()
-    client = EClient(wrapper)
-    client._test_connect("TEST123")
-
-    assert client.is_connected()
-
-    # Inject a disconnect event (simulates heartbeat timeout)
-    client._test_push_disconnect_event()
-
-    # Run one dispatch cycle — should drain the event and fire error(1100)
-    client._test_dispatch_once()
-
-    assert 1100 in wrapper.error_codes, f"Expected error 1100, got: {wrapper.error_codes}"
-    assert not client.is_connected(), "is_connected() should be False after disconnect event"
-    print(f"Error codes: {wrapper.error_codes}")
-    print(f"Error messages: {wrapper.error_messages}")
-    print("PASS: error(1100) fired and is_connected() returned False")
 
 
 @pytest.mark.skipif(

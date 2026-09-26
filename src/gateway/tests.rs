@@ -1726,6 +1726,7 @@ fn a_stop_reaches_a_reconnect_before_and_during_its_handshake() {
     use crate::reliability::retry::DisconnectReason;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    let _port = RECONNECT_PORT_HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     RECONNECT_PORT.store(listener.local_addr().unwrap().port(), Ordering::Relaxed);
     let auth = auth_with("127.0.0.1", "", "");
@@ -1763,6 +1764,7 @@ fn a_stop_reaches_a_reconnect_before_and_during_its_handshake() {
         "a stop the caller asked for read as something to recover from: {err}",
     );
     assert!(in_flight.0.lock().unwrap().is_none(), "the socket is let go with the attempt");
+    assert_eq!(in_flight.take_gone(), 0, "and a stop's own socket is not a connection going");
     RECONNECT_PORT.store(AUTH_PORT, Ordering::Relaxed);
 }
 
