@@ -12376,31 +12376,41 @@ fn order_fields_are_checked_before_contract_expiry() {
     assert!(next_command(&rx).is_none());
 }
 
-/// The types asked in turn, and the feed a subscription then asks first and
-/// the one a refusal falls back to. A type turns feeds on, as a gateway takes
-/// it: 2 frozen, 3 delayed without delayed-frozen, 4 delayed with it, and only
-/// 1 turns them off. One that may fall back starts live.
+/// The types asked in turn, and what a subscription then asks: the live feed
+/// first whatever the type, the delayed feed a refusal falls back to where
+/// delayed data is on, and the frozen feeds a gateway watches the market's
+/// status for. A type turns feeds on, as a gateway takes it: 2 frozen, 3
+/// delayed without delayed-frozen, 4 delayed with it, and only 1 turns them
+/// off. A calculation's watch falls back to nothing: it asks the delayed feed
+/// directly where delayed data is on, and watches no status.
 #[test]
 fn the_types_asked_pick_the_first_feed_and_the_fallback() {
-    let rows: [(&[i32], i32, Option<i32>); 5] = [
-        (&[3], 0, Some(1)),
-        (&[4], 0, Some(3)),
-        (&[4, 2], 0, Some(3)),
-        (&[4, 3], 0, Some(1)),
-        (&[2, 1], 0, None),
+    let rows: [(&[i32], Option<i32>, bool, bool); 6] = [
+        (&[2], None, true, false),
+        (&[3], Some(1), false, false),
+        (&[4], Some(1), false, true),
+        (&[4, 2], Some(1), true, true),
+        (&[4, 3], Some(1), false, false),
+        (&[2, 1], None, false, false),
     ];
-    for (types, first, fallback) in rows {
+    for (types, fallback, frozen_on, delayed_frozen_on) in rows {
         let (client, rx, _shared) = test_client();
         for data_type in types {
             client.req_market_data_type(*data_type);
         }
         client.req_mkt_data(1, &spy(), "", false, false);
-        match rx.try_recv().unwrap() {
-            ControlCommand::Subscribe { mode_9887, delayed_mode, .. } => {
-                assert_eq!((mode_9887, delayed_mode), (first, fallback), "types {types:?}");
+        client.calculate_implied_volatility(2, &spy(), 12.5, 600.0);
+        let asked: Vec<_> = rx.try_iter().filter_map(|command| match command {
+            ControlCommand::Subscribe { req_id, mode_9887, delayed_mode, frozen, delayed_frozen, .. } => {
+                Some((req_id, mode_9887, delayed_mode, frozen, delayed_frozen))
             }
-            other => panic!("expected Subscribe, got {other:?}"),
-        }
+            _ => None,
+        }).collect();
+        assert_eq!(
+            asked,
+            [(1, 0, fallback, frozen_on, delayed_frozen_on), (2, fallback.unwrap_or(0), None, false, false)],
+            "types {types:?}",
+        );
     }
 }
 

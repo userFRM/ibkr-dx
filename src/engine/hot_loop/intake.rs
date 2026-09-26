@@ -1209,6 +1209,8 @@ impl HotLoop {
             filters: e.contract.lookup_filters(),
             mode_9887: 0,
             delayed_mode: None,
+            frozen: false,
+            delayed_frozen: false,
             regulatory_snapshot: false,
             snapshot: false,
             generic_ticks: vec![IN_THE_MONEY],

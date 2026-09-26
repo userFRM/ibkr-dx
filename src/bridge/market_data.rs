@@ -36,9 +36,10 @@ pub struct TickReqParams {
     pub bbo_exchange: String,
     /// What the venue says this request may be given: 0 nothing stated, 1 no
     /// top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not
-    /// available through the API. 0 where no BBO exchange is named, and on a
-    /// bond, a bill, a fixed-income contract or a combination, whatever the
-    /// venue stated, as a gateway states it.
+    /// available through the API. 0 where no BBO exchange is named, on a
+    /// bond, a bill, a fixed-income contract or a combination, and while the
+    /// frozen quote is served in place of the live one, whatever the venue
+    /// stated, as a gateway states it.
     pub snapshot_permissions: i64,
 }
 

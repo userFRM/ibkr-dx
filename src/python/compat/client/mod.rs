@@ -3418,7 +3418,10 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
     fn delayed_mode_starts_live_on_the_python_surface() {
         Python::initialize();
         Python::attach(|py| {
-            for (data_type, fallback) in [(3, 1), (4, 3)] {
+            // Live first whatever the type, falling back to delayed data; a
+            // feed named on the request is asked directly, and so is the
+            // delayed feed by a calculation's watch.
+            for (data_type, named) in [(3, 1), (4, 3)] {
                 for direct in [false, true] {
                     let (client, rx, _shared, _w) = wired_client(py);
                     client.get().core.set_market_data_type(data_type);
@@ -3427,18 +3430,19 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                         exchange: "IDEALPRO".into(), ..Default::default()
                     }).unwrap();
                     if direct {
-                        let _ = client.call_method1(py, "req_mkt_data_ex", (1i64, &contract, "", false, false, fallback));
+                        let _ = client.call_method1(py, "req_mkt_data_ex", (1i64, &contract, "", false, false, named));
                     } else {
                         let _ = client.call_method1(py, "req_mkt_data", (1i64, &contract));
                     }
-                    let commands: Vec<_> = rx.try_iter().collect();
-                    let (mode, delayed) = commands.iter().find_map(|command| match command {
-                        ControlCommand::Subscribe { mode_9887, delayed_mode, .. } => {
-                            Some((*mode_9887, *delayed_mode))
+                    let _ = client.call_method1(py, "calculate_implied_volatility", (2i64, &contract, 0.01, 1.1));
+                    let asked: Vec<_> = rx.try_iter().filter_map(|command| match command {
+                        ControlCommand::Subscribe { req_id, mode_9887, delayed_mode, .. } => {
+                            Some((req_id, mode_9887, delayed_mode))
                         }
                         _ => None,
-                    }).unwrap();
-                    assert_eq!((mode, delayed), if direct { (fallback, None) } else { (0, Some(fallback)) });
+                    }).collect();
+                    let first = if direct { (1, named, None) } else { (1, 0, Some(1)) };
+                    assert_eq!(asked, [first, (2, 1, None)], "type {data_type}, direct {direct}");
                 }
             }
         });

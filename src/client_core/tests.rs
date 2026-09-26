@@ -333,28 +333,6 @@ fn an_account_with_no_positions_still_reports_its_pnl() {
     assert!(core.poll_pnl(&shared).into_iter().next().is_none(), "the same figures do not repeat");
 }
 
-/// The type a caller asks for has to reach the subscription, or asking for
-/// delayed data got realtime-shaped subscriptions and no delayed ticks.
-#[test]
-fn the_requested_market_data_type_picks_the_subscription_mode() {
-    assert_eq!(ClientCore::new().subscription_mode(), 0, "realtime until asked otherwise");
-    for (requested, mode) in [
-        (MDT_DELAYED, 1),
-        (MDT_FROZEN, 2),
-        (MDT_DELAYED_FROZEN, 3),
-        (MDT_REALTIME, 0),
-    ] {
-        let core = ClientCore::new();
-        core.set_market_data_type(requested);
-        assert_eq!(core.subscription_mode(), mode, "type {requested}");
-        assert_eq!(
-            core.check_mdt_needed(requested as i64, true),
-            Some(requested),
-            "the callback names the type the data was asked for",
-            );
-    }
-}
-
 // ── Rejected/Inactive snapshot admission ──
 
 #[test]

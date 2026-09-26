@@ -2510,7 +2510,7 @@ fn an_off_grid_price_is_refused_and_the_caller_told() {
     // Subscribe first: the subscribe ack is what populates the engine's
     // per-instrument tick size. Without it the snap is a no-op.
     control_tx.send(ControlCommand::Subscribe { req_id: 90015,
-        contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false, snapshot: false,
+        contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, frozen: false, delayed_frozen: false, regulatory_snapshot: false, snapshot: false,
         generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).expect("send subscribe failed");
 
@@ -2684,7 +2684,7 @@ fn reclaim_and_symbol_search_phase_live() {
     let subscribe = |req: &str, req_id: i64| {
         control_tx.send(ControlCommand::Subscribe { req_id,
             contract: ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0,
-            delayed_mode: None,
+            delayed_mode: None, frozen: false, delayed_frozen: false,
             regulatory_snapshot: false, snapshot: false,
             generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
         }).expect("send subscribe failed");

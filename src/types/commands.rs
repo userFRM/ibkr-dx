@@ -304,6 +304,15 @@ pub enum ControlCommand {
         mode_9887: i32,
         /// The delayed feed to request after a live refusal states it is available.
         delayed_mode: Option<i32>,
+        /// Whether frozen data was on for the session when this was asked.
+        /// Where the logon enables frozen data, a gateway watches the market's
+        /// status for such a subscription and serves it the frozen feed while
+        /// the market is closed.
+        frozen: bool,
+        /// Whether delayed-frozen data was on. The same watch serves a
+        /// subscription that has fallen back to delayed data the
+        /// delayed-frozen feed while the market is closed.
+        delayed_frozen: bool,
         /// Ask for the venue's chargeable one-shot snapshot rather than a
         /// stream. It is a request type of its own, asked for under the
         /// snapshot action and never with a feed named beside it, and the

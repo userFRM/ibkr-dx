@@ -117,10 +117,12 @@ impl EClient {
     /// `tick_generic` also fires for the halt the venue states on its own tick:
     /// tick 49, 0 while a contract is trading and 1 once it has stopped.
     ///
-    /// Types 3 and 4 start live and switch to delayed or delayed-frozen data
-    /// only after a bid/ask refusal says delayed data is available. The switch
-    /// reports 10167 without ending the request. `market_data_type` names the
-    /// accepted feed. `req_mkt_data_ex` selects its feed directly.
+    /// Every type starts live. Types 3 and 4 switch to delayed data after a
+    /// bid/ask refusal says delayed data is available, which reports 10167
+    /// without ending the request. Types 2 and 4 are served the frozen or the
+    /// delayed-frozen quote while the market is closed, where the logon
+    /// enables frozen data. `market_data_type` names the feed served.
+    /// `req_mkt_data_ex` selects its feed directly.
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
@@ -458,19 +460,19 @@ impl EClient {
         self.shared.last_ccp_rtt()
     }
 
-    /// Which feed the subscriptions after this one ask for: 1 live, 2 frozen,
-    /// 3 delayed, 4 delayed and frozen.
-    ///
-    /// Sent with each subscription, in the field this protocol carries it in,
-    /// and the `market_data_type` callback reports the type the subscription
-    /// was made under. To state it for one request rather than for the ones
-    /// that follow, [`req_mkt_data_ex`](EClient::req_mkt_data_ex) takes it.
-    /// A number naming no type leaves the feeds as they were, and says so.
+    /// Which feeds the subscriptions after this one may be served: 1 live, 2
+    /// frozen, 3 delayed, 4 delayed and frozen.
     ///
     /// A type turns feeds on, as a gateway takes it: 2 turns frozen data on;
     /// 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only
-    /// 1 turns frozen data off, and it turns all three off. So 2 after 4 still
-    /// falls back to delayed-frozen.
+    /// 1 turns frozen data off, and it turns all three off. A subscription
+    /// starts live whatever the type, falls back to delayed data on a refusal
+    /// where delayed data is on, and is served the frozen or delayed-frozen
+    /// quote while the market is closed, where the logon enables frozen data;
+    /// the `market_data_type` callback reports the type served. To name a feed
+    /// for one request instead, [`req_mkt_data_ex`](EClient::req_mkt_data_ex)
+    /// takes it. A number naming no type leaves the feeds as they were, and
+    /// says so.
     pub fn req_market_data_type(&self, market_data_type: i32) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.set_market_data_type(market_data_type);

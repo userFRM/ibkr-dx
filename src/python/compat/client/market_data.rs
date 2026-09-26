@@ -191,19 +191,19 @@ impl EClient {
         Ok(shared.last_ccp_rtt().map(|d| d.as_secs_f64() * 1_000.0))
     }
 
-    /// Name the kind of data every subscription after this one asks for:
+    /// Name the feeds every subscription after this one may be served:
     /// 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.
-    ///
-    /// The type is carried on each subscription that follows, and the
-    /// `market_data_type` callback reports the type that subscription was
-    /// made under. A type this client does not know is logged and leaves the
-    /// feeds as they were. `req_mkt_data_ex` states the type per request,
-    /// which allows two feeds on one contract at once.
     ///
     /// A type turns feeds on, as a gateway takes it: 2 turns frozen data on;
     /// 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only
-    /// 1 turns frozen data off, and it turns all three off. So 2 after 4 still
-    /// falls back to delayed-frozen.
+    /// 1 turns frozen data off, and it turns all three off. A subscription
+    /// starts live whatever the type, falls back to delayed data on a refusal
+    /// where delayed data is on, and is served the frozen or delayed-frozen
+    /// quote while the market is closed, where the logon enables frozen data;
+    /// the `market_data_type` callback reports the type served. A type this
+    /// client does not know is logged and leaves the feeds as they were.
+    /// `req_mkt_data_ex` names a feed per request, which allows two feeds on
+    /// one contract at once.
     fn req_market_data_type(&self, market_data_type: i32) -> PyResult<()> {
         // Answered under 504 with no session, as every request is, and the
         // type is then not kept. It used to be: set before `connect`, it

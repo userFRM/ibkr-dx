@@ -2184,6 +2184,13 @@ impl ClientCore {
         let delayed_mode = (delayed_allowed && matches!(mode_9887, 1 | 3) && !regulatory_snapshot)
             .then_some(mode_9887);
         let mode_9887 = if delayed_mode.is_some() { 0 } else { mode_9887 };
+        // The frozen feeds the session has on, for a request that takes the
+        // session's types: a gateway watches the market's status for it.
+        let feeds = if delayed_allowed && !regulatory_snapshot {
+            self.market_data_feeds.load(Ordering::Relaxed)
+        } else {
+            0
+        };
         shared.admit(control_tx, ControlCommand::Subscribe {
             req_id,
             contract: ContractRef {
@@ -2196,6 +2203,8 @@ impl ClientCore {
             filters: filters.clone(),
             mode_9887,
             delayed_mode,
+            frozen: feeds & FEED_FROZEN != 0,
+            delayed_frozen: feeds & FEED_DELAYED_FROZEN != 0,
             regulatory_snapshot,
             snapshot,
             generic_ticks: asked.series,
@@ -3026,9 +3035,8 @@ impl ClientCore {
 
     /// Store the requested market data type.
     ///
-    /// The caller names the type once; the wire names it per subscription, on
-    /// field 9887. Subscriptions made after this carry the mode it implies, so
-    /// a client that asks for delayed data receives delayed data.
+    /// The caller names the type once; subscriptions made after this carry
+    /// the feeds it turns on.
     ///
     /// A type turns feeds on rather than naming one, as a gateway takes it: 2
     /// turns frozen data on; 3 and 4 turn delayed data on, 4 with
@@ -3055,18 +3063,14 @@ impl ClientCore {
         });
     }
 
-    /// The per-subscription mode the session's feeds imply: with delayed data
-    /// on, the delayed feed a refusal falls back to (3 with delayed-frozen, 1
-    /// without); else 2 with frozen data on; else 0, realtime, which is the
-    /// shape a subscription has when nothing asked otherwise.
+    /// The per-subscription mode the session's feeds imply. A gateway asks
+    /// the live feed first whatever the type, so this is the delayed feed a
+    /// refusal falls back to where delayed data is on, 1, and otherwise 0. The
+    /// frozen feeds are served where the market's status is watched. A
+    /// calculation's subscription, which falls back to nothing, asks this
+    /// feed directly.
     pub fn subscription_mode(&self) -> i32 {
-        let feeds = self.market_data_feeds.load(Ordering::Relaxed);
-        match (feeds & FEED_DELAYED != 0, feeds & FEED_DELAYED_FROZEN != 0, feeds & FEED_FROZEN != 0) {
-            (true, true, _) => 3,
-            (true, false, _) => 1,
-            (false, _, true) => 2,
-            _ => 0,
-        }
+        if self.market_data_feeds.load(Ordering::Relaxed) & FEED_DELAYED != 0 { 1 } else { 0 }
     }
 
     /// Check if the `market_data_type` callback should fire for this req_id.

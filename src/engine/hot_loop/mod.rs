@@ -4327,7 +4327,7 @@ mod tests {
     pub(super) fn subscription(req_id: i64, contract: ContractRef) -> ControlCommand {
         ControlCommand::Subscribe {
             req_id, contract, filters: Default::default(), mode_9887: 0,
-            delayed_mode: None,
+            delayed_mode: None, frozen: false, delayed_frozen: false,
             regulatory_snapshot: false, snapshot: false, generic_ticks: Vec::new(),
             news: None, spread_scan: None, calculation: None,
         }
@@ -9905,7 +9905,8 @@ mod admission_tests {
                     symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
                     currency: "USD".into(), ..Default::default()
                 },
-                req_id: 1, filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false,
+                req_id: 1, filters: Default::default(), mode_9887: 0, delayed_mode: None,
+                frozen: false, delayed_frozen: false, regulatory_snapshot: false,
                 snapshot: false, generic_ticks: Vec::new(), news: None, spread_scan: None,
                 calculation: None,
             })

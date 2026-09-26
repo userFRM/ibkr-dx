@@ -425,6 +425,24 @@ the venue's model for the contract, and asking opens the subscription that
 carries it. A gateway gives up after five seconds. This client waits until the
 model arrives or the call is cancelled.
 
+## A frozen quote is the subscription's
+
+A gateway decides for each request whether it is served the frozen quote, by
+the type in force when that request began, and applies a type changed while
+requests run to them as well. This client holds one subscription per contract,
+and every request on it is served what the subscription was made with; a type
+set later applies to the subscriptions made after it. The market's status of a
+contract directed to an exchange other than the smart route is asked for on
+its preferred market, or on the smart route where it is listed there, as a
+gateway asks it, where this session holds the contract's definition; where it
+does not, on the contract's own exchange.
+
+A gateway states the type a request is served at the moment it changes, also
+where no frozen record follows it; this client states it with the next tick it
+delivers for the request. And where the quote served changes between the live
+one and a frozen one, a gateway sends the whole quote again, and this client
+sends the fields that differ.
+
 ## Order fields
 
 An order carries 159 fields. 128 go out under a tag. 23 are taken and not

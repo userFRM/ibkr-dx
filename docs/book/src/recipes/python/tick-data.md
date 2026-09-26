@@ -16,11 +16,14 @@ ask and last.
 increment, exchange and snapshot permission once per request. It reads the
 latest stored parameters when the callback is delivered. Where the venue names
 no best-bid-and-offer exchange, as for a currency, a crypto or a bond, the
-exchange is empty. The permission is 0 there, and on a bond, a bill, a
-fixed-income contract or a combination whatever the venue stated, as a gateway
-states it. A follower sharing the subscription gets its own callback;
-cancelling and reusing its request id starts a new request. A request cancelled
-before delivery receives no callback.
+exchange is empty. The permission is 0 there, on a bond, a bill, a
+fixed-income contract or a combination, and while the frozen quote is served in
+place of the live one, whatever the venue stated, as a gateway states it. Where
+the market's status is watched, the parameters are stated with the first record
+the request is served, as a gateway states them: on a closed market that is the
+frozen quote's, so the permission is 0. A follower sharing the subscription
+gets its own callback; cancelling and reusing its request id starts a new
+request. A request cancelled before delivery receives no callback.
 
 `tick_price` and `tick_size` for as long as the subscription runs.
 
@@ -82,16 +85,31 @@ under [Beyond the documented API](../../reference/beyond-the-api.md).
 
 One subscription per contract. To change the mode on a contract, cancel first.
 
-Types 3 (delayed) and 4 (delayed-frozen) on `req_market_data_type` enable
-a delayed feed when live data is unavailable. Both start live. A bid/ask
-refusal that states delayed data is available switches to the requested
-delayed feed and reports 10167 without ending the request. `market_data_type`
-reports the feed delivered: 1 while live, then 3 or 4 after the switch. A
-login entitled to live data is served live under type 4 alone, so on a closed
-market its quote states what the live feed states, zero yields included. As a
-gateway takes the types, 2 turns frozen data on, 3 and 4 turn delayed data on
-(4 with delayed-frozen, 3 without), and only 1 turns frozen data off, so a 2
-asked after a 3 or a 4 still leaves the delayed feed to fall back to.
+Every subscription starts live, whatever the type set on
+`req_market_data_type`. As a gateway takes the types, 2 turns frozen data on,
+3 and 4 turn delayed data on (4 with delayed-frozen, 3 without), and only 1
+turns frozen data off, so a 2 asked after a 3 or a 4 still leaves the delayed
+feed to fall back to. With delayed data on, a bid/ask refusal that states
+delayed data is available switches to the delayed feed and reports 10167
+without ending the request, and `market_data_type` reports 3.
+
+Where the logon enables frozen data, the market's status is watched, as a
+gateway watches it, for a subscription made with frozen data on while it is
+served live, and for one that has fallen back to delayed data with
+delayed-frozen data on. While the status says the market is closed, the frozen
+quote is asked for beside the live one and served, reported as 2; beside a
+delayed one the delayed-frozen quote is asked for too, and served from its
+first record, reported as 4, the delayed one until then. The quote asked for
+first is kept up meanwhile, and once the status says the market is open the
+frozen quotes are withdrawn and that quote is served again as it stands,
+reported as 1 or 3. A refusal of the live quote ends the watch on it without a
+word: the frozen quote beside it is withdrawn, and so is the status, unless
+the fallback watches it. So a login entitled to live data is served live under
+type 4 alone, and on a closed market its quote states what the live feed
+states, zero yields included; under type 2, alone or before a 4, it is served
+the frozen quote. A calculation's own subscription falls back to nothing: it
+asks the delayed feed directly where delayed data is on, and watches no
+status.
 
 `req_mkt_data_ex` selects a feed directly: `mode_9887` is 0 realtime, 1 delayed,
 2 frozen, or 3 delayed-frozen. Frozen keeps thinly traded names quoting after

@@ -41,6 +41,28 @@ Delayed data carries no index quote at all: on `market_data_type` 3 every one
 of them reads `-1`, `SPX` included. A quote that is on the real-time feed and
 not the delayed one is a property of the feed rather than of the account.
 
+## A closed market and its frozen quote
+
+On a closed market the live feed states what it states, and the venue serves
+the quote the market closed on as a feed of its own. Measured on a bond at
+night: the live record states a zero bid, ask and yields, and the frozen one
+the bid, ask and yields the market closed on.
+
+A gateway asks the venue whether a contract's market is closed, on a series of
+its own, beside the quote of a subscription made with frozen data on, and of
+one that has fallen back to delayed data with delayed-frozen data on, where
+the logon enables frozen data, and serves the frozen quote while the market is
+closed. This client does the same; the
+[tick data recipe](../recipes/rust/tick-data.md) says what a program is sent.
+Measured on a Saturday, the venue acknowledges the series and answers it at
+once with a single four-byte figure: 1 for a stock, an option and the bond
+above, whose markets were closed, and 2 for a crypto contract, whose market
+trades around the clock. Only 1 says the market is closed, as a gateway reads
+it; on that answer the bond was served its frozen bid, ask and yields. Where
+the series goes unanswered, a closed market is served what the live feed
+states. A frozen quote the venue refuses the login is not reported to the
+program, as a gateway reports nothing of it.
+
 ## A book restarts after a reconnect
 
 After a connection is rebuilt the venue restates a book from the top. This

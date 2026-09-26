@@ -354,6 +354,12 @@ impl MarketState {
         self.server_tag_to_instrument.insert(server_tag, instrument);
     }
 
+    /// Drop one tag, where the subscription it answered is withdrawn and the
+    /// instrument's others stand.
+    pub fn forget_server_tag(&mut self, server_tag: u32) {
+        self.server_tag_to_instrument.remove(&server_tag);
+    }
+
     /// Slot iteration bound (high-water mark). Freed slots below this count
     /// exist but hold zeroed data until reused; consumers iterating
     /// `0..count()` read harmless defaults for them.

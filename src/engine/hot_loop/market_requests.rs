@@ -67,6 +67,8 @@ impl HotLoop {
             filters,
             mode_9887,
             delayed_mode,
+            frozen,
+            delayed_frozen,
             regulatory_snapshot,
             snapshot,
             generic_ticks,
@@ -138,6 +140,8 @@ impl HotLoop {
                 filters,
                 mode_9887,
                 delayed_mode,
+                frozen,
+                delayed_frozen,
                 regulatory_snapshot,
                 snapshot,
                 generic_ticks,
@@ -365,6 +369,11 @@ impl HotLoop {
             }
         } else {
             let (sec_type, exchange) = self.described_as(con_id, &sec_type, &exchange);
+            if !regulatory_snapshot {
+                self.farm.note_frozen_feeds(
+                    id, frozen, delayed_frozen, con_id, &sec_type, &exchange, &self.shared,
+                );
+            }
             self.farm.send_mktdata_subscribe(
                 con_id,
                 &symbol,

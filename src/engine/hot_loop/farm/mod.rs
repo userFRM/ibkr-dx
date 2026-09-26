@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 mod attached_quotes;
+mod frozen;
 mod option_ticks;
 
 use crate::bridge::{Event, SharedState};
@@ -1198,6 +1199,11 @@ pub(crate) struct FarmState {
     /// The venue's number for a generic-tick subscription, and what it
     /// carries: (server tag, request type, instrument).
     generic_tick_tags: Vec<(u32, u32, InstrumentId)>,
+    /// The subscriptions whose market status is watched, and what it has made
+    /// of each.
+    status_watches: std::collections::HashMap<InstrumentId, frozen::StatusWatch>,
+    /// The statuses read from the last message, for acting on once it is read.
+    statuses_stated: Vec<(InstrumentId, bool)>,
     /// Chargeable snapshots answered before their contract's map of venues
     /// was stated: the contract, the answer, the moment it was read on the
     /// venue's clock, and when it arrived.
@@ -2425,6 +2431,8 @@ impl FarmState {
             rt_volume_totals: std::collections::HashMap::new(),
             news_subscriptions: Vec::new(),
             generic_tick_tags: Vec::new(),
+            status_watches: std::collections::HashMap::new(),
+            statuses_stated: Vec::new(),
             snapshot_answers_held: Vec::new(),
             chain_series_withdrawn: Vec::new(),
             unread_types: std::collections::HashSet::new(),
@@ -2583,7 +2591,9 @@ impl FarmState {
             // venue this account cannot see waits for data that was refused
             // before it started.
             b"3" => {
-                self.handle_subscription_reject(msg, context, shared);
+                for instrument in self.handle_subscription_reject(msg, context, shared) {
+                    self.status_on_refusal(instrument, false, farm_conn, context, shared, hb);
+                }
                 let retry: Vec<_> = self.delayed_subscriptions.iter()
                     .filter_map(|(instrument, state)| state.retry.then_some(*instrument)).collect();
                 for instrument in retry {
@@ -2591,7 +2601,10 @@ impl FarmState {
                 }
             },
             b"Y" => self.handle_depth_35y(msg, shared),
-            b"G" => self.handle_generic_tick(msg, context, shared, event_tx),
+            b"G" => {
+                self.handle_generic_tick(msg, context, shared, event_tx);
+                self.apply_market_status(farm_conn, context, shared, hb);
+            }
             // Named once, the first time each arrives, the way the trading
             // connection names what it does not read. Reported where nobody
             // looks, a type the venue sends and this client drops is
@@ -2673,6 +2686,19 @@ impl FarmState {
                 }
             };
 
+            // Where the market's status is watched, what this entry is to the
+            // program: served, kept up for when its quote is served again, or
+            // neither.
+            let route = if self.status_watches.is_empty() {
+                frozen::Route::Serve
+            } else {
+                self.frozen_route(instrument, tick.server_tag, context, shared)
+            };
+            if route == frozen::Route::Drop {
+                continue;
+            }
+            let held = route == frozen::Route::Hold;
+
             let close_attributes = match (tick.layout, tick.tick_type) {
                 (tick_decoder::RecordLayout::Ordinary, 12)
                 | (tick_decoder::RecordLayout::Extremes, 23) => Some(tick.magnitude as i32),
@@ -2683,8 +2709,10 @@ impl FarmState {
                 && matches!(self.asked_sec_type(instrument, context).as_str(), "BAG" | "COMB"))
                 .then_some(tick.magnitude as i32);
             if close_attributes.is_some() || close_date.is_some() {
-                let mode = self.request_mode(instrument);
-                shared.market.note_pricing_close_metadata(instrument, mode, close_attributes, close_date);
+                if !held {
+                    let mode = self.request_mode(instrument);
+                    shared.market.note_pricing_close_metadata(instrument, mode, close_attributes, close_date);
+                }
                 continue;
             }
 
@@ -2704,9 +2732,14 @@ impl FarmState {
             // reference client's callers read them never saw the yield at all.
             if let Some(tick_type) = tick.layout.yield_tick(tick.tick_type) {
                 let value = tick.magnitude as f64 * tick_decoder::YIELD_SCALE;
-                shared.market.push_series_tick(crate::types::SeriesTick {
+                let stated = crate::types::SeriesTick {
                     instrument, tick_type, value: crate::types::SeriesValue::Price(value),
-                });
+                };
+                if held {
+                    self.hold_series(instrument, stated);
+                } else {
+                    shared.market.push_series_tick(stated);
+                }
                 continue;
             }
             // And what this number means under this record's layout. A sidecar
@@ -2725,11 +2758,23 @@ impl FarmState {
                 continue;
             };
 
+            // What the venue says about the two prices stands beside the quote
+            // served, not the one kept up.
+            if held && matches!(tick_type, tick_decoder::O_ELIGIBLE | tick_decoder::O_QUOTE_STATE) {
+                continue;
+            }
             let mts = context.market.min_tick_scaled(instrument);
             // A size is a count of what the venue said sizes move in for this
             // contract, the same way a price is a count of what prices move in.
             let size_tick = context.market.size_tick(instrument);
-            let (q, clock) = context.market.quote_and_clock_mut(instrument);
+            let (q, clock) = if held {
+                match self.held_quote(instrument) {
+                    Some(kept) => kept,
+                    None => continue,
+                }
+            } else {
+                context.market.quote_and_clock_mut(instrument)
+            };
 
             // The extended 35=P format carries a full 8-bit byte width, so a
             // magnitude can reach i64::MAX and the scaling multiply wrapped to
@@ -2880,7 +2925,7 @@ impl FarmState {
                 _ => applied = false,
             }
 
-            if applied {
+            if applied && !held {
                 let present = match tick_type {
                     tick_decoder::O_BID_PRICE => crate::bridge::PRICING_BID,
                     tick_decoder::O_ASK_PRICE => crate::bridge::PRICING_ASK,
@@ -3077,7 +3122,13 @@ impl FarmState {
                 entry.req_id == req_id && entry.request_type == REALTIME_BID_ASK_REQUEST_TYPE
             })
         });
-        if acknowledges_bid_ask && let Some(state) = self.delayed_subscriptions.get(&instrument) {
+        self.note_frozen_tag(instrument, req_id, server_tag);
+        // Not where the program is served the delayed-frozen quote, which is
+        // the type it was last told.
+        if acknowledges_bid_ask
+            && !self.shows_delayed_frozen(instrument)
+            && let Some(state) = self.delayed_subscriptions.get(&instrument)
+        {
             let delayed = state.requests.is_some_and(|requests| requests.contains(&req_id));
             let data_type = crate::client_core::data_type_for_mode(if delayed { state.mode } else { 0 });
             state.data_type.store(data_type, std::sync::atomic::Ordering::Relaxed);
@@ -3085,18 +3136,12 @@ impl FarmState {
         }
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
-        // A gateway states the permission only for a contract it holds a BBO
-        // exchange for. A chargeable snapshot reads the permission without
-        // one, so the rule is kept here rather than where it is stored.
-        let bbo_exchange = shared.reference.bbo_exchange_of(instrument);
-        let snapshot_permissions = if bbo_exchange.is_empty() {
-            0
-        } else {
-            i64::from(shared.reference.snapshot_permission_of(instrument))
-        };
-        shared.market.push_tick_req_params(instrument, crate::bridge::TickReqParams {
-            min_tick, bbo_exchange, snapshot_permissions,
-        });
+        // Where the market's status is watched these wait for a record to be
+        // served, which a gateway states them with: by then the contract may
+        // be in the frozen state.
+        if !self.holds_request_params(instrument, min_tick) {
+            self.state_request_params(instrument, min_tick, shared);
+        }
         // The venue has taken it, so whatever it said the last time it would
         // not is no longer what a request joining this contract is owed.
         //
@@ -3129,17 +3174,39 @@ impl FarmState {
         log::info!("Subscribed instrument {instrument} -> server_tag {server_tag}, minTick {min_tick}");
     }
 
+    /// State what an acknowledgement says of the contract, for `tick_req_params`.
+    /// A gateway states the permission only for a contract it holds a BBO
+    /// exchange for, and not while the contract is in the frozen state. A
+    /// chargeable snapshot reads the permission without a BBO exchange, so the
+    /// rule is kept here rather than where it is stored.
+    fn state_request_params(&self, instrument: InstrumentId, min_tick: f64, shared: &SharedState) {
+        let bbo_exchange = shared.reference.bbo_exchange_of(instrument);
+        let snapshot_permissions = if bbo_exchange.is_empty() || self.in_frozen_state(instrument) {
+            0
+        } else {
+            i64::from(shared.reference.snapshot_permission_of(instrument))
+        };
+        shared.market.push_tick_req_params(instrument, crate::bridge::TickReqParams {
+            min_tick, bbo_exchange, snapshot_permissions,
+        });
+    }
+
     /// The venue refusing something this connection asked for.
     ///
     /// It names the request on tag 262 and says why on tag 58, so unlike the
     /// trading connection's own error channel this one can be handed back to
     /// the caller that asked. A refusal read as nothing leaves that caller
     /// waiting on data the venue already said it would not send.
-    fn handle_subscription_reject(&mut self, msg: &[u8], context: &Context, shared: &SharedState) {
+    ///
+    /// Returns the subscriptions whose quote is refused with nothing to fall
+    /// back to.
+    fn handle_subscription_reject(
+        &mut self, msg: &[u8], context: &Context, shared: &SharedState,
+    ) -> Vec<InstrumentId> {
         let parsed = fix::fix_parse(msg);
         let said = parsed.get(&58).map(String::as_str).unwrap_or("");
         if said.is_empty() {
-            return;
+            return Vec::new();
         }
         // The venue writes these as "Error&VENUE/TYPE/WHAT". The lead-in says
         // only that it is one, which the caller already knows from being told.
@@ -3149,7 +3216,7 @@ impl FarmState {
         // report the subscription refusal once.
         let Some(requests) = parsed.get(&262) else {
             log::warn!("market data refusal names no request: {reason}");
-            return;
+            return Vec::new();
         };
         let mut refused_quotes = Vec::new();
         let delayed_available: Vec<_> = parsed.get(&9887)
@@ -3160,6 +3227,12 @@ impl FarmState {
                 .find(|(id, _)| *id == rid).map(|(_, i)| *i);
             match instrument {
                 Some(instrument) => {
+                    // The market's status and the frozen quotes are asked for
+                    // by the watch alone, and nothing is said of their refusal.
+                    if self.frozen_refusal(instrument, rid) {
+                        log::info!("the venue refused request {rid} of a market status watch: {reason}");
+                        continue;
+                    }
                     let named = context.market.symbol(instrument);
                     // A request riding beside the quote — the trading status, the
                     // exchange map, the option model — is refused on its own. The
@@ -3306,6 +3379,7 @@ impl FarmState {
                 }
             }
         }
+        refused_quotes
     }
 
     fn handle_ticker_setup(&mut self, msg: &[u8], context: &mut Context, shared: &SharedState) {
@@ -3539,6 +3613,7 @@ impl FarmState {
             let _ = conn.send_fixcomp(&tags);
             hb.last_farm_sent = Instant::now();
         }
+        self.status_on_fallback(instrument, farm_conn, context, shared, hb);
     }
 
     pub(crate) fn send_mktdata_subscribe(
@@ -3844,6 +3919,11 @@ impl FarmState {
             }
             hb.last_farm_sent = Instant::now();
         }
+        // The market's status is asked for beside the quote, where it is
+        // watched.
+        if !regulatory_snapshot {
+            self.start_status_watch(instrument, farm_conn, hb);
+        }
     }
 
     pub(crate) fn send_mktdata_unsubscribe(
@@ -3911,6 +3991,7 @@ impl FarmState {
             return;
         }
         self.subscription_asked_on.remove(&instrument);
+        self.withdraw_status_watch(instrument, farm_conn, hb);
         let delayed = self.delayed_subscriptions.remove(&instrument);
         // The occupancy stays until the slot itself goes back: the release that
         // follows names it, and cleared here that release named nothing —
@@ -5150,6 +5231,7 @@ impl FarmState {
         self.generic_tick_reqs.clear();
         self.generic_tick_tags.clear();
         self.rt_volume_totals.clear();
+        self.reset_status_watches(shared);
         // Keyed the same way, and left behind they are never reachable again:
         // what removes an entry looks it up by an id the reconnect has already
         // replaced, so nothing afterwards names the old one. Both are scanned
@@ -5506,6 +5588,7 @@ impl FarmState {
                     emit(event_tx, Event::Tick(instrument));
                 }
                 NEWS_REQUEST_TYPE => self.deliver_news(instrument, payload, shared, event_tx),
+                frozen::MARKET_DATA_STATUS_REQUEST_TYPE => self.note_market_status(instrument, payload),
                 // The venue's other news series, which states one story rather
                 // than a batch of them and frames every string of it with a
                 // count and padding. It reaches a caller on the same callback:

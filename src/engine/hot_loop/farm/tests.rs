@@ -7140,5 +7140,387 @@ mod delayed_request_tests {
     }
 }
 
+
+mod frozen_tests {
+    use super::super::*;
+    use crate::bridge::SharedState;
+    use crate::engine::context::Context;
+    use std::sync::atomic::Ordering;
+
+    /// A frame as the capture holds it, in hex.
+    fn captured(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect()
+    }
+
+    /// The bond's live record on a closed market (IBM 4.6 02/03/33): zero
+    /// bid, ask and yields, and the last trade under the ticker's own number.
+    const BOND_LIVE: &str = "383d4f01393d303133380133353d500103a00005ec0e940104000c0014001c0024002c00b8030005ec0e90010005ec0e90010005ec0f940004050e0e5ce31600df3b1c0024002c0034003c0044004c0054005c00676ab6b4666c027400b8008005ec0f94020502200e0e5ce3160e42f01e0e417ea70135283c2600df3b2e00e45c35a710b80001383334393d454632374536303801";
+
+    /// The same bond's frozen record: bid 93.495, ask 93.74, yields 5.8399
+    /// and 5.7913.
+    const BOND_FROZEN: &str = "383d4f01393d303133360133353d50010390000609ad9401060e44260e0e4db81600e41f1e00e2392501db2d01f4b800000609ad94020502200e0e5ce3160e42f01e0e417ea70135283c2600df3b2e00e45c35a710b800000609ad940004050e0e5ce31600df3b1c0024002c0034003c0044004c0054005c00676ab6b4666c027400b80001383334393d303531454337383001";
+
+    /// An option's delayed-frozen record (SPY 20261002 767 C): bid 7.73, ask
+    /// 7.99.
+    const OPTION_DELAYED_FROZEN: &str = "383d4f01393d303037390133353d500101c80001353d05030524010d031f2c7858000001353d1d0278a70135283c4503594d021c550d1d60000001353d15031234016c00a76ab6d5f7a80001383334393d323331313046363801";
+
+    /// A market status as the venue states it: four bytes under the number
+    /// it answers the status under, one closed.
+    fn status(server_tag: u32, stated: i32) -> Vec<u8> {
+        let mut body = server_tag.to_be_bytes().to_vec();
+        body.push(4);
+        body.extend_from_slice(&stated.to_be_bytes());
+        let mut msg = b"35=G\x01".to_vec();
+        msg.extend_from_slice(&((body.len() * 8) as u16).to_be_bytes());
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    /// Each entry sent: the action, its number, what it asks for, where, and
+    /// the feed it names.
+    fn entries(sent: &[Vec<u8>]) -> Vec<(String, u32, String, String, Option<String>)> {
+        sent.iter().flat_map(|message| {
+            let action = fix::fix_parse(message)[&263].clone();
+            fix::fix_parse_repeating(message, 262).into_iter().map(move |entry| (
+                action.clone(), entry[&262].parse().unwrap(), entry[&264].clone(),
+                entry[&207].clone(), entry.get(&9887).cloned(),
+            ))
+        }).collect()
+    }
+
+    fn numbers(sent: &[(String, u32, String, String, Option<String>)], asked: &str, feed: Option<&str>) -> Vec<u32> {
+        sent.iter()
+            .filter(|(action, _, request, _, stated)| action == asked && ["442", "443"].contains(&request.as_str()) && stated.as_deref() == feed)
+            .map(|(_, id, ..)| *id).collect()
+    }
+
+    /// The bid's and ask's yields published, in the ten thousandths the venue
+    /// states them in.
+    fn yields(shared: &SharedState, instrument: InstrumentId) -> Vec<(i32, i64)> {
+        shared.market.drain_series_ticks(instrument).into_iter().filter_map(|tick| match tick.value {
+            crate::types::SeriesValue::Price(value) if matches!(tick.tick_type, 50 | 51) => {
+                Some((tick.tick_type, (value * 10_000.0).round() as i64))
+            }
+            _ => None,
+        }).collect()
+    }
+
+    /// Where a gateway watches a market's status: for a subscription taken
+    /// with frozen data on, where the logon enables frozen data and a frozen
+    /// quote is served for the kind of contract, on the smart route where the
+    /// contract is directed elsewhere and listed there, or on its preferred
+    /// market where one is named and listed. A subscription taken with
+    /// delayed-frozen data on alone is watched only once it falls back.
+    #[test]
+    fn the_market_status_is_watched_where_a_gateway_watches_it() {
+        // Whether the logon enables frozen data, the feeds the subscription
+        // was made with, the contract, where else it is listed, its
+        // preferred market, and where its status is asked for.
+        let rows = [
+            (true, true, false, "BOND", "SMART", "SMART", "", Some("BEST")),
+            (false, true, false, "BOND", "SMART", "SMART", "", None),
+            (true, false, true, "BOND", "SMART", "SMART", "", None),
+            (true, true, false, "FUND", "SMART", "SMART", "", None),
+            (true, true, false, "STK", "ARCA", "SMART", "", Some("BEST")),
+            (true, true, false, "STK", "ARCA", "NYSE", "NYSE", Some("NYSE")),
+            (true, true, false, "STK", "OVERNIGHT", "SMART", "", Some("OVERNIGHT")),
+            (true, true, false, "STK", "ISLAND", "ISLAND", "", Some("NASDAQ")),
+        ];
+        for (enabled, frozen, delayed_frozen, sec_type, exchange, listed, preferred, watched_at) in rows {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            if enabled {
+                shared.reference.set_enabled_features(vec!["FROZEN".into()]);
+            }
+            shared.reference.set_aggregate_exchanges(format!("4,{preferred}"));
+            shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+                con_id: 7, exchange: exchange.into(), valid_exchanges: vec![exchange.into(), listed.into()],
+                agg_group: 4, ..Default::default()
+            });
+            let instrument = context.market.register(7);
+            farm.note_frozen_feeds(instrument, frozen, delayed_frozen, 7, sec_type, exchange, &shared);
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).unwrap();
+            farm.send_mktdata_subscribe(7, "X", exchange, sec_type, "", 0.0, "", "", instrument, 0, false, &mut conn, &mut hb);
+            let watched: Vec<_> = entries(&super::drain_inner(&mut peer)).into_iter()
+                .filter(|(_, _, request, _, _)| request == "398").collect();
+            assert_eq!(
+                watched.iter().map(|(_, _, _, venue, feed)| (venue.as_str(), feed.clone())).collect::<Vec<_>>(),
+                watched_at.map(|venue| (venue, None)).into_iter().collect::<Vec<_>>(),
+                "{enabled} {frozen} {delayed_frozen} {sec_type} {exchange}",
+            );
+        }
+    }
+
+    /// A subscription taken with frozen data on, on a login served the live
+    /// quote: the bond's live record states zeros on a closed market. The
+    /// status saying the market is closed asks the frozen quote beside the
+    /// live one and serves it, type 2, while the live one is kept up and not
+    /// served; the status saying it is open withdraws the frozen quote and
+    /// serves the live one again, type 1.
+    #[test]
+    fn a_closed_market_serves_the_frozen_quote_until_it_opens() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        shared.reference.set_enabled_features(vec!["FROZEN".into()]);
+        let instrument = context.market.register(851160433);
+        let data_type = shared.market.subscription_data_type(instrument, 1);
+        farm.note_frozen_feeds(instrument, true, false, 851160433, "BOND", "SMART", &shared);
+        let (conn, peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).unwrap();
+        farm.send_mktdata_subscribe(851160433, "IBM", "SMART", "BOND", "", 0.0, "", "", instrument, 0, false, &mut conn, &mut hb);
+        let sent = entries(&super::drain_inner(&mut peer));
+        let live = numbers(&sent, "1", None);
+        let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id).unwrap();
+        assert_eq!(live.len(), 2, "the live quote first: {sent:?}");
+
+        for id in &live {
+            farm.handle_subscription_ack(format!("35=Q\x01388110,{id},0.0001,0,1,ffffffff,,1,1").as_bytes(), &mut context, &shared);
+        }
+        farm.handle_ticker_setup(b"35=L\x01851160433,0.0001,388111,,1", &mut context, &shared);
+        farm.handle_subscription_ack(format!("35=Q\x01395696,{watch},0.0001,0,0,ffffffff,,0,1").as_bytes(), &mut context, &shared);
+        farm.process_farm_message(&captured(BOND_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
+        let mts = context.market.min_tick_scaled(instrument);
+        assert_eq!(yields(&shared, instrument), [(50, 0), (51, 0)], "the live record's zeros");
+
+        farm.process_farm_message(&status(395696, 2), &mut conn, &mut context, &shared, &None, &mut hb);
+        assert!(super::drain_inner(&mut peer).is_empty(), "only a status of one says the market is closed");
+        farm.process_farm_message(&status(395696, 1), &mut conn, &mut context, &shared, &None, &mut hb);
+        let frozen = numbers(&entries(&super::drain_inner(&mut peer)), "1", Some("2"));
+        assert_eq!(frozen.len(), 2, "the frozen quote is asked for beside the live one");
+        assert_eq!(data_type.load(Ordering::Relaxed), 2);
+        for id in &frozen {
+            farm.handle_subscription_ack(format!("35=Q\x01395693,{id},0.0001,2,1,ffffffff,,0,1").as_bytes(), &mut context, &shared);
+        }
+        farm.process_farm_message(&captured(BOND_FROZEN), &mut conn, &mut context, &shared, &None, &mut hb);
+        assert_eq!((context.quote(instrument).bid, context.quote(instrument).ask), (934_950 * mts, 937_400 * mts));
+        assert_eq!(yields(&shared, instrument), [(50, 58_399), (51, 57_913)]);
+
+        farm.process_farm_message(&captured(BOND_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
+        assert_eq!(context.quote(instrument).bid, 934_950 * mts, "the live quote is not served");
+        assert!(yields(&shared, instrument).is_empty());
+
+        farm.process_farm_message(&status(395696, 0), &mut conn, &mut context, &shared, &None, &mut hb);
+        let withdrawn = entries(&super::drain_inner(&mut peer));
+        assert_eq!(numbers(&withdrawn, "2", Some("2")), frozen, "withdrawn as it was asked for");
+        assert_eq!(data_type.load(Ordering::Relaxed), 1);
+        assert_eq!((context.quote(instrument).bid, context.quote(instrument).ask), (0, 0), "the live quote as it stands");
+        assert_eq!(yields(&shared, instrument), [(50, 0), (51, 0)]);
+
+        // Withdrawn with the subscription: the status and the frozen quote.
+        farm.process_farm_message(&status(395696, 1), &mut conn, &mut context, &shared, &None, &mut hb);
+        let frozen = numbers(&entries(&super::drain_inner(&mut peer)), "1", Some("2"));
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        let withdrawn = entries(&super::drain_inner(&mut peer));
+        assert_eq!(numbers(&withdrawn, "2", Some("2")), frozen);
+        assert!(withdrawn.iter().any(|(action, id, request, ..)| action == "2" && *id == watch && request == "398"));
+    }
+
+    /// A subscription taken with delayed-frozen data on, on a login refused
+    /// the live quote: the fallback to delayed data watches the status, the
+    /// closed market asks the frozen and the delayed-frozen quotes, the frozen
+    /// one's refusal is not told to the program, and the first delayed-frozen
+    /// record is served, type 4, and with it what the acknowledgements stated:
+    /// the live record is not in the frozen state, so its permission stands.
+    #[test]
+    fn a_delayed_fallback_on_a_closed_market_serves_the_delayed_frozen_quote() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        shared.reference.set_enabled_features(vec!["FROZEN".into()]);
+        let instrument = context.market.register(910663577);
+        let data_type = shared.market.subscription_data_type(instrument, 1);
+        farm.note_data_type(instrument, 0, Some(1), &shared);
+        farm.note_frozen_feeds(instrument, false, true, 910663577, "OPT", "SMART", &shared);
+        let (conn, peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).unwrap();
+        farm.send_mktdata_subscribe(910663577, "SPY", "SMART", "OPT", "20261002", 767.0, "C", "100", instrument, 0, false, &mut conn, &mut hb);
+        let sent = entries(&super::drain_inner(&mut peer));
+        assert!(sent.iter().all(|(_, _, request, ..)| request != "398"), "not watched before it falls back");
+        let live = numbers(&sent, "1", None);
+
+        let refused = fix::fix_build(&[
+            (fix::TAG_MSG_TYPE, "3"), (58, "Error&BEST/OPT/Top&BEST/OPT/Top"),
+            (262, &format!("{};{}", live[0], live[1])), (9887, "1;1"),
+        ], 1);
+        farm.process_farm_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb);
+        let sent = entries(&super::drain_inner(&mut peer));
+        let delayed = numbers(&sent, "1", Some("1"));
+        let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id)
+            .expect("the fallback watches the status");
+        farm.handle_subscription_ack(format!("35=Q\x0179166,{},0.01,1,1,c7,,0,1", delayed[0]).as_bytes(), &mut context, &shared);
+        farm.handle_subscription_ack(format!("35=Q\x0179200,{watch},0.01,0,0,c7,,0,1").as_bytes(), &mut context, &shared);
+
+        farm.process_farm_message(&status(79200, 1), &mut conn, &mut context, &shared, &None, &mut hb);
+        let sent = entries(&super::drain_inner(&mut peer));
+        let (frozen, delayed_frozen) = (numbers(&sent, "1", Some("2")), numbers(&sent, "1", Some("3")));
+        assert_eq!((frozen.len(), delayed_frozen.len()), (2, 2), "{sent:?}");
+        let refused = fix::fix_build(&[
+            (fix::TAG_MSG_TYPE, "3"),
+            (58, "Error&OPRABBO/OPT/Top/frozen&OPRABBO/OPT/Top/frozen"),
+            (262, &format!("{};{}", frozen[0], frozen[1])), (9887, "0;0"),
+        ], 1);
+        farm.process_farm_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb);
+        assert!(shared.market.drain_subscription_failures().is_empty());
+        assert!(shared.market.drain_companion_refusals().is_empty());
+
+        for id in &delayed_frozen {
+            farm.handle_subscription_ack(format!("35=Q\x0179165,{id},0.01,3,1,c7,,0,1").as_bytes(), &mut context, &shared);
+        }
+        assert_eq!(data_type.load(Ordering::Relaxed), 3, "delayed until a delayed-frozen record arrives");
+        farm.process_farm_message(&captured(OPTION_DELAYED_FROZEN), &mut conn, &mut context, &shared, &None, &mut hb);
+        assert_eq!(data_type.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            shared.market.drain_tick_req_params().iter().map(|(_, p)| p.snapshot_permissions).collect::<Vec<_>>(), [1],
+            "the live record is not frozen",
+        );
+        let mts = context.market.min_tick_scaled(instrument);
+        assert_eq!((context.quote(instrument).bid, context.quote(instrument).ask), (773 * mts, 799 * mts));
+
+        farm.process_farm_message(&status(79200, 0), &mut conn, &mut context, &shared, &None, &mut hb);
+        let withdrawn = entries(&super::drain_inner(&mut peer));
+        assert_eq!(numbers(&withdrawn, "2", Some("3")), delayed_frozen);
+        assert!(numbers(&withdrawn, "2", Some("2")).is_empty(), "the refused quote is not withdrawn");
+        assert_eq!(data_type.load(Ordering::Relaxed), 3);
+    }
+
+    /// A refusal of the live quote ends the watch on it, as a gateway ends
+    /// it: on a closed market the frozen quote asked for beside it is
+    /// withdrawn without a word, and the status with it unless the fallback
+    /// to delayed data watches it with delayed-frozen data on. There the
+    /// delayed record is asked the frozen quote again, whatever the live one
+    /// was told, and the delayed-frozen one beside it; the fallback is
+    /// reported as delayed until a delayed-frozen record arrives.
+    #[test]
+    fn a_refused_live_quote_ends_its_frozen_watch() {
+        // The feeds the session has on (delayed, delayed-frozen), whether the
+        // frozen quote was refused, what the refusal says of delayed data,
+        // what then goes out, and the type reported.
+        type Sent = &'static [(&'static str, &'static str, Option<&'static str>)];
+        let rows: [(bool, bool, bool, &str, Sent, i32); 3] = [
+            (false, false, false, "0;0", &[("2", "442", Some("2")), ("2", "443", Some("2")), ("2", "398", None)], 2),
+            (true, false, false, "1;1", &[
+                ("2", "443", None), ("1", "442", Some("1")), ("1", "443", Some("1")),
+                ("2", "442", Some("2")), ("2", "443", Some("2")), ("2", "398", None),
+            ], 3),
+            (true, true, true, "1;1", &[
+                ("2", "443", None), ("1", "442", Some("1")), ("1", "443", Some("1")),
+                ("1", "442", Some("2")), ("1", "443", Some("2")), ("1", "442", Some("3")), ("1", "443", Some("3")),
+            ], 3),
+        ];
+        for (delayed, delayed_frozen, frozen_refused, available, expected, reported) in rows {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            shared.reference.set_enabled_features(vec!["FROZEN".into()]);
+            let instrument = context.market.register(910663577);
+            let data_type = shared.market.subscription_data_type(instrument, 1);
+            farm.note_data_type(instrument, 0, delayed.then_some(1), &shared);
+            farm.note_frozen_feeds(instrument, true, delayed_frozen, 910663577, "OPT", "SMART", &shared);
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).unwrap();
+            farm.send_mktdata_subscribe(910663577, "SPY", "SMART", "OPT", "20261002", 767.0, "C", "100", instrument, 0, false, &mut conn, &mut hb);
+            let sent = entries(&super::drain_inner(&mut peer));
+            let live = numbers(&sent, "1", None);
+            let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id).unwrap();
+            farm.handle_subscription_ack(format!("35=Q\x0179200,{watch},0.01,0,0,c7,,0,1").as_bytes(), &mut context, &shared);
+            farm.process_farm_message(&status(79200, 1), &mut conn, &mut context, &shared, &None, &mut hb);
+            let frozen = numbers(&entries(&super::drain_inner(&mut peer)), "1", Some("2"));
+            assert_eq!(data_type.load(Ordering::Relaxed), 2);
+            if frozen_refused {
+                let refused = fix::fix_build(&[
+                    (fix::TAG_MSG_TYPE, "3"),
+                    (58, "Error&OPRABBO/OPT/Top/frozen&OPRABBO/OPT/Top/frozen"),
+                    (262, &format!("{};{}", frozen[0], frozen[1])), (9887, "0;0"),
+                ], 1);
+                farm.process_farm_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb);
+            } else {
+                for id in &frozen {
+                    farm.handle_subscription_ack(format!("35=Q\x0179165,{id},0.01,2,1,c7,,0,1").as_bytes(), &mut context, &shared);
+                }
+            }
+
+            let refused = fix::fix_build(&[
+                (fix::TAG_MSG_TYPE, "3"), (58, "Error&BEST/OPT/Top&BEST/OPT/Top"),
+                (262, &format!("{};{}", live[0], live[1])), (9887, available),
+            ], 1);
+            farm.process_farm_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb);
+            let sent = entries(&super::drain_inner(&mut peer));
+            let stated: Vec<_> = sent.iter()
+                .map(|(action, _, request, _, feed)| (action.as_str(), request.as_str(), feed.as_deref()))
+                .collect();
+            assert_eq!(stated, expected, "delayed {delayed}, delayed-frozen {delayed_frozen}");
+            if let Some(&(_, id, ..)) = sent.iter().find(|(action, _, request, _, feed)| {
+                action == "1" && request == "442" && feed.as_deref() == Some("1")
+            }) {
+                farm.handle_subscription_ack(format!("35=Q\x0179166,{id},0.01,1,1,c7,,0,1").as_bytes(), &mut context, &shared);
+            }
+            assert_eq!(data_type.load(Ordering::Relaxed), reported, "delayed {delayed}, delayed-frozen {delayed_frozen}");
+        }
+    }
+
+    /// AAPL under type 2 on a login served it live, on a closed market: the
+    /// status as the venue stated it, and the frozen and the live records.
+    const STOCK_STATUS_CLOSED: &str = "383d4f01393d303033310133353d470100480000ab00040000000101383334393d393130413030364401";
+    const STOCK_FROZEN: &str = "383d4f01393d303130310133353d500102780000ab0116008562343d6c00a76ab70afea8000000ab01b20083380000ab011e008338a70135283c460085774e0082adfc0a661b4986cd84f060000000ab010600855a2502580e0085642d00f0580001383334393d463335433730433901";
+    const STOCK_LIVE: &str = "383d4f01393d303038350133353d500101f88000aafd1e008338a70135283c44004c00540060000000aafd14e434006c00a400ac00d8810000aafb04e424000ce42c003c0084008c0058008000aafdb00001383334393d313331383136313401";
+
+    /// Where the market's status is watched, what the acknowledgements state
+    /// of the contract is stated with the first record served, as a gateway
+    /// states it. With the status arriving before the live record, as it did
+    /// on the stock above, that is the frozen record and the contract is in
+    /// the frozen state: permission 0, where the live acknowledgement stated
+    /// 3. With the live record first, it is stated with that record.
+    #[test]
+    fn a_watched_request_states_its_parameters_with_the_first_record_served() {
+        for status_first in [true, false] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            shared.reference.set_enabled_features(vec!["FROZEN".into()]);
+            let instrument = context.market.register(265598);
+            farm.note_frozen_feeds(instrument, true, false, 265598, "STK", "SMART", &shared);
+            let (conn, peer) = Connection::for_test();
+            let mut conn = Some(conn);
+            let mut peer = Connection::new_raw(peer).unwrap();
+            farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", instrument, 0, false, &mut conn, &mut hb);
+            let sent = entries(&super::drain_inner(&mut peer));
+            let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id).unwrap();
+            for id in numbers(&sent, "1", None) {
+                farm.handle_subscription_ack(format!("35=Q\x0143771,{id},0.01,0,3,9c,,1,1").as_bytes(), &mut context, &shared);
+            }
+            farm.handle_ticker_setup(b"35=L\x01265598,0.01,43773,,1", &mut context, &shared);
+            farm.handle_subscription_ack(format!("35=Q\x0143776,{watch},0.01,0,0,9c,,0,1").as_bytes(), &mut context, &shared);
+            let stated = |shared: &SharedState| -> Vec<i64> {
+                shared.market.drain_tick_req_params().iter().map(|(_, p)| p.snapshot_permissions).collect()
+            };
+            if !status_first {
+                farm.process_farm_message(&captured(STOCK_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
+                assert_eq!(stated(&shared), [3], "with the live record");
+                continue;
+            }
+            farm.process_farm_message(&captured(STOCK_STATUS_CLOSED), &mut conn, &mut context, &shared, &None, &mut hb);
+            for id in numbers(&entries(&super::drain_inner(&mut peer)), "1", Some("2")) {
+                farm.handle_subscription_ack(format!("35=Q\x0143777,{id},0.01,2,3,9c,,0,1").as_bytes(), &mut context, &shared);
+            }
+            assert!(stated(&shared).is_empty(), "not before a record is served");
+            farm.process_farm_message(&captured(STOCK_FROZEN), &mut conn, &mut context, &shared, &None, &mut hb);
+            farm.process_farm_message(&captured(STOCK_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
+            assert_eq!(stated(&shared), [0], "with the frozen record, in the frozen state");
+        }
+    }
+}
+
 #[path = "attached_pricing_tests.rs"]
 mod attached_pricing_tests;

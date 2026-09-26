@@ -10118,7 +10118,8 @@ fn a_subscription_looks_up_the_listing_the_caller_named() {
             last_trade_date_or_contract_month: "202612".into(), strike: 7700.0,
             right: "C".into(), trading_class: "ES".into(), ..Default::default()
         },
-        mode_9887: 0, delayed_mode: None, regulatory_snapshot: false, snapshot: false,
+        mode_9887: 0, delayed_mode: None, frozen: false, delayed_frozen: false,
+        regulatory_snapshot: false, snapshot: false,
         generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }, &mut conn, &mut hb, &shared);
 
@@ -10136,7 +10137,8 @@ fn spy_by_symbol(req_id: i64) -> crate::types::ControlCommand {
             symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(), currency: "USD".into(),
             ..Default::default()
         },
-        filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false,
+        filters: Default::default(), mode_9887: 0, delayed_mode: None, frozen: false,
+        delayed_frozen: false, regulatory_snapshot: false,
         snapshot: false, generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }
 }

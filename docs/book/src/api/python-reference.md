@@ -1139,7 +1139,7 @@ def last_rtt_ms()
 
 #### `req_market_data_type`
 
-Name the kind of data every subscription after this one asks for: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.  The type is carried on each subscription that follows, and the `market_data_type` callback reports the type that subscription was made under. A type this client does not know is logged and leaves the feeds as they were. `req_mkt_data_ex` states the type per request, which allows two feeds on one contract at once.  A type turns feeds on, as a gateway takes it: 2 turns frozen data on; 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only 1 turns frozen data off, and it turns all three off. So 2 after 4 still falls back to delayed-frozen.
+Name the feeds every subscription after this one may be served: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.  A type turns feeds on, as a gateway takes it: 2 turns frozen data on; 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only 1 turns frozen data off, and it turns all three off. A subscription starts live whatever the type, falls back to delayed data on a refusal where delayed data is on, and is served the frozen or delayed-frozen quote while the market is closed, where the logon enables frozen data; the `market_data_type` callback reports the type served. A type this client does not know is logged and leaves the feeds as they were. `req_mkt_data_ex` names a feed per request, which allows two feeds on one contract at once.
 
 ```python
 def req_market_data_type(market_data_type)
@@ -3409,7 +3409,7 @@ What a subscription was given: the increment its prices move in, which venues it
 | `ticker_id` | `int` | Ticker/request ID. |
 | `min_tick` | `float` | Minimum tick size. |
 | `bbo_exchange` | `str` | BBO exchange for smart component lookup (e.g. `"SMART"`). |
-| `snapshot_permissions` | `int` | What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. 0 where the venue names no BBO exchange, as for a currency or a crypto, and on a bond, a bill, a fixed-income contract or a combination, whatever the venue stated, as a gateway states it. |
+| `snapshot_permissions` | `int` | What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. 0 where the venue names no BBO exchange, as for a currency or a crypto, on a bond, a bill, a fixed-income contract or a combination, and while the frozen quote is served in place of the live one, whatever the venue stated, as a gateway states it. |
 
 ---
 

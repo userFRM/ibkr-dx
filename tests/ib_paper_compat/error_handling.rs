@@ -28,7 +28,7 @@ pub(super) fn phase_ib_error_handling(conns: Conns) -> Conns {
 
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { con_id: 0, order_id: oid, instrument: bogus_inst, side: Side::Buy, qty: ibkr_dx::types::QTY_SCALE, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
 
-    control_tx.send(ControlCommand::Subscribe { req_id: 90011, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false, snapshot: false,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90011, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, frozen: false, delayed_frozen: false, regulatory_snapshot: false, snapshot: false,
         generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -94,7 +94,7 @@ pub(super) fn phase_pacing_violation_recovery(conns: Conns) -> Conns {
         control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 14000 + i, end_date_time: end_dt.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
     }
 
-    control_tx.send(ControlCommand::Subscribe { req_id: 90012, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, regulatory_snapshot: false, snapshot: false,
+    control_tx.send(ControlCommand::Subscribe { req_id: 90012, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, frozen: false, delayed_frozen: false, regulatory_snapshot: false, snapshot: false,
         generic_ticks: Vec::new(), news: None, spread_scan: None, calculation: None,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
