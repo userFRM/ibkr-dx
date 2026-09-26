@@ -955,7 +955,7 @@ def next_shared_id()
 
 #### `req_open_orders`
 
-Request all open orders for this client.
+Request all open orders for this client.  An order the venue states held is among them only where this session placed it: a gateway holds an order it sent working whatever the venue states of it later, and leaves out one it first learns of held.
 
 ```python
 def req_open_orders()
@@ -965,7 +965,7 @@ def req_open_orders()
 
 #### `req_all_open_orders`
 
-Request all open orders across all clients.  The same answer as `req_open_orders`. The reference client splits the two by client id; this wire carries no client id on an order, so the venue names the orders on the account without stating who entered them. A subset would be an attribution the venue does not supply.
+Request all open orders across all clients.  The same answer as `req_open_orders`. A gateway narrows that one to the orders of the client asking, and this client does not.
 
 ```python
 def req_all_open_orders()

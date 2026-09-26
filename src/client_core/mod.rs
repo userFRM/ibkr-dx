@@ -3824,8 +3824,7 @@ impl ClientCore {
             .map(|(&id, _)| id)
             .collect();
 
-        // Local tracked orders (non-terminal, or genuinely-Inactive and
-        // still reactivatable —), enriched from secdef cache
+        // Local tracked orders, enriched from secdef cache
         {
             // The client the venue names, read into the answer where the
             // record names none, as the fill's is — and into the answer
@@ -3859,7 +3858,12 @@ impl ClientCore {
                 if shared.orders.recently_completed(oid) {
                     continue;
                 }
-                if is_open_status(&o.status) || (o.status == "Inactive" && !o.rejected) {
+                // What a gateway holds working, which is what it answers
+                // with. No report moves an order it sent out of working, so
+                // one this client placed that the venue states held is still
+                // among them; an order it first learns of from a report
+                // stating it held, it holds inactive and leaves out.
+                if is_open_status(&o.status) || (o.status == "Inactive" && !o.rejected && o.placed_here) {
                     let contract = if o.contract.con_id != 0 {
                         self.get_contract(o.contract.con_id, shared).unwrap_or_else(|| o.contract.clone())
                     } else {
@@ -3886,9 +3890,10 @@ impl ClientCore {
             }
         }
 
-        // Add shared-only entries not already present from local
+        // Add shared-only entries not already present from local. None is
+        // one this client placed, so one the venue states held is left out.
         for (oid, info) in shared_orders {
-            if !is_open_or_reactivatable(&info.order_state.status, &info.order_state.completed_status) {
+            if !is_open_status(&info.order_state.status) {
                 continue;
             }
             if status_withdrawn.contains(&oid) {

@@ -584,10 +584,13 @@ impl EClient {
     /// Request open orders for this client. Matches `reqOpenOrders` in C++.
     ///
     /// Answers with every order working on the account, each on `open_order`
-    /// and then its status on `order_status`, as a gateway answers it and as
-    /// [`req_all_open_orders`](EClient::req_all_open_orders) does. The protocol
-    /// carries no client number on an order, so this session cannot tell which
-    /// orders it placed; reporting fewer would omit working orders.
+    /// and then its status on `order_status`, as a gateway states each order it
+    /// answers with, and as [`req_all_open_orders`](EClient::req_all_open_orders)
+    /// does. An order the venue states held is among them only where this
+    /// session placed it: a gateway holds an order it sent working whatever
+    /// the venue states of it later, and leaves out one it first learns of
+    /// held. A gateway narrows this answer to the orders of the client asking,
+    /// and this client does not.
     pub fn req_open_orders(&self) {
         self.ask_open_orders(crate::types::model::Question::OpenOrders);
     }

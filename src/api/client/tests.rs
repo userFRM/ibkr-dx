@@ -6141,10 +6141,10 @@ fn process_msgs_dispatches_inactive_reason_as_error() {
     assert!(w.events.iter().any(|e| e == "error:46:399:Order held pending margin check"));
 }
 
-/// end-to-end: a genuinely-Inactive order dispatched through the real
-/// `process_msgs` path (not a direct `ClientCore` call) stays in the
-/// open-order snapshot, while a Rejected one — which stringifies to the same
-/// "Inactive" — does not resurrect into it.
+/// end-to-end: a genuinely-Inactive order this client placed, dispatched
+/// through the real `process_msgs` path (not a direct `ClientCore` call),
+/// stays in the open-order snapshot, while a Rejected one — which stringifies
+/// to the same "Inactive" — does not resurrect into it.
 #[test]
 fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
     let (client, rx, shared) = test_client();

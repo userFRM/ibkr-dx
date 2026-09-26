@@ -358,8 +358,12 @@ fn is_open_or_reactivatable_still_excludes_terminal_status() {
     assert!(!is_open_or_reactivatable("Cancelled", ""));
 }
 
+/// The open orders are what a gateway holds working. An order this client
+/// placed that the venue states held is still among them, as no report moves
+/// an order a gateway sent out of working; one first learned of from a report
+/// stating it held is held inactive, and is not. Nor is a rejected one.
 #[test]
-fn collect_open_orders_admits_inactive_but_excludes_rejected_locally_tracked() {
+fn collect_open_orders_admits_an_inactive_order_placed_here_alone_and_no_rejected_one() {
     let core = ClientCore::new();
     let shared = SharedState::new();
     core.track_order(80, ApiContract::default(), ApiOrder { order_id: 80, ..Default::default() }, 0);
@@ -367,16 +371,19 @@ fn collect_open_orders_admits_inactive_but_excludes_rejected_locally_tracked() {
 
     core.update_order_status(&shared, 80, OrderStatus::Inactive, 0.0, 100.0, 0);
     core.update_order_status(&shared, 81, OrderStatus::Rejected, 0.0, 100.0, 0);
+    core.update_order_status(&shared, 82, OrderStatus::Inactive, 0.0, 100.0, 0);
 
     let result = core.collect_open_orders(&shared);
     assert!(result.iter().any(|(id, _)| *id == 80),
-        "genuinely-inactive order must remain in the open-order snapshot");
+        "an inactive order this client placed must remain in the open-order snapshot");
     assert!(!result.iter().any(|(id, _)| *id == 81),
         "rejected order must not resurrect into the open-order snapshot");
+    assert!(!result.iter().any(|(id, _)| *id == 82),
+        "an order first learned of as inactive is not among the open orders");
 }
 
 #[test]
-fn collect_open_orders_shared_only_admits_inactive_but_excludes_rejected() {
+fn collect_open_orders_shared_only_leaves_out_inactive_and_rejected() {
     let core = ClientCore::new();
     let shared = SharedState::new();
 
@@ -398,8 +405,8 @@ fn collect_open_orders_shared_only_admits_inactive_but_excludes_rejected() {
     });
 
     let result = core.collect_open_orders(&shared);
-    assert!(result.iter().any(|(id, _)| *id == 90),
-        "genuinely-inactive shared-only order must be admitted to the open-order snapshot");
+    assert!(!result.iter().any(|(id, _)| *id == 90),
+        "a shared-only order the venue states held is not among the open orders");
     assert!(!result.iter().any(|(id, _)| *id == 91),
         "rejected shared-only order must not resurrect into the open-order snapshot");
 }
