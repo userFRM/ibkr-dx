@@ -32,7 +32,7 @@ impl Wrapper for Heard {
             state.maint_margin_change.clone(),
         ));
     }
-    fn error(&mut self, _r: i64, code: i64, message: &str, _a: &str) {
+    fn error(&mut self, _r: i64, _error_time: i64, code: i64, message: &str, _a: &str) {
         if !matches!(code, 2104 | 2106 | 2158 | 2107) {
             self.said.push(format!("{code}: {}", message.lines().next().unwrap_or("")));
         }

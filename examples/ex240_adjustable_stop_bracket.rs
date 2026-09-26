@@ -37,7 +37,7 @@ impl Wrapper for ProbeWrapper {
         println!("[order_status] id={} status={} parent_id={}", order_id, status, parent_id);
         self.state.lock().unwrap().statuses.push((order_id, status.into(), parent_id));
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         eprintln!("[error] req_id={} code={} msg={}", req_id, code, msg);
         self.state.lock().unwrap().errors.push((req_id, code, msg.into()));
     }

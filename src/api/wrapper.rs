@@ -32,7 +32,13 @@ pub trait Wrapper {
     /// numbers the reference client uses: 321 for a request that fails
     /// validation, 200 for a contract description that matches nothing, 504
     /// for a call made with no session.
-    fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {}
+    ///
+    /// `error_time` is the reference client's second parameter: when this
+    /// client delivered the error, in milliseconds since the epoch. A gateway
+    /// stamps every error it sends, with the time of the venue's message it
+    /// answers or with its own clock, and this client stamps each with its
+    /// clock as it delivers it.
+    fn error(&mut self, req_id: i64, error_time: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {}
     /// An error, with what it is about: a request and whether nothing more
     /// follows for it, an order and the operation it answers, a request that
     /// carries no number, the session, or a lookup this client made for
@@ -42,8 +48,8 @@ pub trait Wrapper {
     /// Every error is delivered here. By default it goes on to `error`, under
     /// the number [`ErrorOrigin::id`] states it under, so a wrapper that
     /// implements only `error` sees exactly what it saw before this existed.
-    fn error_from(&mut self, origin: ErrorOrigin, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
-        self.error(origin.id(), error_code, error_string, advanced_order_reject_json);
+    fn error_from(&mut self, origin: ErrorOrigin, error_time: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
+        self.error(origin.id(), error_time, error_code, error_string, advanced_order_reject_json);
     }
     /// The venue's clock, in seconds since the epoch.
     fn current_time(&mut self, time: i64) {}
@@ -503,13 +509,13 @@ impl<A: Wrapper + ?Sized, B: Wrapper + ?Sized> Wrapper for Tee<'_, A, B> {
         self.asked.managed_accounts(accounts_list);
         self.kept.managed_accounts(accounts_list);
     }
-    fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
-        self.asked.error(req_id, error_code, error_string, advanced_order_reject_json);
-        self.kept.error(req_id, error_code, error_string, advanced_order_reject_json);
+    fn error(&mut self, req_id: i64, error_time: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
+        self.asked.error(req_id, error_time, error_code, error_string, advanced_order_reject_json);
+        self.kept.error(req_id, error_time, error_code, error_string, advanced_order_reject_json);
     }
-    fn error_from(&mut self, origin: ErrorOrigin, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
-        self.asked.error_from(origin, error_code, error_string, advanced_order_reject_json);
-        self.kept.error_from(origin, error_code, error_string, advanced_order_reject_json);
+    fn error_from(&mut self, origin: ErrorOrigin, error_time: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {
+        self.asked.error_from(origin, error_time, error_code, error_string, advanced_order_reject_json);
+        self.kept.error_from(origin, error_time, error_code, error_string, advanced_order_reject_json);
     }
     fn current_time(&mut self, time: i64) {
         self.asked.current_time(time);
@@ -874,7 +880,7 @@ mod tee_tests {
         ) {
             self.fills.push(execution.exec_id.clone());
         }
-        fn error(&mut self, _req_id: i64, code: i64, _message: &str, _adv: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, _message: &str, _adv: &str) {
             self.errors.push(code);
         }
     }
@@ -889,7 +895,7 @@ mod tee_tests {
     fn what_one_side_ignores_still_reaches_the_other() {
         struct AsksAboutErrorsOnly { seen: Vec<i64> }
         impl Wrapper for AsksAboutErrorsOnly {
-            fn error(&mut self, _req_id: i64, code: i64, _message: &str, _adv: &str) {
+            fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, _message: &str, _adv: &str) {
                 self.seen.push(code);
             }
         }
@@ -904,7 +910,7 @@ mod tee_tests {
                 ..Default::default()
             };
             both.exec_details(7, &contract, &execution);
-            both.error(7, 321, "a reason", "");
+            both.error(7, 0, 321, "a reason", "");
         }
         assert_eq!(kept.fills, ["0001"], "the fill reached the record");
         assert_eq!(kept.errors, [321], "and so did the error");
@@ -935,7 +941,7 @@ pub mod tests {
         fn next_valid_id(&mut self, order_id: i64) {
             self.events.push(format!("next_valid_id:{order_id}"));
         }
-        fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, _: &str) {
+        fn error(&mut self, req_id: i64, _error_time: i64, error_code: i64, error_string: &str, _: &str) {
             self.events.push(format!("error:{req_id}:{error_code}:{error_string}"));
         }
         fn question_retired(&mut self, q: Question) {

@@ -74,8 +74,8 @@ macro_rules! call_wrapper {
 /// with what it is about, where the wrapper's class has that method, and on
 /// `error` otherwise.
 macro_rules! say_error {
-    ($client:ident, $py:expr, $shared:ident, $origin:expr, $time:expr, $code:expr, $msg:expr) => {
-        let (name, args) = $client.error_callback($py, $origin, $time, $code, $msg)?;
+    ($client:ident, $py:expr, $shared:ident, $origin:expr, $code:expr, $msg:expr) => {
+        let (name, args) = $client.error_callback($py, $origin, $code, $msg)?;
         call_wrapper!($client, $py, $shared, name, args.bind($py).clone());
     };
 }
@@ -352,13 +352,13 @@ impl EClient {
             Record::ConnectionLost { by_design } => {
                 self.connected.store(false, Ordering::Release);
                 if !by_design {
-                    say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 0, 1100,
+                    say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 1100,
                         "Connectivity between client and server has been lost");
                 }
             }
             Record::ConnectionRestored => {
                 self.connected.store(true, Ordering::Release);
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 0, 1102,
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 1102,
                     "Connectivity between client and server has been restored - data maintained");
             }
             // One of the connections the venue keeps data on went away or
@@ -368,7 +368,7 @@ impl EClient {
                     self.core.forget_last_quotes();
                 }
                 let (broken, ok) = which.codes();
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 0, if up { ok } else { broken }, which.says(up));
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, if up { ok } else { broken }, which.says(up));
             }
             Record::SlotTaken { slot, generation } => self.core.note_slot_taken(slot, generation),
             Record::SlotReleased { slot, generation } => self.core.note_slot_released(slot, generation),
@@ -398,7 +398,7 @@ impl EClient {
 
             // What was said about an order that went anyway, on its number.
             Record::OrderNotice((order_id, code, msg, op)) => {
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, 0, i64::from(code), &msg);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, i64::from(code), &msg);
             }
             Record::Fill(fill) => self.deliver_fill(py, shared, fill)?,
             Record::OrderUpdate(update) => self.deliver_update(py, shared, update)?,
@@ -429,7 +429,7 @@ impl EClient {
             Record::CancelReject(reject) => {
                 let (code, msg) = self.core.retire_rejected(&reject);
                 let origin = crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
-                say_error!(self, py, shared, origin, 0, code, &msg);
+                say_error!(self, py, shared, origin, code, &msg);
             }
             Record::OrderInactive((order_id, code, msg, op)) => {
                 // A refusal is the end of a preview: it states what an order
@@ -437,7 +437,7 @@ impl EClient {
                 if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
                     self.core.untrack_order(order_id);
                 }
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, 0, i64::from(code), &msg);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, i64::from(code), &msg);
             }
             // A preview and nothing else, answered on the order itself.
             Record::WhatIf(wi) => {
@@ -470,7 +470,7 @@ impl EClient {
                 }
             }
             Record::SubscriptionFailureFor((req_id, reason)) => {
-                    say_error!(self, py, shared, crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }, 0, 200, &reason);
+                    say_error!(self, py, shared, crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }, 200, &reason);
             }
             Record::TickReqParams((instrument, generation, _)) => {
                 if generation == self.core.generation_held(instrument) {
@@ -522,7 +522,7 @@ impl EClient {
             // asked for is not served.
             Record::DepthDrop((req_id, reason)) => {
                 let origin = crate::types::model::ErrorOrigin::Request { id: i64::from(req_id), ends: true };
-                say_error!(self, py, shared, origin, super::raised_now(), 354, &reason);
+                say_error!(self, py, shared, origin, 354, &reason);
             }
             Record::DepthUpdate(du) => {
                 if du.market_maker.is_empty() {
@@ -568,7 +568,7 @@ impl EClient {
                 }
             }
             Record::VenueError(text) => {
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, super::raised_now(), 2148, &text);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Session, 2148, &text);
             }
             // A lookup that named a contract another slot already holds.
             // A market-data request the engine has taken, and one withdrawn.
@@ -597,7 +597,7 @@ impl EClient {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
                         let origin = crate::types::model::ErrorOrigin::Request { id: req_id, ends: false };
-                        say_error!(self, py, shared, origin, 0, i64::from(notice.code), &notice.message);
+                        say_error!(self, py, shared, origin, i64::from(notice.code), &notice.message);
                     }
                 }
             }
@@ -605,7 +605,7 @@ impl EClient {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
                         let origin = crate::types::model::ErrorOrigin::Request { id: req_id, ends: true };
-                        say_error!(self, py, shared, origin, 0, 200, &reason);
+                        say_error!(self, py, shared, origin, 200, &reason);
                     }
                 }
             }
@@ -614,7 +614,7 @@ impl EClient {
                     for req_id in self.core.watchers_of(instrument) {
                         // The quote it rides beside goes on.
                         let origin = crate::types::model::ErrorOrigin::Request { id: req_id, ends: false };
-                        say_error!(self, py, shared, origin, 0, 321, &reason);
+                        say_error!(self, py, shared, origin, 321, &reason);
                     }
                 }
             }
@@ -650,7 +650,7 @@ impl EClient {
 
             // What the venue refused under a request, in its place.
             Record::HistoricalError((origin, code, msg)) => {
-                say_error!(self, py, shared, origin, 0, i64::from(code), &msg);
+                say_error!(self, py, shared, origin, i64::from(code), &msg);
             }
             Record::HistoricalData((req_id, response)) => {
                 let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
@@ -772,14 +772,14 @@ impl EClient {
                 call_wrapper!(self, py, shared, "replace_fa_end", (req_id, text.as_str()));
             }
             Record::AdvisorRefused((origin, code, text)) => {
-                say_error!(self, py, shared, origin, super::raised_now(), i64::from(code), &text);
+                say_error!(self, py, shared, origin, i64::from(code), &text);
             }
             Record::ScannerData((req_id, result)) => {
                 // A refused scan arrives in the shape of a completed one and
                 // carries the reason, reported against the requesting id.
                 if !result.error_text.is_empty() {
                     let origin = crate::types::model::ErrorOrigin::Request { id: i64::from(req_id), ends: true };
-                    say_error!(self, py, shared, origin, 0, 321, &result.error_text);
+                    say_error!(self, py, shared, origin, 321, &result.error_text);
                 }
                 for (rank, entry) in result.entries.iter().enumerate() {
                     let cd_py = self.scanned_details(py, entry, shared)?.into_any();
@@ -839,7 +839,7 @@ impl EClient {
             // A refusal made at a call, in its place: after everything pushed
             // before the call.
             Record::Refused((origin, code, msg)) => {
-                let (name, args) = self.error_callback(py, origin, super::raised_now(), code, &msg)?;
+                let (name, args) = self.error_callback(py, origin, code, &msg)?;
                 answer_wrapper!(self, py, shared, name, args.bind(py).clone());
             }
             // Composed by the read's loop, which hands its callbacks over one
@@ -914,7 +914,7 @@ impl EClient {
             );
             // A notice: the ticks it leaves out are the only ones left out.
             let origin = crate::types::model::ErrorOrigin::Request { id: i64::from(req_id), ends: false };
-            say_error!(self, py, shared, origin, super::raised_now(), crate::error_codes::Refusal::VALIDATION as i64, &why);
+            say_error!(self, py, shared, origin, crate::error_codes::Refusal::VALIDATION as i64, &why);
         }
         Ok(())
     }
@@ -1245,7 +1245,7 @@ impl EClient {
                     Ok(answer) => answer,
                     Err(why) => {
                         out.push(self.error_callback(
-                            py, crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }, super::raised_now(),
+                            py, crate::types::model::ErrorOrigin::Request { id: req_id, ends: true },
                             i64::from(why.code), &why.message,
                         )?);
                         // The end still comes, as it does for every request
@@ -1258,7 +1258,7 @@ impl EClient {
                     log::warn!("{why}");
                     // A notice the executions and their end follow.
                     out.push(self.error_callback(
-                        py, crate::types::model::ErrorOrigin::Request { id: req_id, ends: false }, super::raised_now(),
+                        py, crate::types::model::ErrorOrigin::Request { id: req_id, ends: false },
                         crate::error_codes::Refusal::VALIDATION as i64, &why,
                     )?);
                 }
@@ -1368,7 +1368,7 @@ impl EClient {
                 }
                 Err(why) => {
                     let origin = crate::types::model::ErrorOrigin::Request { id: req_id, ends: true };
-                    say_error!(self, py, shared, origin, 0, i64::from(why.code), &why.message);
+                    say_error!(self, py, shared, origin, i64::from(why.code), &why.message);
                 }
             }
         }

@@ -38,7 +38,7 @@ impl Wrapper for ProbeWrapper {
         println!("[contract_details_end] req_id={req_id}");
         self.state.lock().unwrap().end_seen = true;
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         eprintln!("[error] req_id={req_id} code={code} msg={msg}");
         self.state.lock().unwrap().last_error = Some((req_id, code, msg.into()));
     }

@@ -410,7 +410,7 @@ fn an_open_orders_question_is_held_for_the_replay_and_the_call_waits_for_nothing
     shared.orders.replay_is_pending();
     let began = std::time::Instant::now();
     client.req_open_orders();
-    client.req_ids();
+    client.req_ids(1);
     assert!(began.elapsed() < Duration::from_millis(200), "the calls wait for nothing");
     hl.poll_once();
     hl.asks.answer_what_is_ready(&shared, &mut { COMMANDS_PER_LAP });
@@ -1784,7 +1784,7 @@ fn a_joiner_receives_its_acknowledgement_before_the_close() {
         fn tick_req_params(&mut self, id: i64, _: f64, _: &str, _: i64) {
             self.0.push(format!("ack:{id}"));
         }
-        fn error(&mut self, id: i64, _: i64, _: &str, _: &str) {
+        fn error(&mut self, id: i64, _error_time: i64, _: i64, _: &str, _: &str) {
             self.0.push(format!("error:{id}"));
         }
         fn connection_closed(&mut self) {

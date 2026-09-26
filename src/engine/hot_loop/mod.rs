@@ -9730,7 +9730,7 @@ mod admission_tests {
         let (mut hl, shared, client) = stopped();
         shared.orders.replay_is_pending();
         for _ in 0..130 {
-            client.req_ids();
+            client.req_ids(1);
         }
         for _ in 0..3 {
             hl.poll_control_commands();
@@ -9759,7 +9759,7 @@ mod admission_tests {
             hl.poll_control_commands();
         }
         assert_eq!(client.backlog(), 130);
-        client.req_ids();
+        client.req_ids(1);
         shared.orders.set_replay_done();
         for expected in [64, 64, 2] {
             hl.poll_control_commands();
@@ -9783,7 +9783,7 @@ mod admission_tests {
             hl.poll_control_commands();
         }
         assert_eq!(hl.context.pending_orders.len(), 130);
-        client.req_ids();
+        client.req_ids(1);
         hl.poll_control_commands();
         assert_eq!(client.backlog(), 131);
         client.cancel_historical_data(500);

@@ -33,7 +33,7 @@ impl Wrapper for TickWrapper {
             _ => {}
         }
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         if !matches!(code, 2104 | 2106 | 2158) {
             eprintln!("[error] req_id={req_id} code={code} msg={msg}");
         }

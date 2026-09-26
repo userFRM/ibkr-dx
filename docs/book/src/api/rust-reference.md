@@ -1054,11 +1054,15 @@ pub fn req_global_cancel( &self, order_cancel: impl Into<crate::types::model::Or
 
 #### `req_ids`
 
-Request next valid order ID. Answered on `next_valid_id` in its place in the session's order. The venue names what the account is working after the connect returns, and the id is floored above it, so the engine holds the question until the naming is over; nothing waits here.
+Request next valid order ID. Answered on `next_valid_id` in its place in the session's order. The venue names what the account is working after the connect returns, and the id is floored above it, so the engine holds the question until the naming is over; nothing waits here. `num_ids` has no effect, as on a gateway: the next valid id is answered whatever number is asked for.
 
 ```rust
-pub fn req_ids(&self)
+pub fn req_ids(&self, num_ids: i32)
 ```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `num_ids` | `i32` | Number of IDs to reserve (unused). |
 
 ---
 
@@ -2634,11 +2638,12 @@ Every account this login may act for, separated by commas. One for most logins; 
 
 #### `error`
 
-What the venue said about a request, under the number it says it with. Codes from 2100 to 2200 are notices about a connection rather than failures. `req_id` is -1 for anything that answers no particular request.  A request this client will not send is reported here too, under the same numbers the reference client uses: 321 for a request that fails validation, 200 for a contract description that matches nothing, 504 for a call made with no session.
+What the venue said about a request, under the number it says it with. Codes from 2100 to 2200 are notices about a connection rather than failures. `req_id` is -1 for anything that answers no particular request.  A request this client will not send is reported here too, under the same numbers the reference client uses: 321 for a request that fails validation, 200 for a contract description that matches nothing, 504 for a call made with no session.  `error_time` is the reference client's second parameter: when this client delivered the error, in milliseconds since the epoch. A gateway stamps every error it sends, with the time of the venue's message it answers or with its own clock, and this client stamps each with its clock as it delivers it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `error_time` | `i64` | When this client delivered it, in milliseconds since the epoch. |
 | `error_code` | `i64` | Error code. |
 | `error_string` | `&str` | Error message. |
 | `advanced_order_reject_json` | `&str` | JSON with advanced rejection details. |
@@ -2652,6 +2657,7 @@ An error, with what it is about: a request and whether nothing more follows for 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `origin` | `ErrorOrigin` | What the error is about: a request, an order and the operation on it, a request with no number of its own, the session, or a lookup this client made for itself. |
+| `error_time` | `i64` | When this client delivered it, in milliseconds since the epoch. |
 | `error_code` | `i64` | Error code. |
 | `error_string` | `&str` | Error message. |
 | `advanced_order_reject_json` | `&str` | JSON with advanced rejection details. |

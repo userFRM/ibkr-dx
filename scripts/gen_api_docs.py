@@ -202,6 +202,7 @@ PARAM_DOCS: dict[str, str] = {
     "min_tick": "Minimum tick size.",
     "snapshot_permissions": "What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. 0 where the venue names no BBO exchange, as for a currency or a crypto, on a bond, a bill, a fixed-income contract or a combination, and while the frozen quote is served in place of the live one, whatever the venue stated, as a gateway states it.",
     "tick_type": "Tick type ID or tick-by-tick type string.",
+    "error_time": "When this client delivered it, in milliseconds since the epoch.",
     "error_code": "Error code.",
     "error_string": "Error message.",
     "origin": "What the error is about: a request, an order and the operation on it, a request with no number of its own, the session, or a lookup this client made for itself.",

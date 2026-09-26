@@ -293,7 +293,7 @@ impl Wrapper for RecWrapper {
     fn next_valid_id(&mut self, order_id: i64) {
         self.push(Cb::NextValidId { order_id });
     }
-    fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, _: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, error_code: i64, error_string: &str, _: &str) {
         self.push(Cb::Error { req_id, code: error_code, msg: error_string.into() });
     }
     fn contract_details(&mut self, req_id: i64, details: &ContractDetails) {
@@ -910,7 +910,7 @@ fn reference_and_account_calls_live() {
         fn account_update_multi_end(&mut self, req_id: i64) {
             self.0.lock().unwrap().values_multi_end.push(req_id);
         }
-        fn error(&mut self, req_id: i64, _code: i64, message: &str, _: &str) {
+        fn error(&mut self, req_id: i64, _error_time: i64, _code: i64, message: &str, _: &str) {
             if req_id == 999_777 {
                 self.0.lock().unwrap().rule_refusals.push(message.to_string());
             }

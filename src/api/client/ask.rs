@@ -145,7 +145,7 @@ impl Wrapper for Collector {
             self.answer.lock().unwrap().done = true;
         }
     }
-    fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
         // The connection notices are not answers to anything.
         if matches!(code, 2104 | 2106 | 2107 | 2119 | 2158) {
             return;
@@ -409,7 +409,7 @@ impl EClient {
                     self.state.lock().unwrap().done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -470,7 +470,7 @@ impl EClient {
             }
         }
         impl Wrapper for Refused {
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     *self.why.lock().unwrap() = Some(Refusal::stated(code as i32, message));
                 }
@@ -570,7 +570,7 @@ impl EClient {
                     self.state.lock().unwrap().done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -623,7 +623,7 @@ impl EClient {
                     s.done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -663,7 +663,7 @@ impl EClient {
                     s.done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -728,7 +728,7 @@ impl EClient {
                     self.state.lock().unwrap().done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -774,7 +774,7 @@ impl EClient {
                     s.done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -809,7 +809,7 @@ impl EClient {
                     s.done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -880,7 +880,7 @@ impl EClient {
                     s.done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.order_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -952,7 +952,7 @@ impl EClient {
                     self.state.lock().unwrap().done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -1031,7 +1031,7 @@ impl EClient {
                 }
                 *r = Some(report);
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id != self.order_id || is_warning(code) {
                     return;
                 }
@@ -1290,7 +1290,7 @@ impl EClient {
                     self.state.lock().unwrap().done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -1343,7 +1343,7 @@ impl EClient {
                     s.done = true;
                 }
             }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));
@@ -1395,7 +1395,7 @@ impl EClient {
         impl Wrapper for Json {
             fn wsh_meta_data(&mut self, req_id: i64, data: &str) { self.take(req_id, data) }
             fn wsh_event_data(&mut self, req_id: i64, data: &str) { self.take(req_id, data) }
-            fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
                 if req_id == self.req_id && !is_warning(code) {
                     let mut s = self.state.lock().unwrap();
                     s.error = Some(Refusal::stated(code as i32, message));

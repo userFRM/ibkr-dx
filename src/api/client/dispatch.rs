@@ -22,6 +22,17 @@ use crate::types::*;
 
 use super::{Contract, EClient};
 
+/// When an error is delivered, in milliseconds since the epoch.
+///
+/// A gateway stamps every error it sends, what the venue stated as much as
+/// what it raised itself, so a wrapper is never handed zero.
+pub(crate) fn raised_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 /// Tick type 53: a computation this client was asked for.
 ///
 /// The stream and the answer are two different things, and the venue names
@@ -204,7 +215,7 @@ impl EClient {
             Record::ConnectionLost { by_design } => {
                 self.connected.store(false, Ordering::Release);
                 if !by_design {
-                    wrapper.error_from(ErrorOrigin::Session, 1100, "Connectivity between client and server has been lost", "");
+                    wrapper.error_from(ErrorOrigin::Session, raised_now(), 1100, "Connectivity between client and server has been lost", "");
                 }
             }
             // 1102 rather than 1101: the reconnect re-establishes the
@@ -212,7 +223,7 @@ impl EClient {
             // after a loss that was pushed, so it always follows its 1100.
             Record::ConnectionRestored => {
                 self.connected.store(true, Ordering::Release);
-                wrapper.error_from(ErrorOrigin::Session, 1102, "Connectivity between client and server has been restored - data maintained", "");
+                wrapper.error_from(ErrorOrigin::Session, raised_now(), 1102, "Connectivity between client and server has been restored - data maintained", "");
             }
             // One of the connections the venue keeps data on went away or came
             // back, said under the number the venue reports it under. A
@@ -226,7 +237,7 @@ impl EClient {
                     self.core.forget_last_quotes();
                 }
                 let (broken, ok) = which.codes();
-                wrapper.error_from(ErrorOrigin::Session, if up { ok } else { broken }, which.says(up), "");
+                wrapper.error_from(ErrorOrigin::Session, raised_now(), if up { ok } else { broken }, which.says(up), "");
             }
             Record::Retired(what) => {
                 if matches!(what, crate::types::Retirement::Question(crate::types::model::Question::AccountUpdates))
@@ -243,7 +254,7 @@ impl EClient {
             // What was said about an order that went anyway: a warning on its
             // number, and nothing else about it changes.
             Record::OrderNotice((order_id, code, msg, op)) => {
-                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, code as i64, &msg, "");
+                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, raised_now(), code as i64, &msg, "");
             }
             Record::Fill(fill) => self.deliver_fill(fill, wrapper),
             Record::OrderUpdate(update) => self.deliver_update(update, wrapper),
@@ -267,7 +278,7 @@ impl EClient {
             Record::CancelReject(reject) => {
                 let (code, msg) = self.core.retire_rejected(&reject);
                 let origin = ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
-                wrapper.error_from(origin, code, &msg, "");
+                wrapper.error_from(origin, raised_now(), code, &msg, "");
             }
             // Why an order stopped working. The status already said Inactive;
             // this says why.
@@ -279,7 +290,7 @@ impl EClient {
                 if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
                     self.core.untrack_order(order_id);
                 }
-                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, code as i64, &msg, "");
+                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, raised_now(), code as i64, &msg, "");
             }
             // A preview and nothing else. The venue answers what an order
             // would cost on the order itself: it states no status for it,
@@ -312,7 +323,7 @@ impl EClient {
                 }
             }
             Record::SubscriptionFailureFor((req_id, reason)) => {
-                    wrapper.error_from(ErrorOrigin::Request { id: req_id, ends: true }, NO_SECURITY_DEFINITION, &reason, "");
+                    wrapper.error_from(ErrorOrigin::Request { id: req_id, ends: true }, raised_now(), NO_SECURITY_DEFINITION, &reason, "");
             }
             Record::TickReqParams((instrument, generation, _)) => {
                 if generation == self.core.generation_held(instrument) {
@@ -373,7 +384,7 @@ impl EClient {
             // stopped moving.
             Record::DepthDrop((req_id, reason)) => {
                 let origin = ErrorOrigin::Request { id: i64::from(req_id), ends: true };
-                wrapper.error_from(origin, DEPTH_NOT_SERVED, &reason, "");
+                wrapper.error_from(origin, raised_now(), DEPTH_NOT_SERVED, &reason, "");
             }
             Record::DepthUpdate(du) => {
                 if du.market_maker.is_empty() {
@@ -419,7 +430,7 @@ impl EClient {
             }
             // What the venue said went wrong. It attributes these to no
             // request, so neither does this.
-            Record::VenueError(text) => wrapper.error_from(ErrorOrigin::Session, VENUE_MESSAGE, &text, ""),
+            Record::VenueError(text) => wrapper.error_from(ErrorOrigin::Session, raised_now(), VENUE_MESSAGE, &text, ""),
             // A lookup that named a contract another slot already holds. One
             // subscription per contract exists on the wire, so the callers
             // given the second slot read the first — otherwise their quotes
@@ -453,7 +464,7 @@ impl EClient {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
                         let origin = ErrorOrigin::Request { id: req_id, ends: false };
-                        wrapper.error_from(origin, i64::from(notice.code), &notice.message, "");
+                        wrapper.error_from(origin, raised_now(), i64::from(notice.code), &notice.message, "");
                     }
                 }
             }
@@ -461,7 +472,7 @@ impl EClient {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
                         let origin = ErrorOrigin::Request { id: req_id, ends: true };
-                        wrapper.error_from(origin, NO_SECURITY_DEFINITION, &reason, "");
+                        wrapper.error_from(origin, raised_now(), NO_SECURITY_DEFINITION, &reason, "");
                     }
                 }
             }
@@ -473,7 +484,7 @@ impl EClient {
                     for req_id in self.core.watchers_of(instrument) {
                         // The quote it rides beside goes on.
                         let origin = ErrorOrigin::Request { id: req_id, ends: false };
-                        wrapper.error_from(origin, VENUE_REPORTED, &reason, "");
+                        wrapper.error_from(origin, raised_now(), VENUE_REPORTED, &reason, "");
                     }
                 }
             }
@@ -523,7 +534,7 @@ impl EClient {
             // reset ahead of the levels that follow it, a query error ahead
             // of the empty end that follows it.
             Record::HistoricalError((origin, code, msg)) => {
-                wrapper.error_from(origin, i64::from(code), &msg, "");
+                wrapper.error_from(origin, raised_now(), i64::from(code), &msg, "");
             }
             // Historical data → historical_data + historical_data_end, and
             // after that end, historical_data_update. A keep-up-to-date
@@ -608,7 +619,7 @@ impl EClient {
             Record::AdvisorConfig((fa_data_type, xml)) => wrapper.receive_fa(fa_data_type, &xml),
             Record::AdvisorReplaced((req_id, text)) => wrapper.replace_fa_end(req_id, &text),
             Record::AdvisorRefused((origin, code, text)) => {
-                wrapper.error_from(origin, i64::from(code), &text, "");
+                wrapper.error_from(origin, raised_now(), i64::from(code), &text, "");
             }
             // Scanner data. The rows' contracts were resolved by the engine
             // before the batch was released; the fallback covers a partial
@@ -619,7 +630,7 @@ impl EClient {
                 // refusal is not delivered as an empty result.
                 if !result.error_text.is_empty() {
                     let origin = ErrorOrigin::Request { id: i64::from(req_id), ends: true };
-                    wrapper.error_from(origin, VENUE_REPORTED, &result.error_text, "");
+                    wrapper.error_from(origin, raised_now(), VENUE_REPORTED, &result.error_text, "");
                 }
                 for (rank, entry) in result.entries.iter().enumerate() {
                     let mut contract = Contract { con_id: entry.con_id as i64, ..Default::default() };
@@ -671,7 +682,7 @@ impl EClient {
             // A refusal made at a call, in its place: after everything pushed
             // before the call, as a gateway's rejection arrives after
             // everything it wrote before it.
-            Record::Refused((origin, code, msg)) => wrapper.error_from(origin, code, &msg, ""),
+            Record::Refused((origin, code, msg)) => wrapper.error_from(origin, raised_now(), code, &msg, ""),
             Record::Answer(answer) => self.deliver_answer(answer, wrapper, polled),
             Record::Reply(reply) => deliver_reply(reply, wrapper),
         }
@@ -959,14 +970,14 @@ impl EClient {
                     Ok(answer) => answer,
                     Err(why) => {
                         let origin = ErrorOrigin::Request { id: req_id, ends: true };
-                        return wrapper.error_from(origin, i64::from(why.code), &why.message, "");
+                        return wrapper.error_from(origin, raised_now(), i64::from(why.code), &why.message, "");
                     }
                 };
                 if let Some(why) = crate::client_core::ClientCore::unheld_days_notice(&unheld) {
                     log::warn!("{why}");
                     // A notice the executions and their end follow.
                     let origin = ErrorOrigin::Request { id: req_id, ends: false };
-                    wrapper.error_from(origin, crate::error_codes::Refusal::VALIDATION as i64, &why, "");
+                    wrapper.error_from(origin, raised_now(), crate::error_codes::Refusal::VALIDATION as i64, &why, "");
                 }
                 for se in rows {
                     wrapper.exec_details(req_id, &se.contract, &se.execution);
@@ -1095,7 +1106,7 @@ impl EClient {
                 Ok(components) => wrapper.smart_components(req_id, &components),
                 Err(why) => {
                     let origin = ErrorOrigin::Request { id: req_id, ends: true };
-                    wrapper.error_from(origin, i64::from(why.code), &why.message, "");
+                    wrapper.error_from(origin, raised_now(), i64::from(why.code), &why.message, "");
                 }
             }
         }
@@ -1602,7 +1613,7 @@ mod delivered_size_tests {
         #[derive(Default)]
         struct Heard(Vec<(i64, i64, String)>);
         impl Wrapper for Heard {
-            fn error(&mut self, req_id: i64, code: i64, msg: &str, _: &str) {
+            fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _: &str) {
                 self.0.push((req_id, code, msg.to_string()));
             }
         }

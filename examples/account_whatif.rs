@@ -56,7 +56,7 @@ impl Wrapper for WhatIfWrapper {
     fn open_order(&mut self, _order_id: i64, _c: &Contract, _o: &Order, st: &OrderState) {
         self.state.lock().unwrap().preview = Some(st.clone());
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         // 2104/2106/2158 are benign farm-connection notices.
         if !matches!(code, 2104 | 2106 | 2158) {
             eprintln!("[error] req_id={req_id} code={code} msg={msg}");

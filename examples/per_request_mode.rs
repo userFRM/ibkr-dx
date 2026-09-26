@@ -53,7 +53,7 @@ impl Wrapper for PrintWrapper {
         println!("[market_data_type] req_id={req_id} mdt={mdt}");
     }
 
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         eprintln!("[error] req_id={req_id} code={code} msg={msg}");
     }
 }

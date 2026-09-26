@@ -93,7 +93,7 @@ impl DepthWrapper {
 }
 
 impl Wrapper for DepthWrapper {
-    fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, _: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, error_code: i64, error_string: &str, _: &str) {
         eprintln!("  error req_id={req_id} code={error_code} msg={error_string}");
         self.errors.push((req_id, error_code, error_string.into()));
     }

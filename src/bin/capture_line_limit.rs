@@ -20,7 +20,7 @@ struct Heard {
 }
 
 impl Wrapper for Heard {
-    fn error(&mut self, req_id: i64, code: i64, message: &str, _advanced: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _advanced: &str) {
         // The codes every session carries about its farms are not about a
         // subscription; only what names this request is.
         // Nor is a strike that does not exist: that names the contract, not

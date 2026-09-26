@@ -438,7 +438,11 @@ impl EClient {
     /// venue names what the account is working after the connect returns, and
     /// the id is floored above it, so the engine holds the question until the
     /// naming is over; nothing waits here.
-    pub fn req_ids(&self) {
+    ///
+    /// `num_ids` has no effect, as on a gateway: the next valid id is answered
+    /// whatever number is asked for.
+    pub fn req_ids(&self, num_ids: i32) {
+        let _ = num_ids;
         if let Err(why) = self.send(ControlCommand::Ask(crate::types::Ask::NextValidId)) {
             self.refuse_session(&why);
         }

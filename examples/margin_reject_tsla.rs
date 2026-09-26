@@ -65,7 +65,7 @@ impl Wrapper for RejectWrapper {
         println!("[status] oid={order_id} status={status}");
         self.state.lock().unwrap().statuses.push((order_id, status.into()));
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         if matches!(code, 2104 | 2106 | 2158) {
             return; // benign farm-connection notices
         }

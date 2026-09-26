@@ -30,7 +30,7 @@ impl Heard {
 }
 
 impl Wrapper for Heard {
-    fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
         self.0.push(format!("error:{req_id}:{code}:{message}"));
     }
     fn connection_closed(&mut self) {
@@ -935,7 +935,7 @@ fn every_request_keeps_its_outcome_between_the_surrounding_records() {
         ("cancel_order", |c| c.cancel_order(9, "")),
         ("cancel_order_by_perm_id", |c| c.cancel_order_by_perm_id(9)),
         ("req_global_cancel", |c| c.req_global_cancel("")),
-        ("req_ids", |c| c.req_ids()),
+        ("req_ids", |c| c.req_ids(1)),
         ("req_open_orders", |c| c.req_open_orders()),
         ("req_all_open_orders", |c| c.req_all_open_orders()),
         ("req_completed_orders", |c| c.req_completed_orders(false)),

@@ -586,7 +586,7 @@ mod server_clock_tests {
     impl Wrapper for Heard {
         fn current_time(&mut self, t: i64) { self.seconds.push(t); }
         fn current_time_in_millis(&mut self, t: i64) { self.millis.push(t); }
-        fn error(&mut self, _req_id: i64, code: i64, _msg: &str, _: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, _msg: &str, _: &str) {
             self.errors.push(code);
         }
     }

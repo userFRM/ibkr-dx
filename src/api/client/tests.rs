@@ -1605,7 +1605,7 @@ fn the_id_after_the_highest_there_is_does_not_wrap_to_zero() {
     });
 
     let mut w = RecordingWrapper::default();
-    client.req_ids(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
+    client.req_ids(1); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
 
     assert_eq!(w.events.len(), 1);
     assert!(
@@ -1619,7 +1619,7 @@ fn the_id_after_the_highest_there_is_does_not_wrap_to_zero() {
 fn req_ids_calls_wrapper() {
     let (client, rx, shared) = test_client();
     let mut w = RecordingWrapper::default();
-    client.req_ids(); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
+    client.req_ids(1); the_engine_answers(&rx, &shared); client.process_msgs(&mut w);
     assert_eq!(w.events.len(), 1);
     assert!(w.events[0].starts_with("next_valid_id:"));
 }
@@ -1787,7 +1787,7 @@ fn a_profit_subscription_on_an_ended_session_takes_no_slot() {
     #[derive(Default)]
     struct Heard(Vec<i64>);
     impl crate::api::wrapper::Wrapper for Heard {
-        fn error(&mut self, _req_id: i64, code: i64, _msg: &str, _json: &str) { self.0.push(code); }
+        fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, _msg: &str, _json: &str) { self.0.push(code); }
     }
     let mut w = Heard::default();
     client.req_pnl(9, "DU123", "");
@@ -1811,7 +1811,7 @@ fn an_account_read_after_the_session_ended_is_refused() {
     #[derive(Default)]
     struct Heard(Vec<i64>, usize);
     impl crate::api::wrapper::Wrapper for Heard {
-        fn error(&mut self, _req_id: i64, code: i64, _msg: &str, _json: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, _msg: &str, _json: &str) {
             self.0.push(code);
         }
         fn position(&mut self, _a: &str, _c: &Contract, _p: f64, _avg: f64) { self.1 += 1; }
@@ -3937,7 +3937,7 @@ fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
         ended: usize,
     }
     impl Wrapper for Heard {
-        fn error(&mut self, req_id: i64, code: i64, message: &str, _adv: &str) {
+        fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _adv: &str) {
             self.told.push((req_id, code, message.to_string()));
         }
         fn open_order_end(&mut self) { self.ended += 1; }
@@ -5489,7 +5489,7 @@ fn an_execution_filters_account_is_checked_as_a_gateway_checks_it() {
     #[derive(Default)]
     struct Told(Vec<String>);
     impl crate::api::wrapper::Wrapper for Told {
-        fn error(&mut self, req_id: i64, code: i64, message: &str, _: &str) {
+        fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _: &str) {
             self.0.push(format!("error:{req_id}:{code}:{message}"));
         }
         fn exec_details(&mut self, req_id: i64, _: &Contract, _: &crate::types::model::Execution) {
@@ -5693,7 +5693,7 @@ fn multi_account_answers_echo_the_model_the_caller_stated() {
         ) {
             self.models.push(model.to_string());
         }
-        fn error(&mut self, _req_id: i64, _code: i64, message: &str, _json: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, _code: i64, message: &str, _json: &str) {
             self.said.push(message.to_string());
         }
     }
@@ -8044,7 +8044,7 @@ fn the_current_time_is_the_venues_own() {
     struct Heard { times: Vec<i64>, errors: Vec<(i64, String)> }
     impl Wrapper for Heard {
         fn current_time(&mut self, t: i64) { self.times.push(t); }
-        fn error(&mut self, _req_id: i64, code: i64, msg: &str, _: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, msg: &str, _: &str) {
             self.errors.push((code, msg.to_string()));
         }
     }
@@ -8259,7 +8259,7 @@ fn solving_an_option_answers_against_the_venues_own_model() {
             self.computed.push((req_id, opt_price));
             self.greeks.push((delta, gamma, vega, theta));
         }
-        fn error(&mut self, _req_id: i64, _code: i64, msg: &str, _adv: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, _code: i64, msg: &str, _adv: &str) {
             self.errors.push(msg.to_string());
         }
     }
@@ -8338,7 +8338,7 @@ fn a_question_asked_from_inside_a_callback_is_refused_rather_than_left_waiting()
 
         struct AsksBack<'a> { client: &'a EClient, told: Option<String> }
         impl Wrapper for AsksBack<'_> {
-            fn error(&mut self, _req_id: i64, _code: i64, _message: &str, _advanced: &str) {
+            fn error(&mut self, _req_id: i64, _error_time: i64, _code: i64, _message: &str, _advanced: &str) {
                 self.told = Some(
                     match self.client.contract_details(&Contract::default()) {
                         Ok(_) => "answered".to_string(),
@@ -9663,7 +9663,7 @@ fn a_book_given_up_on_is_said_to_the_caller_that_asked_for_it() {
         told: Vec<(i64, i64, String)>,
     }
     impl Wrapper for Heard {
-        fn error(&mut self, req_id: i64, code: i64, message: &str, _adv: &str) {
+        fn error(&mut self, req_id: i64, _error_time: i64, code: i64, message: &str, _adv: &str) {
             self.told.push((req_id, code, message.to_string()));
         }
     }
@@ -9991,7 +9991,7 @@ fn a_book_reset_is_delivered_before_the_levels_that_follow_it() {
     #[derive(Default)]
     struct Sequence(Vec<&'static str>);
     impl Wrapper for Sequence {
-        fn error(&mut self, _: i64, code: i64, _: &str, _: &str) {
+        fn error(&mut self, _: i64, _error_time: i64, code: i64, _: &str, _: &str) {
             if code == 317 { self.0.push("reset"); }
         }
         fn update_mkt_depth(&mut self, _: i64, _: i32, _: i32, _: i32, _: f64, _: f64) {
@@ -10106,7 +10106,7 @@ fn a_session_is_the_client_it_connected_as() {
         ) {
             self.0.push(("order_status", client_id));
         }
-        fn error(&mut self, _: i64, code: i64, _: &str, _: &str) {
+        fn error(&mut self, _: i64, _error_time: i64, code: i64, _: &str, _: &str) {
             self.0.push(("error", code));
         }
     }
@@ -11992,7 +11992,7 @@ fn the_connection_is_described_as_the_reference_client_describes_it() {
     #[derive(Default)]
     struct Heard(Vec<(i64, i64)>);
     impl Wrapper for Heard {
-        fn error(&mut self, req_id: i64, code: i64, _msg: &str, _json: &str) { self.0.push((req_id, code)); }
+        fn error(&mut self, req_id: i64, _error_time: i64, code: i64, _msg: &str, _json: &str) { self.0.push((req_id, code)); }
     }
     let mut w = Heard::default();
     client.start_api();
@@ -12023,7 +12023,7 @@ fn the_verification_calls_and_the_two_quiet_cancels_are_answered_as_a_gateway_an
     #[derive(Default)]
     struct Heard(Vec<(i64, i64, String)>);
     impl Wrapper for Heard {
-        fn error(&mut self, req_id: i64, code: i64, msg: &str, _json: &str) {
+        fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _json: &str) {
             self.0.push((req_id, code, msg.to_string()));
         }
     }

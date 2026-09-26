@@ -754,7 +754,7 @@ fn an_order_on_an_index_live() {
         said: Vec<(i64, String)>,
     }
     impl ibkr_dx::api::wrapper::Wrapper for Heard {
-        fn error(&mut self, _req_id: i64, code: i64, message: &str, _advanced: &str) {
+        fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, message: &str, _advanced: &str) {
             if !(2100..=2200).contains(&code) {
                 self.said.push((code, message.to_string()));
             }

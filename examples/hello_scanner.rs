@@ -30,7 +30,7 @@ impl Wrapper for ScannerWrapper {
     fn scanner_data_end(&mut self, _req_id: i64) {
         self.state.lock().unwrap().end_seen = true;
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         if !matches!(code, 2104 | 2106 | 2158) {
             eprintln!("[error] req_id={req_id} code={code} msg={msg}");
         }

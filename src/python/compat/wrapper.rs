@@ -73,12 +73,11 @@ impl EWrapper {
     /// validation, 200 for a contract description that matches nothing, 504
     /// for a call made with no session.
     ///
-    /// `error_time` is the reference client's second parameter and is stated
-    /// wherever it states one. It carries a clock reading in milliseconds for
-    /// trouble this client raises before anything reached the venue, and zero
-    /// for trouble the venue stated — which is what that client passes for a
-    /// session speaking a protocol older than the one that added the field,
-    /// and this one says it speaks an older protocol than that.
+    /// `error_time` is the reference client's second parameter: when this
+    /// client delivered the error, in milliseconds since the epoch. A gateway
+    /// stamps every error it sends, with the time of the venue's message it
+    /// answers or with its own clock, and this client stamps each with its
+    /// clock as it delivers it.
     fn error(
         &self,
         _req_id: i64,

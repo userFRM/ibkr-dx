@@ -2495,12 +2495,12 @@ Every account this login may act for, separated by commas. One for most logins; 
 
 #### `error`
 
-What the venue said about a request, under the number it says it with. Codes from 2100 to 2200 are notices about a connection rather than failures. `req_id` is -1 for anything that answers no particular request.  A request this client will not send is reported here too, under the same numbers the reference client uses: 321 for a request that fails validation, 200 for a contract description that matches nothing, 504 for a call made with no session.  `error_time` is the reference client's second parameter and is stated wherever it states one. It carries a clock reading in milliseconds for trouble this client raises before anything reached the venue, and zero for trouble the venue stated — which is what that client passes for a session speaking a protocol older than the one that added the field, and this one says it speaks an older protocol than that.
+What the venue said about a request, under the number it says it with. Codes from 2100 to 2200 are notices about a connection rather than failures. `req_id` is -1 for anything that answers no particular request.  A request this client will not send is reported here too, under the same numbers the reference client uses: 321 for a request that fails validation, 200 for a contract description that matches nothing, 504 for a call made with no session.  `error_time` is the reference client's second parameter: when this client delivered the error, in milliseconds since the epoch. A gateway stamps every error it sends, with the time of the venue's message it answers or with its own clock, and this client stamps each with its clock as it delivers it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `error_time` | `int` |  |
+| `error_time` | `int` | When this client delivered it, in milliseconds since the epoch. |
 | `error_code` | `int` | Error code. |
 | `error_string` | `str` | Error message. |
 | `advanced_order_reject_json` | `str` | JSON with advanced rejection details. |
@@ -2514,7 +2514,7 @@ An error, with what it is about: a request and whether nothing more follows for 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `origin` | `ErrorOrigin` | What the error is about: a request, an order and the operation on it, a request with no number of its own, the session, or a lookup this client made for itself. |
-| `error_time` | `int` |  |
+| `error_time` | `int` | When this client delivered it, in milliseconds since the epoch. |
 | `error_code` | `int` | Error code. |
 | `error_string` | `str` | Error message. |
 | `advanced_order_reject_json` | `str` | JSON with advanced rejection details. |

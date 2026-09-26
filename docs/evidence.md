@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,406 offline, and 191 more that live in the suites run against a broker session |
+| Tests | 4,409 offline, and 191 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,9 +72,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,218 | No |
+| Rust unit and integration | 3,219 | No |
 | Rust, live | 9 | Yes |
-| Python | 1,188 | No |
+| Python | 1,190 | No |
 | Python, live | 131 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -324,7 +324,7 @@ These are this client's own.
 A request this client will not send is reported on the error callback, and the
 call returns rather than raising. In Python that is
 `error(reqId, errorTime, errorCode, errorString, advancedOrderRejectJson)`; in
-Rust, `Wrapper::error(req_id, error_code, error_string, advanced_order_reject_json)`.
+Rust, `Wrapper::error(req_id, error_time, error_code, error_string, advanced_order_reject_json)`.
 The code is the one the TWS API defines for that class: 321 for a request that
 fails validation, 200 for a contract description that matches nothing, 504 for
 a call with no session, and 327 for a client other than 0 asking not to bind

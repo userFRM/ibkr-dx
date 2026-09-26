@@ -324,7 +324,7 @@ saved counter behind.
 
 Both surfaces state `next_valid_id` once a session has connected, after the
 venue has named the orders the account is working: Python before `connect()`
-returns, Rust on the first `process_msgs` read after that naming. `req_ids()`
+returns, Rust on the first `process_msgs` read after that naming. `req_ids`
 states it again.
 
 `next_order_id()` reserves under an exclusive file lock and writes the raised

@@ -86,7 +86,7 @@ impl Wrapper for Heard {
     ) {
         self.previews += 1;
     }
-    fn error(&mut self, _req: i64, code: i64, message: &str, _adv: &str) {
+    fn error(&mut self, _req: i64, _error_time: i64, code: i64, message: &str, _adv: &str) {
         if code != 2104 && code != 2106 && code != 2158 {
             self.said.push(format!("{code}: {message}"));
         }

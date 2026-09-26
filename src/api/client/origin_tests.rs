@@ -15,7 +15,7 @@ use crate::types::model::{
 struct Told(Vec<String>);
 
 impl Wrapper for Told {
-    fn error_from(&mut self, origin: ErrorOrigin, code: i64, _: &str, _: &str) {
+    fn error_from(&mut self, origin: ErrorOrigin, _error_time: i64, code: i64, _: &str, _: &str) {
         self.0.push(format!("{origin:?} {code}"));
     }
     fn exec_details(&mut self, req_id: i64, _: &Contract, _: &Execution) {
@@ -34,11 +34,12 @@ impl Wrapper for Told {
 
 /// A wrapper written before `error_from` existed.
 #[derive(Default)]
-struct OnlyError(Vec<(i64, i64)>);
+struct OnlyError(Vec<(i64, i64)>, Vec<i64>);
 
 impl Wrapper for OnlyError {
-    fn error(&mut self, req_id: i64, code: i64, _: &str, _: &str) {
+    fn error(&mut self, req_id: i64, error_time: i64, code: i64, _: &str, _: &str) {
         self.0.push((req_id, code));
+        self.1.push(error_time);
     }
 }
 
@@ -91,6 +92,20 @@ fn an_internal_lookups_error_and_an_orders_error_under_one_number_say_which_they
     let mut heard = OnlyError::default();
     client.process_msgs(&mut heard);
     assert_eq!(heard.0, [(i64::from(n), 200), (i64::from(n), 201)], "as it always was");
+}
+
+/// Every error carries when it was delivered, in milliseconds, whether this
+/// client raised it or the venue stated it, as a gateway stamps every error
+/// it sends.
+#[test]
+fn every_error_carries_a_clock_reading() {
+    let (client, _rx, shared) = test_client();
+    client.place_order(9, &spy(), &Order { order_type: "NOT A TYPE".into(), ..limit() });
+    shared.orders.push_order_inactive(7, OrderOp::Place, 201, "refused".into());
+    let mut heard = OnlyError::default();
+    client.process_msgs(&mut heard);
+    assert_eq!(heard.0.len(), 2, "{:?}", heard.0);
+    assert!(heard.1.iter().all(|&t| t > 1_700_000_000_000), "a clock reading in milliseconds, got {:?}", heard.1);
 }
 
 /// A new order and a change to it, each refused at its call under one

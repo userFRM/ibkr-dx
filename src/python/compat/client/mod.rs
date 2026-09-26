@@ -1850,15 +1850,16 @@ impl EClient {
     ///
     /// An `error` declared as an earlier release of the reference client calls
     /// it is called that way, on `error` itself: with the advanced reject and
-    /// no time, or with neither.
+    /// no time, or with neither. Where the time goes, it is the clock as the
+    /// error is delivered.
     pub(crate) fn error_callback(
         &self,
         py: Python<'_>,
         origin: crate::types::model::ErrorOrigin,
-        error_time: i64,
         code: i64,
         msg: &str,
     ) -> PyResult<(&'static str, Py<pyo3::types::PyTuple>)> {
+        let error_time = raised_now();
         let arity = self.declared.get().map_or(Declared::CURRENT.error_arity, |d| d.error_arity);
         let args = match arity {
             3 => (origin.id(), code, msg).into_pyobject(py)?.unbind(),
@@ -1889,7 +1890,7 @@ impl EClient {
         code: i64,
         msg: &str,
     ) -> PyResult<()> {
-        let (name, args) = self.error_callback(py, origin, raised_now(), code, msg)?;
+        let (name, args) = self.error_callback(py, origin, code, msg)?;
         self.notify(py, name, args.bind(py).clone())
     }
 
@@ -1920,17 +1921,7 @@ pub(crate) fn request_origin(req_id: i64) -> crate::types::model::ErrorOrigin {
     }
 }
 
-/// When this client raised something itself, in milliseconds.
-///
-/// The reference client stamps the trouble it raises before anything reaches
-/// the venue — a call made with no session, a request it will not send — and
-/// leaves the field at zero for trouble the venue stated.
-pub(crate) fn raised_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
+pub(crate) use crate::api::client::dispatch::raised_now;
 
 #[cfg(test)]
 mod tests {

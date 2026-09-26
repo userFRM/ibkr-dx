@@ -887,7 +887,7 @@ impl EClient {
         // As a gateway states it to a client that has just connected: once,
         // in its place in the session's order, after the venue has named what
         // the account is working.
-        self.req_ids();
+        self.req_ids(1);
         Ok(self)
     }
 

@@ -60,7 +60,7 @@ impl Wrapper for OrderWrapper {
     fn open_order(&mut self, order_id: i64, _c: &Contract, order: &Order, st: &OrderState) {
         self.state.lock().unwrap().open.push((order_id, order.perm_id, st.status.to_string()));
     }
-    fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, code: i64, msg: &str, _adv: &str) {
         // 2104/2106/2158 are benign farm-connection notices.
         if !matches!(code, 2104 | 2106 | 2158) {
             eprintln!("[error] req_id={req_id} code={code} msg={msg}");

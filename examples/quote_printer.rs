@@ -5,7 +5,7 @@ use ibkr_dx::api::{EClient, EClientConfig, Wrapper, Contract, TickAttrib};
 struct QuotePrinter;
 
 impl Wrapper for QuotePrinter {
-    fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, _: &str) {
+    fn error(&mut self, req_id: i64, _error_time: i64, error_code: i64, error_string: &str, _: &str) {
         eprintln!("Error req_id={req_id} code={error_code}: {error_string}");
     }
 

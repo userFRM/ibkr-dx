@@ -27,7 +27,7 @@ impl Wrapper for Heard {
     fn wsh_event_data(&mut self, _req_id: i64, data_json: &str) {
         self.events.push(data_json.to_string());
     }
-    fn error(&mut self, _req_id: i64, code: i64, message: &str, _advanced: &str) {
+    fn error(&mut self, _req_id: i64, _error_time: i64, code: i64, message: &str, _advanced: &str) {
         self.refusals.push(format!("{code}: {message}"));
     }
 }
