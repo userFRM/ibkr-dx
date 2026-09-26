@@ -6271,22 +6271,6 @@ fn process_msgs_dispatches_cancel_reject_type_2() {
     );
 }
 
-/// Cancel-reject reason 1 is an unknown order. Every other reason describes an
-/// order the venue found and declined to act on.
-#[test]
-fn an_unknown_order_is_the_only_cancel_reject_reported_as_not_found() {
-    let (client, _rx, shared) = test_client();
-    shared.orders.push_cancel_reject(CancelReject {
-        order_id: 44, instrument: 0, reject_type: 1, reason_code: 1, answers_a_live_change: true, still_working: None, timestamp_ns: 0,
-    });
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(
-        w.events.iter().any(|e| e.starts_with("error:44:10147:")),
-        "{:?}", w.events,
-    );
-}
-
 // ═══════════════════════════════════════════════════════════════════
 //  process_msgs — quote polling
 // ═══════════════════════════════════════════════════════════════════

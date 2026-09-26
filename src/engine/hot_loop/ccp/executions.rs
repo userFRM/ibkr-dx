@@ -3104,7 +3104,6 @@ impl CcpState {
         &mut self,
         parsed: &std::collections::HashMap<u32, String>,
         context: &mut Context,
-        shared: &SharedState,
         event_tx: &Option<EventSink>,
     ) {
         let reject_type: u8 = parsed.get(&434).and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -3155,33 +3154,26 @@ impl CcpState {
                     stated_order_id(base)
                 })
         }));
-        // An empty tag is as good as an absent one. Kept as the empty string,
-        // it travelled as the completed status a refusal is told apart by —
-        // and an order whose status reads "Inactive" with nothing beside it is
-        // one the venue is merely holding, so a refused order this side had
-        // already retired and filed as finished came back out of the working
-        // list.
-        let reason = parsed.get(&58)
-            .map(|s| s.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Cancel rejected");
+        let reason = parsed.get(&58).map(String::as_str).unwrap_or("");
         let reason_code: i32 = parsed.get(&102).and_then(|s| s.parse().ok()).unwrap_or(-1);
         log::warn!("CancelReject: origClOrd={orig_clord:?} type={reject_type} code={reason_code} reason={reason}");
 
         let Some(oid) = orig_clord else { return };
 
-        // The reason on tag 102 moves nothing here: a gateway does not read it,
-        // and retires no order on a refusal whatever reason it states. An order
-        // retired on reason 1 left the book while the venue could still be
-        // working it — out of reach of a cancel-all, its slot free to go to
-        // another contract. It is carried to the caller as stated.
+        // A gateway tells the program nothing of this refusal, whatever it
+        // refuses and whatever reason it states: no error, no text, and no
+        // status restated. It reads the name the refusal states and nothing
+        // else, and puts the order's revision back where that name is the
+        // revision it last sent. The order keeps what the program was last
+        // told of it until the venue states another, and the engine's own
+        // book is put back to what the venue holds, so a cancel-all still
+        // reaches it and the next change names what the venue knows.
 
         // The answer to a replace arrives on this message too, and the record
         // took the attempt ahead of it. Where the venue refuses the attempt
         // and the order still stands, put back what the venue is known to
-        // hold. An order the venue says is gone has no terms to fall back to,
-        // and the refusal of a cancellation changed none — the revision it may
-        // be waiting on has its own answer coming.
+        // hold. The refusal of a cancellation changed no terms — the revision
+        // it may be waiting on has its own answer coming.
         // Whether it answers a revision still outstanding. The venue takes a
         // second revision before it has answered the first, and a cancel can
         // be sent over both, so a refusal of a revision already answered says
@@ -3210,8 +3202,6 @@ impl CcpState {
 
         // Update local context only for an order tracked in this session.
         let mut restored: Option<crate::types::OrderStatus> = None;
-        // Where the refusal says the order finished rather than that it stands.
-        let mut finished_by_the_refusal: Option<crate::types::OrderStatus> = None;
         let instrument = if let Some(order) = context.order(oid).copied() {
             // A refused cancellation always leaves the order standing, so its
             // status always goes back. A refused change does too — but only
@@ -3220,28 +3210,19 @@ impl CcpState {
             // the order stands now, and forcing it back to working undid the
             // withdrawal the caller had been told about.
             if reject_type != 2 || answers_a_live_revision {
-                // The reject states where the order stands, and a cancel the
-                // venue refuses is very often refused BECAUSE the order
-                // finished — which is what it says on that tag. Read past it,
-                // the restore put a finished order back to working and did
-                // none of the cleanup a finish does, so the caller was told an
-                // order was live that the venue had already filled.
-                let stated = parsed.get(&39)
-                    .map(|s| status_of(s, oid, parsed))
-                    .filter(|s| crate::types::order_status::is_terminal(*s));
-                let restore_status = match stated {
-                    Some(finished) => finished,
-                    None if order.filled > 0 => crate::types::OrderStatus::PartiallyFilled,
-                    None => crate::types::OrderStatus::Submitted,
+                // Whatever the refusal states on tag 39: a gateway does not
+                // read it, and the venue's own report settles how the order
+                // finished.
+                let restore_status = if order.filled > 0 {
+                    crate::types::OrderStatus::PartiallyFilled
+                } else {
+                    crate::types::OrderStatus::Submitted
                 };
                 // A refusal of the CHANGE says nothing about a cancel sent
                 // over it. The venue takes a cancel while a revision is still
                 // outstanding — the branch above is here because it does — and
                 // refusing the revision leaves that cancel exactly where it
-                // was: still owed a verdict of its own. Forced back to working
-                // anyway, the withdrawal the caller had been told about was
-                // undone, and both books reported a live order with its cancel
-                // in flight until the venue answered it.
+                // was: still owed a verdict of its own.
                 //
                 // A refused CANCELLATION is the other case and keeps the
                 // regression: there the venue has said the withdrawal will not
@@ -3252,74 +3233,12 @@ impl CcpState {
                     // the guard would rightly block it on the ordinary path.
                     context.set_order_status_forced(oid, restore_status);
                     restored = Some(restore_status);
-                    if crate::types::order_status::is_terminal(restore_status) {
-                        finished_by_the_refusal = Some(restore_status);
-                    }
                 }
-                // And said, not only recorded. The engine's book went back to
-                // working while the record the surfaces read stayed on the
-                // cancel that was refused: `req_open_orders` reported an order
-                // as leaving that the venue had said would not leave, and
-                // nothing later corrected it, because the refusal is the last
-                // message this order draws.
             }
             order.instrument
         } else {
             0
         };
-
-        // A cancel is very often refused because the order finished, and the
-        // refusal states which on tag 39. Taken as a status and nothing more,
-        // the order kept its place in the book with a terminal status written
-        // on it — a cancel-all still walked to it, and a replace still named
-        // it — no completion was filed, and the row a caller reads stayed the
-        // working one it had, so `req_open_orders` went on listing an order
-        // the venue had said was filled. Nothing later corrected any of it:
-        // the refusal is the last message this order draws.
-        if let Some(status) = finished_by_the_refusal {
-            shared.orders.push_completed_order(CompletedOrder {
-                order_id: oid,
-                venue_order: context.venue_orders.get(&oid)
-                    .and_then(|named| named.last().cloned())
-                    .unwrap_or_default(),
-                instrument,
-                status,
-                filled_qty: context.order(oid).map_or(0, |o| o.filled),
-                timestamp_ns: context.now_ns(),
-                stated: None,
-                held: None,
-            });
-            context.retire_order(oid);
-            // Restated, not removed. What the order was is what the
-            // completed-orders reader asks for next — the contract, the
-            // quantity, the price, the venue's own number — and taking the
-            // entry away filed an order carrying nothing but its id. The union
-            // that lists working orders reads the status, so restating it is
-            // what stops the order being listed.
-            shared.orders.note_order_finished(
-                oid,
-                crate::types::order_status::order_status_str(status),
-                // Which of the two an "Inactive" is. Filled and Cancelled say
-                // so on their own; a refusal shares its word with an order the
-                // venue is merely holding, and only the reason beside it
-                // separates them.
-                if status == crate::types::OrderStatus::Rejected { reason } else { "" },
-            );
-        }
-
-        // Tag 58 carries the venue's text. The structured reject has tags 434
-        // and 102 and no text, which cannot separate "the order does not exist"
-        // from "it is too late to cancel". Delivered on the channel a refused
-        // order's reason already uses.
-        if let Some(text) = parsed.get(&58).filter(|t| !t.is_empty()) {
-            // 434 says which it refuses: 1 a cancel, 2 a change.
-            let refused = if reject_type == 2 {
-                crate::types::model::OrderOp::Modify
-            } else {
-                crate::types::model::OrderOp::Cancel
-            };
-            shared.orders.push_order_inactive(oid, refused, ORDER_INACTIVE_ERROR_CODE, text.clone());
-        }
 
         let reject = crate::types::CancelReject {
             order_id: oid,
@@ -3330,7 +3249,6 @@ impl CcpState {
             answers_a_live_change: answers_a_live_revision,
             timestamp_ns: context.now_ns(),
         };
-        shared.orders.push_cancel_reject(reject);
         emit(event_tx, Event::CancelReject(reject));
     }
 }

@@ -4,10 +4,10 @@ The test makes its own order: one share of SPY, far under the market, good till
 cancelled and allowed outside regular hours, which the venue takes at any hour.
 Once it is working it is cancelled twice, back to back. Both cancels go to the
 venue, the second naming itself apart from the first. The order ends cancelled
-once. The second cancel is answered by the venue's reject — under 10147 where
-the venue no longer holds the order, 10148 for any other reason — or by nothing
-further, and which of those the venue does is what a run records. Either way
-the order is gone from the open orders afterwards.
+once. A refusal of the second cancel on the venue's own cancel-reject message
+is told to nobody, as on a gateway; one a report states is answered under
+10148. Which of those the venue does, if either, is what a run records. Either
+way the order is gone from the open orders afterwards.
 
 Run: pytest tests/python/test_a_second_cancel_leaves_one_order_cancelled_once.py -v
 """
@@ -25,9 +25,9 @@ pytestmark = pytest.mark.skipif(
     reason="IB_USERNAME and IB_PASSWORD not set",
 )
 
-#: What the venue's reject of a cancel is reported under: the order is no
-#: longer held there, or the cancel failed for another reason.
-CANCEL_REJECTED = (10147, 10148)
+#: What a cancel refused on a report that states the refusal is reported
+#: under. One refused on the venue's cancel-reject message says nothing.
+CANCEL_REJECTED = (10148,)
 #: This client's own answer to a cancel of an order it has already seen end,
 #: where the first cancel's end arrived before the second was sent.
 NOT_CANCELLABLE = 161

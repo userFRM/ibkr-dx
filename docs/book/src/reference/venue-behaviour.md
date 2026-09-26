@@ -494,6 +494,12 @@ reports a rejected modification; it does not declare the original cancelled
 or inactive. After the error, the order is restated through `open_order` and
 `order_status` with those terms and that state, as a gateway restates it.
 
+A modification refused on the venue's own cancel-reject message is told to
+nobody, as a cancellation refused there is (below). The open-orders view keeps
+the terms the modification asked for until the venue states the order again;
+the engine's own book goes back to the terms the venue holds, so a cancel names
+those.
+
 Replacement carries `useAutoPriceForHedge` under the same order type, hedge,
 opt-out and `HDGLMT` feature conditions as placement. Changing `hedgeMaxSize`
 keeps the pricing instruction.
@@ -508,10 +514,14 @@ out, in the open-orders view and under its own permId: the refusal is about the
 cancel, not the order. After the error, the order is restated through
 `open_order` and `order_status` in that state, as a gateway restates it.
 
-A refusal on the venue's own cancel-reject message is reported under 10147
-where it says it holds no such order, and 10148 otherwise. Neither takes the
-order out of the book or the open-orders view: a gateway retires no order on a
-refusal, whatever reason it states.
+A refusal on the venue's own cancel-reject message is told to nobody, whatever
+it refuses and whatever reason it states: as on a gateway, no error, no text and
+no status reaches the program's callbacks. The order keeps what the program was
+last told of it until the venue states another, and stays in the book and the
+open-orders view: a gateway retires no order on a refusal. The event channel
+`connect_with_events` returns, which a gateway does not have, still carries the
+engine's `Event::CancelReject` for it, with the status the engine's own book
+went back to.
 
 ## Reports behind a withdrawal
 

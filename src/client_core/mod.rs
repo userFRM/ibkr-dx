@@ -3692,10 +3692,9 @@ impl ClientCore {
     /// No refusal retires the record, whatever reason it states: a gateway
     /// retires no order on one, and the engine keeps its own.
     ///
-    /// The code says the cancel was refused, and which of the two ways. 202
-    /// means an order that was cancelled, so reporting it for a refused cancel
-    /// states the opposite and invites a replacement against an order still
-    /// working. 10147 means "not found", which is one reason among several.
+    /// The code says the cancel was refused. 202 means an order that was
+    /// cancelled, so reporting it for a refused cancel states the opposite and
+    /// invites a replacement against an order still working.
     pub(crate) fn restore_refused(&self, reject: &CancelReject) -> (i64, String) {
         if let Some(tracked) = self.open_orders.lock().unwrap().get_mut(&reject.order_id) {
             // The record took the cancel ahead of the venue's answer, and
@@ -3725,20 +3724,12 @@ impl ClientCore {
                 put_back_the_terms(tracked);
             }
         }
-        // 10147 is the order the venue could not find; 10148 is the order it
-        // found and would not act on. The reason it stated picks between them.
-        let code = if reject.reason_code == 1 { 10147 } else { 10148 };
+        // No refusal here states a reason of the venue's: the venue's own
+        // cancel-reject message is told to nobody, as a gateway tells it, and
+        // a refusal stated on a report, or made on this side of the wire,
+        // carries none.
         let what = if reject.reject_type == 1 { "cancel" } else { "modify" };
-        // A refusal from this side of the wire carries no reason of the
-        // venue's, and the sentinel that says so is not a reason to hand a
-        // caller. Said as a number, "reason: -1" reads as one the venue
-        // stated.
-        let stated = if reject.reason_code < 0 {
-            String::new()
-        } else {
-            format!(" by the venue (reason: {})", reject.reason_code)
-        };
-        (code, format!("Order {} {what} rejected{stated}", reject.order_id))
+        (10148, format!("Order {} {what} rejected", reject.order_id))
     }
 
     /// Update a tracked order status from an order update event.

@@ -311,37 +311,6 @@ fn order_lifecycle_algo_vwap_partial_fills() {
     assert_eq!(exec_count, 4);
 }
 
-/// Cancel reject: attempt to cancel already-filled order.
-#[test]
-fn order_lifecycle_cancel_reject_on_filled_order() {
-    let (client, _rx, shared) = test_client();
-    client.map_req_instrument(1, 0);
-
-    // Order fills completely
-    shared.orders.push_fill(Fill {
-        instrument: 0, order_id: 120, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100 * QTY_SCALE, remaining: 0, timestamp_ns: 1000,
-        cum_qty: 100 * QTY_SCALE, avg_price: 150 * PRICE_SCALE,
-    });
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:120:Filled")));
-
-    // Attempt to cancel → reject
-    shared.orders.push_cancel_reject(CancelReject {
-        order_id: 120, instrument: 0, reject_type: 1, reason_code: 0, answers_a_live_change: true, still_working: None, timestamp_ns: 2000,
-    });
-    w.events.clear();
-    client.process_msgs(&mut w);
-    // The reason the venue gave, not one code meaning "cancelled" for every
-    // refusal: 10147 is an order the venue could not find, 10148 one it found
-    // and would not act on. This reject states the second.
-    assert!(
-        w.events.iter().any(|e| e.starts_with("error:120:10148:")),
-        "{:?}", w.events,
-    );
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 //  MARKET DATA SCENARIOS
 // ═══════════════════════════════════════════════════════════════════════

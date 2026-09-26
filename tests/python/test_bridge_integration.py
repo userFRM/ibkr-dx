@@ -583,16 +583,14 @@ class TestCancelRejectDispatch:
 
     def test_cancel_reject_fires_error(self):
         w, c = make_test_client()
-        c._test_push_cancel_reject(42, 0, 1)  # reason 1 = unknown order
+        c._test_push_cancel_reject(42, 0, -1)
         c._test_dispatch_once()
 
         errors = [e for e in w.events if e[0] == "error"]
         assert len(errors) == 1
         assert errors[0][1] == 42  # order_id
-        # The reason the venue gave, not a single code meaning "cancelled" for
-        # every refusal: 10147 is the order this cancel named not being one the
-        # venue is holding.
-        assert errors[0][2] == 10147
+        # A refused cancel, not the code meaning "cancelled".
+        assert errors[0][2] == 10148
 
 
 class TestReqOpenOrdersOrderState:

@@ -1359,7 +1359,7 @@ impl CcpState {
         }
         match msg_type {
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed, msg, context, shared, event_tx, account_id),
-            fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, context, shared, event_tx),
+            fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, context, event_tx),
             fix::MSG_NEWS => self.handle_news_bulletin(&parsed, shared),
             fix::MSG_HEARTBEAT => {}
             fix::MSG_TEST_REQUEST => {

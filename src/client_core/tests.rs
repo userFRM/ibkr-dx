@@ -2936,53 +2936,6 @@ fn a_refusal_that_states_no_status_still_puts_the_terms_back() {
     assert_eq!(price_on_record(&core), 100.0, "the record states what the venue holds");
 }
 
-/// A refusal this client made states no reason of the venue's.
-///
-/// The reason code is the venue's, and a refusal composed on this side of the
-/// wire has none — it carries the sentinel that says so. Formatted as a
-/// number, the caller was handed "reason: -1" as though the venue had stated
-/// it, and a program branching on the reason had a code to match that means
-/// nothing.
-#[test]
-fn a_refusal_from_this_side_states_no_reason_code() {
-    let (core, _shared, _revision) = working_at(100.0);
-    let (_, ours) = core.restore_refused(&crate::types::CancelReject {
-        order_id: 42, instrument: 0, reject_type: 2, reason_code: -1,
-        answers_a_live_change: true, still_working: None, timestamp_ns: 0,
-    });
-    assert_eq!(ours, "Order 42 modify rejected", "no reason, and none invented");
-
-    let (_, theirs) = core.restore_refused(&crate::types::CancelReject {
-        order_id: 42, instrument: 0, reject_type: 1, reason_code: 0,
-        answers_a_live_change: true, still_working: None, timestamp_ns: 0,
-    });
-    assert_eq!(
-        theirs, "Order 42 cancel rejected by the venue (reason: 0)",
-        "and the venue's own reason still reaches the caller",
-    );
-}
-
-/// A refused cancel stating that the venue holds no such order leaves the order
-/// on record and in the open-order answer, as every other refusal does.
-///
-/// A gateway retires no order on a refusal, whatever reason it states. Dropped
-/// here, an order the venue could still be working went missing from what the
-/// caller was told is open.
-#[test]
-fn a_refusal_stating_no_such_order_leaves_the_order_open() {
-    let (core, shared, _revision) = working_at(100.0);
-    let (code, _) = core.restore_refused(&crate::types::CancelReject {
-        order_id: 42, instrument: 0, reject_type: 1, reason_code: 1,
-        answers_a_live_change: true, still_working: Some(crate::types::OrderStatus::Submitted),
-        timestamp_ns: 0,
-    });
-    assert_eq!(code, 10147, "told as the order the venue could not find");
-    let open: Vec<_> = core.collect_open_orders(&shared).into_iter()
-        .map(|(id, o)| (id, o.status))
-        .collect();
-    assert_eq!(open, [(42, "Submitted".to_string())], "and still open, as it was");
-}
-
 /// Every reader of the slot cache is answered from a cache the engine has not
 /// already emptied under it.
 ///
