@@ -153,7 +153,8 @@ fn unanswered_after(req_id: u32) -> std::time::Duration {
 
 /// Number of most-recent ExecIDs retained for fill deduplication. Bounds the
 /// memory of `seen_exec_ids` while staying large enough that a server replay
-/// after a reconnect burst still hits the window.
+/// after a reconnect burst still hits the window. The charges already told
+/// are held to the same window, for the same replay.
 const EXEC_ID_WINDOW: usize = 1024;
 
 /// How many of the venue's own names for recovered orders are held at once.
@@ -177,58 +178,99 @@ fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
     None
 }
 
-/// What a fill cost, as the venue states it.
-///
-/// The execution report carries no commission tag — captured against real
-/// fills on two instruments, it simply is not there — so a charge taken from
-/// the report is always nothing. The venue states it on a record of its own
-/// that follows the report, naming the execution it belongs to, the amount
-/// and the currency it is charged in.
-///
-/// The quantities and the price on this record are the same fill the
-/// execution report already carried, and are left alone: booking the fill
-/// from both is how it would be counted twice. Only what it cost and what it
-/// realised are taken.
-fn handle_trade_charge(parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
-    let Some(exec_id) = parsed.get(&fix::TAG_EXEC_ID).filter(|s| !s.is_empty()) else {
-        return;
-    };
-    // Absent is not nothing: a charge the venue did not state is unstated,
-    // and reporting a zero for it is the number this was written to stop.
-    let Some(charged) = parsed.get(&fix::TAG_TRADE_CHARGE)
-        .and_then(|s| s.parse::<f64>().ok())
-    else {
-        return;
-    };
-    // What the fill realised (6099) and a bond's yield (236), where the record
-    // states them. One it does not state is unset, and so is one it states as
-    // "nan"; a figure it states and this cannot read leaves the record
-    // unreported, as a charge it cannot read does.
-    let figure = |tag| match parsed.get(&tag).map(String::as_str) {
-        None => Some(f64::MAX),
-        Some(stated) if stated.eq_ignore_ascii_case("nan") => Some(f64::MAX),
-        Some(stated) => stated.parse::<f64>().ok(),
-    };
-    let (Some(realized), Some(yield_amount)) = (figure(6099), figure(236)) else {
-        return;
-    };
-    shared.orders.push_charge(crate::types::model::CommissionAndFeesReport {
+/// An execution's name without its revision, as a gateway reads it: the last
+/// part goes, and the last two where the name has five.
+fn without_revision(exec_id: &str) -> &str {
+    let revision = match exec_id.split('.').count() { 1 => 0, 5 => 2, _ => 1 };
+    let mut end = exec_id.len();
+    for _ in 0..revision {
+        end = exec_id[..end].rfind('.').unwrap_or(0);
+    }
+    &exec_id[..end]
+}
+
+impl CcpState {
+    /// What a fill cost, as the venue states it.
+    ///
+    /// The execution report carries no commission tag — captured against real
+    /// fills on two instruments, it simply is not there — so a charge taken from
+    /// the report is always nothing. The venue states it on a record of its own
+    /// that follows the report, naming the execution it belongs to, the amount
+    /// and the currency it is charged in.
+    ///
+    /// The quantities and the price on this record are the same fill the
+    /// execution report already carried, and are left alone: booking the fill
+    /// from both is how it would be counted twice. Only what it cost and what it
+    /// realised are taken.
+    fn handle_trade_charge(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
+        let Some(exec_id) = parsed.get(&fix::TAG_EXEC_ID).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        // Absent is not nothing: a charge the venue did not state is unstated,
+        // and reporting a zero for it is the number this was written to stop.
+        let Some(charged) = parsed.get(&fix::TAG_TRADE_CHARGE)
+            .and_then(|s| s.parse::<f64>().ok())
+        else {
+            return;
+        };
+        // What the fill realised (6099) and a bond's yield (236), where the record
+        // states them. One it does not state is unset, and so is one it states as
+        // "nan"; a figure it states and this cannot read leaves the record
+        // unreported, as a charge it cannot read does.
+        let figure = |tag| match parsed.get(&tag).map(String::as_str) {
+            None => Some(f64::MAX),
+            Some(stated) if stated.eq_ignore_ascii_case("nan") => Some(f64::MAX),
+            Some(stated) => stated.parse::<f64>().ok(),
+        };
+        let (Some(mut realized), Some(yield_amount)) = (figure(6099), figure(236)) else {
+            return;
+        };
+        // An execution named this way is charged to no caller: a gateway tells
+        // nobody of it.
+        if exec_id.starts_with("F-") || exec_id.starts_with("A-") {
+            return;
+        }
+        // Told once for the session. Every logon states the day's executions
+        // and their charges again, so a reconnect told the caller every charge
+        // of the day a second time. As a gateway keys it: the revision already
+        // told, or an earlier one, is not told again, and a later one is, with
+        // what the one before it realised added to its own.
+        let execution = without_revision(exec_id);
+        let stated = |figure: f64| figure != f64::MAX && figure != 0.0;
+        match self.charges_told.get(execution) {
+            Some((told, _)) if told.as_str() >= exec_id.as_str() => return,
+            Some((_, before)) if stated(*before) => {
+                realized = if stated(realized) { realized + before } else { *before };
+            }
+            _ => {}
+        }
         // Nothing realised is unset, as a gateway reports it: an opening fill
         // states 0 here.
-        realized_pnl: if realized == 0.0 { f64::MAX } else { realized },
-        yield_amount,
-        // The redemption the yield is measured to, where 696 states it as a
-        // date.
-        yield_redemption_date: parsed.get(&696)
-            .filter(|date| date.len() == 8)
-            .and_then(|date| date.parse().ok())
-            .unwrap_or(0),
-        ..crate::types::model::CommissionAndFeesReport::charged(
-            exec_id,
-            charged,
-            parsed.get(&fix::TAG_TRADE_CHARGE_CURRENCY).map(String::as_str).unwrap_or(""),
-        )
-    });
+        let realized_pnl = if realized == 0.0 { f64::MAX } else { realized };
+        if self.charges_told.insert(execution.to_string(), (exec_id.clone(), realized_pnl)).is_none() {
+            self.charges_told_order.push_back(execution.to_string());
+            while self.charges_told_order.len() > EXEC_ID_WINDOW {
+                if let Some(old) = self.charges_told_order.pop_front() {
+                    self.charges_told.remove(&old);
+                }
+            }
+        }
+        shared.orders.push_charge(crate::types::model::CommissionAndFeesReport {
+            realized_pnl,
+            yield_amount,
+            // The redemption the yield is measured to, where 696 states it as a
+            // date.
+            yield_redemption_date: parsed.get(&696)
+                .filter(|date| date.len() == 8)
+                .and_then(|date| date.parse().ok())
+                .unwrap_or(0),
+            ..crate::types::model::CommissionAndFeesReport::charged(
+                exec_id,
+                charged,
+                parsed.get(&fix::TAG_TRADE_CHARGE_CURRENCY).map(String::as_str).unwrap_or(""),
+            )
+        });
+    }
 }
 
 /// What the venue says went wrong.
@@ -776,6 +818,12 @@ pub(crate) struct CcpState {
     /// the whole set — a wholesale clear would let a post-reconnect server
     /// replay of a recently-seen ExecID double-count a fill.
     pub(crate) exec_id_order: VecDeque<String>,
+    /// The charges told this session, by the execution they are for without
+    /// its revision: the revision told and what it realised. Kept across
+    /// reconnects, because every logon states the day's charges again.
+    charges_told: HashMap<String, (String, f64)>,
+    /// Insertion order for `charges_told`, oldest at the front.
+    charges_told_order: VecDeque<String>,
     pub(crate) disconnected: bool,
     /// When to account for orders the reconnect did not explain.
     ///
@@ -1143,6 +1191,8 @@ impl CcpState {
         Self {
             seen_exec_ids: HashSet::with_capacity(256),
             exec_id_order: VecDeque::with_capacity(256),
+            charges_told: HashMap::new(),
+            charges_told_order: VecDeque::new(),
             disconnected: false,
             recovery_sweep_at: None,
             hydrated_any: false,
@@ -1521,7 +1571,7 @@ impl CcpState {
                         // channel: which number it arrives under depends only
                         // on a capability the session negotiated at logon, not
                         // on the error.
-                        "60" => handle_trade_charge(&parsed, shared),
+                        "60" => self.handle_trade_charge(&parsed, shared),
                         "192" | "278" => handle_venue_error(&parsed, shared),
                         // The venue speaking to the account holder rather than
                         // about a request: it states the matter as text and

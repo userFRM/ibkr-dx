@@ -8251,7 +8251,7 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
         (crate::protocol::fix::TAG_TRADE_CHARGE, "1.000003".to_string()),
         (crate::protocol::fix::TAG_TRADE_CHARGE_CURRENCY, "USD".to_string()),
     ]);
-    super::handle_trade_charge(&parsed, &shared);
+    CcpState::new().handle_trade_charge(&parsed, &shared);
 
     let charged = shared.orders.drain_charges();
     assert_eq!(charged.len(), 1);
@@ -8276,7 +8276,7 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
             (crate::protocol::fix::TAG_TRADE_CHARGE_CURRENCY, "USD".to_string()),
         ]);
         parsed.extend(stated.iter().map(|(tag, value)| (*tag, value.to_string())));
-        super::handle_trade_charge(&parsed, &shared);
+        CcpState::new().handle_trade_charge(&parsed, &shared);
         let charged = shared.orders.drain_charges();
         assert_eq!(charged.len(), 1, "{exec_id}");
         assert_eq!(
@@ -8302,9 +8302,49 @@ fn a_record_that_states_no_charge_reports_none() {
         ]),
     ] {
         let shared = SharedState::new();
-        super::handle_trade_charge(&parsed, &shared);
+        CcpState::new().handle_trade_charge(&parsed, &shared);
         assert!(shared.orders.drain_charges().is_empty());
     }
+}
+
+/// A charge is told once for the session, however often the venue states it.
+///
+/// Every logon states the day's executions and their charges again, so a
+/// reconnect told the caller every charge of the day a second time, and a
+/// program totalling its fees counted each one twice. A later revision of the
+/// same execution is told, carrying what the one before it realised.
+#[test]
+fn a_charge_is_told_once_across_a_reconnect_and_a_later_revision_again() {
+    let mut ccp = CcpState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+    let charge = |exec_id: &str, realized: &str| fix::fix_build(&[
+        (35, "U"), (43, "N"), (97, "Y"), (6040, "60"), (17, exec_id),
+        (37, "0256d0f1.0001417e.6ab20600.0001"), (6381, "USD"), (6378, "13.022195"),
+        (6099, realized), (8189, "8.780597"),
+    ], 1);
+    let mut told = |ccp: &mut CcpState, frame: &[u8]| {
+        ccp.process_ccp_message(frame, &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        shared.orders.drain_charges()
+    };
+
+    // As a captured session states it at logon.
+    let first = charge("00025b49.6ab28ffe.01.01", "90.482015");
+    assert_eq!(told(&mut ccp, &first).len(), 1);
+
+    ccp.handle_disconnect(&mut None, &mut Context::new(), &shared, &None);
+    let (conn, _peer) = crate::protocol::connection::Connection::for_test();
+    ccp.reconnect(conn, &mut None, &mut HeartbeatState::new(), "DU1", &shared);
+    assert!(told(&mut ccp, &first).is_empty(), "the next logon states it again, and it was told");
+
+    let revised = told(&mut ccp, &charge("00025b49.6ab28ffe.01.02", "1.5"));
+    assert_eq!(revised.len(), 1, "a later revision is told");
+    assert!((revised[0].realized_pnl - 91.982015).abs() < 1e-9, "{revised:?}");
+    assert!(
+        told(&mut ccp, &first).is_empty(),
+        "and the revision before it is not told again",
+    );
 }
 
 /// A trade cancel stated on the report type alone reverses what it undoes.
