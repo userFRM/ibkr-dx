@@ -12574,6 +12574,7 @@ pub(crate) fn attach_from_the_selected_preset(shared: &SharedState) {
         order_type_rules: vec![("STP".into(), 1), ("LMT".into(), 1), ("OCA".into(), 1)],
         order_types: vec!["STP".into(), "LMT".into(), "OCA".into()], ..Default::default()
     });
+    shared.reference.set_order_permissions([("STK".to_string(), Vec::new())].into());
     shared.reference.set_order_presets(vec![("s=STK".into(), "a=1".into(), "1".into())]);
     let (request_key, _) = shared.reference.expect_order_preset_values("s=STK");
     shared.reference.set_order_preset_values(crate::control::order_presets::PresetValues {

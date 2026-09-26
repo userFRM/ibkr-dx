@@ -7627,6 +7627,7 @@ fn an_escaped_preset_key_selects_and_correlates_from_list_through_get() {
     for listed_key in ["s=STK&tc=A%20B%26C%3DD%25", "s=STK&tc=A B%26C%3DD%25"] {
         let mut ccp = CcpState::new();
         let shared = SharedState::new();
+        shared.reference.set_order_permissions([("STK".to_string(), Vec::new())].into());
         let contract = api::Contract {
             sec_type: "STK".into(), symbol: "A B&C=D%".into(), currency: "USD".into(),
             ..api::Contract::default()

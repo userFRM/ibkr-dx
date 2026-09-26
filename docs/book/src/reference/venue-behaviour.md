@@ -498,6 +498,22 @@ group, so individually added children join it. The parent has no OCA group;
 scale-generated children retain their scale group. Replacement retains the
 original parent reference and group.
 
+## Which account preset an order takes
+
+Attached children and an order stated in cash take their terms from one of
+the account's order presets, chosen as a gateway chooses it. A gateway holds
+a preset of its own, at its defaults, for each security type the logon lets
+the account trade, and lays the account's list over them: an entry for a
+security type takes its place, and one for a symbol sits beneath its type.
+An order takes the entry for its symbol (for a currency pair, its local
+symbol first), else its type's, and where the list names nothing for the
+type, the gateway's own defaults, for which the venue is asked nothing.
+Where the session's `PRESETS` feature is on, the entry the list made active
+stands for its type: of strategies, the first active one in the list, since
+each clears the strategies beside it; of other entries, the last. A strategy
+whose values, once read, say it is not active gives way to the preset for
+every type (`u=ANY`), or to the gateway's defaults where the list has none.
+
 ## A modification in flight
 
 A replacement reads `PendingSubmit` once it is sent, as a gateway holds an

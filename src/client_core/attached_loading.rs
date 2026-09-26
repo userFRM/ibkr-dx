@@ -2,7 +2,8 @@
 
 use super::{ApiContract, Refusal, SharedState};
 use crate::control::attached_presets::{
-    AttachedPreset, PresetInstrument, is_unreadable, request_selector, select_preset_key,
+    AttachedPreset, PresetAttributes, PresetInstrument, is_unreadable, preset_types, request_selector,
+    select_preset_key,
 };
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::task::Poll;
@@ -82,7 +83,7 @@ pub(crate) async fn load_attached_preset(
         local_symbol: &local_symbol,
     };
     loop {
-        let mut entries = std::future::poll_fn(|_| match shared.reference.order_preset_list() {
+        let entries = std::future::poll_fn(|_| match shared.reference.order_preset_list() {
             Some(list) => Poll::Ready(Ok(list)),
             None if Instant::now() >= deadline => {
                 Poll::Ready(Err(Refusal::no_answer("Order preset list timed out")))
@@ -90,19 +91,37 @@ pub(crate) async fn load_attached_preset(
             None => Poll::Pending,
         })
         .await?;
-        for (key, attributes, _) in &mut entries {
-            if let Some(values) =
-                shared.reference.current_order_preset_values(&request_selector(key))
-            {
-                *attributes =
+        // The attributes a values answer states replace the listed ones; an
+        // answer that cannot be read states none.
+        let answered: std::collections::HashMap<&str, PresetAttributes> = entries
+            .iter()
+            .filter_map(|(key, _, _)| {
+                let values = shared.reference.current_order_preset_values(&request_selector(key))?;
+                let attributes =
                     if is_unreadable(&values.fields) { String::new() } else { values.attributes };
-            }
-        }
+                Some((key.as_str(), PresetAttributes::parse(&attributes)))
+            })
+            .collect();
+        let permitted = shared.reference.order_permissions();
+        let types = preset_types(
+            |kind| permitted.contains_key(kind),
+            |feature| shared.reference.enables(feature),
+        );
         let enabled = shared.reference.enables("PRESETS");
-        let Some(key) = select_preset_key(&entries, instrument, enabled) else {
+        let selected = shared.reference.settled_order_presets(|settled| {
+            select_preset_key(
+                &entries,
+                &|key| answered.get(key).cloned(),
+                instrument,
+                &types,
+                enabled,
+                settled,
+            )
+            .map(request_selector)
+        });
+        let Some(key) = selected else {
             return Ok(AttachedPreset::default());
         };
-        let key = request_selector(key);
         if let Some(values) = shared.reference.current_order_preset_values(&key) {
             return AttachedPreset::read(&values)
                 .ok_or_else(|| Refusal::no_answer("Order preset answer could not be read"));
@@ -146,6 +165,15 @@ pub(crate) mod tests {
         }
     }
 
+    /// A session whose logon permits orders on shares and futures.
+    fn session() -> SharedState {
+        let shared = SharedState::new();
+        shared.reference.set_order_permissions(
+            [("STK".to_string(), Vec::new()), ("FUT".to_string(), Vec::new())].into(),
+        );
+        shared
+    }
+
     fn contract() -> ApiContract {
         ApiContract {
             sec_type: "STK".into(),
@@ -179,7 +207,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_list_arrives_before_the_selected_get_is_sent() {
-        let shared = SharedState::new();
+        let shared = session();
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
         std::thread::scope(|scope| {
@@ -206,7 +234,7 @@ pub(crate) mod tests {
 
     #[test]
     fn one_selected_get_is_cached_for_the_current_list() {
-        let shared = SharedState::new();
+        let shared = session();
         shared
             .reference
             .set_order_presets(vec![entry("s=STK", "a=1", "1"), entry("s=FUT", "a=1", "1")]);
@@ -244,7 +272,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_answer_must_match_both_request_and_preset_key() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_order_presets(vec![entry("s=STK", "a=1", "1")]);
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
@@ -278,7 +306,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_list_change_during_get_requires_a_new_answer() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_order_presets(vec![entry("s=STK", "a=1", "1")]);
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
@@ -312,9 +340,10 @@ pub(crate) mod tests {
 
     #[test]
     fn changed_get_attributes_cause_selection_to_run_again() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_enabled_features(vec!["PRESETS".into()]);
         let entries = vec![
+            entry("u=ANY", "", "1"),
             entry("s=STK", "", "1"),
             entry("s=STK&tc=Alpha", "st=1&a=1", "1"),
             entry("s=STK&tc=Beta", "st=1&a=1", "1"),
@@ -327,8 +356,9 @@ pub(crate) mod tests {
                 let first = request(&receive);
                 assert_eq!(first.1, "s=STK&tc=Alpha");
                 shared.reference.set_order_preset_values(answer(first, "st=1&a=0"));
+                // The strategy its answer stops gives way to the root.
                 let second = request(&receive);
-                assert_eq!(second.1, "s=STK&tc=Beta");
+                assert_eq!(second.1, "u=ANY");
                 shared.reference.set_order_preset_values(answer(second, "st=1&a=1"));
             });
             assert!(
@@ -349,7 +379,7 @@ pub(crate) mod tests {
 
     #[test]
     fn empty_lists_use_defaults_without_a_get() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_order_presets(Vec::new());
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
@@ -369,7 +399,7 @@ pub(crate) mod tests {
 
     #[test]
     fn timeouts_remove_waiters_and_late_answers_are_not_current() {
-        let shared = SharedState::new();
+        let shared = session();
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
         let missing_list =
@@ -392,7 +422,7 @@ pub(crate) mod tests {
 
     #[test]
     fn stopped_engine_is_distinct_from_an_unanswered_request() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_order_presets(vec![entry("s=STK", "a=1", "1")]);
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
@@ -410,7 +440,7 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_error_answers_keep_their_values() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_order_presets(vec![entry("s=STK", "a=1", "1")]);
         let (send, receive) = channel();
         let receive = Mutex::new(receive);
@@ -439,7 +469,7 @@ pub(crate) mod tests {
     /// already past refuses without asking for values it has no time to hear.
     #[test]
     fn a_spent_deadline_refuses_without_asking() {
-        let shared = SharedState::new();
+        let shared = session();
         shared.reference.set_order_presets(vec![entry("s=STK", "a=1", "1")]);
         let (send, receive) = channel();
         let started = Instant::now();

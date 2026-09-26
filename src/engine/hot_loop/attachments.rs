@@ -178,6 +178,7 @@ mod tests {
             order_types: vec!["STP".into(), "LMT".into(), "OCA".into()],
             ..Default::default()
         });
+        shared.reference.set_order_permissions([("STK".to_string(), Vec::new())].into());
         shared.reference.set_order_presets(vec![("s=STK".into(), "a=1".into(), "1".into())]);
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (connection, peer) = Connection::for_test();

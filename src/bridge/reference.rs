@@ -21,6 +21,8 @@ struct PresetState {
     sequence: u64,
     values: HashMap<String, (u64, crate::control::order_presets::PresetValues)>,
     waiting: HashMap<String, (String, u64, std::sync::mpsc::SyncSender<crate::control::order_presets::PresetValues>)>,
+    /// What the gateway's tree settled on where the list did not, for the list held.
+    settled: crate::control::attached_presets::SettledPresets,
 }
 
 /// A contract's corporate actions as the venue stated them.
@@ -1740,6 +1742,7 @@ impl ReferenceState {
         let mut state = self.order_presets.lock().unwrap();
         if state.list.as_ref() != Some(&presets) {
             state.generation = state.generation.wrapping_add(1);
+            state.settled.clear();
         }
         state.list = Some(presets);
     }
@@ -1761,6 +1764,11 @@ impl ReferenceState {
             None => u64::MAX,
         };
         state.values.insert(values.key.clone(), (generation, values));
+    }
+
+    /// Work with what the preset tree settled on for the list held.
+    pub(crate) fn settled_order_presets<T>(&self, work: impl FnOnce(&mut crate::control::attached_presets::SettledPresets) -> T) -> T {
+        work(&mut self.order_presets.lock().unwrap().settled)
     }
 
     pub(crate) fn order_preset_list(&self) -> Option<Vec<(String, String, String)>> {
