@@ -1188,23 +1188,21 @@ impl HmdsState {
                                 let (_, req_id, ..) = self.rtbar_subs.remove(pos);
                                 self.rtbar_resub.retain(|r| r.req_id != req_id);
                                 // Where the stream was the half of a request
-                                // kept up to date, the request fails whole and
-                                // its number is freed: left flagged, every
-                                // later request under it was refused as a
-                                // duplicate of one the caller was told failed.
-                                //
-                                // Past its history the request ends here, and
-                                // its caller's side is told so; one whose
-                                // history is still being put together is told
-                                // once that history is filed.
-                                if self.keep_up_to_date_reqs.remove(&req_id) {
-                                    self.forming_bars.retain(|f| f.req_id != req_id);
-                                    if !self.held.iter().any(|h| h.req_id == req_id) {
-                                        self.pending_historical.retain(|(_, rid)| *rid != req_id);
-                                        from_historical = true;
-                                    }
+                                // kept up to date, the program is told nothing
+                                // and the request goes on: a gateway keeps the
+                                // refusal of its five-second stream to itself,
+                                // and the history, whether still arriving or
+                                // already in, is delivered and ended as it
+                                // would have been. Only a stream of its own is
+                                // the program's to hear about.
+                                if self.keep_up_to_date_reqs.contains(&req_id) {
+                                    log::warn!(
+                                        "HMDS QueryError on the stream keeping req_id={req_id} up to date \
+                                         (query_id={query_id:?}): {error_msg}; no updates will follow",
+                                    );
+                                } else {
+                                    released_req_id = Some(req_id);
                                 }
-                                released_req_id = Some(req_id);
                             } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, ..)| states(qid, q)) {
                                 let (_, req_id, _) = self.pending_head_ts.remove(pos);
                                 released_req_id = Some(req_id);
@@ -2622,8 +2620,7 @@ fn build_tbt_query(
                     emit(event_tx, Event::HistoricalData { req_id: entry.req_id, data });
                 }
                 // A request not kept up to date ends with its history, and
-                // its caller's side is told so: one whose stream the venue
-                // refused while this was put together no longer is.
+                // its caller's side is told so.
                 if !self.keep_up_to_date_reqs.contains(&entry.req_id) {
                     shared.reference.push_historical_over(entry.req_id);
                 }

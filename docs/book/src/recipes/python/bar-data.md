@@ -23,9 +23,9 @@ One `historical_data` callback per bar, in time order, then one
 was served. A request whose bars are refused once it has been handed over is
 told why on `error`, and nothing follows it: a gateway states no end after a
 refusal, so a program waiting for the end stops on the error too. A request
-kept up to date whose five-second stream the venue refuses is told why on
-`error` and kept up to date no longer: nothing follows once its history is in,
-and a history still to come arrives with its end.
+kept up to date whose five-second stream the venue refuses is told nothing, as
+a gateway tells it nothing: a history still to come arrives with its end, and
+no update follows.
 
 With `keep_up_to_date=True` the bar still forming goes on from the history's
 last bar, as a gateway's does: the live five-second bars inside it are folded

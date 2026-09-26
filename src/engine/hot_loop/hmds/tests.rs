@@ -2693,17 +2693,15 @@ fn an_unreadable_eoq_page_withdraws_the_stream_at_the_venue() {
     assert!(cancel.contains("ticker:4002"), "the stream is withdrawn at the venue: {cancel:?}");
 }
 
-/// The venue refusing the stream half of a request kept up to date fails the
-/// whole request, and the number is freed with it. Left flagged, every later
-/// request under the number was refused as a duplicate of one the caller had
-/// been told had failed.
-///
-/// Its caller's side lets go of it too: at the refusal where its history is
-/// in, and once its history is filed where that was still being put together.
-/// Told the error alone, that side kept the request as one still kept up to
-/// date for the rest of the session.
+/// The venue refusing the stream half of a request kept up to date tells the
+/// program nothing and ends nothing, as a gateway keeps the refusal of its
+/// five-second stream to itself: a history already in stays in, and one still
+/// arriving is delivered and ended as it would have been, the pages held
+/// before the refusal with it. The program was told
+/// a 162 and, once the history was filed, its side let go of a request a
+/// gateway still holds.
 #[test]
-fn a_refused_stream_half_frees_the_number_it_was_kept_up_to_date_under() {
+fn a_refused_stream_half_is_told_nothing_and_leaves_the_request_kept() {
     for history_in in [true, false] {
         let mut hmds = HmdsState::new();
         let (client, _rx, shared) = crate::api::client::tests::test_client();
@@ -2731,6 +2729,18 @@ fn a_refused_stream_half_frees_the_number_it_was_kept_up_to_date_under() {
         hmds.forming_bars.push(FormingBar {
             req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
         });
+        // A page of the history still arriving, held before the refusal.
+        if !history_in {
+            let page = "<ResultSetBar><id>hist_4001</id><eoq>false</eoq><tz>UTC</tz><Events>\
+                        <Bar><time>20260714-13:29:00</time><open>100.0</open><close>100.5</close>\
+                        <high>100.7</high><low>99.9</low><weightedAvg>100.2</weightedAvg>\
+                        <volume>1000</volume><count>10</count></Bar></Events></ResultSetBar>";
+            let mut msg = Vec::new();
+            msg.extend_from_slice(b"35=W\x016118=");
+            msg.extend_from_slice(page.as_bytes());
+            msg.push(0x01);
+            hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+        }
         let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<QueryError>\n\t<id>rt_4002</id>\n\t<error>no</error>\n</QueryError>\n";
         let mut msg = Vec::new();
         msg.extend_from_slice(b"35=W\x016118=");
@@ -2739,14 +2749,25 @@ fn a_refused_stream_half_frees_the_number_it_was_kept_up_to_date_under() {
         hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
 
         assert!(hmds.rtbar_subs.iter().all(|(_, rid, ..)| *rid != 9), "the stream is gone");
-        assert!(!hmds.keep_up_to_date_reqs.contains(&9), "and the number is freed");
-        assert!(hmds.forming_bars.iter().all(|f| f.req_id != 9), "and the half-built bar with it");
+        assert!(hmds.rtbar_resub.iter().all(|r| r.req_id != 9), "and is not asked for again");
+        assert!(hmds.keep_up_to_date_reqs.contains(&9), "the request is still kept: {history_in}");
         // The history's last page, where it is still to come.
-        hmds.process_hmds_message(&super::make_bar_msg("hist_4001", true), &mut conn, &shared, &None, &mut hb);
+        if !history_in {
+            hmds.process_hmds_message(&super::make_bar_msg("hist_4001", true), &mut conn, &shared, &None, &mut hb);
+        }
         let mut heard = crate::api::wrapper::tests::RecordingWrapper::default();
         client.process_msgs(&mut heard);
-        assert!(heard.events.iter().any(|e| e.starts_with("error:9:")), "the caller is told: {:?}", heard.events);
-        assert!(!client.core.historical_answered(9), "and its caller's side lets go of it: {history_in}");
+        assert!(!heard.events.iter().any(|e| e.starts_with("error:")), "nothing is told: {:?}", heard.events);
+        assert_eq!(
+            heard.events.iter().any(|e| e.starts_with("historical_data_end:9")), !history_in,
+            "a history still arriving ends as it would have: {:?}", heard.events,
+        );
+        assert_eq!(
+            heard.events.iter().filter(|e| e.starts_with("historical_data:9:")).count(),
+            if history_in { 0 } else { 2 },
+            "its pages, the one held before the refusal among them: {:?}", heard.events,
+        );
+        assert!(client.core.historical_answered(9), "and its caller's side holds it: {history_in}");
     }
 }
 
@@ -2954,62 +2975,6 @@ fn a_tick_stream_states_the_prelude_and_the_filter_it_was_asked_for() {
     let asked = super::HmdsState::build_tbt_query(7, 265598, "BEST", "CS", "AllLast", 100, true);
     assert!(asked.contains("<timeLength>100 t</timeLength>"), "{asked}");
     assert!(asked.contains("<filter><ignoreSize>true</ignoreSize></filter>"), "{asked}");
-}
-
-/// A refusal of a different query under the same caller number leaves the
-/// held series alone.
-///
-/// The lists these queries are drawn from do not share a number space. A
-/// request that is kept up to date proves it on its own: the batch and the
-/// five-second stream that follows it carry one caller number, and the venue
-/// refusing the stream — a series it serves as history but not at five
-/// seconds, or a contract with no streaming entitlement — threw away every
-/// page the batch had collected. What was held went out as an end carrying no
-/// bars, and the pages still to come were then delivered after it as updates,
-/// newest page first.
-#[test]
-fn a_refusal_of_another_query_leaves_a_held_series_alone() {
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    let mut conn: Option<Connection> = None;
-
-    // One caller number, two queries: the batch of bars, and the stream that
-    // keeps it up to date.
-    hmds.pending_historical.push(("hist_2001".to_string(), 7));
-    hmds.keep_up_to_date_reqs.insert(7);
-    hmds.rtbar_subs.push(("rt_2002".to_string(), 7, None, 0.01, 1.0));
-    hmds.held.push(HeldSeries {
-        req_id: 7, fold: Fold::None, bars: Vec::new(), timezone: String::new(), actions_query: None, actions: None,
-        along: Default::default(),
-        complete: false,
-    });
-    hmds.process_hmds_message(&make_bar_msg("hist_2001", false), &mut conn, &shared, &None, &mut hb);
-    let held_before = hmds.held[0].bars.len();
-    assert!(held_before > 0, "the batch has pages in hand");
-
-    // The venue refuses the stream, not the batch.
-    hmds.process_hmds_message(
-        &make_query_error_msg("rt_2002", "No market data permissions"),
-        &mut conn, &shared, &None, &mut hb,
-    );
-
-    assert_eq!(hmds.held.len(), 1, "the batch was not the query that was refused");
-    assert_eq!(hmds.held[0].bars.len(), held_before, "and it still holds its pages");
-    assert!(hmds.rtbar_subs.is_empty(), "the stream that was refused is gone");
-    assert!(
-        !hmds.pending_historical.is_empty(),
-        "the batch is still outstanding, so its remaining pages still reach the hold",
-    );
-
-    // The caller hears about the stream, and is not handed an end for a series
-    // that has not finished arriving.
-    let errors = shared.reference.drain_historical_errors();
-    assert_eq!(errors, vec![(7, 162, "No market data permissions".to_string())]);
-    assert!(
-        shared.reference.drain_historical_data().is_empty(),
-        "no end for a series still being collected",
-    );
 }
 
 /// A standalone request for a contract's actions shares the caller's number
