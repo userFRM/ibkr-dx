@@ -1277,12 +1277,13 @@ fn fix_side(side: Side) -> &'static str {
     }
 }
 
-/// Synthesize the PendingCancel phase when a cancel request goes out
-/// The server acks a normal cancel with the terminal code only and never
-/// sends the pending-cancel code, so without this local transition consumers
-/// jump straight from Submitted to Cancelled. The server's ack, or a fill that
-/// raced the cancel, then advances the status; a cancel reject restores the
-/// working status through the forced setter.
+/// Hold an order as being withdrawn once its cancel has gone out, as a gateway
+/// holds it, and say nothing of it: a gateway tells a program nothing when a
+/// cancel goes out. The order reads `PendingCancel` to a caller asking for the
+/// open orders, and the venue's next report on it, restating the order, is the
+/// first a program hears. The venue's answer, or a fill that raced the cancel,
+/// then advances the status; a cancel reject restores the working status
+/// through the forced setter.
 fn synthesize_pending_cancel(
     context: &mut Context,
     shared: &Arc<SharedState>,
@@ -1319,7 +1320,7 @@ fn synthesize_pending_cancel(
             parent_id: 0,
             timestamp_ns: context.now_ns(),
         };
-        shared.orders.push_order_update(update);
+        shared.push_call_record(crate::bridge::Record::OrderBook(crate::bridge::OrderBook::CancelSent(update)));
         crate::engine::hot_loop::emit(event_tx, crate::bridge::Event::OrderUpdate(update));
     }
 }

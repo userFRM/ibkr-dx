@@ -938,9 +938,17 @@ impl EClient {
                 }
             }
             Answer::OpenOrders => {
+                // Each order, then its status, as a gateway answers the
+                // question.
                 for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
-                    let state = OrderState { status: tracked.status, ..Default::default() };
-                    wrapper.open_order(self.core.api_order_id(order_id), &tracked.contract, &tracked.order, &state);
+                    let api_id = self.core.api_order_id(order_id);
+                    let state = OrderState { status: tracked.status.clone(), ..Default::default() };
+                    wrapper.open_order(api_id, &tracked.contract, &tracked.order, &state);
+                    wrapper.order_status(
+                        api_id, &tracked.status, tracked.filled, tracked.remaining,
+                        tracked.avg_fill_price, tracked.order.perm_id, tracked.order.parent_id,
+                        tracked.last_fill_price, i64::from(tracked.order.client_id), "", 0.0,
+                    );
                 }
                 wrapper.open_order_end();
             }

@@ -1011,7 +1011,7 @@ pub fn exercise_options( &self, req_id: i64, contract: &Contract, exercise_actio
 
 #### `cancel_order`
 
-Cancel an order. The second argument is what the withdrawal states about itself — `OrderCancel`, or a time alone; `""` states nothing. Who is withdrawing it and whether a person entered it travel on the cancel, as a gateway writes them: from the withdrawal, not from the placement. A time does not travel. A gateway sends it only where the venue has turned that record on for the login, and this client does not read whether it has. The cancel goes anyway and the caller is told the time did not: a live order left standing because a regulatory annotation has nowhere to go is the worse of the two. Taken in silence, the order would come back without the record while the caller had given one. A time a gateway cannot read is refused as a gateway refuses it, under 10301, and nothing is withdrawn.
+Cancel an order. The second argument is what the withdrawal states about itself — `OrderCancel`, or a time alone; `""` states nothing. Who is withdrawing it and whether a person entered it travel on the cancel, as a gateway writes them: from the withdrawal, not from the placement. A time does not travel. A gateway sends it only where the venue has turned that record on for the login, and this client does not read whether it has. The cancel goes anyway and the caller is told the time did not: a live order left standing because a regulatory annotation has nowhere to go is the worse of the two. Taken in silence, the order would come back without the record while the caller had given one. A time a gateway cannot read is refused as a gateway refuses it, under 10301, and nothing is withdrawn. Nothing is said as the cancel goes out, as a gateway says nothing then: asked for, the order reads `PendingCancel`, and the venue's next report on it states it.
 
 ```rust
 pub fn cancel_order( &self, order_id: i64, order_cancel: impl Into<crate::types::model::OrderCancel>, )
@@ -1120,7 +1120,7 @@ pub fn order_id_floor(&self) -> i64
 
 #### `req_open_orders`
 
-Request open orders for this client. Answers with every order working on the account, as `req_all_open_orders` does. The protocol carries no client number on an order, so this session cannot tell which orders it placed; reporting fewer would omit working orders.
+Request open orders for this client. Answers with every order working on the account, each on `open_order` and then its status on `order_status`, as a gateway answers it and as `req_all_open_orders` does. The protocol carries no client number on an order, so this session cannot tell which orders it placed; reporting fewer would omit working orders.
 
 ```rust
 pub fn req_open_orders(&self)
@@ -2756,7 +2756,7 @@ Which feed a subscription is being served from: 1 live, 2 frozen, 3 delayed, 4 d
 
 #### `order_status`
 
-Where an order stands now. Fires on every change, and again on each fill. `filled` and `remaining` are shares, `avg_fill_price` the average of what has filled so far.
+Where an order stands now: stated as the venue reports on the order, again on each fill, and after the order's `open_order` when open orders are asked for. Sending a cancel states nothing, as a gateway states nothing then: asked for, the order reads `PendingCancel`, and the venue's next report on it states it so. `filled` and `remaining` are shares, `avg_fill_price` the average of what has filled so far.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

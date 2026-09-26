@@ -108,15 +108,24 @@ there is no placement here to restate them from.
 ## Market-on-close acknowledgement
 
 A market-on-close order placed during regular hours draws nothing from the
-venue until it is withdrawn: no acknowledgement and no status. A gateway
-states an order to a program when the venue reports on it, when the venue
-names it at connect and when a program asks for the open orders, so it says
-nothing in that wait, and neither does this client. Asked for the open orders
-meanwhile, both list the order as `PendingSubmit`, under the number it went
-out under as its permanent id. Withdrawn, the order reads `PendingCancel`
-until `Cancelled`: the venue then acknowledges the order ahead of answering the
-withdrawal, and a gateway takes an acknowledgement only from an order not yet
-withdrawn, so it states the order as being withdrawn, and so does this client.
+venue until it is withdrawn: no acknowledgement and no status. A program sees
+no `PreSubmitted` or `Submitted` for it while it works, because the venue
+states none. A gateway states an order to a
+program when the venue reports on it, when the venue names it at connect and
+when a program asks for the open orders; it neither asks the venue about an
+order nor states one on a clock of its own, so it says nothing in that wait,
+and neither does this client. Asked for the open orders meanwhile, both state
+the order on `open_order` and then `order_status`, as `PendingSubmit`, under the
+number it went out under as its permanent id.
+
+Withdrawn, nothing is said as the cancel goes out, and the order reads
+`PendingCancel` to a program asking for its open orders. The venue then
+acknowledges the order ahead of answering the withdrawal; a gateway takes an
+acknowledgement only from an order not yet withdrawn, so that report states the
+order `PendingCancel`, then the venue's answer `Cancelled`, and so does this
+client. The order a gateway sends for it differs from a market order in its
+type alone, and so does the order this client sends: nothing about the close
+travels beside it.
 
 Placed before the open, the same order is acknowledged at once with the
 venue's warning that it will not reach the exchange until the open, which

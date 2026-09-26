@@ -375,6 +375,6 @@ share the known parent's cancellation group, a rejected revision keeps the
 original order's accepted terms, and replacements retain automatic hedge
 pricing. An order is stated to a program as a gateway states it: nothing while
 the venue has said nothing — a market-on-close order in regular hours draws no
-report until it is withdrawn — and, asked for, under its type's own name, on
-the account it went out for, with the number it went out under as its
-permanent id.
+report until it is withdrawn — nor as a cancel goes out, and, asked for, with
+its status after it, under its type's own name, on the account it went out
+for, with the number it went out under as its permanent id.

@@ -1898,8 +1898,7 @@ impl CcpState {
                 clord_id, api::OrderOp::Cancel, ORDER_REJECTED_ERROR_CODE, reason, sent(parsed),
             );
             // And the order as it stands, after the error, as a gateway
-            // restates it: a caller told of the cancel ahead of the answer
-            // learns where the order is.
+            // restates the order a report names.
             if let Some(order) = context.order(clord_id).copied() {
                 emit(event_tx, Event::CancelReject(crate::types::CancelReject {
                     order_id: clord_id,

@@ -878,7 +878,7 @@ def exercise_options(req_id, contract, exercise_action, exercise_quantity, accou
 
 #### `cancel_order`
 
-Cancel an order.  The second argument is what the reference client states about the withdrawal itself — when a person entered it, on whose authority, and whether a person entered it at all. It is taken as that object or as the time alone.  Who is withdrawing it and whether a person entered it travel on the cancel, as a gateway writes them: from the withdrawal, not from the placement. A time does not travel. A gateway sends it only where the venue has turned that record on for the login, and this client does not read whether it has. The cancel goes anyway and the caller is told the time did not: refused outright, a live order would be left standing over a record this client does not send. Taken silently it would be withdrawn without the record while the caller had given one, so it is said. A time a gateway cannot read is refused as a gateway refuses it, under 10301, and nothing is withdrawn.
+Cancel an order.  The second argument is what the reference client states about the withdrawal itself — when a person entered it, on whose authority, and whether a person entered it at all. It is taken as that object or as the time alone.  Who is withdrawing it and whether a person entered it travel on the cancel, as a gateway writes them: from the withdrawal, not from the placement. A time does not travel. A gateway sends it only where the venue has turned that record on for the login, and this client does not read whether it has. The cancel goes anyway and the caller is told the time did not: refused outright, a live order would be left standing over a record this client does not send. Taken silently it would be withdrawn without the record while the caller had given one, so it is said. A time a gateway cannot read is refused as a gateway refuses it, under 10301, and nothing is withdrawn.  Nothing is said as the cancel goes out, as a gateway says nothing then: asked for, the order reads `PendingCancel`, and the venue's next report on it states it.
 
 ```python
 def cancel_order(order_id, order_cancel=None)
@@ -2613,7 +2613,7 @@ Which feed a subscription is being served from: 1 live, 2 frozen, 3 delayed, 4 d
 
 #### `order_status`
 
-Where an order stands now. Fires on every change, and again on each fill. `filled` and `remaining` are shares, `avg_fill_price` the average of what has filled so far.
+Where an order stands now: stated as the venue reports on the order, again on each fill, and after the order's `open_order` when open orders are asked for. Sending a cancel states nothing, as a gateway states nothing then: asked for, the order reads `PendingCancel`, and the venue's next report on it states it so. `filled` and `remaining` are shares, `avg_fill_price` the average of what has filled so far.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

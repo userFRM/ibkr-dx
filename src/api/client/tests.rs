@@ -6177,7 +6177,8 @@ fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
 /// An order is stated as a gateway holds it from the moment it is sent, before
 /// the venue has said anything about it: under its type's own name, on the
 /// account it went out for, and with the number it went to the venue under as
-/// its permanent id.
+/// its permanent id. Asked for, it is stated and then its status, as a gateway
+/// answers the question; the status alone was left out.
 #[test]
 fn an_order_is_stated_as_a_gateway_holds_it_before_the_venue_answers() {
     #[derive(Default)]
@@ -6192,6 +6193,12 @@ fn an_order_is_stated_as_a_gateway_holds_it_before_the_venue_answers() {
                 state.status.clone(),
             ));
         }
+        fn order_status(
+            &mut self, order_id: i64, status: &str, filled: f64, remaining: f64, _avg: f64,
+            perm_id: i64, _parent_id: i64, _last: f64, _client_id: i64, _why_held: &str, _cap: f64,
+        ) {
+            self.0.push((order_id, status.to_string(), format!("{filled}/{remaining}"), perm_id, String::new()));
+        }
     }
     let (client, rx, shared) = test_client();
     shared.set_session_account("DU123");
@@ -6202,7 +6209,10 @@ fn an_order_is_stated_as_a_gateway_holds_it_before_the_venue_answers() {
     client.try_place_order(91, &spy(), &order).unwrap();
     let mut heard = Heard::default();
     client.req_all_open_orders(); the_engine_answers(&rx, &shared); client.process_msgs(&mut heard);
-    assert_eq!(heard.0, [(91, "LMT".to_string(), "DU123".to_string(), 91, "PendingSubmit".to_string())]);
+    assert_eq!(heard.0, [
+        (91, "LMT".to_string(), "DU123".to_string(), 91, "PendingSubmit".to_string()),
+        (91, "PendingSubmit".to_string(), "0/1".to_string(), 91, String::new()),
+    ]);
 }
 
 /// A cancel the venue refused leaves the order working, and the record says so.

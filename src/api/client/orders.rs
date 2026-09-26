@@ -335,6 +335,10 @@ impl EClient {
     /// would come back without the record while the caller had given one. A time a
     /// gateway cannot read is refused as a gateway refuses it, under 10301,
     /// and nothing is withdrawn.
+    ///
+    /// Nothing is said as the cancel goes out, as a gateway says nothing then:
+    /// asked for, the order reads `PendingCancel`, and the venue's next report
+    /// on it states it.
     pub fn cancel_order(
         &self, order_id: i64, order_cancel: impl Into<crate::types::model::OrderCancel>,
     ) {
@@ -579,7 +583,8 @@ impl EClient {
 
     /// Request open orders for this client. Matches `reqOpenOrders` in C++.
     ///
-    /// Answers with every order working on the account, as
+    /// Answers with every order working on the account, each on `open_order`
+    /// and then its status on `order_status`, as a gateway answers it and as
     /// [`req_all_open_orders`](EClient::req_all_open_orders) does. The protocol
     /// carries no client number on an order, so this session cannot tell which
     /// orders it placed; reporting fewer would omit working orders.

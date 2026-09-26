@@ -373,6 +373,10 @@ impl EClient {
     /// without the record while the caller had given one, so it is said. A
     /// time a gateway cannot read is refused as a gateway refuses it, under
     /// 10301, and nothing is withdrawn.
+    ///
+    /// Nothing is said as the cancel goes out, as a gateway says nothing then:
+    /// asked for, the order reads `PendingCancel`, and the venue's next report
+    /// on it states it.
     #[pyo3(signature = (order_id, order_cancel=None))]
     fn cancel_order(&self, py: Python<'_>, order_id: i64, order_cancel: Option<Py<PyAny>>) -> PyResult<()> {
         let cancelling = crate::types::model::ErrorOrigin::Order { id: order_id, op: crate::types::model::OrderOp::Cancel };

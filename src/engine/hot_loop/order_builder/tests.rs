@@ -866,24 +866,19 @@ fn order(oid: u64, filled: crate::types::Qty, status: OrderStatus) -> Order {
     }
 }
 
-// An outbound cancel synthesizes the PendingCancel phase the
-// server never sends for a normal cancel.
+// A cancel going out tells a program nothing, as a gateway tells it nothing
+// then: the order is held as being withdrawn, and reads so to a caller asking
+// for the open orders. Stated as a status, both surfaces told the program
+// `PendingCancel` ahead of anything the venue said. The event channel, which a
+// gateway does not have, still carries the engine's change, under the number
+// the order went out under.
 #[test]
-fn synthesize_pending_cancel_updates_and_notifies() {
+fn a_cancel_going_out_is_held_and_told_to_nobody() {
     let mut context = Context::new();
     let shared = Arc::new(SharedState::new());
+    let (tx, events) = std::sync::mpsc::sync_channel(8);
+    let sink = Some(crate::engine::hot_loop::EventSink::new(tx, Default::default()));
     context.insert_order(order(7, 3 * crate::types::QTY_SCALE, OrderStatus::PartiallyFilled));
-
-    synthesize_pending_cancel(&mut context, &shared, 7, &None);
-
-    assert_eq!(context.order(7).unwrap().status, OrderStatus::PendingCancel);
-    let updates = shared.orders.drain_order_updates();
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].status, OrderStatus::PendingCancel);
-    assert_eq!(updates[0].filled_qty, 3.0);
-    assert_eq!(updates[0].remaining_qty, 7.0);
-    assert_eq!(updates[0].perm_id, 7, "under the number it went out under");
-
     // One the venue named at connect is under the venue's number for it.
     context.insert_order(order(9, 0, OrderStatus::Submitted));
     shared.orders.push_order_info(9, crate::bridge::RichOrderInfo {
@@ -891,8 +886,31 @@ fn synthesize_pending_cancel_updates_and_notifies() {
         order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
         contract: Default::default(), last_exec: Default::default(),
     });
-    synthesize_pending_cancel(&mut context, &shared, 9, &None);
-    assert_eq!(shared.orders.drain_order_updates()[0].perm_id, 9000);
+
+    synthesize_pending_cancel(&mut context, &shared, 7, &sink);
+    synthesize_pending_cancel(&mut context, &shared, 9, &sink);
+
+    assert_eq!(context.order(7).unwrap().status, OrderStatus::PendingCancel);
+    let records = shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+    assert!(
+        !records.iter().any(|(_, r)| matches!(r, crate::bridge::Record::OrderUpdate(_))),
+        "a status went to the surfaces ahead of anything the venue said",
+    );
+    let core = crate::client_core::ClientCore::new();
+    for (_, record) in records {
+        if let crate::bridge::Record::OrderBook(entry) = record {
+            core.keep_the_book(&shared, entry);
+        }
+    }
+    let mut open: Vec<_> = core.collect_open_orders(&shared).into_iter()
+        .map(|(id, o)| (id, o.status, o.filled, o.remaining)).collect();
+    open.sort_by_key(|(id, ..)| *id);
+    assert_eq!(open, [(7, "PendingCancel".to_string(), 3.0, 7.0), (9, "PendingCancel".to_string(), 0.0, 10.0)]);
+    let changed: Vec<_> = events.try_iter().filter_map(|event| match event {
+        crate::bridge::Event::OrderUpdate(u) => Some((u.order_id, u.status, u.perm_id)),
+        _ => None,
+    }).collect();
+    assert_eq!(changed, [(7, OrderStatus::PendingCancel, 7), (9, OrderStatus::PendingCancel, 9000)]);
 }
 
 #[test]
@@ -906,7 +924,7 @@ fn synthesize_pending_cancel_skips_terminal_and_unknown_orders() {
     synthesize_pending_cancel(&mut context, &shared, 999, &None);
 
     assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
-    assert!(shared.orders.drain_order_updates().is_empty());
+    assert!(shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false }).is_empty());
 }
 
 /// Adaptive, algo and what-if orders reach their own encoders and still

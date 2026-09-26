@@ -88,9 +88,12 @@ pub trait Wrapper {
 
     // ── Orders ──
 
-    /// Where an order stands now. Fires on every change, and again on
-    /// each fill. `filled` and `remaining` are shares, `avg_fill_price` the
-    /// average of what has filled so far.
+    /// Where an order stands now: stated as the venue reports on the order,
+    /// again on each fill, and after the order's `open_order` when open orders
+    /// are asked for. Sending a cancel states nothing, as a gateway states
+    /// nothing then: asked for, the order reads `PendingCancel`, and the
+    /// venue's next report on it states it so. `filled` and `remaining` are
+    /// shares, `avg_fill_price` the average of what has filled so far.
     fn order_status(
         &mut self, order_id: i64, status: &str, filled: f64, remaining: f64,
         avg_fill_price: f64, perm_id: i64, parent_id: i64,

@@ -3571,6 +3571,10 @@ impl ClientCore {
             crate::bridge::OrderBook::RevisionRefused(reject) => {
                 self.restore_refused(&reject);
             }
+            crate::bridge::OrderBook::CancelSent(update) => self.update_order_status(
+                shared, update.order_id, update.status, update.filled_qty, update.remaining_qty,
+                update.instrument,
+            ),
         }
     }
 

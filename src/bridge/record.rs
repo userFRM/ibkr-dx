@@ -360,6 +360,10 @@ pub enum OrderBook {
     /// A revision the venue refused. Restore the order before delivering the
     /// error that carries the venue's reason.
     RevisionRefused(crate::types::CancelReject),
+    /// A cancel went out. The order reads as being withdrawn to a caller
+    /// asking for the open orders, and nothing is said of it until the venue
+    /// reports on it, as a gateway says nothing.
+    CancelSent(crate::types::OrderUpdate),
 }
 
 /// An answer the dispatcher composes from its own side of the session when it
@@ -1121,6 +1125,7 @@ fn call_owner(record: &Record) -> Option<Owner> {
         Record::MarketDataWithdrawn(req_id) => Some(Owner::Request(*req_id)),
         Record::OrderBook(OrderBook::Taken(taken)) => Some(Owner::Order(taken.order_id as i64)),
         Record::OrderBook(OrderBook::RevisionRefused(reject)) => Some(Owner::Order(reject.order_id as i64)),
+        Record::OrderBook(OrderBook::CancelSent(update)) => Some(Owner::Order(update.order_id as i64)),
         Record::OrderBook(OrderBook::Forgotten(id) | OrderBook::RevisionForgotten(id)) => {
             Some(Owner::Order(*id as i64))
         }

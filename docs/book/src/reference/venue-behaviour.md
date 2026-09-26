@@ -540,12 +540,23 @@ cancel, not the order. After the error, the order is restated through
 
 A refusal on the venue's own cancel-reject message is told to nobody, whatever
 it refuses and whatever reason it states: as on a gateway, no error, no text and
-no status reaches the program's callbacks. The order keeps what the program was
-last told of it until the venue states another, and stays in the book and the
+no status reaches the program's callbacks. The order reads as it did before the
+cancel went out until the venue states another, and stays in the book and the
 open-orders view: a gateway retires no order on a refusal. The event channel
 `connect_with_events` returns, which a gateway does not have, still carries the
 engine's `Event::CancelReject` for it, with the status the engine's own book
 went back to.
+
+## A cancel going out
+
+A gateway says nothing to a program when a cancel goes out, and neither does
+this client. The order is held as being withdrawn: asked for the open orders,
+a program reads it `PendingCancel`, and the venue's next report on the order
+states it so, or states it `Cancelled` where that report is the venue's answer.
+An order the venue answers at once goes from its working status straight to
+`Cancelled`. The event channel `connect_with_events` returns, which a gateway
+does not have, still carries the engine's `Event::OrderUpdate` as the cancel
+goes out.
 
 ## Reports behind a withdrawal
 
