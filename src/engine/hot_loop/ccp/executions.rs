@@ -300,6 +300,17 @@ fn parent_stated(parsed: &std::collections::HashMap<u32, String>, order_id: u64)
         .unwrap_or(0)
 }
 
+/// When the venue sent a report, as a gateway reads it off the report to stamp
+/// an error the report makes: the whole second tag 52 states, in milliseconds
+/// since the epoch. None where the report states none this can read, and the
+/// error is stamped as it is delivered.
+fn sent(parsed: &std::collections::HashMap<u32, String>) -> Option<i64> {
+    parsed
+        .get(&52)
+        .and_then(|stamped| crate::protocol::datetime::ib_datetime_to_unix(stamped))
+        .map(|seconds| seconds.saturating_mul(1_000))
+}
+
 /// The venue's stated reason for a parked or rejected order: the tag 58 text
 /// with the tag 103 reason code. Either alone is ambiguous — the text is often
 /// generic and the code alone names no instrument — so both are reported when
@@ -608,8 +619,8 @@ fn take_what_if(
         if parsed.get(&39).map(String::as_str) == Some("8") && context.order(clord_id).is_some() {
             let reason = stated_reason(parsed);
             log::warn!("WhatIf refused: clord={clord_id} reason='{reason}'");
-            shared.orders.push_order_inactive(
-                clord_id, crate::types::model::OrderOp::Place, ORDER_REJECTED_ERROR_CODE, reason,
+            shared.orders.push_order_inactive_sent(
+                clord_id, crate::types::model::OrderOp::Place, ORDER_REJECTED_ERROR_CODE, reason, sent(parsed),
             );
             context.retire_order(clord_id);
             return true;
@@ -718,7 +729,7 @@ fn tell_the_venues_message(
         Some(refused) => message::for_the_venues_refusal(code, &refused, &described, faq),
     };
     if let Some((code, text)) = told {
-        shared.orders.push_order_notice(clord_id, api::OrderOp::Venue, code, text);
+        shared.orders.push_order_notice_sent(clord_id, api::OrderOp::Venue, code, text, sent(parsed));
     }
 }
 
@@ -1883,8 +1894,8 @@ impl CcpState {
             }
             let reason = stated_reason(parsed);
             log::warn!("Order {clord_id}: the venue refused the cancel, and the order stands: {reason}");
-            shared.orders.push_order_inactive(
-                clord_id, api::OrderOp::Cancel, ORDER_REJECTED_ERROR_CODE, reason,
+            shared.orders.push_order_inactive_sent(
+                clord_id, api::OrderOp::Cancel, ORDER_REJECTED_ERROR_CODE, reason, sent(parsed),
             );
             // And the order as it stands, after the error, as a gateway
             // restates it: a caller told of the cancel ahead of the answer
@@ -1940,8 +1951,8 @@ impl CcpState {
             shared.push_call_record(crate::bridge::Record::OrderBook(
                 crate::bridge::OrderBook::RevisionRefused(reject),
             ));
-            shared.orders.push_order_inactive(
-                clord_id, api::OrderOp::Modify, ORDER_REJECTED_ERROR_CODE, stated_reason(parsed),
+            shared.orders.push_order_inactive_sent(
+                clord_id, api::OrderOp::Modify, ORDER_REJECTED_ERROR_CODE, stated_reason(parsed), sent(parsed),
             );
             emit(event_tx, Event::CancelReject(reject));
             // And the order as it stands again, after the error, as a gateway
@@ -2385,7 +2396,7 @@ impl CcpState {
                 } else {
                     crate::types::model::OrderOp::Venue
                 };
-                shared.orders.push_order_inactive(clord_id, op, ORDER_REJECTED_ERROR_CODE, reason);
+                shared.orders.push_order_inactive_sent(clord_id, op, ORDER_REJECTED_ERROR_CODE, reason, sent(parsed));
             }
         } else {
             log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
@@ -2488,7 +2499,7 @@ impl CcpState {
             } else {
                 crate::types::model::OrderOp::Cancel
             };
-            shared.orders.push_order_inactive(clord_id, refused, ORDER_INACTIVE_ERROR_CODE, told);
+            shared.orders.push_order_inactive_sent(clord_id, refused, ORDER_INACTIVE_ERROR_CODE, told, sent(parsed));
             // And on the channel a refusal already travels on, so the record
             // the surfaces read goes back with the engine's. Said only in the
             // message above, the surfaces kept the terms of an attempt the
@@ -2514,7 +2525,7 @@ impl CcpState {
                     answers_a_live_change: answered_a_live_revision,
                     timestamp_ns: context.now_ns(),
                 };
-                shared.orders.push_cancel_reject(reject);
+                shared.orders.push_cancel_reject_sent(reject, sent(parsed));
                 emit(event_tx, Event::CancelReject(reject));
             }
         }
@@ -2669,9 +2680,9 @@ impl CcpState {
                 if status == crate::types::OrderStatus::Inactive && ord_status == "I" {
                     let reason = stated_reason(parsed);
                     if !reason.is_empty() {
-                        shared.orders.push_order_inactive(
+                        shared.orders.push_order_inactive_sent(
                             clord_id, crate::types::model::OrderOp::Venue, ORDER_INACTIVE_ERROR_CODE,
-                            reason,
+                            reason, sent(parsed),
                         );
                     }
                 }

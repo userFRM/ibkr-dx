@@ -115,7 +115,9 @@ pub struct OrderState {
     /// the only thing that does. A caller asking for the API orders alone is
     /// answered with these.
     api_numbered: Mutex<std::collections::HashSet<u64>>,
-    pub(super) cancel_rejects: Queue<CancelReject>,
+    /// Refused cancels and changes, each with when the venue sent the report
+    /// it comes from, where it said.
+    pub(super) cancel_rejects: Queue<(CancelReject, Option<i64>)>,
     /// What each fill cost, as the venue states it on a record of its own.
     pub(super) charges: Queue<crate::types::model::CommissionAndFeesReport>,
     /// Executions the venue restated rather than announced: replayed at logon
@@ -174,13 +176,15 @@ pub struct OrderState {
     /// carry.
     narrow_id_watermark: AtomicU64,
     /// Reason for a genuinely-Inactive (39=I) transition: (order_id, ibapi
-    /// error code, message, the operation it answers). ibapi has no callback
-    /// dedicated to "order parked with reason", so this is drained into
+    /// error code, message, the operation it answers, when the venue sent the
+    /// message it comes from where it said). ibapi has no callback dedicated
+    /// to "order parked with reason", so this is drained into
     /// `Wrapper::error_from` the same way a cancel/modify reject is.
-    pub(super) order_inactive: Queue<(u64, i32, String, api::OrderOp)>,
+    pub(super) order_inactive: Queue<(u64, i32, String, api::OrderOp, Option<i64>)>,
     /// What the caller is told about an order that goes anyway, as
-    /// (order_id, code, message, the operation it answers).
-    pub(super) order_notices: Queue<(u64, i32, String, api::OrderOp)>,
+    /// (order_id, code, message, the operation it answers, when the venue sent
+    /// the message it comes from where it said).
+    pub(super) order_notices: Queue<(u64, i32, String, api::OrderOp, Option<i64>)>,
     /// Orders whose outstanding replacement the venue has taken.
     ///
     /// The surfaces hold the terms an order had before a replacement, to put
@@ -417,7 +421,7 @@ impl OrderState {
 
     /// Take every cancel rejects waiting, leaving none.
     pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
-        self.cancel_rejects.drain()
+        self.cancel_rejects.drain().into_iter().map(|(reject, _)| reject).collect()
     }
 
     /// Take what the venue has said its fills cost, leaving none.
@@ -446,7 +450,7 @@ impl OrderState {
     /// Drain reasons for genuinely-Inactive (39=I) transitions, each as
     /// (order_id, ibapi error code, message) — see `order_inactive`.
     pub fn drain_order_inactive(&self) -> Vec<(u64, i32, String)> {
-        self.order_inactive.drain().into_iter().map(|(id, code, msg, _)| (id, code, msg)).collect()
+        self.order_inactive.drain().into_iter().map(|(id, code, msg, ..)| (id, code, msg)).collect()
     }
 
     /// Take every what if responses waiting, leaving none.
@@ -460,7 +464,7 @@ impl OrderState {
         self.order_inactive
             .take_if(|e| !mine(e.0))
             .into_iter()
-            .map(|(id, code, msg, _)| (id, code, msg))
+            .map(|(id, code, msg, ..)| (id, code, msg))
             .collect()
     }
 
@@ -473,7 +477,7 @@ impl OrderState {
 
     /// The refusal of one order, if it has arrived, leaving the rest.
     pub fn take_order_inactive_for(&self, order_id: u64) -> Option<(i32, String)> {
-        let (_, code, message, _) = self.order_inactive.take_first(|(id, ..)| *id == order_id)?;
+        let (_, code, message, ..) = self.order_inactive.take_first(|(id, ..)| *id == order_id)?;
         Some((code, message))
     }
 
@@ -793,7 +797,13 @@ impl OrderState {
     }
 
     #[doc(hidden)] pub fn push_cancel_reject(&self, reject: CancelReject) {
-        self.cancel_rejects.push(reject);
+        self.push_cancel_reject_sent(reject, None);
+    }
+
+    /// The same, said on a report of the venue's, with the time the venue
+    /// sent that report where it stated one.
+    #[doc(hidden)] pub fn push_cancel_reject_sent(&self, reject: CancelReject, sent: Option<i64>) {
+        self.cancel_rejects.push((reject, sent));
     }
 
     /// The venue has taken the replacement outstanding on this order.
@@ -809,18 +819,34 @@ impl OrderState {
     /// Say why an order was refused or stopped working, under its number and
     /// with the operation on it the word answers.
     #[doc(hidden)] pub fn push_order_inactive(&self, order_id: u64, op: api::OrderOp, code: i32, message: String) {
-        self.order_inactive.push((order_id, code, message, op));
+        self.push_order_inactive_sent(order_id, op, code, message, None);
+    }
+
+    /// The same, said on a message of the venue's, with the time the venue
+    /// sent that message where it stated one, which the error is stamped
+    /// with as a gateway stamps it.
+    #[doc(hidden)] pub fn push_order_inactive_sent(
+        &self, order_id: u64, op: api::OrderOp, code: i32, message: String, sent: Option<i64>,
+    ) {
+        self.order_inactive.push((order_id, code, message, op, sent));
     }
 
     /// Say something about an order that goes anyway, on its own number: a
     /// warning, and not the end of the order.
     #[doc(hidden)] pub fn push_order_notice(&self, order_id: u64, op: api::OrderOp, code: i32, message: String) {
-        self.order_notices.push((order_id, code, message, op));
+        self.push_order_notice_sent(order_id, op, code, message, None);
+    }
+
+    /// The same, with the time the venue sent the message it comes from.
+    #[doc(hidden)] pub fn push_order_notice_sent(
+        &self, order_id: u64, op: api::OrderOp, code: i32, message: String, sent: Option<i64>,
+    ) {
+        self.order_notices.push((order_id, code, message, op, sent));
     }
 
     /// Take every notice waiting, leaving none.
     pub fn drain_order_notices(&self) -> Vec<(u64, i32, String)> {
-        self.order_notices.drain().into_iter().map(|(id, code, msg, _)| (id, code, msg)).collect()
+        self.order_notices.drain().into_iter().map(|(id, code, msg, ..)| (id, code, msg)).collect()
     }
 
     /// As [`drain_order_inactive_for_dispatch`](Self::drain_order_inactive_for_dispatch),
@@ -829,7 +855,7 @@ impl OrderState {
         self.order_notices
             .take_if(|e| !mine(e.0))
             .into_iter()
-            .map(|(id, code, msg, _)| (id, code, msg))
+            .map(|(id, code, msg, ..)| (id, code, msg))
             .collect()
     }
 

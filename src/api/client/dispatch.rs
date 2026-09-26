@@ -250,8 +250,9 @@ impl EClient {
 
             // What was said about an order that went anyway: a warning on its
             // number, and nothing else about it changes.
-            Record::OrderNotice((order_id, code, msg, op)) => {
-                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, raised_now(), code as i64, &msg, "");
+            Record::OrderNotice((order_id, code, msg, op, sent)) => {
+                let when = sent.unwrap_or_else(raised_now);
+                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, when, code as i64, &msg, "");
             }
             Record::Fill(fill) => self.deliver_fill(fill, wrapper),
             Record::OrderUpdate(update) => self.deliver_update(update, wrapper),
@@ -272,14 +273,14 @@ impl EClient {
             // a refusal of it, in its place: an acceptance and a stale refusal
             // leave the record on what the venue holds.
             Record::ReplacementTaken(order_id) => self.core.settle_replacement(order_id),
-            Record::CancelReject(reject) => {
+            Record::CancelReject((reject, sent)) => {
                 let (code, msg) = self.core.restore_refused(&reject);
                 let origin = ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
-                wrapper.error_from(origin, raised_now(), code, &msg, "");
+                wrapper.error_from(origin, sent.unwrap_or_else(raised_now), code, &msg, "");
             }
             // Why an order stopped working. The status already said Inactive;
             // this says why.
-            Record::OrderInactive((order_id, code, msg, op)) => {
+            Record::OrderInactive((order_id, code, msg, op, sent)) => {
                 // A refusal is the end of a preview: it states what an order
                 // would have cost, and nothing reached the book. Left
                 // standing, the record read as a working order and its number
@@ -287,7 +288,10 @@ impl EClient {
                 if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
                     self.core.untrack_order(order_id);
                 }
-                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, raised_now(), code as i64, &msg, "");
+                // Stamped with the time the venue sent the message it comes
+                // from, where it said, as a gateway stamps it.
+                let when = sent.unwrap_or_else(raised_now);
+                wrapper.error_from(ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, when, code as i64, &msg, "");
             }
             // A preview and nothing else. The venue answers what an order
             // would cost on the order itself: it states no status for it,

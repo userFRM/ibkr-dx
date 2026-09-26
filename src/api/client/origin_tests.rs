@@ -94,18 +94,51 @@ fn an_internal_lookups_error_and_an_orders_error_under_one_number_say_which_they
     assert_eq!(heard.0, [(i64::from(n), 200), (i64::from(n), 201)], "as it always was");
 }
 
-/// Every error carries when it was delivered, in milliseconds, whether this
-/// client raised it or the venue stated it, as a gateway stamps every error
-/// it sends.
+/// Every error carries a time in milliseconds since the epoch, as a gateway
+/// stamps every error it sends: a refusal of an order the venue sent, the
+/// whole second the venue's message states it was sent, and anything else,
+/// the clock as the error is delivered. Every error one report makes carries
+/// the report's time.
 #[test]
 fn every_error_carries_a_clock_reading() {
-    let (client, _rx, shared) = test_client();
-    client.place_order(9, &spy(), &Order { order_type: "NOT A TYPE".into(), ..limit() });
-    shared.orders.push_order_inactive(7, OrderOp::Place, 201, "refused".into());
-    let mut heard = OnlyError::default();
-    client.process_msgs(&mut heard);
-    assert_eq!(heard.0.len(), 2, "{:?}", heard.0);
-    assert!(heard.1.iter().all(|&t| t > 1_700_000_000_000), "a clock reading in milliseconds, got {:?}", heard.1);
+    let refused: &[(u32, &str)] = &[(150, "8"), (39, "8")];
+    // A change the venue restates as refused: its message, and the refusal of
+    // the change.
+    let restated: &[(u32, &str)] = &[(150, "D"), (39, "0"), (378, "102")];
+    // `None` where the time is the clock's.
+    for (report, sent, told, stamped) in [
+        (refused, None, &[201][..], None),
+        (refused, Some("20260926-10:15:10.250"), &[201], Some(1_790_417_710_000)),
+        (restated, Some("20260926-10:15:10.250"), &[399, 10148], Some(1_790_417_710_000)),
+    ] {
+        let (client, _rx, shared) = test_client();
+        client.place_order(9, &spy(), &Order { order_type: "NOT A TYPE".into(), ..limit() });
+        let mut context = crate::engine::context::Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            7, instrument, crate::types::Side::Buy, crate::types::QTY_SCALE, crate::types::PRICE_SCALE,
+            b'2', b'0', 0,
+        ));
+        let mut frame: std::collections::HashMap<u32, String> = [
+            (11, "7"), (58, "refused"), (40, "2"), (38, "1"), (14, "0"), (151, "1"),
+        ].iter().chain(report).map(|(tag, value)| (*tag, value.to_string())).collect();
+        if let Some(sent) = sent {
+            frame.insert(52, sent.into());
+        }
+        crate::engine::hot_loop::ccp::CcpState::new()
+            .handle_exec_report(&frame, b"", &mut context, &shared, &None, "DU1");
+        let mut heard = OnlyError::default();
+        client.process_msgs(&mut heard);
+        let venue: Vec<_> = told.iter().map(|&code| (7, code)).collect();
+        assert_eq!(heard.0, [&[(9, 10051)][..], &venue].concat(), "{report:?} {sent:?}");
+        assert!(heard.1[0] > 1_700_000_000_000, "a clock reading in milliseconds, got {:?}", heard.1);
+        for &at in &heard.1[1..] {
+            match stamped {
+                Some(when) => assert_eq!(at, when, "the venue's time, to the second it states: {report:?}"),
+                None => assert!(at > 1_700_000_000_000, "a clock reading, got {:?}", heard.1),
+            }
+        }
+    }
 }
 
 /// A new order and a change to it, each refused at its call under one

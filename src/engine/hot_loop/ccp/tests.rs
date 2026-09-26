@@ -9293,7 +9293,7 @@ fn a_refused_cancel_leaves_the_order_where_it_stood() {
             .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
             .into_iter()
             .filter_map(|(_, record)| match record {
-                crate::bridge::Record::OrderInactive((id, code, reason, op)) => {
+                crate::bridge::Record::OrderInactive((id, code, reason, op, _)) => {
                     Some(format!("error {id} {code} {op:?} {reason}"))
                 }
                 crate::bridge::Record::OrderUpdate(update) => Some(format!(
@@ -9397,12 +9397,12 @@ fn a_refused_revision_travels_on_the_channel_a_refusal_travels_on() {
                     if let crate::bridge::OrderBook::RevisionRefused(reject) = &entry { refusals.push(*reject); }
                     core.keep_the_book(&shared, entry);
                 }
-                crate::bridge::Record::CancelReject(reject) => {
+                crate::bridge::Record::CancelReject((reject, _)) => {
                     assert_eq!(code, 399, "the venue's refusal needs no second generic error");
                     core.restore_refused(&reject);
                     refusals.push(reject);
                 }
-                crate::bridge::Record::OrderInactive((id, error, reason, op)) => {
+                crate::bridge::Record::OrderInactive((id, error, reason, op, _)) => {
                     assert_eq!(op, crate::types::model::OrderOp::Modify);
                     if code == 201 {
                         let held = core.tracked_order(42).unwrap();
@@ -11575,8 +11575,8 @@ fn operations_answered(shared: &SharedState) -> Vec<(u64, crate::types::model::O
         .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false })
         .into_iter()
         .filter_map(|(_, record)| match record {
-            crate::bridge::Record::OrderInactive((id, _, _, op)) => Some((id, op)),
-            crate::bridge::Record::CancelReject(reject) => Some((reject.order_id, reject.refuses())),
+            crate::bridge::Record::OrderInactive((id, _, _, op, _)) => Some((id, op)),
+            crate::bridge::Record::CancelReject((reject, _)) => Some((reject.order_id, reject.refuses())),
             _ => None,
         })
         .collect()

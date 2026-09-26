@@ -1859,7 +1859,19 @@ impl EClient {
         code: i64,
         msg: &str,
     ) -> PyResult<(&'static str, Py<pyo3::types::PyTuple>)> {
-        let error_time = raised_now();
+        self.error_callback_at(py, origin, raised_now(), code, msg)
+    }
+
+    /// [`error_callback`](Self::error_callback), stamped with a time given:
+    /// the one the venue sent the message the error comes from, where it said.
+    pub(crate) fn error_callback_at(
+        &self,
+        py: Python<'_>,
+        origin: crate::types::model::ErrorOrigin,
+        error_time: i64,
+        code: i64,
+        msg: &str,
+    ) -> PyResult<(&'static str, Py<pyo3::types::PyTuple>)> {
         let arity = self.declared.get().map_or(Declared::CURRENT.error_arity, |d| d.error_arity);
         let args = match arity {
             3 => (origin.id(), code, msg).into_pyobject(py)?.unbind(),

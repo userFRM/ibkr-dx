@@ -478,9 +478,10 @@ pub enum Record {
         generation: u64,
     },
     // ── Orders ──
-    /// Something said about an order that goes anyway, and the operation on
-    /// it that it answers.
-    OrderNotice((u64, i32, String, api::OrderOp)),
+    /// Something said about an order that goes anyway, the operation on it
+    /// that it answers, and when the venue sent the message it comes from,
+    /// where it said.
+    OrderNotice((u64, i32, String, api::OrderOp, Option<i64>)),
     /// A fill, with its report and the status stated beside it.
     Fill(FillRecord),
     /// A status change with no fill on the same report.
@@ -492,11 +493,13 @@ pub enum Record {
     RestatedExecution(Box<(api::Contract, api::Execution)>),
     /// The venue took an order's outstanding replacement.
     ReplacementTaken(u64),
-    /// A refused cancel or modify.
-    CancelReject(CancelReject),
-    /// Why an order stopped working, or why it was refused, and the
-    /// operation on it that it answers.
-    OrderInactive((u64, i32, String, api::OrderOp)),
+    /// A refused cancel or modify, and when the venue sent the report it
+    /// comes from, where it said.
+    CancelReject((CancelReject, Option<i64>)),
+    /// Why an order stopped working, or why it was refused, the operation on
+    /// it that it answers, and when the venue sent the message it comes from,
+    /// where it said.
+    OrderInactive((u64, i32, String, api::OrderOp, Option<i64>)),
     /// What an order would cost.
     WhatIf(WhatIfResponse),
     // ── Market data ──
@@ -785,7 +788,7 @@ impl super::SharedState {
         );
         o.cancel_rejects.take_below(
             cut,
-            |r| kept_back(None, order(r.order_id)),
+            |(r, _)| kept_back(None, order(r.order_id)),
             Record::CancelReject,
             &mut out,
         );

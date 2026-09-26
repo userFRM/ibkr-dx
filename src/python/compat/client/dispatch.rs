@@ -16,7 +16,7 @@ use crate::types::model::{
     Execution as ApiExecution,
     CommissionAndFeesReport as ApiCommissionAndFeesReport,
 };
-use super::EClient;
+use super::{EClient, raised_now};
 use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionAndFeesReport, DepthMktDataDescriptionPy, Execution, Order, OrderState};
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
@@ -75,7 +75,10 @@ macro_rules! call_wrapper {
 /// `error` otherwise.
 macro_rules! say_error {
     ($client:ident, $py:expr, $shared:ident, $origin:expr, $code:expr, $msg:expr) => {
-        let (name, args) = $client.error_callback($py, $origin, $code, $msg)?;
+        say_error!($client, $py, $shared, $origin, $code, $msg, raised_now())
+    };
+    ($client:ident, $py:expr, $shared:ident, $origin:expr, $code:expr, $msg:expr, $when:expr) => {
+        let (name, args) = $client.error_callback_at($py, $origin, $when, $code, $msg)?;
         call_wrapper!($client, $py, $shared, name, args.bind($py).clone());
     };
 }
@@ -397,8 +400,9 @@ impl EClient {
             },
 
             // What was said about an order that went anyway, on its number.
-            Record::OrderNotice((order_id, code, msg, op)) => {
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, i64::from(code), &msg);
+            Record::OrderNotice((order_id, code, msg, op, sent)) => {
+                let when = sent.unwrap_or_else(raised_now);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, i64::from(code), &msg, when);
             }
             Record::Fill(fill) => self.deliver_fill(py, shared, fill)?,
             Record::OrderUpdate(update) => self.deliver_update(py, shared, update)?,
@@ -426,18 +430,19 @@ impl EClient {
             // A replacement the venue has taken spends the terms kept against
             // a refusal of it, in its place.
             Record::ReplacementTaken(order_id) => self.core.settle_replacement(order_id),
-            Record::CancelReject(reject) => {
+            Record::CancelReject((reject, sent)) => {
                 let (code, msg) = self.core.restore_refused(&reject);
                 let origin = crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
-                say_error!(self, py, shared, origin, code, &msg);
+                say_error!(self, py, shared, origin, code, &msg, sent.unwrap_or_else(raised_now));
             }
-            Record::OrderInactive((order_id, code, msg, op)) => {
+            Record::OrderInactive((order_id, code, msg, op, sent)) => {
                 // A refusal is the end of a preview: it states what an order
                 // would have cost, and nothing reached the book.
                 if self.core.tracked_order(order_id).is_some_and(|o| o.what_if) {
                     self.core.untrack_order(order_id);
                 }
-                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, i64::from(code), &msg);
+                let when = sent.unwrap_or_else(raised_now);
+                say_error!(self, py, shared, crate::types::model::ErrorOrigin::Order { id: self.core.api_order_id(order_id), op }, i64::from(code), &msg, when);
             }
             // A preview and nothing else, answered on the order itself.
             Record::WhatIf(wi) => {
