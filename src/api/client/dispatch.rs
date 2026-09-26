@@ -426,7 +426,18 @@ impl EClient {
             // arrive on a slot nothing is watching.
             // A market-data request the engine has taken: from here its
             // number is served on the slot the record names.
-            Record::MarketDataTaken(taken) => self.core.note_mkt_data_taken(&self.shared, &taken),
+            // And one joining an option already modelled is sent the model as
+            // it stands, to it alone.
+            Record::MarketDataTaken(taken) => {
+                if let Some((tick_type, req_id, tick)) = self.core.note_mkt_data_taken(&self.shared, &taken) {
+                    let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                        tick.figures;
+                    wrapper.tick_option_computation(
+                        req_id, tick_type, i32::from(tick.price_based),
+                        implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price,
+                    );
+                }
+            }
             // And withdrawn: nothing more is delivered under its number.
             Record::MarketDataWithdrawn(req_id) => self.core.unregister_mkt_data(req_id),
             // Everyone watching the contract, not only whoever asked first. A
@@ -1382,8 +1393,9 @@ mod delivered_size_tests {
     }
 
     /// News and model publications belong to whoever still watches the
-    /// contract. A model tick goes to each watcher as it stands, and to a
-    /// watcher only when it differs from the last that watcher was sent; a
+    /// contract. A model tick goes to each watcher as it stands, to a request
+    /// joining the contract at once, and to a watcher only when it differs
+    /// from the last that watcher was sent; a
     /// bid's, ask's or last's is completed from the last of its kind that
     /// watcher was sent. An explicit calculation answer keeps its own request
     /// id.
@@ -1426,14 +1438,24 @@ mod delivered_size_tests {
         assert_eq!(heard.news, [1, 2]);
         assert_eq!(heard.models, [(1, 13, 1, figures(0.2)), (2, 13, 1, figures(0.2))]);
 
-        // The same tick again goes only to a request that was not sent it.
+        // A request joining the option is sent the model as it stands, at
+        // once and to it alone; the model's next change goes to every
+        // watcher after it, and the same tick again goes to nobody.
         client.try_req_mkt_data(3, &crate::api::client::tests::spy(), "", false, false)
             .expect("taken");
-        crate::api::client::tests::settled(&client, &rx);
-        publish(0.2);
+        rx.pump();
+        publish(0.3);
         let mut heard = Heard::default();
         client.process_msgs(&mut heard);
-        assert_eq!(heard.models, [(3, 13, 1, figures(0.2))], "sent once to each");
+        assert_eq!(
+            heard.models,
+            [(3, 13, 1, figures(0.2)), (1, 13, 1, figures(0.3)), (2, 13, 1, figures(0.3)), (3, 13, 1, figures(0.3))],
+            "the model as it stands, then its change",
+        );
+        publish(0.3);
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert!(heard.models.is_empty(), "sent once to each: {:?}", heard.models);
 
         // The bid's, the ask's and the last's go out under numbers of their
         // own, and take each figure they do not state from the last one of
@@ -1487,8 +1509,7 @@ mod delivered_size_tests {
         crate::api::client::tests::reported(&client, || client.cancel_mkt_data(1)).unwrap();
         client.try_req_mkt_data(1, &crate::api::client::tests::spy(), "", false, false)
             .expect("taken");
-        crate::api::client::tests::settled(&client, &rx);
-        publish(0.21);
+        rx.pump();
         let mut heard = Heard::default();
         client.process_msgs(&mut heard);
         let kinds: Vec<(i64, i32)> = heard.models.iter().map(|m| (m.0, m.1)).collect();
@@ -1509,6 +1530,17 @@ mod delivered_size_tests {
         assert!(heard.news.is_empty(), "a withdrawn watch was sent news: {:?}", heard.news);
         let kinds: Vec<(i64, i32)> = heard.models.iter().map(|m| (m.0, m.1)).collect();
         assert_eq!(kinds, [(7, 53)], "only the explicitly addressed answer is owed");
+
+        // Taken afresh, the option has no model yet: a request joining it is
+        // not sent the one worked out for the subscription before.
+        for req_id in [4, 5] {
+            client.try_req_mkt_data(req_id, &crate::api::client::tests::spy(), "", false, false)
+                .expect("taken");
+            crate::api::client::tests::settled(&client, &rx);
+        }
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert!(heard.models.is_empty(), "a model from before: {:?}", heard.models);
     }
 
     /// What the venue says on its own account reaches the caller under the

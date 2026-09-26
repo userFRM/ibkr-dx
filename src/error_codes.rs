@@ -205,14 +205,16 @@ pub const NO_SUCH_ORDER: i32 = 135;
 /// answering is answered under.
 pub const NO_SUCH_HISTORICAL_QUERY: i32 = 366;
 
-/// The code an order-type name this client does not place is refused under.
+/// The code an order type a gateway places and this client does not is
+/// refused under, naming the type.
 ///
-/// The number a gateway gives an order type the exchange does not support.
-/// For a name that is no order type at all, what a gateway answers is not
-/// established here, so this client answers under this number and says what
-/// was wrong; a type a gateway places and this client does not is refused
-/// under it too.
+/// The number a gateway gives an order type the contract does not take on its
+/// exchange.
 pub const ORDER_TYPE_UNSUPPORTED: i32 = 387;
+
+/// The code a name that is no order type is refused under, as a gateway
+/// refuses it: *Invalid order type*.
+pub const INVALID_ORDER_TYPE: i32 = 10051;
 
 /// The code a replace naming a contract other than the order's is refused
 /// under.

@@ -960,6 +960,14 @@ pub(crate) fn drain_and_send_orders(
                         parent_clord(context, &spec.attrs),
                         shared,
                     );
+                    // The most the ladder holds, as it was stated on the
+                    // placement: a gateway keeps it on the order and states it
+                    // again on a replace of a type that can be a ladder.
+                    if can_be_a_ladder(&restated)
+                        && let Some(most) = context.ladder_sizes.get(&order_id)
+                    {
+                        attr_fields.push((6534, most.to_string()));
+                    }
                     // Stated once. The lean message already names these, and the
                     // gateway reads a repeated tag as a second statement of it.
                     let stated: Vec<u32> = fields.iter().map(|(t, _)| *t).collect();
@@ -1051,6 +1059,13 @@ pub(crate) fn drain_and_send_orders(
         }
     }
     context.pending_orders.requeue_front(unsent);
+}
+
+/// Whether an order of this type can be a ladder.
+fn can_be_a_ladder(kind: &crate::types::OrderKind) -> bool {
+    use crate::types::OrderKind as K;
+    matches!(kind, K::Limit { .. } | K::Rel { .. } | K::PassiveRel { .. } | K::PegMkt { .. }
+        | K::PegMid { .. } | K::PegBest { .. } | K::Mit { .. } | K::Adaptive { .. } | K::Algo { .. })
 }
 
 /// Everything a cancel states, in one place because the two callers stated it
@@ -1639,13 +1654,11 @@ fn send_order_ex(
     // path holds none; check it here once one is held at placement.
     if let Some(scale) = attrs.scale.as_deref()
         && (scale.init_level_size > 0 || scale.subs_level_size > 0)
-        && {
-            use crate::types::OrderKind as K;
-            matches!(kind, K::Limit { .. } | K::Rel { .. } | K::PassiveRel { .. } | K::PegMkt { .. }
-                | K::PegMid { .. } | K::PegBest { .. } | K::Mit { .. } | K::Adaptive { .. } | K::Algo { .. })
-        }
+        && can_be_a_ladder(&kind)
     {
-        fields.push((6534, (qty / crate::types::QTY_SCALE).to_string()));
+        let most = qty / crate::types::QTY_SCALE;
+        context.ladder_sizes.insert(order_id, most);
+        fields.push((6534, most.to_string()));
     }
     // A ladder stated as a table, which a gateway states on a new order only
     // and after everything else: how many levels, then each level's price and

@@ -5209,7 +5209,8 @@ mod as_a_gateway_sends_it {
     /// A ladder stated as a table states its levels under their count, price
     /// then quantity, in the order they were written, on the placement alone
     /// and in place of the restart; one that does not read states the
-    /// restart alone.
+    /// restart alone. The most a ladder holds is stated again on a replace,
+    /// as it was placed.
     #[test]
     fn a_ladder_stated_as_a_table_states_its_levels() {
         let order = |table: &str| crate::types::model::Order {
@@ -5234,6 +5235,7 @@ mod as_a_gateway_sends_it {
         assert_eq!((one(&d, 6461), one(&d, 6450).as_deref()), (None, Some("2")), "asked or not: {d}");
         assert!(all(&g, 6450).is_empty() && all(&g, 6447).is_empty(), "a replace states no table: {g}");
         assert_eq!(one(&g, 6461).as_deref(), Some("1"), "and states the restart: {g}");
+        assert_eq!((one(&d, 6534).as_deref(), one(&g, 6534).as_deref()), (Some("1"), Some("1")), "{g}");
         let d = placed(K::Limit { price: 10 * P }, order("100,10.00").attrs(), &[]);
         assert_eq!(one(&d, 6461).as_deref(), Some("1"), "{d}");
         assert!(all(&d, 6450).is_empty(), "a level of two parts sends no table: {d}");

@@ -142,6 +142,22 @@ with every one of them, as a gateway does.
   handed back as the venue names it. A gateway goes on to ask for the
   continuous contract as well, and this client does not.
 
+## A contract's least size
+
+`min_size` and `size_increment` are one figure, as a gateway states them, and
+worked out in this order: a contract whose size rule deals in fractions of a
+unit takes the rule's finest band; one whose definition states a least size
+behind the flag that admits it takes that size, or a ten-thousandth where the
+flag stands alone; one whose order types on its exchange name a board lot or
+a default lot, on an exchange it lists, takes the lot; any other takes one
+unit. The lot is the band a size of nothing falls in, no less than the rule's
+whole unit for a share or a warrant listed in the United States, or nought
+where the definition states no rule; and no less than a size the venue
+suggests above nought — which on a routed exchange stands on its own. A bond's
+least size is where its size table starts, and its step is the lot.
+`suggested_size_increment` is the larger of the rule's finest band and the size
+the venue suggests.
+
 ## Size-only changes
 
 `ignoreSize` on `req_historical_ticks` and `ignore_size` on
@@ -197,7 +213,9 @@ it:
   its amount the percentage, and a gateway reads it that way.
 
 It is rebuilt at most once a second, on the clock's seconds, and a request is
-sent it when any figure differs from the last one that request was sent. What
+sent it when any figure differs from the last one that request was sent. A
+request that starts on an option the model already works out is sent the model
+tick as it stands at once, as a gateway sends it when a request starts. What
 was stated stands through a reconnect until the venue states it again, so a
 tick owed when the connection drops is built from what was stated before it.
 
@@ -392,11 +410,14 @@ send itself. The venue's pending report follows, as a status report, and a
 gateway reads it as the order acknowledged: the caller is told `PreSubmitted`,
 and the working status again once the venue accepts the change. The report
 ahead of a change the venue makes itself (the exits of a bracket once its
-parent fills) reads the same way. A pending report for a revision earlier than
-the one last sent, or on an order being withdrawn, changes no status, and one
-sent as an execution report rather than a status report changes none either:
-the order is stated again as it stands. An order whose state this session lost
-with a dropped connection takes its status from the report instead.
+parent fills) reads the same way, and so does a report stating the venue's
+other code for a change on its way, E. A pending report for a revision earlier
+than the one last sent, or on an order this session is withdrawing, changes no
+status, and one sent as an execution report rather than a status report
+changes none either: the order is stated again as it stands. An order whose
+state this session lost with a dropped connection takes its status from the
+report instead, and one the venue names at connect or states in the finished
+orders with a change on its way reads `PreSubmitted`, as a gateway restores it.
 
 ## Refused modifications
 
@@ -420,6 +441,22 @@ venue's words. The order stays in the state it held before the cancel went
 out, in the open-orders view and under its own permId: the refusal is about the
 cancel, not the order. After the error, the order is restated through
 `open_order` and `order_status` in that state, as a gateway restates it.
+
+## Reports behind a withdrawal
+
+A cancel takes the order to a revision of its own, past every one the order
+was named under, and a gateway ignores a status report stating an earlier
+revision unless it states the order cancelled. So once this session has sent a
+cancel, a status report naming the order rather than the cancel changes
+nothing: the order reads `PendingCancel` until the venue answers the cancel,
+and is stated again as it stands. Nor does an acknowledgement, the acceptance
+of a change or a new order's report move an order being withdrawn, or one this
+session did not place that the venue named inactive: a gateway takes those
+only from an order that is working or on its way. A gateway does not hold an
+order it has sent inactive on the venue's word, so one this session placed is
+working again on any of them. A status report stating the order working at
+its own revision, after a withdrawal this session did not send, states it
+working again.
 
 ## What the account may trade
 

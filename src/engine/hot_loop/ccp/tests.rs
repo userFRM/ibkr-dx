@@ -347,16 +347,34 @@ fn what_if_test_state() -> (CcpState, Context, SharedState) {
 /// in flight has here, a replace this session sent was stated as still
 /// pending; read off 39=6 as a cancel, both were told the order was being
 /// cancelled.
+///
+/// A gateway reads a report stating E as one stating 6, on an execution
+/// report as on a status report. And it reads a status report stating a
+/// change on its way at the order's revision, or at the revision of this
+/// session's cancel, whatever withdrawal the order was under.
 #[test]
 fn a_change_on_its_way_is_stated_as_a_gateway_states_it() {
+    use crate::types::OrderStatus::{PendingCancel, Submitted};
     use std::io::Read;
-    for (replaced, expected) in [
-        (true, ["PreSubmitted", "Submitted"]),
-        (false, ["PreSubmitted", "Submitted"]),
+    // Replaced here, where the order stood, the name the reports give it, the
+    // code, the kind of report, and what the caller is told.
+    for (replaced, stood, revision, code, kind, expected) in [
+        (true, Submitted, "42.1", "6", "3", &["PreSubmitted", "Submitted"][..]),
+        (false, Submitted, "42.0", "6", "3", &["PreSubmitted", "Submitted"]),
+        (true, Submitted, "42.1", "E", "3", &["PreSubmitted", "Submitted"]),
+        (false, Submitted, "42.0", "E", "3", &["PreSubmitted", "Submitted"]),
+        (false, Submitted, "42.0", "E", "0", &["Submitted", "Submitted"]),
+        // Withdrawn by another session.
+        (false, PendingCancel, "42.0", "6", "3", &["PreSubmitted", "Submitted"]),
+        // Withdrawn by this session, whose cancel the report names.
+        (false, PendingCancel, "C42", "6", "3", &["PreSubmitted", "Submitted"]),
     ] {
         let (mut context, shared) = working_order_state();
         let mut ccp = CcpState::new();
-        let revision = if replaced { "42.1" } else { "42.0" };
+        context.update_order_status(42, stood, false);
+        if revision.starts_with('C') {
+            context.before_the_cancel.insert(42, Submitted);
+        }
         if replaced {
             let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
             peer.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
@@ -370,7 +388,7 @@ fn a_change_on_its_way_is_stated_as_a_gateway_states_it() {
             let n = peer.read(&mut buf).unwrap();
             assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"));
         }
-        for reply in [[(150, "6"), (20, "3"), (39, "6")], [(150, "5"), (20, "0"), (39, "5")]] {
+        for reply in [[(150, code), (20, kind), (39, code)], [(150, "5"), (20, "0"), (39, "5")]] {
             let mut report = exec_report_frame(&[
                 (11, revision), (6008, "756733"), (38, "100"), (44, "101"),
                 (14, "0"), (151, "100"), (100, "ARCA"), (198, "ARCA:1"),
@@ -383,8 +401,8 @@ fn a_change_on_its_way_is_stated_as_a_gateway_states_it() {
         }
         let told: Vec<_> = shared.orders.drain_order_updates().into_iter()
             .map(|update| crate::types::order_status::order_status_str(update.status)).collect();
-        assert_eq!(told, expected, "replaced here: {replaced}");
-        assert_eq!(context.order(42).map(|o| o.status), Some(crate::types::OrderStatus::Submitted));
+        assert_eq!(told, expected, "replaced here: {replaced}, from {stood:?} under {revision}, stating {code} on 20={kind}");
+        assert_eq!(context.order(42).map(|o| o.status), Some(Submitted));
     }
 }
 
@@ -1081,34 +1099,41 @@ fn ord_status_test_state() -> (CcpState, Context, SharedState) {
 /// Named as working regardless, a caller was told an order was at an exchange
 /// the venue had just said it had not reached — and the book then stood above
 /// every later unrouted echo of it, so nothing could put it right.
+///
+/// A change on its way, which a gateway restores as the order acknowledged,
+/// is named PreSubmitted too.
 #[test]
 fn a_replayed_order_is_published_under_the_state_its_report_states() {
-    let mut context = Context::new();
-    let mut ccp = CcpState::new();
-    let shared = SharedState::new();
-
-    // Accepted and not yet routed: no venue named on the report, and no
-    // reason given for a rejection.
-    let mut frame = std::collections::HashMap::new();
-    for (tag, val) in [
-        (11u32, "88"), (150, "0"), (39, "0"), (6008, "756733"),
-        (38, "100"), (55, "SPY"), (54, "1"), (40, "2"), (44, "150.00"),
+    for (what, codes) in [
+        // Accepted and not yet routed: no venue named on the report, and no
+        // reason given for a rejection.
+        ("accepted", &[(150u32, "0"), (39, "0")][..]),
+        ("with a change on its way", &[(150, "6"), (39, "6"), (20, "3")]),
     ] {
-        frame.insert(tag, val.to_string());
-    }
-    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let mut frame = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "88"), (6008, "756733"),
+            (38, "100"), (55, "SPY"), (54, "1"), (40, "2"), (44, "150.00"),
+        ].iter().chain(codes) {
+            frame.insert(*tag, val.to_string());
+        }
+        ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
 
-    let recovered = shared.orders.drain_open_orders();
-    let (_, row) = recovered.iter().find(|(id, _)| *id == 88).expect("the order is recovered");
-    assert_eq!(
-        row.order_state.status, "PreSubmitted",
-        "what the report says, not what this client would like it to be",
-    );
-    assert_eq!(
-        context.order(88).map(|o| o.status),
-        Some(crate::types::OrderStatus::PreSubmitted),
-        "and the book agrees with what was published",
-    );
+        let recovered = shared.orders.drain_open_orders();
+        let (_, row) = recovered.iter().find(|(id, _)| *id == 88).expect("the order is recovered");
+        assert_eq!(
+            row.order_state.status, "PreSubmitted",
+            "{what}: what the report says, not what this client would like it to be",
+        );
+        assert_eq!(
+            context.order(88).map(|o| o.status),
+            Some(crate::types::OrderStatus::PreSubmitted),
+            "{what}: and the book agrees with what was published",
+        );
+    }
 }
 
 /// A finished option order's right is published as the letter every other path
@@ -2641,39 +2666,6 @@ fn a_pending_status_does_not_retire_the_order() {
     assert_ne!(updates[0].status, crate::types::OrderStatus::Cancelled);
 }
 
-/// The venue treats 39=E as a pending cancel, so that is what reaches the
-/// caller.
-///
-/// Published under a word of its own, it was in neither the working set nor the
-/// finished set of a program written against the vocabulary this client answers
-/// in.
-#[test]
-fn a_pending_change_is_reported_as_the_venue_treats_it() {
-    let (mut ccp, mut context, shared) = ord_status_test_state();
-    // The order is working before the change is asked of the venue.
-    let working = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1")]);
-    ccp.handle_exec_report(&working, b"", &mut context, &shared, &None, "");
-    let _ = shared.orders.drain_order_updates();
-
-    let pending = exec_report_frame(&[(39, "E"), (150, "E"), (100, "ARCA"), (198, "ARCA:1")]);
-    ccp.handle_exec_report(&pending, b"", &mut context, &shared, &None, "");
-
-    let updates = shared.orders.drain_order_updates();
-    assert_eq!(
-        updates[0].status, crate::types::OrderStatus::PendingCancel,
-        "read as the venue treats it: {updates:?}",
-    );
-    let info = shared.orders.get_order_info(42).expect("the record a caller reads back");
-    assert_eq!(
-        info.order_state.status, "PendingCancel",
-        "and the record a caller reads back says the same",
-    );
-    assert!(
-        shared.orders.drain_open_orders().iter().any(|(id, _)| *id == 42),
-        "and an order mid-modification is still on the open book",
-    );
-}
-
 /// The fill was thrown away with the report: an unrecognised status returned
 /// before anything read the execution, so a real fill on a status this did
 /// not know about was silently lost.
@@ -2881,7 +2873,7 @@ fn an_order_is_named_as_the_reference_client_names_it() {
         (&[(40, "P"), (18, "R")], "REL"), (&[(40, "P"), (18, "M")], "PEG MID"),
         (&[(40, "P"), (18, "P")], "PEG MKT"), (&[(40, "P"), (18, "a")], "TRAIL"),
         (&[(40, "TSL")], "TRAIL LIMIT"), (&[(40, "SMID")], "SNAP MID"), (&[(40, "SMKT")], "SNAP MKT"),
-        (&[(40, "SREL")], "SNAP PRI"), (&[(40, "MIDPX")], "MIDPRICE"), (&[(40, "PSVR")], "PASSV REL"),
+        (&[(40, "SREL")], "SNAP PRIM"), (&[(40, "MIDPX")], "MIDPRICE"), (&[(40, "PSVR")], "PASSV REL"),
         (&[(40, "PB")], "PEG BENCH"), (&[(40, "E2M")], "PEG BEST"), (&[(40, "LT")], "LIT"),
         (&[(40, "SP")], "STP PRT"), (&[(40, "U")], "MKT PRT"), (&[(40, "K")], "MTL"), (&[(40, "PMID2")], "PEG MID"),
     ];
@@ -4464,6 +4456,13 @@ fn ord_status_inactive_reason_reaches_inactive_queue() {
 
     let info = shared.orders.get_order_info(42).unwrap();
     assert!(info.order_state.completed_status.is_empty());
+
+    // Placed by this session, the order is working again once the venue
+    // routes it: a gateway never held it inactive.
+    context.placed_at.insert(42, Default::default());
+    let routed = exec_report_frame(&[(39, "0"), (150, "0"), (20, "0"), (100, "ARCA"), (198, "ARCA:1")]);
+    ccp.handle_exec_report(&routed, b"", &mut context, &shared, &None, "");
+    assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::Submitted);
 }
 
 #[test]
@@ -4843,13 +4842,24 @@ fn a_rejection_that_answers_the_replace_is_not_cached_as_the_orders_state() {
 /// and Cancelled.
 #[test]
 fn a_working_report_the_status_guard_refused_is_not_cached_as_the_orders_state() {
-    for (what, report) in [
+    use crate::types::OrderStatus::{Inactive, PendingCancel};
+    let routed = [(100, "ARCA"), (198, "ARCA:1")];
+    for (what, stood, report) in [
         // 97=Y marks a report that restates history. 150=0/39=0 is a working
         // order, which the venue names PreSubmitted.
-        ("replayed", &[(11, "42"), (150, "0"), (39, "0"), (97, "Y")][..]),
+        ("replayed", PendingCancel, &[(11, "42"), (150, "0"), (39, "0"), (97, "Y")][..]),
         // The late acknowledgement, as the venue sent it on a withdrawn
         // market-on-close order: no exchange, and no reference beside it.
-        ("acknowledged late", &[(11, "42.0"), (150, "0"), (39, "0"), (20, "0"), (198, "NONE")]),
+        ("acknowledged late", PendingCancel, &[(11, "42.0"), (150, "0"), (39, "0"), (20, "0"), (198, "NONE")]),
+        // Behind this session's cancel the order stands at the cancel's
+        // revision: a status report naming the order states a lower one.
+        ("stated working below the cancel", PendingCancel, &[(11, "42.0"), (150, "0"), (39, "0"), (20, "3"), routed[0], routed[1]]),
+        ("a change accepted behind the cancel", PendingCancel, &[(11, "42.0"), (150, "5"), (39, "5"), (20, "0"), routed[0], routed[1]]),
+        ("acknowledged behind the cancel", PendingCancel, &[(11, "42.0"), (150, "A"), (39, "A"), (20, "0")]),
+        // Nor does a new order's report move an order this session did not
+        // place that the venue named inactive, or say again why it is.
+        ("a new order's report on an inactive order", Inactive,
+            &[(11, "42.0"), (150, "0"), (39, "0"), (20, "0"), routed[0], routed[1], (58, "Order held pending margin check")]),
     ] {
         let mut ccp = CcpState::new();
         let mut context = Context::new();
@@ -4858,7 +4868,11 @@ fn a_working_report_the_status_guard_refused_is_not_cached_as_the_orders_state()
         context.insert_order(crate::types::Order::new(
             42, instrument, Side::Buy, 100 * crate::types::QTY_SCALE, 100 * PRICE_SCALE, b'2', b'0', 0,
         ));
-        assert!(context.update_order_status(42, crate::types::OrderStatus::PendingCancel, false));
+        assert!(context.update_order_status(42, stood, false));
+        // Withdrawn by this session, from where it was working.
+        if stood == PendingCancel {
+            context.before_the_cancel.insert(42, crate::types::OrderStatus::Submitted);
+        }
 
         let mut fields = vec![(fix::TAG_MSG_TYPE, fix::MSG_EXEC_REPORT)];
         fields.extend_from_slice(report);
@@ -4868,16 +4882,16 @@ fn a_working_report_the_status_guard_refused_is_not_cached_as_the_orders_state()
         );
 
         assert_eq!(
-            context.order(42).map(|o| o.status),
-            Some(crate::types::OrderStatus::PendingCancel),
-            "{what}: the order is still being withdrawn",
+            context.order(42).map(|o| o.status), Some(stood),
+            "{what}: the order stands where it was",
         );
         let cached = shared.orders.get_order_info(42);
         assert!(
-            cached.as_ref().is_none_or(|i| i.order_state.status != "PreSubmitted"),
+            cached.as_ref().is_none_or(|i| !matches!(i.order_state.status.as_str(), "PreSubmitted" | "Submitted")),
             "{what}: and the cache says the same thing: {:?}",
             cached.map(|i| i.order_state.status.clone()),
         );
+        assert!(shared.orders.drain_order_inactive().is_empty(), "{what}: nothing is said to be inactive");
     }
 }
 

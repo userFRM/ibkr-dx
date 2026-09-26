@@ -3113,7 +3113,7 @@ fn place_order_snap_pri() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
-        action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP PRI".into(), ..Default::default()
+        action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP PRIM".into(), ..Default::default()
     };
     client.try_place_order(1, &spy(), &order).unwrap();
 
@@ -3204,19 +3204,6 @@ fn place_order_what_if() {
         attrs: crate::types::OrderAttrs { what_if: true, .. }, .. })));
 }
 
-#[test]
-fn place_order_unsupported_type_returns_error() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 100.0, order_type: "FANTASY".into(), ..Default::default()
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    let err = result.unwrap_err();
-    assert!(err.message.contains("Unsupported order type"));
-    assert_eq!(err.code, 387, "one refusal, one number, wherever it is raised");
-}
-
 /// A preview states the order type it asks about. An unrecognised type is
 /// refused; encoded as a limit, the answer would describe a different order.
 #[test]
@@ -3229,7 +3216,7 @@ fn a_preview_is_refused_for_a_type_this_client_cannot_send() {
         ..Default::default()
     };
     let err = client.try_place_order(1, &spy(), &order).unwrap_err();
-    assert!(err.message.contains("Unsupported order type"), "got: {err}");
+    assert_eq!((err.code, err.message.as_str()), (10051, "Invalid order type"), "got: {err}");
 }
 
 /// An algorithm rides on a limit order: tag 40 is written once, as `2`. Any
@@ -7395,7 +7382,7 @@ fn modify_price_and_qty_simultaneously() {
 /// replace now carries the caller's order whole and states its type from it.
 #[test]
 fn a_modify_into_another_type_goes_out_as_that_type() {
-    for order_type in ["REL", "TRAIL", "LIT", "MIDPX", "SNAP MKT", "PEG MKT", "PASSV REL"] {
+    for order_type in ["REL", "TRAIL", "LIT", "MIDPRICE", "SNAP MKT", "PEG MKT", "PASSV REL"] {
         let (client, rx, shared) = test_client();
         shared.market.set_instrument_count(1);
         let plain = Order {

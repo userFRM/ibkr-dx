@@ -2716,7 +2716,7 @@ fn a_modify_of_a_venue_named_order_is_judged_against_the_venues_statement() {
 fn a_venue_named_order_restates_itself_under_the_reference_name() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    for (id, name) in [(42u64, "MIDPRICE"), (43, "SNAP MKT"), (44, "SNAP PRI"), (45, "SNAP PRIM"), (46, "SNAP MIDPT"), (47, "PEG MIDPT")] {
+    for (id, name) in [(42u64, "MIDPRICE"), (43, "SNAP MKT"), (45, "SNAP PRIM")] {
         let named = ApiOrder {
             order_id: id as i64, action: "BUY".into(), total_quantity: 1.0,
             order_type: name.into(), lmt_price: 100.0, aux_price: 0.05, tif: "DAY".into(), ..Default::default()
@@ -4259,11 +4259,24 @@ mod as_a_gateway_checks_it {
                 assert_eq!(kind_of(alias), kind_of(canonical), "{alias} is {canonical}");
             }
         }
-        let unknown = ApiOrder { order_type: "XYZ".into(), ..order() };
-        assert_eq!(
-            refused(&unknown, &session(&[])),
-            (387, "Unsupported order type: 'XYZ' is not an order type this client places".to_string()),
-        );
+        // A name that is no order type is refused as a gateway refuses it,
+        // and so are names a gateway does not take for the types this client
+        // places; a type a gateway places and this client does not is refused
+        // by name.
+        for (name, answer) in [
+            ("XYZ", (10051, "Invalid order type".to_string())),
+            ("MIDPX", (10051, "Invalid order type".to_string())),
+            ("PEG MIDPT", (10051, "Invalid order type".to_string())),
+            ("SNAP MIDPT", (10051, "Invalid order type".to_string())),
+            ("SNAP PRI", (10051, "Invalid order type".to_string())),
+            ("ALGO", (10051, "Invalid order type".to_string())),
+            ("TRAIL MIT", (387, "Unsupported order type: 'TRAIL MIT' is not an order type this client places".to_string())),
+            ("IBALGO", (387, "Unsupported order type: 'IBALGO' is not an order type this client places".to_string())),
+            ("PDV", (387, "Unsupported order type: 'PDV' is not an order type this client places".to_string())),
+        ] {
+            let named = ApiOrder { order_type: name.into(), ..order() };
+            assert_eq!(refused(&named, &session(&[])), answer, "{name}");
+        }
     }
 
     /// A replace moving an order's group, or the way it cancels, is refused

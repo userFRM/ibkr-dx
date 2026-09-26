@@ -62,8 +62,11 @@ placement alone, as a gateway states it, and a replace states its restart
 instead. A ladder sized by its components states the most it holds, the
 order's quantity in whole units, on its placement, as a gateway states it; the
 venue refuses a ladder placed without it (*Message must contain field # 6534*).
-Whether a gateway states it again on a replace is not established here, and
-this client does not.
+A replace states it again as the placement stated it, as a gateway does: it
+keeps the figure on the order and does not work it out again. A gateway leaves
+every field of a ladder off an order whose contract, on its exchange, does not
+take a ladder among its order types; this client holds no definition when it
+places an order and states them whatever the contract takes.
 
 What a gateway refuses in a replace is refused here in its words: a new
 one-cancels-all group on an order that has one, under 10326 (*OCA group
@@ -116,12 +119,9 @@ withdrawal, and a gateway takes an acknowledgement only from an order not yet
 withdrawn, so it states the order as being withdrawn, and so does this client.
 
 Placed before the open, the same order is acknowledged at once with the
-venue's warning that it will not reach the exchange until the open. What a
-gateway states for that warning is not established here: it is expected to be
-a 399, *Order Message:* followed by its own description of the order and the
-warning, and a gateway placing such an order before the open would settle it.
-This client does not state it: the description a gateway writes there is not
-reproduced here.
+venue's warning that it will not reach the exchange until the open; what a
+gateway makes of that warning is under
+[an order's warning](#an-orders-warning) below.
 
 ## A trailing stop limit by percentage
 
@@ -142,11 +142,13 @@ read here, each contract under the one its own exchange's record names, as
 
 ## A contract's least size
 
-A contract dealt in whole units whose definition states no least size, such as
-a stock that trades in lots of a hundred, is described here with a `min_size`
-of nought and the lot as its `size_increment` and `suggested_size_increment`.
-What a gateway states for such a contract is not established here. A gateway's
-contract details for 7203 on TSEJ and 700 on SEHK would settle it.
+`min_size` and `size_increment` are what a gateway states, as
+[Venue behaviour](./venue-behaviour.md) describes, except in three corners a
+gateway decides on a setting or a figure this client does not read: a fund
+held to whole units despite a fractional rule; a contract on `SMART` or
+`ZERO` whose suggested size is stated as nought, which a gateway states as one
+under a logon setting; and a contract for difference whose rule states no
+sizes, which a gateway sizes by its underlying's listing.
 
 ## Alternate exercise transport
 
@@ -209,12 +211,29 @@ them:
   until they are stated again.
 - A payment the model's tree takes is one whose ex-date ends a whole day or
   more from now on this machine's own calendar, which is how a gateway counts
-  it on its own.
+  it on its own: on the time zone its settings name, or its machine's where
+  they name none. No zone is named to this client, so it counts on its
+  machine's.
+- The model takes no dividend yield for the underlying. A gateway takes one only
+  where a trader workstation on the same machine, under the same login, saved
+  one for it; with none saved, it takes none either.
 
 # Where this client behaves differently
 
 Not a gap in what it can ask for. A program written against the other
 behaviour will still be wrong, which is why they are here.
+
+## An order's warning
+
+The venue can acknowledge an order with a warning beside it: a market-on-close
+order placed before the open is acknowledged with the warning that it will not
+reach the exchange until the open. A gateway sends the program that placed the
+order error 399 under the order's number, *Order Message:* followed on a line
+of its own by a description of the order — its side, its quantity and its
+contract, as a gateway's display writes them — and on the next line the
+warning. This client does not: the description is a gateway's display text,
+which is not reproduced here. A gateway's 399 for such an order, placed before
+the open on a paper login, would give the text to reproduce.
 
 ## Callbacks nothing fires
 
@@ -689,20 +708,23 @@ A gateway takes each order type under several names, in any case, and so does
 this client: `LIMIT` is `LMT`, `STOP LIMIT` is `STP LMT`, `PEG PRIM` is a
 relative order. An order is stated back under its type's own name, as a
 gateway states it: one placed as `LIMIT` reads back `LMT`, and one placed as
-`STOP LIMIT` reads back `STP LMT`. A relative order reads back `REL`; a
-gateway setting can have it say `PEG PRIM` there instead. Four names are this
-client's own and a gateway does not know them: `MIDPX`, `PEG MIDPT`,
-`SNAP MIDPT` and `SNAP PRI`, taken as `MIDPRICE`, `PEG MID`, `SNAP MID` and
-`SNAP PRIM`. A name this client does not place is refused under 387,
-*Unsupported order type:* followed by the name and that it is not an order type
-this client places; what a gateway answers for a name that is no order type is
-not established here.
+`STOP LIMIT` reads back `STP LMT`; a relative order reads back `REL`. A name
+that is no order type is refused as a gateway refuses it, under 10051 and
+*Invalid order type*, and so is a name a gateway does not take.
 
-Five order types a gateway takes are not placed by this client — trailing
-market-if-touched and limit-if-touched, the retail price improvement order,
-the volatility order and the pegged-to-stock order — nor are the four
-volatility pegs. Each carries prices or companions not yet established here,
-and is refused by name.
+Order types a gateway takes are not all placed by this client: trailing
+market-if-touched (`TRAIL MIT`) and limit-if-touched (`TRAIL LIT`), and the
+two joined to a market order (`TRAIL LMT + MKT`, `TRAIL REL + MKT`); a limit
+or a relative order joined to a market order and a relative order joined to a
+limit (`LMT + MKT`, `REL + MKT`, `REL + LMT`); the retail price improvement
+order (`RPI`), the volatility order (`VOL`) and the four volatility pegs
+(`PEGMIDVOL`, `PEGMKTVOL`, `PEGPRIMVOL`, `PEGSURFVOL`, each also under its
+spaced name and its short one, such as `PEG MID VOL` and `PDV`); the
+pegged-to-stock order (`PEG STK`), `FIX PEGGED`, `FUNARI`, `QUOTE` and
+`IBALGO` as a type name.
+Each carries prices or companions not yet established here, and is refused by
+name under 387, *Unsupported order type:* followed by the name and that it is
+not an order type this client places.
 
 ## Account groups and models
 

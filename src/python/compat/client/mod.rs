@@ -2491,10 +2491,22 @@ assert models == [(i, 13, 1, 0.2, 0.55, 5.0, None, 0.02, 0.3, -0.1, 765.0) for i
 w.calls.clear()
 ", Some(&g), None).unwrap();
 
+            // A request joining the option is sent the model as it stands, at
+            // once and to it alone.
+            client.call_method1(py, "req_mkt_data", (3i64, &spy, "", false, false)).unwrap();
+            engine.pump();
+            client.get().dispatch_once(py, &shared).unwrap();
+            py.run(c"
+models = [c[1:] for c in w.calls if c[0] in ('tickOptionComputation', 'tick_option_computation')]
+assert models == [(3, 13, 1, 0.2, 0.55, 5.0, None, 0.02, 0.3, -0.1, 765.0)], models
+w.calls.clear()
+", Some(&g), None).unwrap();
+
             // Withdrawn where the engine takes the cancels, so what the venue
             // says of the contract after that is nobody's.
-            client.call_method1(py, "cancel_mkt_data", (1,)).unwrap();
-            client.call_method1(py, "cancel_mkt_data", (2,)).unwrap();
+            for req_id in [1i64, 2, 3] {
+                client.call_method1(py, "cancel_mkt_data", (req_id,)).unwrap();
+            }
             engine.pump();
             client.get().dispatch_once(py, &shared).unwrap();
             publish();

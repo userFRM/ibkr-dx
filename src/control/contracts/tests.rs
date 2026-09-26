@@ -1909,13 +1909,74 @@ mod size_and_precision_tests {
         assert_eq!(def.last_size_precision, 0.000001);
     }
 
-    /// A contract that cannot be dealt in fractions states no smallest order,
-    /// and the size is not in force without the flag that admits it.
+    /// Where no fraction decides it, the least size and the step between sizes
+    /// are one figure, as a gateway states them: the size the venue states
+    /// behind its flag, the lot where the contract's order types on its
+    /// exchange name one, and otherwise one unit.
+    ///
+    /// Stated as nought where the venue stated no least size, a share dealt in
+    /// whole units, or in lots, read as one that states no smallest order.
     #[test]
-    fn a_size_stated_without_the_flag_is_not_in_force() {
-        let frame = b"35=d\x01320=R1\x016008=1\x0155=SPY\x018175=0.0001\x01";
-        let def = parse_secdef_response(frame, true).expect("the definition parses");
-        assert_eq!(def.min_size, 0.0);
+    fn the_least_size_and_the_step_are_what_a_gateway_states() {
+        // A share dealt in lots of a hundred on its own exchange.
+        let lot = |types: &str| format!(
+            "35=d\x01320=R1\x0155=7203\x01167=CS\x016008=1001\x01207=TSEJ\x016046=TSEJ\x016430=jp\x01\
+             6019=1\x016031=9\x016026=1\x016023=0\x016027=0.5\x016030=1\x016023=0\x016027=100\x01\
+             6432=1\x016430=jp\x016431={types}\x01"
+        );
+        for (what, frame, least, step) in [
+            ("a size stated without its flag", "35=d\x01320=R1\x016008=1\x0155=SPY\x018175=0.0001\x01".to_string(), 1.0, 1.0),
+            ("the flag alone", "35=d\x01320=R1\x016008=1\x0155=SPY\x018193=1\x01".to_string(), 0.0001, 0.0001),
+            ("order types naming a board lot", lot("LMT/1,BOARDLOT/1"), 100.0, 100.0),
+            ("order types naming no lot", lot("LMT/1"), 1.0, 1.0),
+            ("a board lot on an exchange the contract does not list",
+                lot("LMT/1,BOARDLOT/1").replace("6046=TSEJ", "6046=OSE"), 1.0, 1.0),
+            // The lot is the band a size of nought falls in, not a later one.
+            ("a lot with a band beyond it",
+                lot("LMT/1,BOARDLOT/1").replace("6030=1\x016023=0\x016027=100", "6030=2\x016023=0\x016027=100\x016023=1000\x016027=1000"),
+                100.0, 100.0),
+            // A share listed in the United States deals in a hundred where its
+            // rule states no size.
+            ("a share listed in the United States with no size table",
+                "35=d\x01320=R1\x0155=ABC\x01167=CS\x016008=9\x01207=NYSE\x016046=NYSE\x016430=u\x01\
+                 6019=1\x016031=9\x016026=1\x016023=0\x016027=0.01\x01\
+                 6432=1\x016430=u\x016431=LMT/1,DFTLOT/1\x016344=1\x016008=9\x016523=USSTK\x01".to_string(), 100.0, 100.0),
+            // With no rule at all there is no lot.
+            ("a lot with no rule",
+                "35=d\x01320=R1\x0155=ABC\x01167=CS\x016008=9\x01207=NYSE\x016046=NYSE\x016430=u\x01\
+                 6432=1\x016430=u\x016431=LMT/1,DFTLOT/1\x016344=1\x016008=9\x016523=USSTK\x01".to_string(), 0.0, 0.0),
+            // On a routed exchange the size the venue suggests stands on its
+            // own, below the lot as much as above it.
+            ("a default lot where the venue routes it",
+                "35=d\x01320=R1\x0155=ABC\x01167=CS\x016008=7\x01207=BEST\x016046=SMART,NYSE\x016430=k\x016581=50\x01\
+                 6019=1\x016031=9\x016026=1\x016023=0\x016027=0.01\x016030=1\x016023=0\x016027=100\x01\
+                 6432=1\x016430=k\x016431=LMT/1,DFTLOT/1\x01".to_string(), 50.0, 50.0),
+            // A suggestion of nought is none: the lot stands.
+            ("a suggestion of nought where the venue routes it",
+                "35=d\x01320=R1\x0155=ABC\x01167=CS\x016008=7\x01207=BEST\x016046=SMART,NYSE\x016430=k\x016581=0\x01\
+                 6019=1\x016031=9\x016026=1\x016023=0\x016027=0.01\x016030=1\x016023=0\x016027=100\x01\
+                 6432=1\x016430=k\x016431=LMT/1,DFTLOT/1\x01".to_string(), 100.0, 100.0),
+            // A bond's least is where its size table starts.
+            ("a bond",
+                "35=d\x01320=R1\x0155=IBM\x01167=BOND\x016008=8\x01207=SMART\x01\
+                 6019=1\x016031=9\x016026=1\x016023=0\x016027=0.01\x016030=1\x016023=2000\x016027=1000\x01".to_string(),
+                2000.0, 1000.0),
+        ] {
+            let def = parse_secdef_response(frame.as_bytes(), true).expect("the definition parses");
+            assert_eq!((def.min_size, def.size_increment), (least, step), "{what}");
+        }
+        // The venue's suggestion is the lot's either way.
+        assert_eq!(parse_secdef_response(lot("LMT/1").as_bytes(), true).unwrap().suggested_size_increment, 100.0);
+
+        // The order types a reply states once for every contract in it reach
+        // the first contract as well as the last.
+        let reply = "35=d\x01320=R1\x0155=7203\x01167=CS\x016008=1001\x01207=TSEJ\x016046=TSEJ\x016430=jp\x01\
+                     6019=1\x016031=9\x016026=1\x016023=0\x016027=0.5\x016030=1\x016023=0\x016027=100\x01\
+                     55=9984\x01167=CS\x016008=1002\x01207=TSEJ\x016046=TSEJ\x016430=jp\x01\
+                     6432=1\x016430=jp\x016431=LMT/1,BOARDLOT/1\x01";
+        let definitions = parse_secdef_responses(reply.as_bytes(), true);
+        assert_eq!(definitions.len(), 2);
+        assert_eq!((definitions[0].min_size, definitions[0].size_increment), (100.0, 100.0));
     }
 
     /// How a contract settles, and the day it really stops trading.
@@ -1949,7 +2010,7 @@ mod size_table_tests {
 
         let def = parse_secdef_response(data, true).expect("the definition parses");
         assert_eq!(def.min_tick, 0.01, "the price table gives the tick");
-        assert_eq!(def.size_increment, 40.0, "the size table gives the size");
+        assert_eq!(def.suggested_size_increment, 40.0, "the size table gives the size");
     }
 
     /// A rule stating only price bands leaves the size unset rather than
@@ -1960,7 +2021,7 @@ mod size_table_tests {
                      6019=1\x016031=26\x016026=1\x016023=0\x016027=0.05\x01";
         let def = parse_secdef_response(data, true).expect("the definition parses");
         assert_eq!(def.min_tick, 0.05);
-        assert_eq!(def.size_increment, 0.0);
+        assert_eq!(def.suggested_size_increment, 0.0);
     }
 }
 mod delivered_name_tests {

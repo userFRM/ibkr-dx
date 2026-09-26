@@ -76,19 +76,6 @@ fn place_order_empty_action_returns_error() {
     assert!(result.is_err());
 }
 
-#[test]
-fn place_order_unsupported_order_type_returns_error() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 100.0,
-        order_type: "NONSENSE".into(), ..Default::default()
-    };
-    let result = { client.place_order(1, &spy(), &order); outcome(&shared) };
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("Unsupported order type"));
-}
-
 /// An algorithm this client does not model is carried to the venue, not
 /// refused here.
 ///

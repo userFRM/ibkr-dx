@@ -572,7 +572,20 @@ impl EClient {
             }
             // A lookup that named a contract another slot already holds.
             // A market-data request the engine has taken, and one withdrawn.
-            Record::MarketDataTaken(taken) => self.core.note_mkt_data_taken(shared, &taken),
+            // One joining an option already modelled is sent the model as it
+            // stands, to it alone.
+            Record::MarketDataTaken(taken) => {
+                if let Some((tick_type, req_id, tick)) = self.core.note_mkt_data_taken(shared, &taken) {
+                    let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                        tick.figures;
+                    call_wrapper!(self, py, shared, "tick_option_computation",
+                        (req_id, tick_type, i32::from(tick.price_based),
+                         or_unstated_price(implied_vol).filter(|v| *v >= 0.0), or_unstated_greek(delta),
+                         or_unstated_price(opt_price), or_unstated_price(pv_dividend),
+                         or_unstated_greek(gamma), or_unstated_greek(vega),
+                         or_unstated_greek(theta), or_unstated_price(und_price)));
+                }
+            }
             Record::MarketDataWithdrawn(req_id) => self.core.unregister_mkt_data(req_id),
             // Everyone watching the contract that held the slot.
             Record::MarketDataType((instrument, generation, data_type)) => {

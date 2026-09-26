@@ -26,7 +26,7 @@ use crate::error_codes::{
     NBBO_PRICE_CAP_DROPPED, NBBO_PRICE_CAP_WITHDRAWN,
     MISC_OPTION_KEY_INVALID, MISC_OPTION_VALUE_INVALID, NO_SUCH_BOOK, OCA_GROUP_REVISION,
     OCA_TYPE_REVISION, OPT_OUT_SMART_ROUTING_DROPPED, OPT_OUT_SMART_ROUTING_WITHDRAWN,
-    MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, PER_LEG_PRICES_UNSUPPORTED,
+    MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, INVALID_ORDER_TYPE, PER_LEG_PRICES_UNSUPPORTED,
     REQUEST_NOT_PROCESSED, Refusal, SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -258,8 +258,8 @@ impl ClientCore {
     /// one is compared with. The bid's, the ask's and the last's take each
     /// figure they do not state from the last one of their kind that request
     /// was sent, and are sent, and kept as the last, when that differs from
-    /// it. A request joining a contract already modelled is sent the next
-    /// tick of each kind.
+    /// it. A request joining a contract already modelled is sent the model as
+    /// it stands when it joins, and the next tick of each other kind.
     pub fn option_tick_owed(
         &self, generation: u64, tick: &crate::bridge::OptionTick,
     ) -> (i32, Vec<(i64, [f64; 8])>) {
@@ -276,6 +276,9 @@ impl ClientCore {
         };
         if generation != self.generation_held(tick.instrument) {
             return (tick_type, Vec::new());
+        }
+        if tick.kind == Model {
+            self.models_as_they_stand.lock().unwrap().insert(tick.instrument, (generation, *tick));
         }
         // Marked under the map a withdrawal clears, so a withdrawal lands
         // wholly before or wholly after: marked after it, a number reused on
@@ -1405,6 +1408,9 @@ pub struct ClientCore {
     /// The last option computation of each kind each request was sent,
     /// figure by figure.
     option_ticks_sent: Mutex<HashMap<(i64, crate::bridge::OptionTickKind), [f64; 8]>>,
+    /// Each option's model tick as it stands, under the subscription it was
+    /// built for: what a request joining the option is sent at once.
+    models_as_they_stand: Mutex<HashMap<InstrumentId, (u64, crate::bridge::OptionTick)>>,
     /// The type sent with each instrument's subscription. Every watcher reads
     /// that feed, even when it asked for another type or takes over as holder.
     mdt_by_instrument: Mutex<HashMap<InstrumentId, i32>>,
@@ -1639,6 +1645,7 @@ impl ClientCore {
             mdt_sent: Mutex::new(HashMap::new()),
             tick_req_params_sent: Mutex::new(HashSet::new()),
             option_ticks_sent: Mutex::new(HashMap::new()),
+            models_as_they_stand: Mutex::new(HashMap::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
@@ -1723,6 +1730,7 @@ impl ClientCore {
         self.mdt_sent.lock().unwrap().clear();
         self.tick_req_params_sent.lock().unwrap().clear();
         self.option_ticks_sent.lock().unwrap().clear();
+        self.models_as_they_stand.lock().unwrap().clear();
         self.mdt_by_instrument.lock().unwrap().clear();
         self.historical_asks.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
@@ -2111,7 +2119,13 @@ impl ClientCore {
     /// Written here rather than at the call, because the engine is the first
     /// to know which slot a contract named by symbol holds, and a request
     /// withdrawn before this is read is withdrawn in the same order.
-    pub fn note_mkt_data_taken(&self, _shared: &SharedState, taken: &crate::bridge::MarketDataTaken) {
+    ///
+    /// A request that starts on an option the model already works out is owed
+    /// the model tick as it stands: returned, with the number it goes out
+    /// under, for the caller to send that request alone.
+    pub fn note_mkt_data_taken(
+        &self, _shared: &SharedState, taken: &crate::bridge::MarketDataTaken,
+    ) -> Option<(i32, i64, crate::bridge::OptionTick)> {
         let crate::bridge::MarketDataTaken {
             req_id, slot, generation, con_id, ref series, snapshot, asked_at, one_shot, data_type, marked,
         } = *taken;
@@ -2136,13 +2150,35 @@ impl ClientCore {
         // it was never refused — off a stream it did not ask for.
         if !one_shot && self.follows_existing_subscription(slot, req_id, series) {
             self.last_quotes.lock().unwrap().remove(&slot);
-            return;
+            // A request that starts on an option the model already works out
+            // is sent the model tick as it stands, as a gateway sends it when
+            // a request starts, rather than at the model's next change. Sent
+            // to it alone and now: queued again behind the model's newer
+            // ticks, it went to every watcher after them.
+            let (built_for, tick) = self.models_as_they_stand.lock().unwrap().get(&slot).copied()?;
+            if built_for != self.generation_held(slot) {
+                return None;
+            }
+            let stated = tick.figures.iter().any(|figure| *figure != f64::MAX);
+            let fresh = self.option_ticks_sent.lock().unwrap()
+                .insert((req_id, crate::bridge::OptionTickKind::Model), tick.figures) != Some(tick.figures);
+            if !(fresh && stated) {
+                return None;
+            }
+            let tick_type = if self.feed_is_delayed(slot) {
+                DELAYED_MODEL_OPTION_COMPUTATION
+            } else {
+                MODEL_OPTION_COMPUTATION
+            };
+            self.note_snapshot_tick(req_id, tick_type);
+            return Some((tick_type, req_id, tick));
         }
         let _ = self.take_or_follow(slot, req_id, series, generation, con_id);
         self.stamp_registration(req_id);
         // A request beside it may already hold the subscription. Its mode
         // still describes the feed everyone on this instrument receives.
         self.mdt_by_instrument.lock().unwrap().entry(slot).or_insert(data_type);
+        None
     }
 
     /// Take a request number for a book, or say it already holds one.
@@ -5484,13 +5520,18 @@ impl ClientCore {
         Ok(())
     }
 
-    /// The refusal of an order-type name this client does not place: a name
-    /// that is no order type, or one a gateway places and this client does not.
+    /// The refusal of an order-type name this client does not place: one a
+    /// gateway places and this client does not, by name, or a name that is no
+    /// order type, as a gateway refuses it.
     fn not_an_order_type(order: &ApiOrder) -> Refusal {
-        Refusal::stated(
-            ORDER_TYPE_UNSUPPORTED,
-            format!("Unsupported order type: '{}' is not an order type this client places", order.order_type),
-        )
+        if crate::types::model::placed_only_by_a_gateway(&order.order_type) {
+            Refusal::stated(
+                ORDER_TYPE_UNSUPPORTED,
+                format!("Unsupported order type: '{}' is not an order type this client places", order.order_type),
+            )
+        } else {
+            Refusal::stated(INVALID_ORDER_TYPE, "Invalid order type")
+        }
     }
 
     /// The retired instructions an order states, walked in the order a

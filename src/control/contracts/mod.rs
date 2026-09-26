@@ -822,11 +822,15 @@ pub fn parse_secdef_responses(
     // identifier block. In a reply naming fifty bonds, forty-nine came back
     // holding three fields each while the last held twelve hundred, because
     // only the last had nothing following it to be cut by.
+    let order_type_tables = parse_order_type_tables(data);
+    let classifications = parse_market_classifications(data);
     let mut open: Option<Vec<u8>> = None;
     let flush = |open: &mut Option<Vec<u8>>, out: &mut Vec<ContractDefinition>| {
         if let Some(mut record) = open.take() {
             record.push(SOH);
-            if let Some(def) = parse_secdef_response(&record, island_for_nasdaq) {
+            if let Some(def) = parse_secdef_record(
+                &record, island_for_nasdaq, &order_type_tables, &classifications,
+            ) {
                 out.push(def);
             }
         }
@@ -865,12 +869,6 @@ pub fn parse_secdef_responses(
         if out.iter().all(|d| d.con_id == first) {
             return parse_secdef_response(data, island_for_nasdaq).into_iter().collect();
         }
-    }
-    let classifications = parse_market_classifications(data);
-    let order_type_tables = parse_order_type_tables(data);
-    for definition in &mut out {
-        apply_order_type_table(definition, &order_type_tables);
-        definition.market_classification = classifications.get(&definition.con_id).cloned().unwrap_or_default();
     }
     out
 }
@@ -955,7 +953,7 @@ static READ_FROM_A_DEFINITION: std::sync::LazyLock<std::collections::HashSet<u32
     // catch it.
     let walked = format!(
         "{}{}{}{}{}",
-        what_a_function_reads(source, "pub fn parse_secdef_response("),
+        what_a_function_reads(source, "fn parse_secdef_record("),
         what_a_function_reads(source, "pub fn parse_market_rules("),
         what_a_function_reads(source, "fn ineligibility_descriptions("),
         what_a_function_reads(source, "fn parse_order_type_tables("),
@@ -1024,6 +1022,20 @@ pub fn unread_definition_tags(data: &[u8]) -> Vec<u32> {
 /// message.
 pub fn parse_secdef_response(
     data: &[u8], island_for_nasdaq: bool,
+) -> Option<ContractDefinition> {
+    parse_secdef_record(
+        data, island_for_nasdaq, &parse_order_type_tables(data), &parse_market_classifications(data),
+    )
+}
+
+/// Read one contract out of a reply, with the tables the reply states once for
+/// every contract in it: the order types each takes on its exchange, and each
+/// one's market.
+fn parse_secdef_record(
+    data: &[u8],
+    island_for_nasdaq: bool,
+    order_type_tables: &HashMap<String, Vec<(String, i32)>>,
+    classifications: &HashMap<u32, String>,
 ) -> Option<ContractDefinition> {
     let tags = fix::fix_parse(data);
 
@@ -1118,9 +1130,11 @@ pub fn parse_secdef_response(
     // The smallest across every band, not the first one stated: a table with
     // more than one band names the finest last as often as first, and taking
     // whichever came first named a size larger than the contract deals in.
-    if let Some(size) = parse_market_rules(data)
+    let rules = parse_market_rules(data);
+    let ruled = !rules.is_empty();
+    let size_bands: Vec<PriceIncrement> = rules.into_iter().flat_map(|r| r.size_increments).collect();
+    if let Some(size) = size_bands
         .iter()
-        .flat_map(|r| r.size_increments.iter())
         .map(|b| b.increment)
         .filter(|v| *v > 0.0)
         .min_by(|a, b| a.total_cmp(b))
@@ -1170,8 +1184,8 @@ pub fn parse_secdef_response(
     {
         def.order_type_key = key;
     }
-    apply_order_type_table(&mut def, &parse_order_type_tables(data));
-    def.market_classification = parse_market_classifications(data).remove(&def.con_id).unwrap_or_default();
+    apply_order_type_table(&mut def, order_type_tables);
+    def.market_classification = classifications.get(&def.con_id).cloned().unwrap_or_default();
     if let Some((_, v)) = tag_sequence(data).into_iter()
         .take_while(|(tag, _)| *tag != TAG_MARKET_RULE_START)
         .filter(|(tag, _)| *tag == TAG_IB_MARKET_RULE_ID).last()
@@ -1299,28 +1313,72 @@ pub fn parse_secdef_response(
     if let Some(v) = tags.get(&8502) { def.fund_distribution_policy_indicator = v.clone(); }
     if let Some(v) = tags.get(&8503) { def.fund_asset_type = v.clone(); }
     if let Some(v) = tags.get(&8383) { def.real_expiration_date = v.clone(); }
-    // The least the venue will take. A contract dealt in fractions — which is
-    // what a size rule whose finest band is under one unit means — takes it
-    // from that rule, and it is the same figure as the increment: the least
-    // that can be dealt and the step between sizes are one thing there. A
-    // contract dealt in whole units takes it from a tag of its own, stated
-    // behind a flag saying the venue stated one.
-    //
-    // Read only off the tag, a contract dealt in fractions reported no least
-    // size at all — the tag is for the other kind — and every fractional
-    // contract came back saying nothing about the smallest order it takes.
+    // The least a contract is dealt in and the step between its sizes, which a
+    // gateway states as one figure, worked out in this order: a size rule
+    // whose finest band is under one unit deals in that band; a least size
+    // the venue states behind its flag is that size, or a ten-thousandth
+    // where the flag stands alone; a contract whose order types on its
+    // exchange name a board lot or a default lot, on an exchange it lists,
+    // deals in the lot; anything else deals in one unit. A bond's least size
+    // is where its size table starts, and its step is the lot.
     //
     // Not 8598, which states the precision of a price rather than a size.
     //
-    // One case is left out because nothing here can decide it: the venue holds
-    // a fund to whole units despite a fractional rule, on a flag this client
-    // does not read.
-    def.min_size = if def.size_increment > 0.0 && def.size_increment < 1.0 {
-        def.size_increment
+    // Two cases are left out because nothing here can decide them: a gateway
+    // holds a fund to whole units despite a fractional rule, and states one
+    // unit where the venue suggests nought on SMART or ZERO, each on a logon
+    // setting this client does not read. Otherwise a suggestion of nought is
+    // none, and the lot stands.
+    let stated_suggestion = tags.get(&TAG_IB_SUGGESTED_SIZE)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|suggested| *suggested > 0.0);
+    let on_smart = matches!(def.exchange.as_str(), "SMART" | "BEST");
+    // The lot: the band a size of nothing falls in, or the rule's whole unit
+    // where the contract is a share or a warrant listed in the United States,
+    // whichever is larger, and nought where no rule is stated; and the figure
+    // the venue suggests, which stands on its own on a routed exchange and is
+    // the least otherwise.
+    let lot = {
+        let band = size_bands.iter().rev().find(|b| b.low_edge <= 0.0).or(size_bands.first());
+        let us_listed = matches!(
+            (&def.sec_type, def.market_classification.as_str()),
+            (SecurityType::Stock, "USSTK") | (SecurityType::Warrant, "USWAR"),
+        );
+        let whole = match (us_listed, band) {
+            (false, _) => 1.0,
+            (true, None) => 100.0,
+            (true, Some(_)) => Some(def.size_increment.trunc()).filter(|v| *v > 0.0).unwrap_or(100.0),
+        };
+        let lot = if ruled { band.map_or(0.0, |b| b.increment).max(whole) } else { 0.0 };
+        match stated_suggestion {
+            Some(suggested) if on_smart => suggested,
+            Some(suggested) => suggested.max(lot),
+            None => lot,
+        }
+    };
+    let bond = matches!(def.sec_type, SecurityType::Bond | SecurityType::Bill | SecurityType::FixedIncome);
+    let least = if def.size_increment > 0.0 && def.size_increment < 1.0 {
+        Some(def.size_increment)
     } else if tags.get(&TAG_MIN_SIZE_STATED).map(|v| v.as_str()) == Some("1") {
-        tags.get(&TAG_MIN_SIZE).and_then(|v| v.parse().ok()).unwrap_or(0.0)
+        Some(tags.get(&TAG_MIN_SIZE).and_then(|v| v.parse().ok()).unwrap_or(0.0001))
     } else {
-        0.0
+        None
+    };
+    let by_lot = def.order_types.iter().any(|t| matches!(t.as_str(), "BOARDLOT" | "DFTLOT"))
+        && def.valid_exchanges.contains(&def.exchange);
+    (def.min_size, def.size_increment) = match least {
+        Some(least) => (least, least),
+        None if bond => {
+            let start = size_bands.first().map_or(0.0, |b| b.low_edge);
+            let first = match stated_suggestion {
+                Some(suggested) if on_smart => suggested,
+                Some(suggested) => suggested.max(start),
+                None => start,
+            };
+            (first, lot)
+        }
+        None if by_lot => (lot, lot),
+        None => (1.0, 1.0),
     };
     // How many places the venue states a price and a size to. Published by the
     // reference client and recorded here as computed rather than sent, which

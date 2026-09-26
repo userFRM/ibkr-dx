@@ -590,7 +590,7 @@ fn uses_limit(kind: &str) -> bool {
             | "MIDPRICE"
             | "SNAP MID"
             | "SNAP MKT"
-            | "SNAP PRI"
+            | "SNAP PRIM"
             | "RPI"
             | "REL + LMT"
     )

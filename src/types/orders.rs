@@ -302,7 +302,7 @@ pub fn ord_type_api_name<'a>(ord_type: &'a str, exec_inst: &str) -> &'a str {
         "1" => "MKT", "2" => "LMT", "3" => "STP", "4" => "STP LMT", "5" => "MOC",
         "B" => "LOC", "J" => "MIT", "K" => "MTL", "U" => "MKT PRT", "R" => "REL",
         "SP" => "STP PRT", "LT" => "LIT", "TSL" => "TRAIL LIMIT", "MIDPX" => "MIDPRICE",
-        "SMKT" => "SNAP MKT", "SMID" => "SNAP MID", "SREL" => "SNAP PRI",
+        "SMKT" => "SNAP MKT", "SMID" => "SNAP MID", "SREL" => "SNAP PRIM",
         "PB" => "PEG BENCH", "E2M" => "PEG BEST", "PSVR" => "PASSV REL", "PMID2" => "PEG MID",
         "P" if exec_inst.contains('P') => "PEG MKT",
         "P" if exec_inst.contains('M') => "PEG MID",

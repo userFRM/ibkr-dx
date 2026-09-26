@@ -942,11 +942,8 @@ fn scale_table_levels(table: &str) -> Option<Vec<(String, String)>> {
 }
 
 /// An order type under the one name this client spells it, from any of the
-/// names a gateway takes it under, or `None` for a name that is not an order
-/// type.
-///
-/// Four names are this client's own and are kept for the callers that use
-/// them: `MIDPX`, `PEG MIDPT`, `SNAP MIDPT` and `SNAP PRI`.
+/// names a gateway takes it under, or `None` for a name that is not one of the
+/// types this client places.
 pub fn order_type_named(name: &str) -> Option<&'static str> {
     Some(match name.to_uppercase().as_str() {
         "MKT" | "MARKET" => "MKT",
@@ -966,15 +963,32 @@ pub fn order_type_named(name: &str) -> Option<&'static str> {
         "REL" | "RELATIVE" | "PEG PRIM" => "REL",
         "PASSV REL" => "PASSV REL",
         "PEG MKT" | "PEGMKT" => "PEG MKT",
-        "PEG MID" | "PEGMID" | "PEG MIDPT" => "PEG MID",
+        "PEG MID" | "PEGMID" => "PEG MID",
         "PEG BEST" | "PEGBEST" | "PEG BEST " => "PEG BEST",
         "PEG BENCH" | "PEGBENCH" | "PEG_TO_BENCH" => "PEG BENCH",
-        "MIDPRICE" | "MIDPX" => "MIDPRICE",
-        "SNAP MID" | "SNAPMID" | "SNAP MIDPT" => "SNAP MID",
+        "MIDPRICE" => "MIDPRICE",
+        "SNAP MID" | "SNAPMID" => "SNAP MID",
         "SNAP MKT" | "SNAPMKT" => "SNAP MKT",
-        "SNAP PRIM" | "SNAPPRIM" | "SNAP PRI" => "SNAP PRIM",
+        "SNAP PRIM" | "SNAPPRIM" => "SNAP PRIM",
         _ => return None,
     })
+}
+
+/// Whether a gateway places an order under this name, as a type this client
+/// does not place. Any other name that `order_type_named` does not answer is
+/// no order type at all.
+pub fn placed_only_by_a_gateway(name: &str) -> bool {
+    matches!(
+        name.to_uppercase().as_str(),
+        "FIX_PEG" | "FIX PEGGED" | "FIXPEGGED" | "FUNARI" | "QUOTE" | "RPI" | "IBALGO"
+            | "REL + LMT" | "REL+LMT" | "LMT + MKT" | "LMT+MKT" | "REL + MKT" | "REL+MKT"
+            | "RELATIVE_TO_STOCK" | "PEGSTK" | "PEG STK"
+            | "TRAILING_LIT" | "TRAIL LIT" | "TRAILLIT" | "TRAILING_MIT" | "TRAIL MIT" | "TRAILMIT"
+            | "TRAIL LMT + MKT" | "TRAIL REL + MKT"
+            | "VOLATILITY" | "VOLAT" | "VOL" | "PEGMIDVOL" | "PEG MID VOL" | "PDV"
+            | "PEGMKTVOL" | "PEG MKT VOL" | "PMV" | "PEGPRIMVOL" | "PEG PRM VOL" | "PPV"
+            | "PEGSURFVOL" | "PEG SURF VOL"
+    )
 }
 
 impl Order {

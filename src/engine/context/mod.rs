@@ -123,6 +123,9 @@ pub struct Context {
     /// Where an order stood when this session's latest cancel moved it to
     /// pending cancel: what a refusal of that cancel puts back.
     pub(crate) before_the_cancel: HashMap<OrderId, OrderStatus>,
+    /// The most a ladder holds, as it was stated when the order was placed:
+    /// what every replace of it states again.
+    pub(crate) ladder_sizes: HashMap<OrderId, i64>,
     /// What an order held before the latest replace went out, and the name it
     /// held it under. A replace writes its attempt into the record ahead of the
     /// venue's answer, and the answer can refuse it; this is the record that
@@ -182,6 +185,7 @@ impl Context {
             submitted: HashMap::new(),
             cancel_attempts: HashMap::new(),
             before_the_cancel: HashMap::new(),
+            ladder_sizes: HashMap::new(),
             pre_replace: HashMap::new(),
             account: AccountState::default(),
             clock: Clock::new(),
@@ -626,6 +630,7 @@ impl Context {
         self.submitted.remove(&order_id);
         self.cancel_attempts.remove(&order_id);
         self.before_the_cancel.remove(&order_id);
+        self.ladder_sizes.remove(&order_id);
         self.pre_replace.retain(|(id, _), _| *id != order_id);
     }
 

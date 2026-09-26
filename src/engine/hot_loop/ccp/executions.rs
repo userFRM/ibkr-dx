@@ -723,14 +723,10 @@ fn status_of(
             }
         }
         "5" => crate::types::OrderStatus::Submitted,
-        "A" => crate::types::OrderStatus::PreSubmitted,
-        // The venue treats this one as a pending cancel, and says so: a report
-        // carrying it is answered the same way a pending cancel is. Published
-        // as a word of its own, it was in neither the working set nor the
-        // finished set of any program written against the vocabulary this
-        // client answers in.
-        "E" => crate::types::OrderStatus::PendingCancel,
-        "6" => crate::types::OrderStatus::PendingCancel,
+        // A change on its way: the order acknowledged, as a gateway states an
+        // order it restores from a report stating it, at connect or in the
+        // history. A report stating E is read as one stating this.
+        "A" | "6" | "E" => crate::types::OrderStatus::PreSubmitted,
         "1" => crate::types::OrderStatus::PartiallyFilled,
         "2" => crate::types::OrderStatus::Filled,
         "4" | "C" => crate::types::OrderStatus::Cancelled,
@@ -1589,6 +1585,20 @@ impl CcpState {
         event_tx: &Option<EventSink>,
         account_id: &str,
     ) {
+        // A gateway reads a report stating E as one stating 6, on both codes,
+        // before anything else reads it: a change on its way.
+        let restated;
+        let parsed = if parsed.get(&39).map(String::as_str) == Some("E") {
+            let mut read = parsed.clone();
+            read.insert(39, "6".to_string());
+            if read.get(&150).map(String::as_str) == Some("E") {
+                read.insert(150, "6".to_string());
+            }
+            restated = read;
+            &restated
+        } else {
+            parsed
+        };
         // CCP recovery push format A (, captured against live):
         // 35=8 with 150=0/39=0, tag 11 carries `<permId>.0`, the originating
         // orderId is in tag 6121. For these, prefer 6121 as the local key so
@@ -1912,33 +1922,53 @@ impl CcpState {
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
         let status_report = parsed.get(&20).map(String::as_str) == Some("3");
+        // A cancel takes the order to a revision of its own, past every one the
+        // order was named under, and a gateway ignores a status report stating
+        // a lower revision unless it states the order cancelled: the order
+        // stays as it stands, being withdrawn. This client names its cancel
+        // apart from the order, so while its cancel is outstanding a report
+        // naming the order rather than the cancel is one of those.
+        let below_the_cancel = status_report
+            && !matches!(ord_status, "4" | "C")
+            && parsed.get(&11).is_some_and(|named| !named.starts_with('C'))
+            && context.before_the_cancel.contains_key(&clord_id)
+            && context.order(clord_id)
+                .is_some_and(|o| o.status == crate::types::OrderStatus::PendingCancel);
         // A status report stating a change on its way is taken as a gateway
         // takes it: the order acknowledged, for the revision the report names
-        // or a later one, wherever it stood short of being withdrawn or done.
+        // or a later one, wherever it stood short of being done.
         // Held to the order of states a replace in flight has here, the caller
         // went on being told the replace was pending where a gateway states
         // the order acknowledged.
         let acknowledges_a_change = status_report && ord_status == "6" && !marked_resend
+            && !below_the_cancel
             && parsed.get(&11).map(|named| revision_of(named))
                 .is_none_or(|named| named >= context.modify_versions.get(&clord_id).copied().unwrap_or(0))
             && context.order(clord_id).is_some_and(|o| !o.status.is_terminal()
-                && !matches!(o.status, crate::types::OrderStatus::PendingCancel | crate::types::OrderStatus::Uncertain));
+                && o.status != crate::types::OrderStatus::Uncertain);
         // A report of a change on its way (150=6) otherwise moves nothing, as
         // a gateway reads it: the venue sends one ahead of accepting a replace,
         // and ahead of revising an order itself. An order whose state is known
         // is stated again as it stands; one whose state is not is recovered
         // from the report below.
         //
-        // Nor does a new order's report move an order being withdrawn. The
-        // venue can acknowledge an order it had said nothing about after the
-        // withdrawal has gone, and a gateway takes an acknowledgement only
-        // from an order not yet withdrawn: it states the order as being
-        // withdrawn until the withdrawal is answered.
+        // Nor does a report of a new order, of an accepted change or of an
+        // acknowledgement move an order being withdrawn, or one this session
+        // did not place that the venue named inactive. The venue can
+        // acknowledge an order it had said nothing about after the withdrawal
+        // has gone, and a gateway takes each of these only from an order that
+        // is working or on its way: it states the order as it stands until the
+        // venue answers the withdrawal, or states it anew. A gateway does not
+        // hold an order it has sent inactive on the venue's word, so one this
+        // session placed is taken as working again.
         let status = match context.order(clord_id) {
+            Some(held) if below_the_cancel => held.status,
             Some(_) if acknowledges_a_change => crate::types::OrderStatus::PreSubmitted,
             Some(held) if exec_type == "6" && held.status != crate::types::OrderStatus::Uncertain => held.status,
-            Some(held) if exec_type == "0" && !status_report
-                && held.status == crate::types::OrderStatus::PendingCancel => held.status,
+            Some(held) if !status_report && matches!(ord_status, "0" | "5" | "A")
+                && (held.status == crate::types::OrderStatus::PendingCancel
+                    || (held.status == crate::types::OrderStatus::Inactive
+                        && !context.placed_at.contains_key(&clord_id))) => held.status,
             _ => status_of(ord_status, clord_id, parsed),
         };
         // The sentinel is dropped further down, but this recovery insert runs
@@ -2559,7 +2589,7 @@ impl CcpState {
                 // reactivate, so there is no snapshot field to carry the
                 // reason on. Route it through the same error() path a
                 // cancel/modify reject already uses instead.
-                if status == crate::types::OrderStatus::Inactive {
+                if status == crate::types::OrderStatus::Inactive && ord_status == "I" {
                     let reason = stated_reason(parsed);
                     if !reason.is_empty() {
                         shared.orders.push_order_inactive(
