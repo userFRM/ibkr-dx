@@ -3474,7 +3474,7 @@ fn registering_a_joiner_leaves_its_refusal_to_the_engine() {
         snapshot: false, one_shot: false, data_type: data_type_for_mode(0), marked: false,
     });
     assert!(shared.market.drain_subscription_failures_direct().is_empty());
-    assert_eq!(shared.market.failure_for_follower(iid).as_deref(), Some("no entitlement"));
+    assert_eq!(shared.market.failure_for_follower(iid).map(|refusal| refusal.message).as_deref(), Some("no entitlement"));
 
     shared.market.note_released_slot(iid, u64::MAX);
     assert!(
@@ -3498,7 +3498,7 @@ fn a_subscription_the_venue_has_taken_is_no_longer_refused_for_a_joiner() {
 
     shared.market.push_subscription_failure(iid, "no entitlement".to_string());
     assert_eq!(
-        shared.market.failure_for_follower(iid).as_deref(),
+        shared.market.failure_for_follower(iid).map(|refusal| refusal.message).as_deref(),
         Some("no entitlement"),
     );
 

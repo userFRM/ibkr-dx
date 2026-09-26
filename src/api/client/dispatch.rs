@@ -41,9 +41,6 @@ pub(crate) fn raised_now() -> i64 {
 /// under 13, an answer arrived indistinguishable from the stream.
 const ASKED_OPTION_COMPUTATION: i32 = 53;
 
-/// What the reference client reports when a contract cannot be named.
-const NO_SECURITY_DEFINITION: i64 = 200;
-
 /// Reported against no request, the way the reference client reports anything
 /// it cannot attribute to one.
 pub(crate) const NO_REQUEST: i64 = -1;
@@ -322,8 +319,8 @@ impl EClient {
                     wrapper.tick_req_params(req_id, p.min_tick, &p.bbo_exchange, p.snapshot_permissions);
                 }
             }
-            Record::SubscriptionFailureFor((req_id, reason)) => {
-                    wrapper.error_from(ErrorOrigin::Request { id: req_id, ends: true }, raised_now(), NO_SECURITY_DEFINITION, &reason, "");
+            Record::SubscriptionFailureFor((req_id, refusal)) => {
+                    wrapper.error_from(ErrorOrigin::Request { id: req_id, ends: true }, raised_now(), i64::from(refusal.code), &refusal.message, "");
             }
             Record::TickReqParams((instrument, generation, _)) => {
                 if generation == self.core.generation_held(instrument) {
@@ -468,11 +465,11 @@ impl EClient {
                     }
                 }
             }
-            Record::SubscriptionFailure((instrument, generation, reason)) => {
+            Record::SubscriptionFailure((instrument, generation, refusal)) => {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
                         let origin = ErrorOrigin::Request { id: req_id, ends: true };
-                        wrapper.error_from(origin, raised_now(), NO_SECURITY_DEFINITION, &reason, "");
+                        wrapper.error_from(origin, raised_now(), i64::from(refusal.code), &refusal.message, "");
                     }
                 }
             }

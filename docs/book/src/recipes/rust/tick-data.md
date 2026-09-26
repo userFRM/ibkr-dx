@@ -93,7 +93,13 @@ Every subscription starts live, whatever the type set on
 turns frozen data off, so a 2 asked after a 3 or a 4 still leaves the delayed
 feed to fall back to. With delayed data on, a bid/ask refusal that states
 delayed data is available switches to the delayed feed and reports 10167
-without ending the request, and `market_data_type` reports 3.
+without ending the request, and `market_data_type` reports 3. With nothing to
+fall back to, the refusal ends the request as a gateway ends it: under 354,
+"Requested market data is not subscribed.", followed by "Delayed market data
+is available." where the refusal says so; or under 10089, where the services
+the refusal names for the API reach past those it names for the data. The
+venue's own words follow either, as sent. Under type 2 alone the request ends
+there, and no frozen quote is asked for.
 
 Where the logon enables frozen data, the market's status is watched, as a
 gateway watches it, for a subscription made with frozen data on while it is

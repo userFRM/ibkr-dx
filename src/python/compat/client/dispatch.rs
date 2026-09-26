@@ -469,8 +469,8 @@ impl EClient {
                         (req_id, p.min_tick, p.bbo_exchange.as_str(), p.snapshot_permissions));
                 }
             }
-            Record::SubscriptionFailureFor((req_id, reason)) => {
-                    say_error!(self, py, shared, crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }, 200, &reason);
+            Record::SubscriptionFailureFor((req_id, refusal)) => {
+                    say_error!(self, py, shared, crate::types::model::ErrorOrigin::Request { id: req_id, ends: true }, i64::from(refusal.code), &refusal.message);
             }
             Record::TickReqParams((instrument, generation, _)) => {
                 if generation == self.core.generation_held(instrument) {
@@ -601,11 +601,11 @@ impl EClient {
                     }
                 }
             }
-            Record::SubscriptionFailure((instrument, generation, reason)) => {
+            Record::SubscriptionFailure((instrument, generation, refusal)) => {
                 if generation == self.core.generation_held(instrument) {
                     for req_id in self.core.watchers_of(instrument) {
                         let origin = crate::types::model::ErrorOrigin::Request { id: req_id, ends: true };
-                        say_error!(self, py, shared, origin, 200, &reason);
+                        say_error!(self, py, shared, origin, i64::from(refusal.code), &refusal.message);
                     }
                 }
             }

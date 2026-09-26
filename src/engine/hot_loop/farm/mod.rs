@@ -7,6 +7,7 @@ mod option_ticks;
 use crate::bridge::{Event, SharedState};
 use crate::protocol::datetime::chrono_free_timestamp;
 use crate::engine::context::Context;
+use crate::error_codes::Refusal;
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
@@ -1657,6 +1658,42 @@ enum PayloadLength {
     ToTheEnd,
 }
 
+/// What a gateway tells the program of a quote the venue refused with nothing
+/// to fall back to, the venue's words after its own: that the data is not
+/// subscribed, and that delayed data is available where the refusal says so;
+/// or, where the services the refusal names for the API reach past those it
+/// names for the data, that the API needs a subscription of its own.
+fn refused_quote(said: &str, delayed_available: bool, data_services: &str, api_services: &str) -> Refusal {
+    let api_services = if api_services.is_empty() { data_services } else { api_services };
+    let for_the_api = match (subscribed_services(api_services), subscribed_services(data_services)) {
+        (Some(api), Some(data)) => api.iter().any(|service| !data.contains(service)),
+        (api, _) => api.is_some(),
+    };
+    if for_the_api {
+        return Refusal::stated(
+            10089,
+            format!(
+                "Requested market data requires additional subscription for API. See link in \
+                 'Market Data Connections' dialog for more details.{said}"
+            ),
+        );
+    }
+    let delayed = if delayed_available { "Delayed market data is available." } else { "" };
+    Refusal::stated(354, format!("Requested market data is not subscribed.{delayed}{said}"))
+}
+
+/// The services a refusal names as ones a subscription is needed for: a list,
+/// or a single number. Anything else names none.
+fn subscribed_services(stated: &str) -> Option<Vec<&str>> {
+    if stated.contains(',') {
+        Some(stated.split(',').collect())
+    } else if stated.contains('#') {
+        Some(stated.split('#').collect())
+    } else {
+        stated.parse::<i32>().is_ok().then(|| vec![stated])
+    }
+}
+
 /// The ticks that state their payload's length in two bytes.
 const TWO_BYTE_LENGTH_TICKS: [u32; 28] = [
     247, 256, 257, 258, 292, 385, 386, 434, 454, 481, 490, 491, 496, 546, 593, 594, 628, 631,
@@ -3234,6 +3271,12 @@ impl FarmState {
         let mut refused_quotes = Vec::new();
         let delayed_available: Vec<_> = parsed.get(&9887)
             .map(|flags| flags.split(';').filter(|flag| !flag.is_empty()).collect()).unwrap_or_default();
+        // The services each refused request needs, for the data and for the
+        // API, entry by entry.
+        let services = |tag: u32| -> Vec<&str> {
+            parsed.get(&tag).map(|listed| listed.split(';').collect()).unwrap_or_default()
+        };
+        let (data_services, api_services) = (services(6756), services(6763));
         for (index, id) in requests.split(';').filter(|id| !id.is_empty()).enumerate() {
             let Ok(rid) = id.parse::<u32>() else { continue };
             let instrument = self.md_req_to_instrument.iter()
@@ -3336,9 +3379,17 @@ impl FarmState {
                     }
                     refused_quotes.push(instrument);
                     log::warn!("The venue refused a subscription on {named}: {reason}");
-                    shared.market.push_subscription_failure(
-                        instrument, format!("the venue refused this subscription: {reason}"),
-                    );
+                    let refusal = if refuses_bid_ask {
+                        refused_quote(
+                            said,
+                            delayed_available.get(index) == Some(&"1"),
+                            data_services.get(index).copied().unwrap_or(""),
+                            api_services.get(index).copied().unwrap_or(""),
+                        )
+                    } else {
+                        Refusal::no_definition(format!("the venue refused this subscription: {reason}"))
+                    };
+                    shared.market.push_subscription_refusal(instrument, refusal);
                 }
                 // A depth subscription asks under an id of its own, and one venue's
                 // refusal does not end the caller's request: one book is asked for

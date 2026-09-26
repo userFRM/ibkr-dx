@@ -249,7 +249,7 @@ pub struct MarketDataState {
     pub(super) subscription_notices: Queue<(InstrumentId, u64, crate::error_codes::Refusal)>,
     pub(super) market_data_types: Queue<(InstrumentId, u64, i32)>,
     subscription_data_types: Mutex<std::collections::HashMap<InstrumentId, std::sync::Arc<std::sync::atomic::AtomicI32>>>,
-    pub(super) subscription_failures: Queue<(crate::types::InstrumentId, u64, String)>,
+    pub(super) subscription_failures: Queue<(crate::types::InstrumentId, u64, crate::error_codes::Refusal)>,
     /// Refusals of the requests that ride beside a quote: the contract, which
     /// companion was refused, and the venue's own reason.
     ///
@@ -270,9 +270,9 @@ pub struct MarketDataState {
     /// held it then; a request that joins the same contract afterwards was
     /// told nothing and received nothing, because the subscription it joined
     /// had already been refused.
-    last_subscription_failure: Mutex<std::collections::HashMap<crate::types::InstrumentId, String>>,
+    last_subscription_failure: Mutex<std::collections::HashMap<crate::types::InstrumentId, crate::error_codes::Refusal>>,
     /// A refusal owed to one request that joined a contract already refused.
-    pub(super) subscription_failures_direct: Queue<(i64, String)>,
+    pub(super) subscription_failures_direct: Queue<(i64, crate::error_codes::Refusal)>,
     /// Why the quote feed is done for the rest of this session, where it is.
     ///
     /// Set once the engine gives up on the feed, and never cleared: the feed
@@ -681,7 +681,7 @@ impl MarketDataState {
 
     /// Take every subscription failures waiting, leaving none.
     pub fn drain_subscription_failures(&self) -> Vec<(crate::types::InstrumentId, String)> {
-        self.subscription_failures.drain().into_iter().map(|(at, _, why)| (at, why)).collect()
+        self.subscription_failures.drain().into_iter().map(|(at, _, why)| (at, why.message)).collect()
     }
 
     /// Take every companion refusal waiting, leaving none.
@@ -1543,14 +1543,22 @@ impl MarketDataState {
         self.subscription_notices.drain().into_iter().map(|(id, _, notice)| (id, notice)).collect()
     }
     #[doc(hidden)] pub fn push_subscription_failure(&self, instrument: crate::types::InstrumentId, reason: String) {
+        self.push_subscription_refusal(instrument, crate::error_codes::Refusal::no_definition(reason));
+    }
+
+    /// A subscription refused under the number a gateway states the refusal
+    /// under.
+    #[doc(hidden)] pub fn push_subscription_refusal(
+        &self, instrument: crate::types::InstrumentId, refusal: crate::error_codes::Refusal,
+    ) {
         self.last_subscription_failure.lock().unwrap()
-            .insert(instrument, reason.clone());
-        self.subscription_failures.push((instrument, self.generation_of(instrument), reason));
+            .insert(instrument, refusal.clone());
+        self.subscription_failures.push((instrument, self.generation_of(instrument), refusal));
     }
 
     /// Why a contract a request is about to join was refused, if it was.
     /// `None` where the subscription it joins is live.
-    pub fn failure_for_follower(&self, instrument: crate::types::InstrumentId) -> Option<String> {
+    pub fn failure_for_follower(&self, instrument: crate::types::InstrumentId) -> Option<crate::error_codes::Refusal> {
         self.last_subscription_failure.lock().unwrap().get(&instrument).cloned()
     }
 
@@ -1594,13 +1602,13 @@ impl MarketDataState {
     }
 
     /// A refusal owed to one request that joined a contract already refused.
-    #[doc(hidden)] pub fn push_subscription_failure_for(&self, req_id: i64, reason: String) {
-        self.subscription_failures_direct.push((req_id, reason));
+    #[doc(hidden)] pub fn push_subscription_failure_for(&self, req_id: i64, refusal: crate::error_codes::Refusal) {
+        self.subscription_failures_direct.push((req_id, refusal));
     }
 
     /// Take every refusal owed to a single request, leaving none.
     pub fn drain_subscription_failures_direct(&self) -> Vec<(i64, String)> {
-        self.subscription_failures_direct.drain()
+        self.subscription_failures_direct.drain().into_iter().map(|(id, why)| (id, why.message)).collect()
     }
 
     /// Publish how many slots the engine has handed out. The quote table is

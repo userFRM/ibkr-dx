@@ -3516,6 +3516,30 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
+    /// A quote refused with nothing to fall back to reaches every Python
+    /// watcher under the number a gateway states it under.
+    #[test]
+    fn a_refused_quote_reaches_python_watchers_under_its_number() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, wrapper) = wired_client(py);
+            client.get().core.instrument_to_req.lock().unwrap().insert(0, 7);
+            client.get().core.instrument_followers.lock().unwrap().insert(0, vec![8]);
+            client.get().core.req_to_instrument.lock().unwrap().insert(7, 0);
+            client.get().core.req_to_instrument.lock().unwrap().insert(8, 0);
+            shared.market.push_subscription_refusal(0, crate::error_codes::Refusal::stated(
+                354, "Requested market data is not subscribed.Error&BEST/OPT/Top&BEST/OPT/Top",
+            ));
+            client.get().dispatch_once(py, &shared).unwrap();
+            let globals = pyo3::types::PyDict::new(py);
+            globals.set_item("w", &wrapper).unwrap();
+            let heard: Vec<(i64, i64)> = py.eval(
+                c"sorted((c[1], c[3]) for c in w.calls if c[0] == 'error')", Some(&globals), None,
+            ).unwrap().extract().unwrap();
+            assert_eq!(heard, [(7, 354), (8, 354)]);
+        });
+    }
+
     #[test]
     fn delayed_mode_starts_live_on_the_python_surface() {
         Python::initialize();

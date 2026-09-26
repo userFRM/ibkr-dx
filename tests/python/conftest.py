@@ -104,10 +104,11 @@ def liquid_hours(client, contract):
 # drops: market data, then historical.
 FEED_DOWN = (2103, 2105)
 # What it reports the venue declining a request under: data the account is not
-# subscribed to (354), and the historical service's refusal (162). A
-# subscription the venue refused is reported under 200, and a request riding
-# beside a quote under 321, each in words saying the venue refused it.
-VENUE_DECLINED = (354, 162)
+# subscribed to (354, or 10089 where the API needs a subscription of its own),
+# and the historical service's refusal (162). A subscription the venue refused
+# for another reason is reported under 200, and a request riding beside a quote
+# under 321, each in words saying the venue refused it.
+VENUE_DECLINED = (354, 10089, 162)
 
 
 def declined(errors, *req_ids):

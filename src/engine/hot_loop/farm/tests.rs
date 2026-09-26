@@ -5886,6 +5886,60 @@ mod depth_position_tests {
         }
     }
 
+    /// A quote the venue refuses with nothing to fall back to ends the request
+    /// as a gateway ends it: 354, the data not subscribed, with delayed data
+    /// said to be available where the refusal says so, or 10089 where the
+    /// services the refusal names for the API reach past those it names for
+    /// the data; the venue's words follow. Rows as refused on a login with no
+    /// live option or stock data, under type 2.
+    #[test]
+    fn a_refused_quote_is_told_as_a_gateway_tells_it() {
+        let option = "108,109,205,215,661";
+        let stock = "108,109,122,123,203,204,206,775";
+        let stock_api = "1046,1047,1048,1049,108,109,123,1473,203,206,775";
+        let rows = [
+            ("OPT", "1;1", option, None,
+             "354:Requested market data is not subscribed.Delayed market data is available.Error&BEST/OPT/Top&BEST/OPT/Top"),
+            ("OPT", "0;0", option, None,
+             "354:Requested market data is not subscribed.Error&BEST/OPT/Top&BEST/OPT/Top"),
+            ("STK", "1;1", stock, Some(stock_api),
+             "10089:Requested market data requires additional subscription for API. See link in 'Market Data \
+              Connections' dialog for more details.Error&BEST/STK/Top&BEST/STK/Top"),
+        ];
+        for (sec_type, delayed, services, api_services, told) in rows {
+            let (client, _rx, shared) = crate::api::client::tests::test_client();
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(265598);
+            client.core.req_to_instrument.lock().unwrap().insert(1, instrument);
+            client.core.instrument_to_req.lock().unwrap().insert(instrument, 1);
+            farm.send_mktdata_subscribe(
+                265598, "AAPL", "SMART", sec_type, "", 0.0, "", "", instrument, 0,
+                false, &mut None, &mut hb,
+            );
+            let quote: Vec<_> = farm.md_req_to_instrument.iter()
+                .map(|(id, _)| id.to_string())
+                .filter(|id| !farm.generic_tick_reqs.iter().any(|(g, _)| g.to_string() == *id))
+                .collect();
+            let said = format!("Error&BEST/{sec_type}/Top&BEST/{sec_type}/Top");
+            let (ids, services) = (quote.join(";"), format!("{services};{services}"));
+            let api_services = api_services.map(|listed| format!("{listed};{listed}"));
+            let mut fields = vec![
+                (fix::TAG_MSG_TYPE, "3"), (58, said.as_str()), (262, ids.as_str()), (9887, delayed),
+                (6756, services.as_str()),
+            ];
+            if let Some(listed) = &api_services {
+                fields.push((6763, listed.as_str()));
+            }
+            fields.push((9888, "1;1"));
+            farm.handle_subscription_reject(&fix::fix_build(&fields, 1), &context, &shared);
+            let mut wrapper = crate::api::wrapper::tests::RecordingWrapper::default();
+            client.process_msgs(&mut wrapper);
+            assert_eq!(wrapper.events, [format!("error:1:{told}")], "{sec_type} {delayed}");
+        }
+    }
+
     /// A crypto's two acknowledgements state permissions 3 and 1 and name no
     /// BBO exchange, so the request is told once, in either arrival order,
     /// what a gateway tells it: no exchange and no permission.

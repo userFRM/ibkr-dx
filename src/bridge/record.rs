@@ -509,7 +509,7 @@ pub enum Record {
     /// What a joined subscription was acknowledged with, for one request.
     TickReqParamsFor((i64, TickReqParams)),
     /// A refusal owed to a request that joined a refused contract.
-    SubscriptionFailureFor((i64, String)),
+    SubscriptionFailureFor((i64, crate::error_codes::Refusal)),
     /// What a subscription was acknowledged with: slot, generation, params.
     TickReqParams((InstrumentId, u64, TickReqParams)),
     /// A trade on a tick-by-tick stream.
@@ -532,7 +532,7 @@ pub enum Record {
     VenueError(String),
     /// A subscription the venue could not be asked for: slot, generation,
     /// reason.
-    SubscriptionFailure((InstrumentId, u64, String)),
+    SubscriptionFailure((InstrumentId, u64, crate::error_codes::Refusal)),
     /// A notice that leaves the subscription running.
     SubscriptionNotice((InstrumentId, u64, crate::error_codes::Refusal)),
     /// The feed the venue accepted for a subscription.
