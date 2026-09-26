@@ -832,6 +832,143 @@ pub fn scale_historical_bars(
         .collect())
 }
 
+/// Multiply the bars before each of a contract's rights offers by the value the
+/// offer states, as a gateway multiplies every series it asks along a
+/// contract's id history once the series is whole.
+///
+/// A bar is before an offer where it ends before the offer's day begins on
+/// UTC's clock. The offers stating one day are multiplied together, those
+/// stating one day and one value counted once; a value that is nought or cannot
+/// be read is passed over, and a day whose values multiply to one moves
+/// nothing. Volume moves with none of them.
+pub(crate) fn fold_rights_offers(
+    mut bars: Vec<crate::control::historical::HistoricalBar>, actions: &[Adjustment],
+) -> Vec<crate::control::historical::HistoricalBar> {
+    let mut offered = std::collections::BTreeMap::<&str, f64>::new();
+    let mut counted = std::collections::HashSet::new();
+    for a in actions.iter().filter(|a| a.kind == Some(AdjustmentKind::RightsOffer)) {
+        let Some(value) = a.value.parse::<f64>().ok().filter(|v| v.is_finite() && *v != 0.0) else { continue };
+        if !a.date.is_empty() && counted.insert((a.date.as_str(), value.to_bits())) {
+            *offered.entry(a.date.as_str()).or_insert(1.0) *= value;
+        }
+    }
+    let moment = |stamp: &str| {
+        crate::protocol::datetime::ib_datetime_to_unix(stamp)
+            .or_else(|| crate::protocol::datetime::day_number(stamp).map(|days| days * 86_400))
+    };
+    for (day, value) in offered {
+        let Some(begins) = crate::protocol::datetime::day_number(day).map(|days| days * 86_400) else { continue };
+        if value == 1.0 {
+            continue;
+        }
+        for bar in &mut bars {
+            if moment(&bar.end).or_else(|| moment(&bar.time)).is_some_and(|ends| ends < begins) {
+                for price in [&mut bar.open, &mut bar.high, &mut bar.low, &mut bar.close, &mut bar.wap] {
+                    *price *= value;
+                }
+            }
+        }
+    }
+    bars
+}
+
+/// Take a contract's cash dividends off the bars before each, as a gateway
+/// takes them off a series asked for as `ADJUSTED_LAST`, once the bars are on
+/// one scale for the actions that move it.
+///
+/// Each dividend is first restated on the scale of what the answer lists after
+/// it: multiplied by the reciprocal of each split and rights offer and by each
+/// spin-off's value, and rounded to four places. A factor that is nought or
+/// cannot be read is passed over. A stock dividend restates nothing. A special
+/// is taken off as a regular one is. An amount that cannot be read is read as
+/// the largest a float holds, as a gateway reads it.
+///
+/// A dividend is carried by the first bar the exchange dates its day, and by no
+/// bar where none is: the rows stating one day and one amount are counted once,
+/// and those stating one day and several amounts are summed. For each carried
+/// dividend, oldest first, the newest bar that ends before the carrying bar
+/// starts has the amount taken off its open, high, low, close and average, and
+/// every bar before that one is multiplied by what that took off its close: its
+/// close after the dividend over its close before it, whatever that leaves.
+/// Volume moves with none of them.
+pub(crate) fn fold_dividends(
+    mut bars: Vec<crate::control::historical::HistoricalBar>, actions: &[Adjustment], zone: &str,
+) -> Vec<crate::control::historical::HistoricalBar> {
+    let mut after = 1.0;
+    let mut restated = Vec::new();
+    for a in actions.iter().rev() {
+        let value = a.value.parse::<f64>().ok().filter(|v| v.is_finite());
+        match a.kind {
+            Some(AdjustmentKind::CashDividend) => {
+                let value = a.value.parse::<f64>().unwrap_or(f64::MAX);
+                // Rounded half up to four places, as a gateway rounds it: to a
+                // whole count of ten-thousandths, which stops at the largest
+                // count there is.
+                restated.push((a.date.as_str(), ((value * after * 1e4 + 0.5).floor() as i64) as f64 / 1e4));
+            }
+            Some(AdjustmentKind::Split | AdjustmentKind::RightsOffer) => {
+                if let Some(value) = value.filter(|v| *v > 0.0) {
+                    after *= 1.0 / value;
+                }
+            }
+            Some(AdjustmentKind::SpinOff) => {
+                if let Some(value) = value.filter(|v| *v != 0.0) {
+                    after *= value;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Each bar's day read once: the exchange's clock is not a cheap thing to
+    // read a stamp on, and a long series holds many dividends.
+    let mut first_of_day = std::collections::HashMap::new();
+    for (at, bar) in bars.iter().enumerate() {
+        if let Some(day) = day_of(&bar.time, zone) {
+            first_of_day.entry(day).or_insert(at);
+        }
+    }
+    let mut carried = std::collections::BTreeMap::<usize, f64>::new();
+    let mut counted = std::collections::HashSet::new();
+    for (date, amount) in restated {
+        let Some(&at) = first_of_day.get(date) else {
+            continue;
+        };
+        if amount != 0.0 && counted.insert((date, amount.to_bits())) {
+            *carried.entry(at).or_default() += amount;
+        }
+    }
+    let moment = |stamp: &str| {
+        crate::protocol::datetime::ib_datetime_to_unix(stamp)
+            .or_else(|| crate::protocol::datetime::day_number(stamp).map(|days| days * 86_400))
+    };
+    for (at, amount) in carried {
+        if amount == 0.0 {
+            continue;
+        }
+        let starts = moment(&bars[at].time);
+        let before = (0..at).rev().find(|i| {
+            let bar = &bars[*i];
+            match (moment(&bar.end).or_else(|| moment(&bar.time)), starts) {
+                (Some(ends), Some(starts)) => ends < starts,
+                _ => true,
+            }
+        });
+        let Some(before) = before else { continue };
+        let bar = &mut bars[before];
+        let close = bar.close;
+        for price in [&mut bar.open, &mut bar.high, &mut bar.low, &mut bar.close, &mut bar.wap] {
+            *price -= amount;
+        }
+        let ratio = bar.close / close;
+        for bar in &mut bars[..before] {
+            for price in [&mut bar.open, &mut bar.high, &mut bar.low, &mut bar.close, &mut bar.wap] {
+                *price *= ratio;
+            }
+        }
+    }
+    bars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

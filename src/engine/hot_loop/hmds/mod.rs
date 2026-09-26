@@ -347,9 +347,8 @@ impl RtBarRequest {
 ///
 /// The vendor states two of its series as adjusted: TRADES is adjusted for
 /// splits but not dividends, and ADJUSTED_LAST for dividends as well. The
-/// venue serves raw trades either way, so both are one fold — one routine
-/// applies the actions — and they differ only in which kinds of action the
-/// fold is handed.
+/// venue serves raw trades either way, so both are put on one scale by one
+/// routine, and ADJUSTED_LAST then has its dividends taken off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fold {
     /// Filed as the venue served it.
@@ -358,8 +357,8 @@ pub(crate) enum Fold {
     /// dividend and a spin-off. A cash dividend is a payment out of the
     /// price rather than a restatement of it, and stays out.
     Splits,
-    /// Folded with every kind of action this client can apply. Which kinds
-    /// that is, the fold's own routine states.
+    /// Folded as `Splits` is, and then with each cash dividend taken off the
+    /// bars before it, as a gateway takes it off.
     Adjusted,
 }
 
@@ -2493,26 +2492,26 @@ fn build_tbt_query(
                 actions.retain(|a| {
                     crate::control::adjustments::day_of(&a.date, "").is_none_or(|day| day <= today)
                 });
-                // The vendor states TRADES as adjusted for splits and no
-                // more, so its fold takes the kinds that move the scale and
-                // leaves a payment out of the price where it is. ADJUSTED_LAST
-                // takes every kind the fold can apply. A kind this client
-                // cannot name goes with either, so the fold refuses it rather
-                // than guess.
-                let actions: Vec<_> = if fold == Fold::Splits {
-                    actions
-                        .into_iter()
-                        .filter(|a| a.kind.is_none_or(|k| k.moves_the_scale()))
-                        .collect()
-                } else {
-                    actions
-                };
+                // Both series are put on the scale of the kinds that move it,
+                // as a gateway folds them; a kind this client cannot name goes
+                // with them, so the fold refuses it rather than guess.
+                let scaled: Vec<_> = actions
+                    .iter()
+                    .filter(|a| a.kind.is_none_or(|k| k.moves_the_scale()))
+                    .cloned()
+                    .collect();
                 // On the clock the venue named beside the bars: an action is
                 // dated on the exchange's day and a stamp below a day arrives
-                // in UTC.
-                crate::control::adjustments::scale_historical_bars(
-                    entry.bars, &actions, &entry.timezone,
-                )
+                // in UTC. Then the rights offers, and for ADJUSTED_LAST the
+                // cash dividends, as a gateway takes them once a series is whole.
+                crate::control::adjustments::scale_historical_bars(entry.bars, &scaled, &entry.timezone)
+                    .map(|bars| crate::control::adjustments::fold_rights_offers(bars, &actions))
+                    .map(|bars| match fold {
+                        Fold::Adjusted => crate::control::adjustments::fold_dividends(
+                            bars, &actions, &entry.timezone,
+                        ),
+                        _ => bars,
+                    })
             }
         };
         match folded {

@@ -336,8 +336,14 @@ impl EClient {
     /// contract traded as it, and joined into one series. The fold is made
     /// once the series is whole, before a bar is handed to anyone, with the
     /// actions dated up to the day it is made, that day on UTC's calendar
-    /// included, as a gateway folds them. This call waits and hands the series
-    /// back in one piece; `reqHistoricalData` delivers the same bars one at a
+    /// included, as a gateway folds them, and the bars before a rights offer
+    /// are multiplied by the value it states. ADJUSTED_LAST also has each cash
+    /// dividend taken off the bars before it, as a gateway takes it off: the
+    /// amount restated on the scale of the splits, spin-offs and rights offers
+    /// listed after it, to four places, taken off the last bar before the one
+    /// dated its day, and every bar before that one multiplied by what it took
+    /// off that bar's close. This call waits and hands the series back in one
+    /// piece; `reqHistoricalData` delivers the same bars one at a
     /// time on its callbacks. Both ask for the actions by the venue's id for
     /// the contract, which the venue is asked for first where the contract is
     /// named some other way.

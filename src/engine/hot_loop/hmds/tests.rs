@@ -975,6 +975,171 @@ fn a_trades_request_is_folded_with_the_actions_that_move_the_scale() {
     assert!(hmds.held.is_empty(), "the hold is released once folded");
 }
 
+/// ADJUSTED_LAST has each cash dividend taken off the bars before it, as a
+/// gateway takes it off, and TRADES has none taken off; both have the bars
+/// before a rights offer multiplied by its value. The answers are the ones a
+/// paper session was given for GE and SIRI, from 2021 on, and the bars are the
+/// raw ones it was served around their ex-dates; every figure below was worked
+/// by hand from a gateway's rule, and a volume is where the split and the
+/// spin-offs leave it.
+///
+/// - GE: every bar is put on the scale of the spin-offs after it, 0.7803 and
+///   0.7975, and those before the 1:8 split of 2 August 2021 on its scale too:
+///   4.978314 before it, 0.62228925 from it. The dividend of 0.01 on 25 June is
+///   restated by the split and both spin-offs to 0.04978314, and by the two
+///   spin-offs the one of 0.08 on 24 September is too: both round to 0.0498.
+///   Oldest first, 0.0498 comes off the bar of 24 June, whose close goes from
+///   65.4648291 to 65.4150291, and the bar before it takes the ratio
+///   0.99923928618; then off the bar of 23 September, from 64.07090118 to
+///   64.02110118, and every bar before it takes 0.99922273608.
+/// - GE with a rights offer of 0.98 stated twice for 25 June, counted once:
+///   TRADES has every bar that ends before that day begins on UTC's clock
+///   multiplied by it, those of 23 and 24 June, and the one of the 25th left as
+///   it is.
+/// - SIRI: the 1:10 split of 10 September 2024 puts every bar at ten times its
+///   price. On 10 February 2022 it paid a regular dividend of 0.021962, stated
+///   twice and counted once, and a special of 0.25, restated to 0.2196 and 2.5:
+///   the special is taken off as the regular one is, and the two sum to 2.7196,
+///   which comes off the bar of the 9th, from a close of 68.6 to 65.8804, and
+///   every bar before it takes 0.96035568513.
+#[test]
+fn an_adjusted_series_has_its_dividends_taken_off_and_a_trades_one_does_not() {
+    const GE: &str = "200\nconc\n498843743,20210802,-1\n7516,-1,20210801\nCD\n\
+        20210305,0.01,USD,20210212,20210308,20210426,R,NA\n\
+        20210625,0.01,USD,20210618,20210628,20210726,R,NA\nSS\n20210802,0.125,,20210310\nCD\n\
+        20210924,0.08,USD,20210910,20210927,20211025,R,NA\n\
+        20211220,0.08,USD,20211210,20211221,20220125,R,NA\nSO\n20211231,1,,20180626\nCD\n\
+        20220307,0.08,USD,20220211,20220308,20220425,R,NA\n\
+        20220627,0.08,USD,20220617,20220628,20220725,R,NA\n\
+        20220926,0.08,USD,20220909,20220927,20221025,R,NA\n\
+        20221214,0.08,USD,20221130,20221215,20230125,R,NA\nSO\n20230104,0.7803,,20211109\nCD\n\
+        20230306,0.08,USD,20230210,20230307,20230425,R,NA\n\
+        20230710,0.08,USD,20230630,20230711,20230725,R,NA\n\
+        20230925,0.08,USD,20230908,20230926,20231025,R,NA\n\
+        20231227,0.08,USD,20231215,20231228,20240125,R,NA\nSO\n20240402,0.7975,,20211109\nCD\n\
+        20240412,0.28,USD,20240405,20240415,20240425,R,NA\n\
+        20240711,0.28,USD,20240621,20240711,20240725,R,NA\n\
+        20240926,0.28,USD,20240913,20240926,20241025,R,NA\n\
+        20241227,0.28,USD,20241213,20241227,20250127,R,NA\n\
+        20250310,0.36,USD,20250214,20250310,20250425,R,NA\n\
+        20250707,0.36,USD,20250627,20250707,20250725,R,NA\n\
+        20250929,0.36,USD,20250918,20250929,20251027,R,NA\n\
+        20251229,0.36,USD,20251204,20251229,20260126,R,NA\n\
+        20260309,0.47,USD,20260206,20260309,20260427,R,NA\n\
+        20260706,0.47,USD,20260625,20260706,20260727,R,NA\n";
+    const SIRI: &str = "200\nconc\n727785544,20240910,-1\n138397467,20131115,20240909\n\
+        53069174,20080807,20131114\n4727823,-1,20080806\nCD\n\
+        20211104,0.021962,USD,20211025,20211105,20211129,R,NA\n\
+        20220210,0.021962,USD,20220126,20220211,20220225,R,NA\n\
+        20220210,0.021962,USD,20220126,20220211,20220225,R,NA\n\
+        20220210,0.25,USD,20220201,20220211,20220225,S,NA\n\
+        20220505,0.021962,USD,20220419,20220506,20220525,R,NA\n\
+        20220804,0.021962,USD,20220714,20220805,20220831,R,NA\n\
+        20221109,0.0242,USD,20221101,20221111,20221130,R,NA\n\
+        20230208,0.0242,USD,20230125,20230209,20230224,R,NA\n\
+        20230504,0.0242,USD,20230419,20230505,20230524,R,NA\n\
+        20230807,0.0242,USD,20230726,20230808,20230830,R,NA\n\
+        20231106,0.0266,USD,20231025,20231107,20231129,R,NA\n\
+        20240208,0.0266,USD,20240124,20240209,20240223,R,NA\n\
+        20240509,0.0266,USD,20240425,20240510,20240529,R,NA\n\
+        20240809,0.0266,USD,20240724,20240809,20240826,R,NA\nSS\n20240910,0.1,,20231212\nCD\n\
+        20241105,0.27,USD,20241022,20241105,20241121,R,NA\n\
+        20250207,0.27,USD,20250122,20250207,20250225,R,NA\n\
+        20250509,0.27,USD,20250416,20250509,20250528,R,NA\n\
+        20250808,0.27,USD,20250723,20250808,20250827,R,NA\n\
+        20251105,0.27,USD,20251022,20251105,20251121,R,NA\n\
+        20260211,0.27,USD,20260129,20260211,20260227,R,NA\n\
+        20260511,0.27,USD,20260423,20260511,20260527,R,NA\n\
+        20260810,0.27,USD,20260722,20260810,20260826,R,NA\n";
+    // Day, open, high, low, close, average and volume, as served; the hour the
+    // session opened and closed on UTC's clock.
+    type Served = (&'static str, f64, f64, f64, f64, f64, i64);
+    const GE_BARS: [Served; 8] = [
+        ("20210623", 13.02, 13.19, 12.94, 12.95, 13.06396, 39314956),
+        ("20210624", 13.06, 13.2, 12.92, 13.15, 13.08036, 39214324),
+        ("20210625", 13.16, 13.24, 13.1, 13.16, 13.15533, 26921071),
+        ("20210730", 13.16, 13.22, 12.92, 12.95, 13.03118, 49683320),
+        ("20210802", 104.48, 107.21, 100.43, 100.6, 102.906, 20463469),
+        ("20210923", 99.53, 104.08, 99.52, 102.96, 102.974, 8643277),
+        ("20210924", 102.41, 104.2, 102.41, 103.8, 103.694, 4397741),
+        ("20210927", 104.55, 106.34, 104.39, 105.35, 105.756, 5638415),
+    ];
+    const SIRI_BARS: [Served; 6] = [
+        ("20220207", 6.78, 6.84, 6.71, 6.74, 6.761, 8748521),
+        ("20220208", 6.75, 6.88, 6.71, 6.8, 6.812, 9772239),
+        ("20220209", 6.8, 6.87, 6.8, 6.86, 6.833, 13019612),
+        ("20220210", 6.55, 6.58, 6.3, 6.33, 6.409, 28886500),
+        ("20220211", 6.35, 6.36, 6.2, 6.22, 6.261, 25467529),
+        ("20220214", 6.25, 6.31, 6.12, 6.17, 6.183, 17590143),
+    ];
+    // The closes filed, oldest first, and the bar a dividend came off in full:
+    // its day, open, high, low, average and volume.
+    type Row = (&'static str, &'static str, u32, String, (&'static str, &'static str),
+                &'static [Served], &'static [f64], (&'static str, [f64; 4], i64));
+    let offered = GE.replacen("SS\n20210802", "RO\n20210625,0.98,,\n20210625,0.98,,\nSS\n20210802", 1);
+    let rows: [Row; 4] = [
+        ("GE", "ADJUSTED_LAST", 498843743, GE.into(), ("13:30", "20:00"), &GE_BARS, &[
+            64.3700522764, 65.3641843579, 65.4636900955, 64.4190567429, 62.5536400418,
+            64.0211011800, 64.5936241500, 65.5581724875,
+        ], ("20210923", [61.8866490525, 64.7180651400, 61.8804261600, 64.0298132295], 13889485)),
+        ("GE", "TRADES", 498843743, GE.into(), ("13:30", "20:00"), &GE_BARS, &[
+            64.4691663000, 65.4648291000, 65.5146122400, 64.4691663000, 62.6022985500,
+            64.0709011800, 64.5936241500, 65.5581724875,
+        ], ("20210923", [61.9364490525, 64.7678651400, 61.9302261600, 64.0796132295], 13889485)),
+        ("GE", "TRADES", 498843743, offered, ("13:30", "20:00"), &GE_BARS, &[
+            63.1797829740, 64.1555325180, 65.5146122400, 64.4691663000, 62.6022985500,
+            64.0709011800, 64.5936241500, 65.5581724875,
+        ], ("20210624", [63.7164452232, 64.3994699040, 63.0334205424, 63.8157765268], 7877029)),
+        ("SIRI", "ADJUSTED_LAST", 727785544, SIRI.into(), ("14:30", "21:00"), &SIRI_BARS, &[
+            64.7279731778, 65.3041865889, 65.8804, 63.3, 62.2, 61.7,
+        ], ("20220209", [65.2804, 65.9804, 65.2804, 65.6104], 1301961)),
+    ];
+    for (symbol, what_to_show, con_id, answer, (opens, closes), served, filed, (day, prices, volume)) in rows {
+        let (conn, mut peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        hmds.send_historical_request_ex(
+            42, con_id.into(), "", "1 M", "1 day", what_to_show, true, false, false,
+            symbol, "STK", "SMART", &mut conn, &mut hb, &shared,
+        );
+        let _ = read_frame(&mut peer);
+        let qid = hmds.pending_adjustments[0].0.clone();
+        hmds.process_hmds_message(&conadj_reply(&qid, &answer), &mut conn, &shared, &None, &mut hb);
+        let _ = read_frame(&mut peer);
+        let asked = hmds.pending_historical[0].0.clone();
+        let bars: String = served.iter().map(|(at, open, high, low, close, wap, volume)| format!(
+            "<Bar><time>{at}-{opens}:00</time><endTime>{at}-{closes}:00</endTime><open>{open}</open>\
+             <close>{close}</close><high>{high}</high><low>{low}</low><weightedAvg>{wap}</weightedAvg>\
+             <volume>{volume}</volume><count>1</count></Bar>",
+        )).collect();
+        let xml = format!(
+            "<ResultSetBar><id>{asked}</id><eoq>true</eoq><tz>US/Eastern</tz><Events>{bars}</Events>\
+             </ResultSetBar>",
+        );
+        hmds.process_hmds_message(
+            &[b"35=W\x016118=".as_slice(), xml.as_bytes(), b"\x01"].concat(), &mut conn, &shared, &None, &mut hb,
+        );
+
+        let series = shared.reference.drain_historical_data();
+        assert!(shared.reference.drain_historical_errors().is_empty(), "{symbol} {what_to_show}: not refused");
+        let bars = &series[0].1.bars;
+        let near = |got: f64, wanted: f64| (got - wanted).abs() < 1e-8;
+        let got: Vec<f64> = bars.iter().map(|b| b.close).collect();
+        assert!(
+            got.len() == filed.len() && got.iter().zip(filed).all(|(got, wanted)| near(*got, *wanted)),
+            "{symbol} {what_to_show}: closes {got:?}, wanted {filed:?}",
+        );
+        let bar = bars.iter().find(|b| b.time.starts_with(day)).unwrap();
+        assert!(
+            near(bar.open, prices[0]) && near(bar.high, prices[1]) && near(bar.low, prices[2])
+                && near(bar.wap, prices[3]) && bar.volume == volume,
+            "{symbol} {what_to_show}: the bar of {day} reads {bar:?}",
+        );
+    }
+}
+
 /// A TRADES request whose contract states an action this client cannot name
 /// is refused rather than handed back raw: an action it cannot classify is
 /// one it cannot say moves nothing, and folding without it is the wrong

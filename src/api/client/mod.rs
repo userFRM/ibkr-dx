@@ -1257,11 +1257,12 @@ impl EClient {
     /// contract that split ten for one, where the closes either side were
     /// 1208.88 and 121.79, and every close before it folds to a tenth.
     ///
-    /// A cash dividend is stated here and moves nothing, and neither does a
-    /// rights offer; a future rollover carries no value to move anything by.
-    /// That is the scale the adjusted series is stated in, not a gap in this
-    /// client: a series that took dividends off as well would be on a second
-    /// scale, and nothing the venue serves beside it would be on that one.
+    /// A cash dividend moves no price on that scale, and neither does a rights
+    /// offer; a future rollover carries no value to move anything by. A
+    /// series folded here is then multiplied, before each rights offer, by
+    /// the value the offer states, and ADJUSTED_LAST has each cash dividend
+    /// taken off the bars before it as well, as a gateway does; a factor for a
+    /// date alone states neither: see `historical_data`.
     ///
     /// Empty until the venue has stated them for the contract, which it does
     /// once per contract on a historical request.
