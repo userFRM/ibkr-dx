@@ -29,7 +29,7 @@ const CRYPTO_CASH_AND_SIZE: i32 = 10293;
 
 /// The order types a logon's lists name for orders at market, at a limit, on
 /// a stop and on a stop with a limit.
-const BASIC_TYPES: [&str; 4] = ["MKT", "LMT", "STP", "STPLMT"];
+pub(crate) const BASIC_TYPES: [&str; 4] = ["MKT", "LMT", "STP", "STPLMT"];
 
 /// What a gateway refuses, before sending it, of an order stated by the cash
 /// it spends, and of an order for a fund: the refusals it states, in the order
@@ -941,7 +941,7 @@ fn to_a_lot(shared: &SharedState, definition: &ContractDefinition, size: f64) ->
 /// entries separated by commas, each a name with a mark after a slash, a mark
 /// of 5 where none is stated; the first entry of the name counts unless
 /// marked 4.
-fn listed(list: &str, name: &str) -> bool {
+pub(crate) fn listed(list: &str, name: &str) -> bool {
     list.split(',')
         .map(|entry| {
             let mut parts = entry.split('/');
@@ -953,7 +953,7 @@ fn listed(list: &str, name: &str) -> bool {
 
 /// Whether the contract's own order types list an entry: the first under the
 /// name, unless marked 4.
-fn takes(definition: &ContractDefinition, name: &str) -> bool {
+pub(crate) fn takes(definition: &ContractDefinition, name: &str) -> bool {
     definition
         .order_type_rules
         .iter()
@@ -962,7 +962,7 @@ fn takes(definition: &ContractDefinition, name: &str) -> bool {
 }
 
 /// An order type as the logon's lists name it.
-fn list_name(kind: &str) -> &str {
+pub(crate) fn list_name(kind: &str) -> &str {
     match kind {
         "STP LMT" => "STPLMT",
         "STP PRT" => "STPPROT",

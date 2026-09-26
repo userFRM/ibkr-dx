@@ -4459,6 +4459,7 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
     };
     let pair = |order_types: &[&str]| ContractDefinition {
         order_types: order_types.iter().map(|t| t.to_string()).collect(),
+        order_type_rules: order_types.iter().map(|t| (t.to_string(), 1)).collect(),
         ..def(SecurityType::Forex, "EUR", "EUR.USD")
     };
     let crypto = ContractDefinition { trading_class: "BTC".into(), ..def(SecurityType::Crypto, "BTC", "BTC.USD") };
@@ -4526,12 +4527,14 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
         size_fraction: "", cancelling: false, told: Some((399, format!("Order Message: {told} {TIME}"))),
     };
     // A logon that takes shares for an amount on market and limit orders, and
-    // states the dollar to a cent.
+    // states the dollar to a cent. Its list names the order types.
     let by_amount = crate::bridge::MoneyOrderTerms {
-        order_types: "1,2".into(), product_defaults: "CASH,USD,25000,1000000,0.01;STK,AAPL,100,1000".into(),
+        order_types: "MKT,LMT".into(), product_defaults: "CASH,USD,25000,1000000,0.01;STK,AAPL,100,1000".into(),
         ..Default::default()
     };
-    let share_by_amount = ContractDefinition { order_types: vec!["CASHQTY".into()], ..share.clone() };
+    let share_by_amount = ContractDefinition {
+        order_types: vec!["CASHQTY".into()], order_type_rules: vec![("CASHQTY".into(), 1)], ..share.clone()
+    };
     let refused = |what, stated, told: Option<(i32, &str)>| Row {
         stated, refusals_told: true, told: told.map(|(code, text)| (code, text.to_string())),
         ..row(what, share.clone(), Side::Buy, 100.0, "")
@@ -4581,13 +4584,21 @@ fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it()
         Row { cash: 500.25, ..row("a share by amount the logon does not take", share_by_amount.clone(), Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS") },
         Row {
             cash: 500.25,
-            money: crate::bridge::MoneyOrderTerms { order_types: "1,2/4".into(), ..by_amount.clone() },
+            money: crate::bridge::MoneyOrderTerms { order_types: "MKT,LMT/4".into(), ..by_amount.clone() },
             ..row("a share by amount on a type the logon marks off", share_by_amount.clone(), Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS")
         },
         Row {
             cash: 500.25,
-            money: crate::bridge::MoneyOrderTerms { order_types: "1,2/4,2".into(), ..by_amount.clone() },
-            ..row("a share by amount on a type the logon names again unmarked", share_by_amount.clone(), Side::Buy, 0.0, "BUY 500.25 USD AAPL NASDAQ.NMS")
+            money: crate::bridge::MoneyOrderTerms { order_types: "MKT,LMT/4,LMT".into(), ..by_amount.clone() },
+            ..row("a share by amount on a type the logon marks off first", share_by_amount.clone(), Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS")
+        },
+        Row {
+            cash: 500.25, money: by_amount.clone(),
+            ..row(
+                "a share by amount whose contract marks amounts off",
+                ContractDefinition { order_type_rules: vec![("CASHQTY".into(), 4)], ..share_by_amount.clone() },
+                Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS",
+            )
         },
         Row {
             cash: 500.25, money: by_amount.clone(), algo: "Adaptive", told: None,

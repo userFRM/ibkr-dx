@@ -8,8 +8,9 @@
 //! one line.
 
 use crate::control::contracts::{ContractDefinition, MarketRule, OptionRight, SecurityType};
-use crate::client_core::cash_quantity::rounded_half_even;
+use crate::client_core::cash_quantity::{self, listed, rounded_half_even};
 use crate::types::Side;
+use crate::types::orders::ord_type_api_name;
 
 /// The code a gateway states a message about an order under.
 pub(super) const ORDER_MESSAGE: i32 = 399;
@@ -456,7 +457,7 @@ fn side_word(order: &Described<'_>) -> &'static str {
     // other currency, and is described from its side.
     let turned = order.contract.sec_type == SecurityType::Forex
         && order.cash.is_some()
-        && order.contract.order_types.iter().any(|t| t == "CASHQTY");
+        && cash_quantity::takes(order.contract, "CASHQTY");
     match (order.side, turned) {
         (Side::Buy, false) | (Side::Sell | Side::ShortSell, true) => "BUY",
         (Side::Sell, false) | (Side::Buy, true) => "SELL",
@@ -502,7 +503,7 @@ fn takes_money(order: &Described<'_>) -> Option<bool> {
     }
     let def = order.contract;
     let m = &order.money;
-    let takes = |name: &str| def.order_types.iter().any(|t| t == name);
+    let takes = |name: &str| cash_quantity::takes(def, name);
     let crypto = def.sec_type == SecurityType::Crypto;
     if crypto {
         return Some(true);
@@ -510,7 +511,7 @@ fn takes_money(order: &Described<'_>) -> Option<bool> {
     let share = def.sec_type == SecurityType::Stock;
     let pair_by_amount = def.sec_type == SecurityType::Forex && takes("CASHQTY");
     let in_parts = deals_in_fractions(order.rule);
-    let plain = |list: &str| ["1", "2", "3", "4"].iter().any(|code| listed(list, code));
+    let plain = |list: &str| cash_quantity::BASIC_TYPES.iter().any(|name| listed(list, name));
     let opened = m.crypto || ((m.account || m.refusals_told) && plain(m.types));
     let by_rule = (opened
         && ((!share && in_parts) || (share && def.min_size_stated && listed(m.types, "CASHQTY"))))
@@ -523,21 +524,9 @@ fn takes_money(order: &Described<'_>) -> Option<bool> {
         && (by_rule || by_logon);
     let typed = !order.order_type.is_empty()
         && order.order_type != "-1"
-        && (pair_by_amount || (share && listed(m.order_types, order.order_type)));
+        && (pair_by_amount
+            || (share && listed(m.order_types, cash_quantity::list_name(ord_type_api_name(order.order_type, "")))));
     Some((pair_by_amount || otherwise) && typed)
-}
-
-/// Whether a list the logon states names a type: names separated by commas,
-/// each with a mark after a slash; an entry of the name counts unless marked
-/// 4.
-fn listed(list: &str, name: &str) -> bool {
-    list.split(',')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            let mut parts = entry.split('/').filter(|part| !part.is_empty());
-            (parts.next().unwrap_or(""), parts.next().map_or(5, |mark| mark.parse().unwrap_or(0)))
-        })
-        .any(|(named, mark)| named == name && mark != 4)
 }
 
 /// An order for an amount of money as a gateway sizes it: the amount and its
