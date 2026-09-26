@@ -440,7 +440,9 @@ pub trait Wrapper {
     // ── Tick Req Params ──
 
     /// What a subscription was given: the increment its prices move in,
-    /// which venues it is served from, and which feed answered.
+    /// which venues it is served from, and which feed answered. Sent once per
+    /// request, with the first record it is served, as a gateway sends it; a
+    /// request served none is sent none.
     fn tick_req_params(&mut self, ticker_id: i64, min_tick: f64, bbo_exchange: &str, snapshot_permissions: i64) {}
 
     // ── Smart Components ──

@@ -5774,6 +5774,13 @@ mod depth_position_tests {
         assert!(shared.market.drain_subscription_failures().is_empty(), "the quote it rode beside is not reported refused");
     }
 
+    /// Serve the subscription acknowledged under `server_tag` one record,
+    /// which what its acknowledgements said goes out with.
+    fn serve_a_record(farm: &mut FarmState, context: &mut Context, shared: &SharedState, server_tag: u32) {
+        let record = super::decode_publish_tests::framed_35p(server_tag, &[(tick_decoder::O_BID_PRICE, 2, 100)]);
+        farm.handle_tick_data(&record, context, shared, &None);
+    }
+
     /// The increment the venue acknowledges a subscription with is kept for
     /// the caller, who hears it on `tick_req_params` as the reference client
     /// delivers it.
@@ -5794,6 +5801,7 @@ mod depth_position_tests {
             .expect("the quote's own request");
         let ack = format!("35=Q\x01777,{quote},0.01");
         farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        serve_a_record(&mut farm, &mut context, &shared, 777);
         assert_eq!(
             shared.market.drain_tick_req_params(),
             vec![(instrument, crate::bridge::TickReqParams { min_tick: 0.01, ..Default::default() })],
@@ -5824,6 +5832,7 @@ mod depth_position_tests {
             .expect("the quote's own request");
         let ack = format!("35=Q\x0133082,{quote},0.01,0,3,9c,,1,1");
         farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        serve_a_record(&mut farm, &mut context, &shared, 33082);
         assert_eq!(
             shared.market.drain_tick_req_params(),
             vec![(instrument, crate::bridge::TickReqParams {
@@ -5834,9 +5843,11 @@ mod depth_position_tests {
 
     /// The bid/ask and last entries each receive an acknowledgement. Generic
     /// entries have their own acknowledgements beside them, and a request is
-    /// told its parameters once across all of those replies.
+    /// told its parameters once across all of those replies, as a gateway
+    /// tells it: with the first record it is served, ahead of that record's
+    /// ticks, and not at all before one.
     #[test]
-    fn paired_quote_acknowledgements_state_tick_req_params_once() {
+    fn a_request_is_told_its_parameters_once_with_its_first_record() {
         for reverse in [false, true] {
             let (client, _rx, shared) = crate::api::client::tests::test_client();
             let mut farm = FarmState::new();
@@ -5861,9 +5872,16 @@ mod depth_position_tests {
                 farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
                 client.process_msgs(&mut wrapper);
             }
+            assert!(wrapper.events.is_empty(), "nothing before a record is served: {:?}", wrapper.events);
+            for _ in 0..2 {
+                serve_a_record(&mut farm, &mut context, &shared, 777);
+                client.process_msgs(&mut wrapper);
+            }
+            assert_eq!(wrapper.events.first().map(String::as_str), Some("tick_req_params:1:0.01:9c0001:3"),
+                "{:?}", wrapper.events);
             assert_eq!(wrapper.events.iter().filter(|e| e.starts_with("tick_req_params:")).count(), 1,
                 "{:?}", wrapper.events);
-            assert!(wrapper.events.iter().any(|e| e == "tick_req_params:1:0.01:9c0001:3"));
+            assert!(wrapper.events.iter().any(|e| e.starts_with("tick_price:1:1:")), "{:?}", wrapper.events);
             assert!(farm.md_req_to_instrument.is_empty(), "every acknowledgement was consumed");
         }
     }
@@ -5895,6 +5913,7 @@ mod depth_position_tests {
             for acknowledgement in acknowledgements {
                 farm.handle_subscription_ack(acknowledgement.as_bytes(), &mut context, &shared);
             }
+            serve_a_record(&mut farm, &mut context, &shared, 57924);
             let mut wrapper = crate::api::wrapper::tests::RecordingWrapper::default();
             client.process_msgs(&mut wrapper);
             let parameters: Vec<_> = wrapper.events.iter()
@@ -5926,6 +5945,7 @@ mod depth_position_tests {
                 .expect("the quote's own request");
             let ack = format!("35=Q\x0133082,{quote},0.01,0,{fifth},{sixth},,1,1");
             farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            serve_a_record(&mut farm, &mut context, &shared, 33082);
             let (_, p) = shared.market.drain_tick_req_params().pop().expect("stated");
             (p.snapshot_permissions, p.bbo_exchange)
         };
@@ -7475,15 +7495,16 @@ mod frozen_tests {
     const STOCK_FROZEN: &str = "383d4f01393d303130310133353d500102780000ab0116008562343d6c00a76ab70afea8000000ab01b20083380000ab011e008338a70135283c460085774e0082adfc0a661b4986cd84f060000000ab010600855a2502580e0085642d00f0580001383334393d463335433730433901";
     const STOCK_LIVE: &str = "383d4f01393d303038350133353d500101f88000aafd1e008338a70135283c44004c00540060000000aafd14e434006c00a400ac00d8810000aafb04e424000ce42c003c0084008c0058008000aafdb00001383334393d313331383136313401";
 
-    /// Where the market's status is watched, what the acknowledgements state
-    /// of the contract is stated with the first record served, as a gateway
-    /// states it. With the status arriving before the live record, as it did
-    /// on the stock above, that is the frozen record and the contract is in
-    /// the frozen state: permission 0, where the live acknowledgement stated
-    /// 3. With the live record first, it is stated with that record.
+    /// What the acknowledgements state of the contract goes out with the
+    /// first record served, as a gateway states it. With the status arriving
+    /// before the live record, as it did on the stock above, that is the
+    /// frozen record and the contract is in the frozen state: permission 0,
+    /// where the live acknowledgement stated 3. With no frozen record before
+    /// the market opens, it is the live quote kept up and served again, out of
+    /// the frozen state.
     #[test]
-    fn a_watched_request_states_its_parameters_with_the_first_record_served() {
-        for status_first in [true, false] {
+    fn a_closed_market_states_the_parameters_with_the_record_it_serves() {
+        for opens_first in [false, true] {
             let mut farm = FarmState::new();
             let mut context = Context::new();
             let shared = SharedState::new();
@@ -7502,19 +7523,20 @@ mod frozen_tests {
             }
             farm.handle_ticker_setup(b"35=L\x01265598,0.01,43773,,1", &mut context, &shared);
             farm.handle_subscription_ack(format!("35=Q\x0143776,{watch},0.01,0,0,9c,,0,1").as_bytes(), &mut context, &shared);
-            let stated = |shared: &SharedState| -> Vec<i64> {
-                shared.market.drain_tick_req_params().iter().map(|(_, p)| p.snapshot_permissions).collect()
-            };
-            if !status_first {
-                farm.process_farm_message(&captured(STOCK_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
-                assert_eq!(stated(&shared), [3], "with the live record");
-                continue;
-            }
             farm.process_farm_message(&captured(STOCK_STATUS_CLOSED), &mut conn, &mut context, &shared, &None, &mut hb);
             for id in numbers(&entries(&super::drain_inner(&mut peer)), "1", Some("2")) {
                 farm.handle_subscription_ack(format!("35=Q\x0143777,{id},0.01,2,3,9c,,0,1").as_bytes(), &mut context, &shared);
             }
-            assert!(stated(&shared).is_empty(), "not before a record is served");
+            let stated = |shared: &SharedState| -> Vec<i64> {
+                shared.market.drain_tick_req_params().iter().map(|(_, p)| p.snapshot_permissions).collect()
+            };
+            if opens_first {
+                farm.process_farm_message(&captured(STOCK_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
+                assert!(stated(&shared).is_empty(), "the live quote is kept up, not served");
+                farm.process_farm_message(&status(43776, 2), &mut conn, &mut context, &shared, &None, &mut hb);
+                assert_eq!(stated(&shared), [3], "with the kept quote, served again");
+                continue;
+            }
             farm.process_farm_message(&captured(STOCK_FROZEN), &mut conn, &mut context, &shared, &None, &mut hb);
             farm.process_farm_message(&captured(STOCK_LIVE), &mut conn, &mut context, &shared, &None, &mut hb);
             assert_eq!(stated(&shared), [0], "with the frozen record, in the frozen state");

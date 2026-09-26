@@ -13,17 +13,18 @@ ask and last.
 ## What comes back
 
 `tick_req_params` (`tickReqParams` in Python) states the contract's price
-increment, exchange and snapshot permission once per request. It reads the
-latest stored parameters when the callback is delivered. Where the venue names
+increment, exchange and snapshot permission once per request, with the first
+record the request is served and ahead of its ticks, as a gateway states it; a
+request served no record is told nothing. It reads the latest stored
+parameters when the callback is delivered. Where the venue names
 no best-bid-and-offer exchange, as for a currency, a crypto or a bond, the
 exchange is empty. The permission is 0 there, on a bond, a bill, a
 fixed-income contract or a combination, and while the frozen quote is served in
-place of the live one, whatever the venue stated, as a gateway states it. Where
-the market's status is watched, the parameters are stated with the first record
-the request is served, as a gateway states them: on a closed market that is the
-frozen quote's, so the permission is 0. A follower sharing the subscription
-gets its own callback; cancelling and reusing its request id starts a new
-request. A request cancelled before delivery receives no callback.
+place of the live one, whatever the venue stated, as a gateway states it. On a
+closed market whose frozen quote is served, that is the record the parameters
+go out with, so the permission is 0. A follower sharing the subscription gets
+its own callback; cancelling and reusing its request id starts a new request. A
+request cancelled before delivery receives no callback.
 
 `tick_price` and `tick_size` for as long as the subscription runs.
 

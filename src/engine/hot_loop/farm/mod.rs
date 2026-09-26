@@ -1204,6 +1204,9 @@ pub(crate) struct FarmState {
     status_watches: std::collections::HashMap<InstrumentId, frozen::StatusWatch>,
     /// The statuses read from the last message, for acting on once it is read.
     statuses_stated: Vec<(InstrumentId, bool)>,
+    /// The minimum tick a subscription's acknowledgement stated, while what it
+    /// says of the contract waits for the first record served.
+    params_due: std::collections::HashMap<InstrumentId, f64>,
     /// Chargeable snapshots answered before their contract's map of venues
     /// was stated: the contract, the answer, the moment it was read on the
     /// venue's clock, and when it arrived.
@@ -2432,6 +2435,7 @@ impl FarmState {
             news_subscriptions: Vec::new(),
             generic_tick_tags: Vec::new(),
             status_watches: std::collections::HashMap::new(),
+            params_due: std::collections::HashMap::new(),
             statuses_stated: Vec::new(),
             snapshot_answers_held: Vec::new(),
             chain_series_withdrawn: Vec::new(),
@@ -2698,6 +2702,9 @@ impl FarmState {
                 continue;
             }
             let held = route == frozen::Route::Hold;
+            if !held && !self.params_due.is_empty() {
+                self.state_params_due(instrument, shared);
+            }
 
             let close_attributes = match (tick.layout, tick.tick_type) {
                 (tick_decoder::RecordLayout::Ordinary, 12)
@@ -3136,12 +3143,10 @@ impl FarmState {
         }
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
-        // Where the market's status is watched these wait for a record to be
-        // served, which a gateway states them with: by then the contract may
-        // be in the frozen state.
-        if !self.holds_request_params(instrument, min_tick) {
-            self.state_request_params(instrument, min_tick, shared);
-        }
+        // What it says of the contract waits for the first record served,
+        // which a gateway states it with: a request never served one is told
+        // nothing, and by then the contract may be in the frozen state.
+        self.params_due.insert(instrument, min_tick);
         // The venue has taken it, so whatever it said the last time it would
         // not is no longer what a request joining this contract is owed.
         //
@@ -3172,6 +3177,14 @@ impl FarmState {
             context.market.set_size_tick(instrument, size_tick);
         }
         log::info!("Subscribed instrument {instrument} -> server_tag {server_tag}, minTick {min_tick}");
+    }
+
+    /// State what the acknowledgements said of the contract, where it waits
+    /// for the record now served.
+    fn state_params_due(&mut self, instrument: InstrumentId, shared: &SharedState) {
+        if let Some(min_tick) = self.params_due.remove(&instrument) {
+            self.state_request_params(instrument, min_tick, shared);
+        }
     }
 
     /// State what an acknowledgement says of the contract, for `tick_req_params`.
@@ -3992,6 +4005,7 @@ impl FarmState {
         }
         self.subscription_asked_on.remove(&instrument);
         self.withdraw_status_watch(instrument, farm_conn, hb);
+        self.params_due.remove(&instrument);
         let delayed = self.delayed_subscriptions.remove(&instrument);
         // The occupancy stays until the slot itself goes back: the release that
         // follows names it, and cleared here that release named nothing —
@@ -5232,6 +5246,7 @@ impl FarmState {
         self.generic_tick_tags.clear();
         self.rt_volume_totals.clear();
         self.reset_status_watches(shared);
+        self.params_due.clear();
         // Keyed the same way, and left behind they are never reachable again:
         // what removes an entry looks it up by an id the reconnect has already
         // replaced, so nothing afterwards names the old one. Both are scanned

@@ -485,7 +485,9 @@ impl EWrapper {
     // ── Tier 3: Tick Req Params ──
 
     /// What a subscription was given: the increment its prices move in,
-    /// which venues it is served from, and which feed answered.
+    /// which venues it is served from, and which feed answered. Sent once per
+    /// request, with the first record it is served, as a gateway sends it; a
+    /// request served none is sent none.
     fn tick_req_params(&self, _ticker_id: i64, _min_tick: f64, _bbo_exchange: &str, _snapshot_permissions: i64) {}
 
     // ── Tier 3: Bond Contract Details ──

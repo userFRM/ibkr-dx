@@ -65,9 +65,6 @@ pub(super) struct StatusWatch {
     /// The quote being served before, kept up while the program is served
     /// another.
     held: Option<Held>,
-    /// The minimum tick an acknowledgement stated, while what it says of the
-    /// contract waits for a record to be served.
-    params_due: Option<f64>,
 }
 
 /// A frozen quote asked for: its feed, its two requests, and the numbers the
@@ -492,6 +489,9 @@ impl FarmState {
         watch.shows_frozen = frozen;
         watch.shows_delayed_frozen = delayed_frozen;
         let after = self.serves_its_own(instrument);
+        if !before && after {
+            self.state_params_due(instrument, shared);
+        }
         let Some(watch) = self.status_watches.get_mut(&instrument) else { return };
         let (quote, clock) = context.market.quote_and_clock_mut(instrument);
         if before && !after {
@@ -605,7 +605,7 @@ impl FarmState {
         let Some(watch) = self.status_watches.get(&instrument) else { return Route::Serve };
         let feed =
             watch.pairs.iter().find(|pair| pair.tags.contains(&server_tag)).map(|pair| pair.feed);
-        let route = match feed {
+        match feed {
             None if self.serves_its_own(instrument) => Route::Serve,
             None => Route::Hold,
             Some(FROZEN_FEED) if watch.shows_frozen => Route::Serve,
@@ -619,23 +619,7 @@ impl FarmState {
                 Route::Serve
             }
             Some(_) => Route::Drop,
-        };
-        if route == Route::Serve
-            && let Some(min_tick) =
-                self.status_watches.get_mut(&instrument).and_then(|watch| watch.params_due.take())
-        {
-            self.state_request_params(instrument, min_tick, shared);
         }
-        route
-    }
-
-    /// Hold what an acknowledgement says of the contract for the next record
-    /// served, where the market's status is watched: a gateway states it with
-    /// the first record it serves the request.
-    pub(super) fn holds_request_params(&mut self, instrument: InstrumentId, min_tick: f64) -> bool {
-        let Some(watch) = self.status_watches.get_mut(&instrument) else { return false };
-        watch.params_due = Some(min_tick);
-        true
     }
 
     /// The quote kept up while it is not served, where one is.
@@ -674,7 +658,6 @@ impl FarmState {
             watch.shows_delayed_frozen = false;
             watch.armed = false;
             watch.held = None;
-            watch.params_due = None;
         }
     }
 }

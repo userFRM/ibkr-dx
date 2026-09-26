@@ -967,17 +967,19 @@ login.
 
 Probably not. An empty result means one of two things: the venue holds nothing
 for that contract, or the account is not entitled to that series. Such a
-subscription is acknowledged and then nothing is stated, with no error to read.
-`tick_req_params` fires once per request, including a follower sharing another
-request's subscription. It reads the contract's latest stored parameters when
-delivered: the price increment, the exchange the best bid and offer come from,
+subscription is acknowledged and then nothing is stated, with no error to read,
+not even `tick_req_params`: it fires once per request, including a follower
+sharing another request's subscription, with the first record the request is
+served, as a gateway sends it. It reads the contract's latest stored parameters
+when delivered: the price increment, the exchange the best bid and offer come from,
 and the permission number the venue gives the request (0
 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4
 snapshots not available through the API), which is 0 where the venue names no
 such exchange, as for a currency or a crypto, on a bond, a bill, a
 fixed-income contract or a combination, and while the frozen quote is served in
-place of the live one, whatever the venue stated, as a gateway states it. Whether that number differs between a series the account is
-not entitled to and one with nothing to say has not been seen yet, and a
+place of the live one, whatever the venue stated, as a gateway states it.
+Whether that number differs between a series the account is not entitled to
+and one with nothing to say has not been seen yet, and a
 gateway may report 0 for some other contracts whatever the venue stated; until
 a capture settles both, the subscription list in account management is what
 separates them. See

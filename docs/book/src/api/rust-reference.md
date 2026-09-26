@@ -3634,7 +3634,7 @@ Every exchange the venue names, in the two sections it names them in: shares and
 
 #### `tick_req_params`
 
-What a subscription was given: the increment its prices move in, which venues it is served from, and which feed answered.
+What a subscription was given: the increment its prices move in, which venues it is served from, and which feed answered. Sent once per request, with the first record it is served, as a gateway sends it; a request served none is sent none.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
