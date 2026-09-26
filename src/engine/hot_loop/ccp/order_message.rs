@@ -8,6 +8,7 @@
 //! one line.
 
 use crate::control::contracts::{ContractDefinition, MarketRule, OptionRight, SecurityType};
+use crate::client_core::cash_quantity::rounded_half_even;
 use crate::types::Side;
 
 /// The code a gateway states a message about an order under.
@@ -720,35 +721,6 @@ fn grouped(value: &str, places: usize) -> String {
     out
 }
 
-/// A decimal's whole and fractional digits rounded half to even to `places`,
-/// the fraction's trailing zeros dropped.
-fn rounded_half_even(whole: &str, fraction: &str, places: usize) -> (String, String) {
-    if fraction.len() <= places {
-        return (whole.to_string(), fraction.trim_end_matches('0').to_string());
-    }
-    let kept = &fraction[..places];
-    let dropped = &fraction[places..];
-    let first = dropped.as_bytes()[0];
-    let beyond = dropped[1..].bytes().any(|b| b != b'0');
-    let mut digits: Vec<u8> = format!("0{whole}{kept}").into_bytes();
-    let last_odd = digits.last().is_some_and(|d| (d - b'0') % 2 == 1);
-    let up = first > b'5' || (first == b'5' && (beyond || last_odd));
-    if up {
-        let mut i = digits.len();
-        loop {
-            i -= 1;
-            if digits[i] == b'9' {
-                digits[i] = b'0';
-            } else {
-                digits[i] += 1;
-                break;
-            }
-        }
-    }
-    let text = String::from_utf8(digits).unwrap_or_default();
-    let (w, f) = text.split_at(text.len() - places);
-    (w.to_string(), f.trim_end_matches('0').to_string())
-}
 
 /// A currency pair's size as a gateway writes it: thousands as `K` and
 /// millions as `M` where the rest divides out, a tenth of either as `.1`, and

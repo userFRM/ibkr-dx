@@ -655,6 +655,63 @@ under 10212 with the venue's price-management question where the rejection is
 a price cap. A pattern-day-trader rejection is not: a gateway shows it in its
 own window.
 
+## An order stated in cash
+
+An order that states `cashQty` goes with the amount on tag 152. Where the
+venue works the size out from it — a crypto's always, a share's where the
+logon offers `DISABLECASHQTYOVEREST` and a currency pair's where it offers
+`DISABLEFXCASHQTYOVEREST` — it states no size, as a gateway sends it, and
+the venue states the size it worked out on its reports; an order it cannot
+size is refused, *"Order size would be zero"*. A fund is bought by its
+amount and states a size of one.
+
+A gateway refuses, before sending anything, an order that cannot carry an
+amount, and this client refuses it the same way, in the same order:
+
+| | |
+| --- | --- |
+| 10292 | *"Stop Buy order is not allowed for this instrument"*: a stop to buy a crypto |
+| 10318 | *"This order doesn't support fractional quantity trading"*: a currency pair stating part of a unit as its size, or an amount with parts of a unit where its currency moves in whole units or the logon waives the currency's least amount (`NOCASHQTYPRECISION`) |
+| 10317 | *"The Cash Quantity size of … does not conform to minimum variation of … for this contract"*: an amount that is not a whole number of its currency's least amount; a fund bought by an amount with more places than the fund's own least amount, where the logon offers `MFCASHQTYINCR` |
+| 10244 | *"Cash Quantity cannot be used for this order"*: a crypto as a stop, a limit or a sale at market; a currency pair whose order types do not list `CASHQTY`; a fund sold by an amount; a share unless it goes through an algorithm, on an order type the logon takes amounts on, allocated only where the logon permits it, on a contract the venue sizes by an amount; any other contract |
+| 10203 | a fund bought with a quantity, or without an amount |
+| 10204 | a fund sold with an amount, or without a quantity |
+| 10207 | a fund sold by a size of more than three places |
+| 10206 | an amount of more than two places, where the currency's least amount is waived or is a whole unit |
+| 10293 | *"Cryptocurrency Cash Quantity order cannot specify size"*: a crypto stating a size beside its amount |
+| 10241 | a replace of an order stated by an amount, where the account may trade crypto or the logon takes amounts on market, limit, stop or stop-limit orders |
+
+A currency's least amount is the one the logon's product defaults state for
+it under `CASH` (a hundredth where they state none, a yen whole); a gateway
+holds its own list of thirteen currencies until the logon states any, and a
+currency the logon states a fixed rate for moves in hundredths. A gateway
+states 10207, 10206 and the 10317 on an amount without stopping its checks,
+and drops the order all the same: only the first of them is stated, with
+10293 beside it where a crypto states a size.
+
+The size a gateway works out for the order is the order's size, which it
+reports until the venue states its own, and is the size tag 38 states where
+the venue does not work it out. A size the caller states passes through on a
+currency pair, and on any other contract the venue sizes by an amount. The
+amount converts at the market's midpoint, last trade or close, then at the
+record as it stands, then, for a currency pair, at the account's rate between
+its two currencies; a buy no higher than its limit and a sale no lower. On a
+contract dealt in parts of a unit the size is the amount over the order's own
+price — its limit, stop, trailing stop or starting price, or the market's for
+an order at market — rounded to the places of the finest size, and a gateway
+keeps fewer places the larger the size's whole part; otherwise it is rounded
+up to a whole unit where parts of a unit are not open to the order, and to a
+lot where the order's venue deals in them. Where the venue does not work the
+size out, it is raised by the margin the account preset states (a quarter
+where it states none). A replace goes with the caller's size, and a gateway
+then resizes its own record of an order whose size it worked out to the new
+amount.
+
+A share's order through an algorithm takes an amount only where the
+algorithm's own definition names one. Those definitions come from the venue
+on requests this client does not make, so such an order is sent and the
+venue decides.
+
 ## What the account may trade
 
 The venue states at logon which security types this account may trade, and

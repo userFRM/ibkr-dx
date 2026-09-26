@@ -549,6 +549,9 @@ pub struct ContractDefinition {
     pub size_increment: f64,
     /// What the venue suggests trading in.
     pub suggested_size_increment: f64,
+    /// The size the venue states apart from any rule, tag 6581, as stated;
+    /// nought where it states none.
+    pub suggested_size: f64,
     /// How many decimal places its prices carry.
     pub last_price_precision: f64,
     /// How many its sizes carry.
@@ -675,6 +678,7 @@ impl Default for ContractDefinition {
             issue_date: String::new(),
             size_increment: 0.0,
             suggested_size_increment: 0.0,
+            suggested_size: 0.0,
             last_price_precision: 0.0,
             last_size_precision: 0.0,
             settlement_method: String::new(),
@@ -1169,6 +1173,7 @@ fn parse_secdef_record(
         && suggested > 0.0
     {
         def.suggested_size_increment = def.suggested_size_increment.max(suggested);
+        def.suggested_size = suggested;
     }
     if let Some(v) = tags.get(&TAG_MULTIPLIER) {
         // A multiplier that does not read is not the multiplier one. This is

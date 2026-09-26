@@ -89,6 +89,9 @@ pub struct AttachedPreset {
     pub primary_reverse_bid_ask: bool,
     /// A stated fractional share default selects the parent's exact quantity.
     pub profit_uses_exact_parent_quantity: bool,
+    /// The percentage a size worked out from an amount is raised by, field
+    /// 4014; a whole number, and the largest one where the field is not.
+    pub cash_estimate_percent: i32,
 }
 
 impl Default for AttachedPreset {
@@ -125,6 +128,7 @@ impl Default for AttachedPreset {
             },
             primary_reverse_bid_ask: true,
             profit_uses_exact_parent_quantity: false,
+            cash_estimate_percent: 25,
         }
     }
 }
@@ -161,6 +165,7 @@ impl AttachedPreset {
                 8339 => preset.primary_use_price_mgmt_algo = value == "1",
                 6965 => preset.primary_auto_cancel_parent = value == "1",
                 4200 => precise_quantity = Some(read_double(&value.replace(',', ""))),
+                4014 => preset.cash_estimate_percent = read_integer(value),
                 _ => {}
             }
         }

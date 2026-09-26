@@ -80,6 +80,24 @@ impl Loading {
         Self { future, requests, names: Vec::new() }
     }
 
+    /// The account preset alone, for a contract whose definition is held.
+    pub(super) fn preset(shared: Arc<SharedState>, contract: Contract, deadline: Instant) -> Self {
+        let (send, requests) = mpsc::channel();
+        let future = Box::pin(async move {
+            let under = contract_definition(&shared, &contract).map(|definition| definition.under_sec_type);
+            let preset = attached_loading::load_attached_preset(
+                &shared,
+                &send,
+                &contract,
+                under.as_deref().unwrap_or_default(),
+                deadline,
+            )
+            .await?;
+            Ok((preset, false))
+        });
+        Self { future, requests, names: Vec::new() }
+    }
+
     pub(super) fn poll(&mut self, engine: &mut HotLoop) -> Poll<Loaded> {
         for (mut contract, mut lookup, answer) in std::mem::take(&mut self.names) {
             match engine.name_order_contract(&mut contract, &mut lookup) {

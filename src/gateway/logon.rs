@@ -83,8 +83,9 @@ pub(super) struct LogonAck {
     pub product: String,
     /// What the logon states about orders for an amount of money: the
     /// security types and order types it takes them on (tags 8334 and 8351),
-    /// whether the account takes them (tag 8335), and each product's default
-    /// size and precision (tag 6052).
+    /// whether the account takes them (tag 8335), each product's default
+    /// size and precision (tag 6052), and the fixed rates it states for
+    /// currencies (tag 6592).
     pub money_orders: crate::bridge::MoneyOrderTerms,
     /// The part of a unit a size is shown to on a contract that states no
     /// least size of its own, tag 8079.
@@ -369,6 +370,7 @@ impl LogonAck {
             if let Some(v) = fields.get(&8351) { keep_first(&mut ack.money_orders.order_types, v, "8351"); }
             if let Some(v) = fields.get(&8335) { ack.money_orders.account |= v.contains('1'); }
             if let Some(v) = fields.get(&6052) { keep_first(&mut ack.money_orders.product_defaults, v, "6052"); }
+            if let Some(v) = fields.get(&6592) { keep_first(&mut ack.money_orders.fixed_rates, v, "6592"); }
             if let Some(v) = fields.get(&8079) { keep_first(&mut ack.size_fraction, v, "8079"); }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte
             // search.

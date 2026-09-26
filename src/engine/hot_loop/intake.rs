@@ -12,7 +12,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::bridge::{OrderBook, Record, TakenOrder};
-use crate::client_core::ClientCore;
+use crate::client_core::{ClientCore, cash_quantity};
+use crate::control::contracts::ContractDefinition;
 use crate::error_codes::{
     DUPLICATE_ORDER_ID, NO_SUCH_ORDER, NOT_CANCELLABLE, ORDER_DOES_NOT_MATCH, Refusal,
 };
@@ -90,6 +91,8 @@ struct Placed {
     order: api::Order,
     instrument: InstrumentId,
     contract: api::Contract,
+    /// The margin its size was worked out from an amount at, where it was.
+    sized_at: Option<f64>,
 }
 
 /// An order command not yet taken, and the lookup naming its contract, once
@@ -251,7 +254,7 @@ impl Intake {
         order: api::Order,
         instrument: InstrumentId,
     ) {
-        self.placed.insert(order_id, Placed { order, instrument, contract: api::Contract::default() });
+        self.placed.insert(order_id, Placed { order, instrument, contract: api::Contract::default(), sized_at: None });
     }
 }
 
@@ -400,6 +403,53 @@ impl HotLoop {
             i64::from(why.code),
             why.message,
         );
+    }
+
+    /// The size a gateway works out for an order stated by an amount, from
+    /// its record of the contract's market and the account's exchange rates.
+    fn cash_estimate(&self, order: &api::Order, contract: &api::Contract, definition: &ContractDefinition, margin: f64) -> f64 {
+        let ledger: Vec<(String, f64)> = self
+            .shared
+            .portfolio_for(&order.account)
+            .stated_account_values()
+            .into_iter()
+            .filter(|(ledger, key, ..)| *ledger && key == "ExchangeRate")
+            .filter_map(|(_, _, rate, currency)| Some((currency, rate.parse().ok()?)))
+            .collect();
+        let cross = cash_quantity::cross_rate(&ledger, &self.shared.reference.money_orders().fixed_rates, definition);
+        let market = self.cash_market(order, contract, definition);
+        cash_quantity::estimate(&self.shared, order, &contract.exchange, definition, &market, cross, margin)
+    }
+
+    /// A gateway's record of a contract's market, as this session holds it:
+    /// the instrument it reads the contract under, the account's holding of
+    /// it and the contract's rule.
+    fn cash_market(&self, order: &api::Order, contract: &api::Contract, definition: &ContractDefinition) -> cash_quantity::Market {
+        let con_id = contract.con_id;
+        let instrument = self
+            .context
+            .market
+            .instrument_by_con_id(con_id)
+            .or_else(|| self.shared.market.attached_quote_instrument(con_id, &contract.exchange));
+        let negative = definition
+            .market_rule_id
+            .and_then(|id| self.shared.reference.market_rule(id as i32))
+            .is_some_and(|rule| rule.negative_prices);
+        let holding = self
+            .shared
+            .portfolio_for(&order.account)
+            .position_info(con_id)
+            .filter(|held| held.market_price_stated)
+            .map(|held| held.market_price as f64 / crate::types::PRICE_SCALE as f64);
+        match instrument {
+            Some(instrument) => cash_quantity::Market::held(
+                &self.shared.market.pricing_quote_views(instrument),
+                self.context.quote(instrument).halted == 1,
+                holding,
+                negative,
+            ),
+            None => cash_quantity::Market { holding, negative, ..Default::default() },
+        }
     }
 
     /// A number the wire cannot carry names a different contract.
@@ -576,6 +626,30 @@ impl HotLoop {
                 return Step::Done;
             }
         }
+        // An order stated by the cash it spends, or one for a fund, is checked
+        // as a gateway checks it before sending it. The contract's definition
+        // decides, so one not yet held is asked for.
+        if !existing && p.contract.con_id != 0 && (cash_quantity::stated_amount(&p.order).is_some() || p.contract.sec_type == "FUND") {
+            if attached_orders::contract_definition(&self.shared, &p.contract).is_none() {
+                match self.name_order_contract(&mut p.contract.clone(), lookup) {
+                    Ok(true) => {}
+                    Ok(false) => return Step::Waits,
+                    Err(why) => {
+                        self.refuse_order(api_id, op, why);
+                        return Step::Done;
+                    }
+                }
+            }
+            let refused = attached_orders::contract_definition(&self.shared, &p.contract)
+                .map(|definition| cash_quantity::refusals(&self.shared, &p.order, &definition))
+                .unwrap_or_default();
+            if !refused.is_empty() {
+                for why in refused {
+                    self.refuse_order(api_id, op, why);
+                }
+                return Step::Done;
+            }
+        }
         let loaded = if attaching && !existing {
             if loading.is_none() {
                 let (logon_accounts, advisor) = self.shared.reference.login();
@@ -597,6 +671,39 @@ impl HotLoop {
                 }
             }
         } else { None };
+        let mut sized_at = None;
+        // An order stated by the cash it spends is given the size a gateway
+        // works out for it: its size until the venue states one, and what tag
+        // 38 states where the venue does not size it. There the size is
+        // raised by the account preset's margin, which is loaded first.
+        if !existing
+            && let Some(definition) = attached_orders::contract_definition(&self.shared, &p.contract)
+            && cash_quantity::works_out_size(&self.shared, &p.order, &definition)
+        {
+            let margin = if cash_quantity::sized_by_the_venue(&self.shared, &p.contract.sec_type, true) {
+                1.0
+            } else if let Some((preset, _)) = &loaded {
+                cash_quantity::margin(preset.cash_estimate_percent)
+            } else {
+                let preset = loading.get_or_insert_with(|| {
+                    super::attachments::Loading::preset(self.shared.clone(), p.contract.clone(), deadline)
+                });
+                match preset.poll(self) {
+                    std::task::Poll::Pending => return Step::Waits,
+                    std::task::Poll::Ready(Err(why)) => {
+                        *loading = None;
+                        self.refuse_order(api_id, op, why);
+                        return Step::Done;
+                    }
+                    std::task::Poll::Ready(Ok((preset, _))) => {
+                        *loading = None;
+                        cash_quantity::margin(preset.cash_estimate_percent)
+                    }
+                }
+            };
+            p.order.total_quantity = self.cash_estimate(&p.order, &p.contract, &definition, margin);
+            sized_at = Some(margin);
+        }
         if let Some(why) = Self::beyond_the_wire(p.contract.con_id) {
             self.refuse_order(api_id, op, why);
             return Step::Done;
@@ -692,8 +799,10 @@ impl HotLoop {
                 .get(&order_id)
                 .map(|placed| placed.order.clone())
                 .or_else(|| self.shared.orders.get_order_info(order_id).map(|info| info.order));
-            if let Some(refusal) =
-                ClientCore::modify_refusal_of(resting, &p.order, Some(&self.shared))
+            if let Some(refusal) = cash_quantity::modify_refusal(
+                &self.shared, p.contract.sec_type == "FUND", resting.as_ref(), &p.order,
+            )
+            .or_else(|| ClientCore::modify_refusal_of(resting, &p.order, Some(&self.shared)))
             {
                 self.refuse_order(api_id, OrderOp::Modify, refusal);
                 return Step::Done;
@@ -781,6 +890,28 @@ impl HotLoop {
             // order a program places.
             attrs.attached_mut().api_identity = Some((api_id, p.order.client_id));
         }
+        // A replace goes out with the caller's size. Where the working order's
+        // size was worked out from its amount and the replace changes the
+        // amount, a gateway then resizes its own record of the order.
+        if replacing
+            && let Some(margin) = self.intake.placed.get(&order_id).and_then(|working| {
+                let cents = |cash: f64| (cash * 1e4).round();
+                working.sized_at.filter(|_| cents(working.order.cash_qty) != cents(p.order.cash_qty))
+            })
+        {
+            sized_at = Some(margin);
+            if let Some(definition) = attached_orders::contract_definition(&self.shared, &p.contract) {
+                let filled = self.context.order(order_id).map_or(0.0, |held| crate::types::qty_to_f64(held.filled));
+                let market = self.cash_market(&p.order, &p.contract, &definition);
+                if let Some(size) = cash_quantity::resized(
+                    &self.shared, &p.order, &p.contract.exchange, &definition, &market, margin, filled,
+                ) {
+                    p.order.total_quantity = size;
+                }
+            }
+        } else if replacing {
+            sized_at = self.intake.placed.get(&order_id).and_then(|working| working.sized_at);
+        }
         self.remember_attachment(order_id, api_id, p.order.client_id, &command, p.order.what_if);
         // The caller's side records the order before anything the venue says
         // about it: the record stands ahead of the order in the session's
@@ -803,7 +934,7 @@ impl HotLoop {
                 order.oca_group = before.order.oca_group.clone();
                 order.oca_type = before.order.oca_type;
             }
-            self.intake.placed.insert(order_id, Placed { order, instrument, contract: p.contract.clone() });
+            self.intake.placed.insert(order_id, Placed { order, instrument, contract: p.contract.clone(), sized_at });
         }
 
         if self.shared.orders.is_waiting_attached(order_id) {
@@ -838,7 +969,7 @@ impl HotLoop {
                 self.shared.push_call_record(Record::OrderBook(OrderBook::Taken(Box::new(TakenOrder {
                     order_id: child.wire_id, contract: p.contract.clone(), order: child.order.clone(), instrument, restated: false,
                 }))));
-                self.intake.placed.insert(child.wire_id, Placed { order: child.order, instrument, contract: p.contract.clone() });
+                self.intake.placed.insert(child.wire_id, Placed { order: child.order, instrument, contract: p.contract.clone(), sized_at: None });
                 self.intake.keep(child.wire_id, order_id as i64, request);
             }
         }
@@ -1294,7 +1425,7 @@ impl HotLoop {
                     restated: false,
                 },
             ))));
-            self.intake.placed.insert(order_id, Placed { order, instrument, contract: c.clone() });
+            self.intake.placed.insert(order_id, Placed { order, instrument, contract: c.clone(), sized_at: None });
         }
         let scaled = crate::types::price_from_f64;
         self.context.pending_orders.push(OrderRequest::SubmitBracket {
@@ -1490,7 +1621,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::bridge::SharedState;
-    use crate::control::contracts::ContractDefinition;
+    use crate::control::contracts::{ContractDefinition, SecurityType};
     use crate::protocol::connection::Connection;
     use crate::types::model::{Contract, Order};
     use crate::types::{ControlCommand, OrderCondition, Placement};
@@ -1587,6 +1718,390 @@ mod tests {
             let sent_as = if replaced { "35=G|" } else { "35=D|" };
             assert_eq!(wire.contains(sent_as), expected.is_none(), "{row:?}: {wire}");
             assert_eq!(wire.contains("|8612=1|"), expected.is_none() && conditioned, "{row:?}: {wire}");
+        }
+    }
+
+    /// An order stated by the cash it spends, and one for a fund, is checked,
+    /// sized and sent as a gateway does. A share takes an amount only through
+    /// an algorithm on a type the logon takes amounts on, a currency pair
+    /// where its order types list `CASHQTY`, a crypto except as a stop, a
+    /// limit or a sale at market, a fund only to buy. A pair's size is whole
+    /// and an amount a multiple of its currency's least amount, or of no more
+    /// than two places where that is waived; a fund bought by an amount keeps
+    /// to its own least amount where the logon holds it to one. A fund is
+    /// bought by an amount alone, stating a size of one, and sold by a
+    /// quantity alone. The size a gateway works out for an amount is the
+    /// order's size — at the market's price, the order's own or the preset's
+    /// margin — and is stated on tag 38 only where the venue does not work
+    /// it out; a size the caller states on a pair passes through. A
+    /// definition not held is asked for first.
+    #[test]
+    fn a_cash_order_is_checked_and_sent_as_a_gateway_sends_it() {
+        #[derive(Clone)]
+        struct Row {
+            what: &'static str,
+            sec_type: SecurityType,
+            currency: &'static str,
+            features: &'static [&'static str],
+            action: &'static str,
+            order_type: &'static str,
+            limit: f64,
+            algo: &'static str,
+            total: f64,
+            cash: f64,
+            held: bool,
+            /// The finest size the contract's rule deals in.
+            finest: Option<f64>,
+            /// The live bid, ask and last trade, each with a size.
+            market: Option<(f64, f64, f64)>,
+            /// The fund's least amount, where it states one.
+            tick: Option<&'static str>,
+            refused: &'static [i64],
+            text: &'static str,
+            size: Option<&'static str>,
+            /// The size the order is held at.
+            held_at: Option<f64>,
+        }
+        let share = Row {
+            what: "a share through an algorithm, the estimate off",
+            sec_type: SecurityType::Stock,
+            currency: "USD",
+            features: &["DISABLECASHQTYOVEREST"],
+            action: "BUY",
+            order_type: "LMT",
+            limit: 1.0,
+            algo: "Adaptive",
+            total: 0.0,
+            cash: 50.0,
+            held: true,
+            finest: None,
+            market: None,
+            tick: None,
+            refused: &[],
+            text: "",
+            size: None,
+            // No market: a buy converts at its limit.
+            held_at: Some(50.0),
+        };
+        let pair = Row {
+            what: "a pair listing CASHQTY, the estimate off",
+            sec_type: SecurityType::Forex,
+            features: &["DISABLEFXCASHQTYOVEREST"],
+            algo: "",
+            cash: 1000.5,
+            held_at: Some(1001.0),
+            ..share.clone()
+        };
+        let crypto = Row {
+            what: "a crypto bought at market",
+            sec_type: SecurityType::Crypto,
+            features: &[],
+            order_type: "MKT",
+            algo: "",
+            // No market and no limit: nothing to convert at.
+            held_at: Some(0.0),
+            ..share.clone()
+        };
+        let fund = Row {
+            what: "a fund bought by an amount",
+            sec_type: SecurityType::Fund,
+            features: &[],
+            algo: "",
+            size: Some("1"),
+            held_at: None,
+            ..share.clone()
+        };
+        for row in [
+            share.clone(),
+            Row { what: "a share without an algorithm", algo: "", refused: &[10244], ..share.clone() },
+            Row { what: "a share on a type the logon takes no amounts on", order_type: "MIT", refused: &[10244], ..share.clone() },
+            Row { what: "a definition not held", held: false, ..share.clone() },
+            Row {
+                what: "a share with the estimate on, at the preset's margin over its limit",
+                features: &[],
+                limit: 2.0,
+                finest: Some(0.0001),
+                size: Some("31.25"),
+                held_at: Some(31.25),
+                ..share.clone()
+            },
+            Row {
+                what: "a whole-unit share at market, up to a whole unit",
+                features: &[],
+                order_type: "MKT",
+                finest: Some(1.0),
+                market: Some((29.0, 31.0, 30.0)),
+                size: Some("3"),
+                held_at: Some(3.0),
+                ..share.clone()
+            },
+            pair.clone(),
+            Row { what: "a pair stating a size passes it through", total: 1000.0, held_at: Some(1000.0), ..pair.clone() },
+            Row { what: "a pair stating part of a unit", total: 1000.5, refused: &[10318], ..pair.clone() },
+            Row {
+                what: "a pair's amount finer than its currency",
+                cash: 1000.505,
+                refused: &[10317],
+                text: "The Cash Quantity size of 1000.505 does not conform to minimum variation of 0.01 for this contract",
+                ..pair.clone()
+            },
+            Row { what: "a future, algorithm or not", sec_type: SecurityType::Future, refused: &[10244], ..share.clone() },
+            Row { what: "a pair in a currency not listed", currency: "XYZ", refused: &[10318], ..pair.clone() },
+            Row { what: "a pair in a currency with a fixed rate", currency: "GBX", ..pair.clone() },
+            crypto.clone(),
+            Row {
+                what: "a crypto sized at the midpoint of its quote",
+                finest: Some(0.00000001),
+                market: Some((100.0, 102.0, f64::MAX)),
+                held_at: Some(0.4950495),
+                ..crypto.clone()
+            },
+            Row {
+                what: "a crypto's amount finer than a cent",
+                cash: 50.555,
+                refused: &[10317],
+                text: "The Cash Quantity size of 50.555 does not conform to minimum variation of 0.01 for this contract",
+                ..crypto.clone()
+            },
+            Row {
+                what: "a crypto's amount past two places where cents are waived",
+                features: &["NOCASHQTYPRECISION"],
+                cash: 50.555,
+                refused: &[10206],
+                text: "Non-zero cash quantity cannot contain more than 2 decimals.",
+                ..crypto.clone()
+            },
+            Row { what: "a crypto stating a size too", total: 1.0, refused: &[10293], ..crypto.clone() },
+            Row {
+                what: "a crypto stating a size and an amount finer than a cent",
+                total: 1.0,
+                cash: 50.555,
+                refused: &[10317, 10293],
+                ..crypto.clone()
+            },
+            Row { what: "a crypto limit", order_type: "LMT", refused: &[10244], ..crypto.clone() },
+            Row { what: "a crypto sold at market", action: "SELL", refused: &[10244], ..crypto.clone() },
+            Row { what: "a crypto stop to buy", order_type: "STP", refused: &[10292], ..crypto.clone() },
+            fund.clone(),
+            Row {
+                what: "a fund bought finer than its least amount",
+                features: &["MFCASHQTYINCR"],
+                cash: 50.55,
+                tick: Some("0.1"),
+                refused: &[10317],
+                text: "The Cash Quantity size of 50.55 does not conform to minimum variation of 0.1 for this contract",
+                ..fund.clone()
+            },
+            Row { what: "a fund bought with a size too", total: 5.0, refused: &[10203], ..fund.clone() },
+            Row { what: "a fund bought without an amount", cash: 0.0, refused: &[10203], ..fund.clone() },
+            Row { what: "a fund sold by an amount", action: "SELL", refused: &[10244], ..fund.clone() },
+            Row { what: "a fund sold without a size", action: "SELL", cash: 0.0, refused: &[10204], ..fund.clone() },
+            Row { what: "a fund sold by a size", action: "SELL", cash: 0.0, total: 3.0, size: Some("3"), ..fund.clone() },
+            Row { what: "a fund sold by a size past three places", action: "SELL", cash: 0.0, total: 3.0001, refused: &[10207], ..fund.clone() },
+        ] {
+            let shared = Arc::new(SharedState::new());
+            shared.orders.set_replay_done();
+            shared.reference.set_enabled_features(row.features.iter().map(|f| f.to_string()).collect());
+            shared.reference.set_money_orders(crate::bridge::MoneyOrderTerms {
+                order_types: "ALLOC,DAY,GTC,LMT,MKT,STP,STPLMT".into(),
+                product_defaults: "CASH,USD,25000,1000000,0.01".into(),
+                fixed_rates: "GBX:0.0132,USD:1".into(),
+                ..Default::default()
+            });
+            shared.reference.set_order_presets(Vec::new());
+            if let Some(finest) = row.finest {
+                shared.reference.push_market_rules(vec![crate::control::contracts::MarketRule {
+                    rule_id: 26,
+                    negative_prices: false,
+                    price_magnifier: 1,
+                    price_increments: Vec::new(),
+                    size_increments: vec![crate::control::contracts::PriceIncrement { low_edge: 0.0, increment: finest }],
+                    price_places: None,
+                }]);
+            }
+            let definition = ContractDefinition {
+                con_id: 265598,
+                sec_type: row.sec_type.clone(),
+                exchange: "SMART".into(),
+                currency: row.currency.into(),
+                order_types: vec!["LMT".into(), "CASHQTY".into()],
+                order_type_rules: vec![("LMT".into(), 1), ("CASHQTY".into(), 1)],
+                market_rule_id: row.finest.map(|_| 26),
+                unnamed_fields: row.tick.map(|tick| (8482, tick.to_string())).into_iter().collect(),
+                ..Default::default()
+            };
+            if row.held {
+                shared.reference.cache_contract_definition(definition.clone());
+            }
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            if let Some((bid, ask, last)) = row.market {
+                let instrument = engine.context.market.register(265598);
+                let scaled = |price: f64| if price == f64::MAX { 0 } else { (price * crate::types::PRICE_SCALE as f64) as i64 };
+                let quote = crate::types::Quote {
+                    bid: scaled(bid), ask: scaled(ask), last: scaled(last),
+                    bid_size: crate::types::QTY_SCALE, ask_size: crate::types::QTY_SCALE, last_size: crate::types::QTY_SCALE,
+                    ..Default::default()
+                };
+                let present = if last == f64::MAX { 0x33 } else { 0x77 };
+                shared.market.push_pricing_quote(instrument, 0, &quote, present, 0);
+                shared.market.note_pricing_subscription(instrument, 0, true);
+            }
+            let (connection, mut peer) = Connection::for_test();
+            peer.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            engine.ccp_conn = Some(connection);
+            engine.set_account_id("DU1".into());
+            let (send, receive) = mpsc::channel();
+            engine.set_control_rx(receive);
+            let mut sent = || {
+                let mut wire = String::new();
+                let mut bytes = [0; 16384];
+                while let Ok(n) = peer.read(&mut bytes) {
+                    if n == 0 { break; }
+                    wire.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                }
+                wire.replace('\x01', "|")
+            };
+            let order = Order {
+                action: row.action.into(),
+                order_type: row.order_type.into(),
+                lmt_price: row.limit,
+                aux_price: 1.0,
+                total_quantity: row.total,
+                cash_qty: row.cash,
+                algo_strategy: row.algo.into(),
+                tif: "DAY".into(),
+                ..Default::default()
+            };
+            shared.admit(&send, ControlCommand::Place(Box::new(Placement {
+                order_id: 10,
+                allocator: Arc::new(AtomicU64::new(11)),
+                contract: Contract {
+                    con_id: 265598, symbol: "X".into(), sec_type: row.sec_type.to_api_str().into(),
+                    exchange: "SMART".into(), currency: row.currency.into(), ..Default::default()
+                },
+                order,
+                warnings: Vec::new(),
+            }))).unwrap();
+            engine.poll_once();
+            if !row.held {
+                assert!(sent().contains("35=c|"), "{}: asked first", row.what);
+                let (lookup, _) = engine.ccp.order_naming.remove(0);
+                shared.reference.cache_contract_definition(definition.clone());
+                engine.ccp.orders_named.push((lookup, super::OrderNamed::Contract(Box::new(definition))));
+            }
+            engine.poll_once();
+            engine.poll_once();
+            let wire = sent();
+            let told = shared.drain_refused();
+            let codes: Vec<_> = told.iter().map(|(_, code, _)| *code).collect();
+            assert_eq!(codes, row.refused, "{}", row.what);
+            if !row.text.is_empty() {
+                assert_eq!(told[0].2, row.text, "{}", row.what);
+            }
+            let Some(submit) = wire.split("35=D|").nth(1) else {
+                assert!(!row.refused.is_empty(), "{}: nothing sent: {wire}", row.what);
+                continue;
+            };
+            assert!(row.refused.is_empty(), "{}: sent though refused: {submit}", row.what);
+            let stated = submit.split('|').find_map(|field| field.strip_prefix("38="));
+            assert_eq!(stated, row.size, "{}: {submit}", row.what);
+            if let Some(held_at) = row.held_at {
+                let placed = engine.intake.placed.values().next().expect("placed");
+                assert_eq!(placed.order.total_quantity, held_at, "{}", row.what);
+            }
+        }
+    }
+
+    /// A replace of an order stated by an amount is refused under 10241 where
+    /// the account may trade crypto or the logon takes amounts on market,
+    /// limit, stop or stop-limit orders; otherwise it goes, stating no size
+    /// where the venue works it out, and the order worked out from its amount
+    /// is held at the size the new amount comes to.
+    #[test]
+    fn a_cash_order_is_not_replaced_where_a_gateway_refuses_it() {
+        for (crypto, order_types, refused, held_at) in [
+            (true, "", Some(10241), 0.4950495),
+            (false, "LMT", Some(10241), 0.4950495),
+            (false, "LMT/4", None, 0.594059),
+        ] {
+            let shared = Arc::new(SharedState::new());
+            shared.orders.set_replay_done();
+            if crypto {
+                shared.reference.set_order_permissions([("CRYPTO".to_string(), Vec::new())].into());
+            }
+            shared.reference.set_money_orders(crate::bridge::MoneyOrderTerms {
+                order_types: order_types.into(),
+                ..Default::default()
+            });
+            shared.reference.push_market_rules(vec![crate::control::contracts::MarketRule {
+                rule_id: 26,
+                negative_prices: false,
+                price_magnifier: 1,
+                price_increments: Vec::new(),
+                size_increments: vec![crate::control::contracts::PriceIncrement { low_edge: 0.0, increment: 0.00000001 }],
+                price_places: None,
+            }]);
+            shared.reference.cache_contract_definition(ContractDefinition {
+                con_id: 479624278,
+                sec_type: SecurityType::Crypto,
+                exchange: "PAXOS".into(),
+                currency: "USD".into(),
+                market_rule_id: Some(26),
+                ..Default::default()
+            });
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            let instrument = engine.context.market.register(479624278);
+            let quote = crate::types::Quote {
+                bid: 100 * crate::types::PRICE_SCALE, ask: 102 * crate::types::PRICE_SCALE,
+                bid_size: crate::types::QTY_SCALE, ask_size: crate::types::QTY_SCALE,
+                ..Default::default()
+            };
+            shared.market.push_pricing_quote(instrument, 0, &quote, 0x33, 0);
+            let (connection, mut peer) = Connection::for_test();
+            peer.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            engine.ccp_conn = Some(connection);
+            engine.set_account_id("DU1".into());
+            let (send, receive) = mpsc::channel();
+            engine.set_control_rx(receive);
+            let mut sent = || {
+                let mut wire = String::new();
+                let mut bytes = [0; 16384];
+                while let Ok(n) = peer.read(&mut bytes) {
+                    if n == 0 { break; }
+                    wire.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                }
+                wire.replace('\x01', "|")
+            };
+            let place = |cash: f64| {
+                shared.admit(&send, ControlCommand::Place(Box::new(Placement {
+                    order_id: 10,
+                    allocator: Arc::new(AtomicU64::new(11)),
+                    contract: Contract {
+                        con_id: 479624278, symbol: "BTC".into(), sec_type: "CRYPTO".into(),
+                        exchange: "PAXOS".into(), currency: "USD".into(), ..Default::default()
+                    },
+                    order: Order {
+                        action: "BUY".into(), order_type: "MKT".into(), cash_qty: cash,
+                        tif: "IOC".into(), ..Default::default()
+                    },
+                    warnings: Vec::new(),
+                }))).unwrap();
+            };
+            place(50.0);
+            (0..3).for_each(|_| engine.poll_once());
+            assert!(sent().contains("35=D|"), "{crypto} {order_types}: working first");
+            place(60.0);
+            (0..3).for_each(|_| engine.poll_once());
+            let wire = sent();
+            let codes: Vec<_> = shared.drain_refused().into_iter().map(|(_, code, _)| code).collect();
+            assert_eq!(codes, refused.into_iter().collect::<Vec<_>>(), "{crypto} {order_types}");
+            let replace = wire.split("35=G|").nth(1);
+            assert_eq!(replace.is_some(), refused.is_none(), "{crypto} {order_types}: {wire}");
+            if let Some(replace) = replace {
+                assert!(!replace.split('|').any(|field| field.starts_with("38=")), "{replace}");
+            }
+            let placed = engine.intake.placed.values().next().expect("placed");
+            assert_eq!(placed.order.total_quantity, held_at, "{crypto} {order_types}");
         }
     }
 }

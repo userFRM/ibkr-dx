@@ -877,6 +877,17 @@ pub(crate) fn drain_and_send_orders(
                 if local_symbol.is_empty() {
                     fields.retain(|(tag, _)| *tag != 6035);
                 }
+                let cash = spec.as_deref().map_or(0, |spec| spec.attrs.cash_qty);
+                let size = stated_size(shared, &sec_type_str, orig.side, cash, qty);
+                match size.as_deref() {
+                    None => fields.retain(|(tag, _)| *tag != 38),
+                    Some(size) if size != &*qty_str => {
+                        for field in fields.iter_mut().filter(|(tag, _)| *tag == 38) {
+                            field.1 = size;
+                        }
+                    }
+                    Some(_) => {}
+                }
                 // The trigger the caller moved, or the one the order already had.
                 // A stated shape states its own, as its placement does.
                 let stop_str;
@@ -1584,8 +1595,10 @@ fn send_order_ex(
         (1, account_for(attrs, account_id).to_string()),
         (55, symbol),
         (54, fix_side(side).to_string()),
-        (38, format_qty(qty).to_string()),
     ];
+    if let Some(size) = stated_size(shared, &sec_type_str, side, attrs.cash_qty, qty) {
+        fields.push((38, size));
+    }
 
     let exec_inst = exec_inst_for(&kind, trail_as_t);
     push_type_and_prices(&mut fields, &kind, trail_as_t);
@@ -1665,6 +1678,22 @@ fn send_order_ex(
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
     conn.send_fix(&refs)
+}
+
+/// The size an order states on tag 38, as a gateway states it on a
+/// placement and on a replace: none where the order is stated by the cash it
+/// spends and the venue works the size out from it — a crypto's, a share's
+/// where the logon offers `DISABLECASHQTYOVEREST` and a currency pair's where
+/// it offers `DISABLEFXCASHQTYOVEREST`; one where a fund is bought, which goes
+/// by its amount; the quantity otherwise.
+fn stated_size(shared: &SharedState, sec_type: &str, side: Side, cash: crate::types::Price, qty: crate::types::Qty) -> Option<String> {
+    if crate::client_core::cash_quantity::sized_by_the_venue(shared, sec_type, cash > 0) {
+        None
+    } else if sec_type == "FUND" && side == Side::Buy {
+        Some("1".to_string())
+    } else {
+        Some(format_qty(qty).to_string())
+    }
 }
 
 /// The account an order goes out for: the one it names, where the session

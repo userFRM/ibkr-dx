@@ -6,6 +6,7 @@
 //! respective callback formats (Rust `Wrapper` trait calls or PyO3 `call_method`).
 
 pub(crate) mod attached_checks;
+pub(crate) mod cash_quantity;
 pub(crate) mod attached_orders;
 pub(crate) mod attached_loading;
 pub(crate) mod attached_prices;

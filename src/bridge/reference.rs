@@ -150,10 +150,12 @@ pub(crate) struct AttachedCombo {
 /// quantity, as it states it.
 #[derive(Clone, Debug, Default)]
 pub struct MoneyOrderTerms {
-    /// The security types it takes them on, tag 8334: a list separated by
-    /// commas.
+    /// What it takes orders for parts of a unit on, tag 8334: order types,
+    /// times in force and permissions such as `ALLOC` and `RTHONLY`, a list
+    /// separated by commas.
     pub types: String,
-    /// The order types it takes them on, tag 8351, listed the same way.
+    /// What it takes orders for an amount of money on, tag 8351, listed the
+    /// same way.
     pub order_types: String,
     /// Whether the account takes them, tag 8335.
     pub account: bool,
@@ -161,6 +163,9 @@ pub struct MoneyOrderTerms {
     /// 6052: `type,product,size,most,precision` entries separated by
     /// semicolons.
     pub product_defaults: String,
+    /// The fixed rates it states for currencies, tag 6592: `currency:rate`
+    /// entries separated by commas.
+    pub fixed_rates: String,
 }
 
 /// Historical data, contract definitions, scanners, news archives, market rules,
