@@ -77,7 +77,8 @@ fn farm_reconnect_with_cached_credentials() {
     let new_farm = connect_farm(&Default::default(), 
         &cfg.host, "usfarm",
         &cfg.username, &cfg.password, cfg.paper,
-        &server_session_id, &session_key, &hw_info, &encoded, ibkr_dx::gateway::Farm::MarketData, None, None
+        &server_session_id, &session_key, &hw_info, &encoded, ibkr_dx::gateway::Farm::MarketData, None,
+        gw.token_published.session_token(), None
     ).expect("Farm reconnect with cached credentials FAILED");
     let reconnect_ms = t1.elapsed().as_millis();
 
@@ -176,6 +177,7 @@ fn ccp_reconnect_with_cached_credentials() {
         code_provider: cfg.code_provider.clone(),
         ib_key_timeout_secs: cfg.ib_key_timeout_secs,
         ib_key_token_sub_type: cfg.ib_key_token_sub_type.clone(),
+        token_published: gw.token_published.clone(),
         paper: cfg.paper,
         session_key: gw.session_token.clone(),
         session_token: gw.session_token.clone(),

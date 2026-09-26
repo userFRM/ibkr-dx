@@ -391,7 +391,7 @@ pub fn send_secure<W: Write>(
 ) -> io::Result<()> {
     let ct = channel.encrypt(inner);
     let ct_b64 = B64.encode(&ct);
-    let outer = format!("{NS_VERSION};{NS_SECURE_MESSAGE};{ct_b64};");
+    let outer = format!("{};{NS_SECURE_MESSAGE};{ct_b64};", channel.ns_version);
     let payload = outer.as_bytes();
     let mut msg = Vec::with_capacity(8 + payload.len());
     msg.extend_from_slice(NS_MAGIC);
@@ -1265,6 +1265,7 @@ impl GateReader {
 /// interval, against a code that is good for about thirty seconds.
 pub fn do_security_code_2fa<S: Read + Write>(
     stream: &mut S,
+    ns_version: u32,
     deadline: std::time::Instant,
     code_provider: Option<&CodeProvider>,
     cancel: Option<&AtomicBool>,
@@ -1447,7 +1448,7 @@ pub fn do_security_code_2fa<S: Read + Write>(
                 // followed by a populated field echoes a value the probe did
                 // not ask for otherwise.
                 let ts = ns::parse_test_request_timestamp(&raw).unwrap_or_default();
-                stream.write_all(&ns_build_heart_beat(NS_VERSION, &ts))?;
+                stream.write_all(&ns_build_heart_beat(ns_version, &ts))?;
             }
             // Identifiers only. The derived `Debug` prints every field, and an
             // echoed frame can carry the code itself.
@@ -1489,6 +1490,7 @@ pub fn do_security_code_2fa<S: Read + Write>(
 /// that waits for it cannot ask the socket for it twice.
 pub fn do_ib_key_2fa<S: Read + Write>(
     stream: &mut S,
+    ns_version: u32,
     token_sub_type: &str,
     deadline: std::time::Instant,
     code_provider: Option<&CodeProvider>,
@@ -1708,7 +1710,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                 // followed by a populated field echoes a value the probe did
                 // not ask for otherwise.
                 let ts = ns::parse_test_request_timestamp(&raw).unwrap_or_default();
-                let reply = ns_build_heart_beat(NS_VERSION, &ts);
+                let reply = ns_build_heart_beat(ns_version, &ts);
                 stream.write_all(&reply)?;
                 log::debug!("2FA gate: heartbeat {ts} -> 531");
             }

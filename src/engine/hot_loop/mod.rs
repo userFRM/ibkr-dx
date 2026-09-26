@@ -3148,7 +3148,7 @@ impl HotLoop {
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, Farm::MarketData, auth.trading_port,
-                    Some(&cancel),
+                    auth.token_published.session_token(), Some(&cancel),
                 );
                 if let Ok(conn) = &mut result {
                     conn.count_into(&traffic);
@@ -3513,7 +3513,7 @@ impl HotLoop {
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, Farm::Historical, auth.hmds_port,
-                    Some(&cancel),
+                    auth.token_published.session_token(), Some(&cancel),
                 );
                 if let Ok(conn) = &mut result {
                     conn.count_into(&traffic);
@@ -3619,7 +3619,7 @@ impl HotLoop {
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, Farm::SecurityDefinition, auth.secdef_port,
-                    Some(&cancel),
+                    auth.token_published.session_token(), Some(&cancel),
                 );
                 if let Ok(conn) = &mut result {
                     conn.count_into(&traffic);
@@ -4816,6 +4816,7 @@ mod tests {
     fn an_hmds_disconnect_lets_its_reconnect_run() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: None,
@@ -7031,6 +7032,7 @@ mod tests {
     fn hmds_keeps_retrying_through_an_outage_longer_than_the_ladder() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: None,
@@ -7082,6 +7084,7 @@ mod tests {
     fn a_reconnect_the_venue_stamped_nothing_on_still_moves_the_logon_on() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: None,
@@ -7146,6 +7149,7 @@ mod tests {
         let port = closed.local_addr().unwrap().port();
         drop(closed);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: Some(port),
@@ -7212,6 +7216,7 @@ mod tests {
     fn a_farm_the_venue_finally_refused_is_not_dialled_again() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: None,
@@ -9245,6 +9250,7 @@ mod calendar_farm_reconnect_tests {
     fn a_calendar_connection_that_went_is_scheduled_to_come_back() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: None,
@@ -9285,6 +9291,7 @@ mod calendar_farm_reconnect_tests {
     fn a_session_without_that_farm_does_not_try() {
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            token_published: Default::default(),
             account_id: String::new(),
             trading_port: None,
             hmds_port: None,

@@ -77,6 +77,37 @@ pub struct CallerAuth {
     pub ib_key_token_sub_type: String,
 }
 
+/// When the venue published each of the session's tokens, by the token's type,
+/// as it states them once the session has agreed name-service version 52.
+/// Shared by every connection the session opens, each of which states when
+/// the token it presents was published.
+#[derive(Clone, Debug, Default)]
+pub struct TokenPublishTimes(std::sync::Arc<std::sync::Mutex<Vec<(u64, i64)>>>);
+
+impl TokenPublishTimes {
+    /// The type of the token a login is given, which the session's connections
+    /// present.
+    const SESSION_TOKEN: u64 = 2;
+
+    /// Take what the venue stated, each type's time replacing the one held.
+    pub(crate) fn record(&self, stated: &[(u64, i64)]) {
+        let mut held = self.0.lock().unwrap();
+        for &(kind, time) in stated {
+            match held.iter_mut().find(|(held_kind, _)| *held_kind == kind) {
+                Some(entry) => entry.1 = time,
+                None => held.push((kind, time)),
+            }
+        }
+    }
+
+    /// When the session's token was published; nought where the venue has not
+    /// said.
+    pub fn session_token(&self) -> i64 {
+        let held = self.0.lock().unwrap();
+        held.iter().find(|(kind, _)| *kind == Self::SESSION_TOKEN).map_or(0, |(_, time)| *time)
+    }
+}
+
 /// Credentials cached for auto-reconnect (no SRP needed).
 #[derive(Clone)]
 pub struct ReconnectAuth {
@@ -118,6 +149,9 @@ pub struct ReconnectAuth {
     pub ib_key_timeout_secs: u64,
     /// Which kind of second factor to ask for.
     pub ib_key_token_sub_type: String,
+    /// When the venue published the session's tokens, which a reconnect and
+    /// every farm logon state.
+    pub token_published: TokenPublishTimes,
     /// The key the session was established with.
     pub session_key: BigUint,
     /// The token it resumes with.
@@ -278,6 +312,8 @@ pub struct Gateway {
     pub server_session_id: String,
     /// What the trading connection authenticates with.
     pub ccp_token: String,
+    /// When the venue published the session's tokens.
+    pub token_published: TokenPublishTimes,
     /// How often the venue expects to hear from this client.
     pub heartbeat_interval: u64,
     /// Stored for farm reconnection.
@@ -469,11 +505,12 @@ pub fn connect_farm(
     encoded: &str,
     farm: Farm,
     stated_port: Option<u16>,
+    published: i64,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> io::Result<Connection> {
     connect_farm_under(
         settings, host, farm_id, username, password, paper, server_session_id, session_key,
-        hw_info, encoded, farm, stated_port, &TakeBack::new(cancel),
+        hw_info, encoded, farm, stated_port, published, &TakeBack::new(cancel),
     )
 }
 
@@ -491,6 +528,7 @@ fn connect_farm_under(
     encoded: &str,
     farm: Farm,
     stated_port: Option<u16>,
+    published: i64,
     cancel: &TakeBack<'_>,
 ) -> io::Result<Connection> {
     let stage = format!("{farm_id} connect");
@@ -507,7 +545,7 @@ fn connect_farm_under(
 
     // Key exchange (raw TCP)
     let mut channel = SecureChannel::new();
-    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
+    let dh_msg = channel.build_secure_connect(NS_VERSION_MIN, NS_VERSION_MAX);
     let mut stream = LogonSocket::new(farm_tcp, cancel.flag())?;
     stream.write_all(&dh_msg)?;
 
@@ -541,7 +579,7 @@ fn connect_farm_under(
     let logon_bytes = build_farm_encrypted_logon(
         settings,
         &mut channel, username, paper, farm_id,
-        &farm_session_id, session_key, hw_info, encoded, farm.login_version(),
+        &farm_session_id, session_key, hw_info, encoded, farm.login_version(), published,
     );
     stream.write_all(&logon_bytes)?;
     log::info!("{farm_id} encrypted logon sent");
@@ -978,6 +1016,45 @@ enum ReconnectPostAuth {
     Redirect(String),
 }
 
+/// Keep the publish times an `NS_PUBLISH_ST_RESPONSE` states. A gateway reads
+/// one only on a session that agreed version 52, and passes over any other.
+fn take_publish_times(ns_version: u32, message: &[u8], published: &TokenPublishTimes) {
+    if ns_version < NS_VERSION_MAX {
+        log::warn!("a token publish time arrived on a session at name-service version {ns_version}");
+        return;
+    }
+    let stated = ns::published_tokens(message);
+    log::info!("the venue states when it published the session's tokens: {stated:?}");
+    published.record(&stated);
+}
+
+/// A connect request as a gateway of this build states it: the oldest and
+/// newest name-service versions it speaks, who, the flags, the launcher, the
+/// machine, the session and the client string — and where the session's token
+/// is presented, its short hash and, at version 52, when the venue published
+/// it, where the venue has said.
+fn connect_request(
+    display_name: &str,
+    flags: u32,
+    hw_info: &str,
+    session_id: &str,
+    encoded: &str,
+    token: Option<(&str, i64)>,
+) -> String {
+    let mut request = format!(
+        "{NS_VERSION_MIN};{};{display_name};{flags};{NS_VERSION_MAX};{IB_LAUNCHER_VERSION};\
+         {hw_info};{session_id};{encoded};",
+        ns::NS_CONNECT_REQUEST,
+    );
+    if let Some((hash, published)) = token {
+        request.push_str(&format!("{hash};"));
+        if published > 0 {
+            request.push_str(&format!("{published};"));
+        }
+    }
+    request
+}
+
 /// Wait for the data start after a reconnect's authentication, answering
 /// what the venue asks for on the way.
 ///
@@ -990,6 +1067,7 @@ enum ReconnectPostAuth {
 fn wait_for_fix_start<S: Read + Write>(
     stream: &mut S,
     channel: &mut SecureChannel,
+    published: &TokenPublishTimes,
     our_logged_in_at: &str,
     deadline: std::time::Instant,
     mut unread: Option<Vec<u8>>,
@@ -1080,10 +1158,12 @@ fn wait_for_fix_start<S: Read + Write>(
                 // Carried out with the connection so the engine can say so.
                 competing = Some(other);
             }
-            let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
+            let newcomm = format!("{};{};0;;2;0;", channel.ns_version, ns::NS_NEWCOMMPORTTYPE);
             session::send_secure(stream, channel, newcomm.as_bytes())?;
         } else if msg_type == ns::NS_FIX_START {
             return Ok(ReconnectPostAuth::Ready(competing));
+        } else if msg_type == ns::NS_PUBLISH_ST_RESPONSE {
+            take_publish_times(channel.ns_version, &inner, published);
         } else if msg_type == ns::NS_ERROR_RESPONSE {
             return Err(session::error_the_venue_stated(
                 "CCP reconnect post-auth error",
@@ -1147,7 +1227,7 @@ fn reconnect_ccp_attempt(
     )?;
 
     let mut channel = SecureChannel::new();
-    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
+    let dh_msg = channel.build_secure_connect(NS_VERSION_MIN, NS_VERSION_MAX);
     tls.write_all(&dh_msg)?;
 
     let hello = read_server_hello(&mut tls, "CCP reconnect")?;
@@ -1169,18 +1249,13 @@ fn reconnect_ccp_attempt(
     } else {
         auth.username.clone()
     };
-    let connect_req = format!(
-        "{};{};{};{};{};{};{};{};{};{};",
-        NS_VERSION_MIN,
-        ns::NS_CONNECT_REQUEST,
-        display_name,
+    let connect_req = connect_request(
+        &display_name,
         flags,
-        NS_VERSION,
-        IB_LAUNCHER_VERSION,
-        auth.hw_info,
-        auth.server_session_id,
-        auth.encoded,
-        token_hash,
+        &auth.hw_info,
+        &auth.server_session_id,
+        &auth.encoded,
+        Some((token_hash, auth.token_published.session_token())),
     );
     session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
     log::info!("CCP reconnect CONNECT_REQUEST sent (session={}, hash={})", auth.server_session_id, token_hash);
@@ -1201,6 +1276,10 @@ fn reconnect_ccp_attempt(
         }
         Err(e) => return Err(e),
     };
+
+    // The version the session agrees is the one AUTH_START states, and every
+    // message after it states that one.
+    channel.ns_version = ns::stated_version(&auth_start).unwrap_or(NS_VERSION);
 
     // Parse AUTH_START field[5] for auth mode: 2=SOFT_TOKEN, 0=SRP required
     let auth_text = auth_start_text(&auth_start)?;
@@ -1249,6 +1328,7 @@ fn reconnect_ccp_attempt(
             code_provider: auth.code_provider.as_ref(),
             timeout_secs: auth.ib_key_timeout_secs,
             default_sub_type: &auth.ib_key_token_sub_type,
+            ns_version: channel.ns_version,
             cancel: Some(cancel),
         })?.unread;
     }
@@ -1268,7 +1348,8 @@ fn reconnect_ccp_attempt(
     // Whoever held the account when this reconnect arrived, if the venue said,
     // and the interval it holds this connection to.
     let took_from = match wait_for_fix_start(
-        &mut tls, &mut channel, &auth.logged_in_at, fix_deadline, post_auth_unread.take(),
+        &mut tls, &mut channel, &auth.token_published, &auth.logged_in_at, fix_deadline,
+        post_auth_unread.take(),
     )? {
         ReconnectPostAuth::Ready(other) => other.map(|o| (o.ip, o.since, o.read_only)),
         ReconnectPostAuth::Redirect(redirect_host) => {
@@ -1630,6 +1711,9 @@ pub(crate) struct SecondFactor<'a> {
     pub code_provider: Option<&'a session::CodeProvider>,
     pub timeout_secs: u64,
     pub default_sub_type: &'a str,
+    /// The name-service version `AUTH_START` stated, which the gate's
+    /// keepalive replies state.
+    pub ns_version: u32,
     /// Set when the client can take the wait back: a reconnect that was
     /// stopped or whose recovery budget is spent, or a first logon whose
     /// caller took it back. The gate checks it between polls.
@@ -1655,6 +1739,7 @@ enum PostAuth {
 fn wait_for_data_start(
     tls: &mut native_tls::TlsStream<LogonSocket>,
     channel: &mut SecureChannel,
+    published: &TokenPublishTimes,
     port: u16,
     mut unread: Option<Vec<u8>>,
 ) -> io::Result<PostAuth> {
@@ -1739,13 +1824,15 @@ fn wait_for_data_start(
                 );
             }
             // Send port type change (required before data start)
-            let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
+            let newcomm = format!("{};{};0;;2;0;", channel.ns_version, ns::NS_NEWCOMMPORTTYPE);
             session::send_secure(tls, channel, newcomm.as_bytes())?;
             log::info!("Port type change sent");
         } else if msg_type == ns::NS_FIX_START {
             log::info!("Data start: {inner_text}");
             fix_ready = true;
             break;
+        } else if msg_type == ns::NS_PUBLISH_ST_RESPONSE {
+            take_publish_times(channel.ns_version, &inner, published);
         } else if msg_type == ns::NS_ERROR_RESPONSE {
             return Err(session::error_the_venue_stated(
                 "Post-auth error",
@@ -1940,7 +2027,7 @@ fn dial_auth_server(
 
     // Key exchange
     let mut channel = SecureChannel::new();
-    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
+    let dh_msg = channel.build_secure_connect(NS_VERSION_MIN, NS_VERSION_MAX);
     tls.write_all(&dh_msg)?;
 
     // A message the venue states while the hello is awaited is read past, not
@@ -1974,6 +2061,7 @@ fn connect_farms(
     trading: (&str, &str, Option<u16>),
     mktdata: (&str, &str, Option<u16>),
     secdef: Option<(&str, &str, Option<u16>)>,
+    published: i64,
 ) -> io::Result<(Connection, Option<Connection>, Option<Connection>)> {
     let (farm_conn, hmds_conn, secdef_conn) = std::thread::scope(|scope| {
         let username = &config.username;
@@ -1982,16 +2070,16 @@ fn connect_farms(
         let settings = config.settings.as_ref();
         let trading_handle = scope.spawn(move || {
             connect_farm_under(settings, trading.0, trading.1, username, password,
-                paper, session_id, token, hw_info, encoded, Farm::MarketData, trading.2, take_back)
+                paper, session_id, token, hw_info, encoded, Farm::MarketData, trading.2, published, take_back)
         });
         let mktdata_handle = scope.spawn(move || {
             connect_farm_under(settings, mktdata.0, mktdata.1, username, password,
-                paper, session_id, token, hw_info, encoded, Farm::Historical, mktdata.2, take_back)
+                paper, session_id, token, hw_info, encoded, Farm::Historical, mktdata.2, published, take_back)
         });
         let secdef_handle = secdef.map(|(host, farm, port)| {
             scope.spawn(move || {
                 connect_farm_under(settings, host, farm, username, password,
-                    paper, session_id, token, hw_info, encoded, Farm::SecurityDefinition, port, take_back)
+                    paper, session_id, token, hw_info, encoded, Farm::SecurityDefinition, port, published, take_back)
             })
         });
         let trading = trading_handle.join().expect("trading farm thread panicked");
@@ -2092,6 +2180,7 @@ fn authenticate(
                 code_provider: config.code_provider.as_ref(),
                 timeout_secs: config.ib_key_timeout_secs,
                 default_sub_type: &config.ib_key_token_sub_type,
+                ns_version: ns::stated_version(auth_start).unwrap_or(NS_VERSION),
                 cancel: take_back.flag(),
             })?;
             (session_key, gate.unread)
@@ -2222,20 +2311,23 @@ impl Gateway {
         // answer with a challenge instead of a handshake; a fresh id has no
         // session behind it and gets the handshake.
         let resume_key = resume.map(|r| BigUint::from_bytes_be(&r.token));
+        // When the token offered was published, as the session that saved it
+        // was told; stated beside the token where the venue said.
+        let published = TokenPublishTimes::default();
+        if let Some(r) = resume {
+            published.record(&[(TokenPublishTimes::SESSION_TOKEN, r.publish_time)]);
+        }
         let session_id = resume
             .map_or_else(session::get_session_id, |r| r.server_session_id.clone());
-        let connect_req = match resume_key.as_ref() {
-            Some(key) => format!(
-                "{};{};{};{};{};{};{};{};{};{};",
-                NS_VERSION_MIN, ns::NS_CONNECT_REQUEST, display_name, flags, NS_VERSION,
-                IB_LAUNCHER_VERSION, hw_info, session_id, encoded, token_short_hash(key),
-            ),
-            None => format!(
-                "{};{};{};{};{};{};{};{};{};",
-                NS_VERSION_MIN, ns::NS_CONNECT_REQUEST, display_name, flags, NS_VERSION,
-                IB_LAUNCHER_VERSION, hw_info, session_id, encoded,
-            ),
-        };
+        let token_hash = resume_key.as_ref().map(token_short_hash);
+        let connect_req = connect_request(
+            &display_name,
+            flags,
+            &hw_info,
+            &session_id,
+            &encoded,
+            token_hash.as_deref().map(|hash| (hash, published.session_token())),
+        );
         session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
 
         // Receive AUTH_START (may get a redirect instead for paper accounts)
@@ -2262,11 +2354,14 @@ impl Gateway {
             Err(e) => return Err(e),
         };
 
+        // The version the session agrees is the one AUTH_START states, and
+        // every message after it states that one.
+        channel.ns_version = ns::stated_version(&auth_start).unwrap_or(NS_VERSION);
         let (session_key, mut post_auth_unread) =
             authenticate(&mut tls, config, take_back, &auth_start, resume_key)?;
 
         let competing = match wait_for_data_start(
-            &mut tls, &mut channel, port, post_auth_unread.take(),
+            &mut tls, &mut channel, &published, port, post_auth_unread.take(),
         )? {
             PostAuth::Ready(competing) => competing,
             PostAuth::Redirect(redirect_host, redirect_port) => {
@@ -2489,6 +2584,7 @@ impl Gateway {
             (&trading_host, &trading_farm, trading_port),
             (&mktdata_host, &mktdata_farm, mktdata_port),
             secdef.as_ref().map(|(h, f, p)| (h.as_str(), f.as_str(), *p)),
+            published.session_token(),
         );
         take_back.check("logon")?;
         let (farm_conn, hmds_conn, secdef_conn) = farms?;
@@ -2543,6 +2639,7 @@ impl Gateway {
             session_token: session_key,
             server_session_id,
             ccp_token,
+            token_published: published,
             heartbeat_interval,
             hw_info,
             encoded,
@@ -2758,6 +2855,7 @@ impl Gateway {
             code_provider: caller.code_provider,
             ib_key_timeout_secs: caller.ib_key_timeout_secs,
             ib_key_token_sub_type: caller.ib_key_token_sub_type,
+            token_published: self.token_published.clone(),
             session_key: self.session_token.clone(),
             session_token: self.session_token.clone(),
             server_session_id: self.server_session_id.clone(),

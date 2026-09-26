@@ -606,6 +606,10 @@ fn try_frame_farm_msg_with_trailing() {
 /// test can build — so what the logon says was checked nowhere, and a field
 /// missing from it was missing from every farm connection this client opens.
 /// Composed apart from the enciphering, what it says can be read here.
+///
+/// It states the name-service versions it speaks, 51 to 52, and — where the
+/// venue has said when it published the session's token — that time on 8611,
+/// behind the token's hash.
 #[test]
 fn a_farm_logon_states_the_session_the_way_an_order_logon_does() {
     let settings = crate::settings::SessionSettings {
@@ -615,7 +619,7 @@ fn a_farm_logon_states_the_session_the_way_an_order_logon_does() {
         lan_ip: Some("10.11.12.13".into()),
         ..Default::default()
     };
-    let inner = crate::gateway::logon::build_farm_logon_fields(
+    let logon = |published: i64| crate::gateway::logon::build_farm_logon_fields(
         &settings,
         "user",
         "mdfarm",
@@ -624,8 +628,23 @@ fn a_farm_logon_states_the_session_the_way_an_order_logon_does() {
         "abc123|AA:BB:CC:DD:EE:FF",
         "17.0.10.0.101/W/en/G",
         3,
+        published,
     );
+    let tags = |inner: &[u8]| -> Vec<u32> {
+        String::from_utf8_lossy(inner)
+            .split('\u{1}')
+            .filter_map(|f| f.split_once('='))
+            .filter_map(|(t, _)| t.parse::<u32>().ok())
+            .collect()
+    };
+    let published = logon(1_790_000_000_123);
+    assert_eq!(fix_parse(&published)[&8611], "1790000000123");
+    let stated = tags(&published);
+    assert_eq!(stated.iter().position(|t| *t == 8611), stated.iter().position(|t| *t == 8483).map(|at| at + 1));
+    let inner = logon(0);
+    assert!(!tags(&inner).contains(&8611), "no time where the venue has said none");
     let fields = fix_parse(&inner);
+    assert_eq!(fields[&8285], "51..52", "the name-service versions it speaks");
     assert_eq!(fields[&35], "A");
     assert_eq!(fields[&6947], "Europe/Zurich", "the zone, as the venue's own farm logon states it");
     assert_eq!(fields[&6034], "9999", "the build");
@@ -709,6 +728,7 @@ fn try_frame_farm_msg_multiple_sequential() {
 
 fn auth_with(host: &str, trading_host: &str, trading_farm: &str) -> ReconnectAuth {
     ReconnectAuth {
+        token_published: Default::default(),
         account_id: String::new(),
         trading_port: None,
         hmds_port: None,
@@ -1473,7 +1493,7 @@ mod reconnect_post_auth_tests {
         let redirect = ns::ns_build(NS_VERSION, ns::NS_REDIRECT, &["cdc1.example:4000"], "");
         let mut stream = FramedScript { pos: 0, frames: vec![redirect] };
         match super::super::wait_for_fix_start(
-            &mut stream, &mut SecureChannel::new(), "", deadline(), None,
+            &mut stream, &mut SecureChannel::new(), &Default::default(), "", deadline(), None,
         ) {
             Ok(super::super::ReconnectPostAuth::Redirect(host)) => {
                 assert_eq!(host, "cdc1.example", "the port it names is the record, not the target");
@@ -1486,7 +1506,7 @@ mod reconnect_post_auth_tests {
         let refusal = ns::ns_build(NS_VERSION, ns::NS_SECURE_ERROR, &["stale session"], "");
         let mut stream = FramedScript { pos: 0, frames: vec![refusal] };
         let err = match super::super::wait_for_fix_start(
-            &mut stream, &mut SecureChannel::new(), "", deadline(), None,
+            &mut stream, &mut SecureChannel::new(), &Default::default(), "", deadline(), None,
         ) {
             Err(e) => e,
             Ok(_) => panic!("a secure error after auth was waited out, not refused"),
@@ -1498,10 +1518,30 @@ mod reconnect_post_auth_tests {
         let start = ns::ns_build(NS_VERSION, ns::NS_FIX_START, &[], "");
         let mut stream = FramedScript { pos: 0, frames: vec![start] };
         match super::super::wait_for_fix_start(
-            &mut stream, &mut SecureChannel::new(), "", deadline(), None,
+            &mut stream, &mut SecureChannel::new(), &Default::default(), "", deadline(), None,
         ) {
             Ok(super::super::ReconnectPostAuth::Ready(none)) => assert!(none.is_none()),
             _ => panic!("the data start was not read as the data start"),
+        }
+
+        // When the venue published the session's tokens, stated once the
+        // session agreed version 52, is kept, each type in the order of the
+        // mask's bits; on a session at 51 a gateway passes over it.
+        for (agreed, kept) in [(52, 1_790_000_000_123), (51, 0)] {
+            let publish = ns::ns_build(
+                52, ns::NS_PUBLISH_ST_RESPONSE,
+                &["258", "tst", "st", "1790000000123", "1790000000456"], "",
+            );
+            let start = ns::ns_build(NS_VERSION, ns::NS_FIX_START, &[], "");
+            let mut stream = FramedScript { pos: 0, frames: vec![publish, start] };
+            let mut channel = SecureChannel::new();
+            channel.ns_version = agreed;
+            let published = super::super::TokenPublishTimes::default();
+            let ready = super::super::wait_for_fix_start(
+                &mut stream, &mut channel, &published, "", deadline(), None,
+            );
+            assert!(matches!(ready, Ok(super::super::ReconnectPostAuth::Ready(_))), "{agreed}");
+            assert_eq!(published.session_token(), kept, "at {agreed}");
         }
     }
 }
@@ -1854,4 +1894,19 @@ fn a_session_taken_back_while_its_farms_open_is_logged_out() {
     let mut bytes = String::new();
     venue.read_to_string(&mut bytes).unwrap();
     assert!(bytes.contains("35=5\x01"));
+}
+
+/// A connect request states the name-service versions a gateway of this
+/// build speaks, 51 to 52, and where it presents the session's token, the
+/// token's hash and — where the venue has said — when it was published.
+#[test]
+fn a_connect_request_states_the_versions_and_the_tokens_publish_time() {
+    let head = "51;521;Suser;8;52;28;hw;s1;enc;";
+    for (token, stated) in [
+        (None, head.to_string()),
+        (Some(("ab12", 0)), format!("{head}ab12;")),
+        (Some(("ab12", 1_790_000_000_123)), format!("{head}ab12;1790000000123;")),
+    ] {
+        assert_eq!(super::connect_request("Suser", 8, "hw", "s1", "enc", token), stated);
+    }
 }

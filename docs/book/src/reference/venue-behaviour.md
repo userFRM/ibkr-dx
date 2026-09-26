@@ -665,6 +665,21 @@ not bind the party holding the channel keys to the party that answered the
 logon. That is a property of the venue's protocol, and a gateway's connections
 are opened the same way.
 
+## Name-service versions
+
+A connect request states the name-service versions a gateway of this build
+speaks, 51 to 52, and so does the key exchange ahead of it; a data-farm logon
+states the same range on tag 8285, `51..52`. The venue answers at 52. Every
+message after `AUTH_START` states the version it agreed, and those before it
+state 51.
+
+At 52 the venue may state when it published the session's tokens
+(`NS_PUBLISH_ST_RESPONSE`). The time is kept for each token type. Where a
+reconnect or a resumed session presents the session's token it states the
+time beside the token's hash, and every data-farm logon states it on tag 8611
+behind the hash on 8483; a saved session keeps it for the next connect. Where
+the venue has stated none, nothing is added.
+
 ## Contract expiry validation
 
 Malformed `lastTradeDateOrContractMonth` is refused with code 10372 before

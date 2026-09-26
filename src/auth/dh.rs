@@ -14,6 +14,9 @@ fn dh_n() -> BigUint {
 
 /// DH-based encrypted channel.
 pub struct SecureChannel {
+    /// The name-service version the session agreed, which every message sent
+    /// through the channel states once it is known.
+    pub(crate) ns_version: u32,
     client_random: [u8; 32],
     private_key: BigUint,
     public_key: BigUint,
@@ -96,6 +99,7 @@ impl SecureChannel {
         let public_key = g.modpow(&private_key, &n);
 
         Self {
+            ns_version: crate::config::NS_VERSION,
             client_random,
             private_key,
             public_key,
@@ -351,6 +355,7 @@ mod tests {
     fn make_test_channel() -> SecureChannel {
         let block = vec![0u8; 104];
         SecureChannel {
+            ns_version: crate::config::NS_VERSION,
             client_random: [0u8; 32],
             private_key: BigUint::from(0u32),
             public_key: BigUint::from(0u32),

@@ -41,7 +41,7 @@ pub(super) fn open_farm(kind: ibkr_dx::gateway::Farm) -> std::io::Result<Connect
         &auth.settings, host, farm,
         &auth.username, &auth.password, auth.paper,
         &auth.server_session_id, &auth.session_key,
-        &auth.hw_info, &auth.encoded, kind, port,
+        &auth.hw_info, &auth.encoded, kind, port, auth.token_published.session_token(),
         // Nothing cancels a connect here: the suite is the whole of what runs.
         None,
     )

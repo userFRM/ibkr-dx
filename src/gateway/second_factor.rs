@@ -200,7 +200,7 @@ pub(super) fn run_second_factor(
         // most of it. Restored afterwards.
         tls.get_ref().set_read_timeout(Some(Duration::from_millis(500)))?;
         let gate = session::do_security_code_2fa(
-            tls, deadline, sf.code_provider, sf.cancel,
+            tls, sf.ns_version, deadline, sf.code_provider, sf.cancel,
         );
         let restore = tls.get_ref().set_read_timeout(None);
         if let session::IbKeyOutcome::Skipped { unread: carried } = gate? {
@@ -257,6 +257,7 @@ pub(super) fn run_second_factor(
         tls.get_ref().set_read_timeout(Some(Duration::from_millis(500)))?;
         let gate = session::do_ib_key_2fa(
             tls,
+            sf.ns_version,
             token_sub_type,
             deadline,
             sf.code_provider,

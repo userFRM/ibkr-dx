@@ -104,10 +104,14 @@ pub const TIMEOUT_SSL_AUTH: u64 = 20;
 /// How long a farm connection may take to open.
 pub const TIMEOUT_FARM_CONNECT: u64 = 8;
 
-/// Protocol version.
+/// The name-service version a message states until the session has agreed
+/// one, as a gateway states it.
 pub const NS_VERSION: u32 = 51;
-/// The oldest name-service version this client speaks.
-pub const NS_VERSION_MIN: u32 = 38;
+/// The oldest name-service version this client states on a connect request.
+pub const NS_VERSION_MIN: u32 = 51;
+/// The newest: at it, a connect request carrying the session's token and a
+/// data farm's logon state when the token was published.
+pub const NS_VERSION_MAX: u32 = 52;
 
 // The venue's date format moved to `protocol::datetime` when it stopped being
 // a constant and started being a codec. Reachable here because that is the

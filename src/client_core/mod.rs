@@ -6881,6 +6881,7 @@ pub fn remember_session(
         encoded: gateway.encoded.clone(),
         username: username.to_string(),
         paper,
+        publish_time: gateway.token_published.session_token(),
     };
     if let Some(path) = file
         && let Err(e) = crate::auth::resume::save(path, password, &session)

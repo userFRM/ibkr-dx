@@ -87,13 +87,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t_a1 = Instant::now();
     let trading_a = connect_farm(
         &Default::default(), &host, "usfarm", &cfg.username, &cfg.password, cfg.paper,
-        &server_session_id, &session_token, &hw_info, &encoded, ibkr_dx::gateway::Farm::MarketData, None, None
+        &server_session_id, &session_token, &hw_info, &encoded, ibkr_dx::gateway::Farm::MarketData, None, 0, None
     );
     let trading_a_ms = t_a1.elapsed().as_millis();
     let t_a2 = Instant::now();
     let mktdata_a = connect_farm(
         &Default::default(), &host, "ushmds", &cfg.username, &cfg.password, cfg.paper,
-        &server_session_id, &session_token, &hw_info, &encoded, ibkr_dx::gateway::Farm::Historical, None, None
+        &server_session_id, &session_token, &hw_info, &encoded, ibkr_dx::gateway::Farm::Historical, None, 0, None
     );
     let mktdata_a_ms = t_a2.elapsed().as_millis();
     let serial_total_ms = t_a.elapsed().as_millis();
@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::spawn(move || {
             let t = Instant::now();
             let r = connect_farm(&Default::default(), &host, "usfarm", &user, &pass, paper_b,
-                &ssid, &token, &hw, &enc, ibkr_dx::gateway::Farm::MarketData, None, None);
+                &ssid, &token, &hw, &enc, ibkr_dx::gateway::Farm::MarketData, None, 0, None);
             (t.elapsed().as_millis(), r)
         })
     };
@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::spawn(move || {
             let t = Instant::now();
             let r = connect_farm(&Default::default(), &host, "ushmds", &user, &pass, paper_b,
-                &ssid, &token, &hw, &enc, ibkr_dx::gateway::Farm::Historical, None, None);
+                &ssid, &token, &hw, &enc, ibkr_dx::gateway::Farm::Historical, None, 0, None);
             (t.elapsed().as_millis(), r)
         })
     };

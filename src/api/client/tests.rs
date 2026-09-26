@@ -2247,6 +2247,7 @@ fn a_session_from_another_account_is_not_offered() {
         encoded: "enc".into(),
         username: "someone-else".into(),
         paper: true,
+        publish_time: 0,
     };
     let offered = |cfg: &EClientConfig| {
         cfg.resume.as_ref().filter(|r| r.username == cfg.username && r.paper == cfg.paper).is_some()

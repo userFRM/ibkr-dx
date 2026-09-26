@@ -813,9 +813,10 @@ pub fn build_farm_encrypted_logon(
     hw_info: &str,
     encoded: &str,
     slot: u32,
+    published: i64,
 ) -> Vec<u8> {
     let inner = build_farm_logon_fields(
-        settings, username, farm_name, session_id, session_token, hw_info, encoded, slot,
+        settings, username, farm_name, session_id, session_token, hw_info, encoded, slot, published,
     );
 
     // Every field but who: 96 names the login, and 95 says how long it is.
@@ -850,42 +851,47 @@ pub(crate) fn build_farm_logon_fields(
     hw_info: &str,
     encoded: &str,
     slot: u32,
+    published: i64,
 ) -> Vec<u8> {
     let display_name = format!("S{username}");
     let farm_id = format!("{display_name}/{slot}/{farm_name}");
     let farm_id_len = farm_id.len().to_string();
     let token_hash = token_short_hash(session_token);
-    let ns_range = format!("{NS_VERSION_MIN}..{NS_VERSION}");
+    let ns_range = format!("{NS_VERSION_MIN}..{NS_VERSION_MAX}");
     let now = chrono_free_timestamp();
     let hb_str = FARM_HEARTBEAT.to_string();
     let hw_field = format!("<{}|{}>", hw_info, session::get_lan_ip(settings.lan_ip.as_deref()));
     let build = settings.build.clone();
     let version = settings.version.clone();
+    let published_text = published.to_string();
 
-    fix_build(
-        &[
-            (fix::TAG_MSG_TYPE, fix::MSG_LOGON),
-            (fix::TAG_SENDING_TIME, &now),
-            (fix::TAG_ENCRYPT_METHOD, "0"),
-            (fix::TAG_HEARTBEAT_INT, &hb_str),
-            (95, &farm_id_len),
-            (96, &farm_id),
-            (fix::TAG_IB_BUILD, &build),
-            (fix::TAG_IB_VERSION, &version),
-            (6351, &hw_field),
-            // The zone, in the place the venue's own farm logon states it:
-            // behind the machine identity and before the longer string. The
-            // order logon states it in was the one this had, and a farm logon
-            // stated no zone at all.
-            (6947, settings.timezone.as_str()),
-            (6266, encoded),
-            (6903, "1"),
-            (8035, session_id),
-            (8285, &ns_range),
-            (8483, &token_hash),
-        ],
-        0,
-    )
+    let mut fields: Vec<(u32, &str)> = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_LOGON),
+        (fix::TAG_SENDING_TIME, &now),
+        (fix::TAG_ENCRYPT_METHOD, "0"),
+        (fix::TAG_HEARTBEAT_INT, &hb_str),
+        (95, &farm_id_len),
+        (96, &farm_id),
+        (fix::TAG_IB_BUILD, &build),
+        (fix::TAG_IB_VERSION, &version),
+        (6351, &hw_field),
+        // The zone, in the place the venue's own farm logon states it:
+        // behind the machine identity and before the longer string. The
+        // order logon states it in was the one this had, and a farm logon
+        // stated no zone at all.
+        (6947, settings.timezone.as_str()),
+        (6266, encoded),
+        (6903, "1"),
+        (8035, session_id),
+        (8285, &ns_range),
+        (8483, &token_hash),
+    ];
+    // When the token behind 8483 was published, at version 52, where the
+    // venue has said.
+    if published > 0 {
+        fields.push((8611, &published_text));
+    }
+    fix_build(&fields, 0)
 }
 
 /// The enciphered logon inside the wrapper the venue frames it in.

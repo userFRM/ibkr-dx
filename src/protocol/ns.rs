@@ -41,6 +41,11 @@ pub const NS_SECURE_ERROR: u32 = 535;
 /// Payload: `MISC{ns_version};530;{server_timestamp};` — the client must echo
 /// `server_timestamp` verbatim in an `NS_HEART_BEAT` reply.
 pub const NS_TEST_REQUEST: u32 = 530;
+/// The times at which the venue published this session's tokens, sent once
+/// the session has agreed version 52: a mask of the token types it names, a
+/// field for each, then the publish time of each, in the order of the mask's
+/// bits.
+pub const NS_PUBLISH_ST_RESPONSE: u32 = 540;
 /// Client keepalive reply matching a prior `NS_TEST_REQUEST`.
 /// Payload: `MISC{ns_version};531;{server_timestamp};`.
 pub const NS_HEART_BEAT: u32 = 531;
@@ -120,6 +125,29 @@ pub fn ns_parse(payload: &[u8]) -> Option<(u32, u32, Vec<String>)> {
         parts = &parts[..parts.len() - 1];
     }
     Some((version, msg_type, parts.iter().map(|s| s.to_string()).collect()))
+}
+
+/// The version a message states in its first field.
+pub fn stated_version(payload: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(payload).ok()?;
+    text.split(';').next()?.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().ok()
+}
+
+/// Each token type an `NS_PUBLISH_ST_RESPONSE` names, with the time it states
+/// the venue published that token. The mask's bits are the token types, taken
+/// in the order below; a field stands for each type named, then each type's
+/// publish time follows in the same order.
+pub fn published_tokens(payload: &[u8]) -> Vec<(u64, i64)> {
+    /// The session token, the permanent one, the read-only one, and TST.
+    const TYPES: [u64; 4] = [2, 4, 16, 256];
+    let text = String::from_utf8_lossy(payload);
+    let mut fields = text.split(';').skip(2);
+    let Some(mask) = fields.next().and_then(|mask| mask.parse::<u64>().ok()) else {
+        return Vec::new();
+    };
+    let named: Vec<u64> = TYPES.into_iter().filter(|kind| mask & kind != 0).collect();
+    let mut times = fields.skip(named.len());
+    named.into_iter().map_while(|kind| Some((kind, times.next()?.parse().ok()?))).collect()
 }
 
 /// Build an `NS_HEART_BEAT` reply that echoes the timestamp from a paired

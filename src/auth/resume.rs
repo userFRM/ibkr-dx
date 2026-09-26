@@ -53,6 +53,10 @@ pub struct ResumableSession {
     pub username: String,
     /// Whether the session is a paper one, for the same reason.
     pub paper: bool,
+    /// When the venue published the token, as it told the session that saved
+    /// it; nought where it did not say. A gateway restarting on a saved token
+    /// states it beside the token, and so does this.
+    pub publish_time: i64,
 }
 
 impl ResumableSession {
@@ -70,6 +74,7 @@ impl ResumableSession {
             out.extend_from_slice(field);
         }
         out.push(self.paper as u8);
+        out.extend_from_slice(&self.publish_time.to_be_bytes());
         out
     }
 
@@ -88,8 +93,14 @@ impl ResumableSession {
         let hw_info = String::from_utf8(take()?).ok()?;
         let encoded = String::from_utf8(take()?).ok()?;
         let username = String::from_utf8(take()?).ok()?;
-        let paper = *cur.first()? != 0;
-        Some(Self { token, server_session_id, hw_info, encoded, username, paper })
+        let (paper, after) = cur.split_first()?;
+        // A session saved before the publish time was kept has none, as a
+        // gateway reads a saved token that ends before it.
+        let publish_time = after
+            .get(..8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map_or(0, i64::from_be_bytes);
+        Some(Self { token, server_session_id, hw_info, encoded, username, paper: *paper != 0, publish_time })
     }
 }
 
@@ -210,6 +221,7 @@ mod tests {
             encoded: "21.0/L/en_US/dist".into(),
             username: "someone".into(),
             paper: true,
+            publish_time: 1_790_000_000_000,
         }
     }
 
@@ -219,7 +231,11 @@ mod tests {
         let path = dir.join("session");
         let s = sample();
         save(&path, "hunter2", &s).unwrap();
-        assert_eq!(load(&path, "someone", "hunter2", true), Some(s));
+        assert_eq!(load(&path, "someone", "hunter2", true), Some(s.clone()));
+        // One saved before the publish time was kept reads as having none.
+        let encoded = s.encode();
+        let before = ResumableSession::decode(&encoded[..encoded.len() - 8]);
+        assert_eq!(before, Some(ResumableSession { publish_time: 0, ..s }));
         clear(&path);
         assert_eq!(load(&path, "someone", "hunter2", true), None);
     }

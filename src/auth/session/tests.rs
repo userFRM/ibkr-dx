@@ -848,6 +848,7 @@ fn security_code_gate_sends_the_code_and_accepts_passed() {
     let mut stream = RepliesAfterWrite::new(security_code_result(&["", "", "", "PASSED"]));
     let outcome = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .expect("PASSED must be accepted");
@@ -868,6 +869,7 @@ fn security_code_gate_reassembles_a_reply_split_across_reads() {
     let mut stream = RepliesAfterWrite::chunked(security_code_result(&["", "", "", "PASSED"]), 1);
     let outcome = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .expect("a frame split across reads must still be accepted");
@@ -891,7 +893,7 @@ fn security_code_gate_answers_keepalives_while_it_waits() {
         std::thread::sleep(std::time::Duration::from_millis(60));
         Ok("123456".to_string())
     });
-    do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None)
+    do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None)
         .expect("PASSED must be accepted");
     let heartbeat = ns_build_heart_beat(NS_VERSION, "20260729-01:02:03");
     let code_frame = xyz::xyz_wrap(&xyz::xyz_build_security_code("123456"));
@@ -919,7 +921,7 @@ fn security_code_gate_echoes_the_timestamp_from_its_position_or_nothing() {
         std::thread::sleep(std::time::Duration::from_millis(60));
         Ok("123456".to_string())
     });
-    do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None)
+    do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None)
         .expect("PASSED must be accepted");
     let heartbeat = ns_build_heart_beat(NS_VERSION, "");
     assert!(
@@ -939,6 +941,7 @@ fn security_code_gate_reports_a_rejection_as_a_rejection_not_a_timeout() {
     let mut stream = RepliesAfterWrite::new(security_code_result(&["", "", "", "FAILED"]));
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -956,6 +959,7 @@ fn security_code_gate_reports_a_774_rejection_before_a_code_is_sent() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
         let err = do_security_code_2fa(
             &mut stream,
+            NS_VERSION,
             deadline,
             Some(&code_provider_waiting_past_the_gate()), None)
         .unwrap_err();
@@ -973,6 +977,7 @@ fn security_code_gate_reports_a_rejection_delivered_as_auth_finish() {
     )));
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -987,6 +992,7 @@ fn security_code_gate_never_puts_the_code_in_an_error_message() {
     let mut stream = RepliesAfterWrite::new(security_code_result(&["", "123456", "", ""]));
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -1000,6 +1006,7 @@ fn security_code_gate_accepts_passed_before_a_code_is_sent() {
     )));
     let outcome = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_waiting_past_the_gate()), None)
     .expect("the venue's PASSED must be accepted before a code is sent");
@@ -1021,7 +1028,7 @@ fn security_code_gate_accepts_a_verdict_whose_read_began_before_the_code() {
         ready,
         written: Vec::new(),
     };
-    let outcome = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None)
+    let outcome = do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None)
         .expect("the venue's PASSED must be accepted before a code is sent");
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
     assert!(stream.written.is_empty(), "nothing should have been sent");
@@ -1041,7 +1048,7 @@ fn security_code_gate_reports_a_774_rejection_whose_read_began_before_the_code()
         ready,
         written: Vec::new(),
     };
-    let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None)
+    let err = do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None)
         .expect_err("the venue's FAILED must reject the login before a code is sent");
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     assert!(err.to_string().contains("security code rejected (FAILED)"), "got {err}");
@@ -1061,7 +1068,7 @@ fn security_code_gate_accepts_a_verdict_after_a_keepalive_before_the_code() {
     incoming.extend_from_slice(&security_code_result(&["", "", "", "PASSED"]));
     let mut stream = VerdictAfterCodeReady { incoming, pos: 0, ready, written: Vec::new() };
 
-    let outcome = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None)
+    let outcome = do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None)
         .expect("the venue's PASSED must be accepted before a code is sent");
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
     let heartbeat = ns_build_heart_beat(NS_VERSION, "20260730-01:02:03");
@@ -1078,6 +1085,7 @@ fn security_code_gate_surfaces_an_unexpected_774_code_before_a_code_is_sent() {
         )));
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_waiting_past_the_gate()), None)
     .unwrap_err();
@@ -1132,6 +1140,7 @@ fn security_code_gate_survives_an_interrupted_read() {
     };
     let outcome = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .expect("a signal must not end the login");
@@ -1144,7 +1153,7 @@ fn security_code_gate_rejects_an_empty_code_before_sending_it() {
     // and one wrong code ends the attempt.
     let mut stream = RepliesAfterWrite::new(Vec::new());
     let provider: CodeProvider = Arc::new(|_| Ok("  ".to_string()));
-    let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None)
+    let err = do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None)
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     assert!(stream.written.is_empty(), "an empty code must not reach the wire");
@@ -1175,6 +1184,7 @@ fn security_code_gate_treats_a_clean_close_as_a_close() {
     let began = std::time::Instant::now();
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -1195,6 +1205,7 @@ fn security_code_gate_leaves_the_next_frame_on_the_stream() {
     let mut stream = RepliesAfterWrite::new(reply);
     do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .expect("PASSED must be accepted");
@@ -1222,6 +1233,7 @@ fn security_code_gate_reassembles_a_frame_larger_than_one_read() {
     let mut stream = RepliesAfterWrite::new(reply);
     do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .expect("a large PASSED frame must still be accepted");
@@ -1242,6 +1254,7 @@ fn security_code_gate_trims_the_code_it_sends() {
     let mut stream = RepliesAfterWrite::new(security_code_result(&["", "", "", "PASSED"]));
     do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("  123456  ")), None)
     .expect("PASSED must be accepted");
@@ -1259,6 +1272,7 @@ fn security_code_gate_accepts_a_774_verdict_before_a_code_is_sent() {
     let mut stream = ScriptedStream::new(security_code_result(&["", "", "", "PASSED"]));
     let outcome = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_waiting_past_the_gate()), None)
     .expect("the venue's PASSED must be accepted before a code is sent");
@@ -1273,6 +1287,7 @@ fn security_code_gate_surfaces_an_ns_error_frame() {
     );
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -1293,6 +1308,7 @@ fn security_code_gate_surfaces_an_unexpected_774_code() {
         )));
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -1311,6 +1327,7 @@ fn security_code_gate_rejects_an_absurd_frame_length_instead_of_buffering() {
     let mut stream = RepliesAfterWrite::new(reply);
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         far_future_deadline(),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -1324,7 +1341,7 @@ fn security_code_gate_requires_a_provider() {
     // same on every attempt, and retrying it ran the same unfinished
     // handshake without end.
     let mut stream = ScriptedStream::new(Vec::new());
-    let err = do_security_code_2fa(&mut stream, far_future_deadline(), None, None).unwrap_err();
+    let err = do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     let reason = crate::reliability::retry::DisconnectReason::from_error(&err);
     assert!(
@@ -1358,6 +1375,7 @@ fn security_code_gate_does_not_send_a_code_after_the_deadline_passes() {
     let mut stream = SlowRead { written: Vec::new() };
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         std::time::Instant::now() + std::time::Duration::from_millis(20),
         Some(&code_provider_returning("123456")), None)
     .unwrap_err();
@@ -1371,6 +1389,7 @@ fn security_code_gate_honours_the_deadline() {
     let began = std::time::Instant::now();
     let err = do_security_code_2fa(
         &mut stream,
+        NS_VERSION,
         std::time::Instant::now(),
         Some(&code_provider_waiting_past_the_gate()), None)
     .unwrap_err();
@@ -1396,7 +1415,7 @@ fn ib_key_2fa_skipped_when_server_passes_immediately() {
     // no SWCR_TOKEN(state=2) preceded it, so this is the no-2FA fast path.
     let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["PASSED"]);
         let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap();
     assert_eq!(outcome, IbKeyOutcome::Skipped { unread: None });
 
 
@@ -1444,7 +1463,7 @@ fn a_quiet_socket_is_waited_through_and_the_deadline_ends_it() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
 
     let started = std::time::Instant::now();
-    let outcome = do_ib_key_2fa(&mut stream, "2a", deadline, None, None);
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", deadline, None, None);
 
     let why = outcome.expect_err("a wait nobody answered ends as a timeout");
     assert_eq!(why.kind(), io::ErrorKind::TimedOut, "{why}");
@@ -1488,7 +1507,7 @@ fn a_second_factor_wait_ends_when_the_client_takes_it_back() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
 
     let started = std::time::Instant::now();
-    let err = do_ib_key_2fa(&mut stream, "2a", deadline, None, Some(&cancel))
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", deadline, None, Some(&cancel))
         .expect_err("a wait the client took back is not one the venue ended");
     assert_eq!(err.kind(), io::ErrorKind::Interrupted, "{err}");
     assert!(err.to_string().contains("cancelled"), "{err}");
@@ -1516,7 +1535,7 @@ fn nothing_in_the_finish_body_is_read_as_a_token_by_its_shape() {
     ]);
     let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
 
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap();
 
     assert_eq!(
         outcome, IbKeyOutcome::Skipped { unread: None },
@@ -1538,7 +1557,7 @@ fn ib_key_2fa_approved_after_state_2_and_passed() {
     incoming.extend_from_slice(&frame_xyz(&auth_finish));
     let mut stream = ScriptedStream::new(incoming);
 
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap();
     match outcome {
         IbKeyOutcome::Approved { approval_url, session_id } => {
             assert_eq!(approval_url, "https://www.example.com/seamless?S=YWJjZA==");
@@ -1564,7 +1583,7 @@ fn ib_key_gate_reassembles_a_reply_split_across_reads() {
     let mut incoming = frame_xyz(&challenge);
     incoming.extend_from_slice(&frame_xyz(&auth_finish));
     let mut stream = RepliesAfterWrite::chunked(incoming, 1);
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None)
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None)
         .expect("a frame split across reads must still be read");
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }), "{outcome:?}");
 }
@@ -1586,7 +1605,7 @@ fn ib_key_2fa_echoes_test_request_timestamp() {
     incoming.extend_from_slice(&frame_xyz(&auth_finish));
     let mut stream = ScriptedStream::new(incoming);
 
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap();
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
 
     // The captured write stream contains: SWCR_TOKEN init, then HEART_BEAT.
@@ -1620,7 +1639,7 @@ fn ib_key_gate_echoes_the_timestamp_from_its_position_or_nothing() {
     incoming.extend_from_slice(&frame_xyz(&auth_finish));
     let mut stream = ScriptedStream::new(incoming);
 
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap();
     assert!(matches!(outcome, IbKeyOutcome::Skipped { .. }), "{outcome:?}");
 
     let heartbeat = ns_build_heart_beat(NS_VERSION, "");
@@ -1645,7 +1664,7 @@ fn ib_key_2fa_socket_close_during_wait_is_aborted() {
         "https://x.example/u",
     ]);
     let mut stream = ScriptedStream::new(frame_xyz(&challenge));
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
     assert!(err.to_string().contains("18 min server-side deadline"),
         "expected the long-deadline message; got {err}");
@@ -1658,7 +1677,7 @@ fn ib_key_2fa_socket_close_before_challenge_says_likely_rejection() {
     // the 18 min deadline (which would mislead users into "approve faster"
         // when the real fix is "your account doesn't use IBKey").
     let mut stream = ScriptedStream::new(Vec::new());
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
     let msg = err.to_string();
     assert!(msg.contains("before issuing a challenge"),
@@ -1672,7 +1691,7 @@ fn ib_key_2fa_rejected_when_passed_string_is_failed() {
     // Server replies AUTH_FINISH state=5 but payload says FAILED — denial.
     let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["FAILED"]);
         let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     assert!(err.to_string().contains("rejected"));
 }
@@ -1713,7 +1732,7 @@ fn ib_key_2fa_cr_submits_code_then_passes_on_auth_finish_state_3() {
         Ok(RUN_A_CODE.to_string())
     });
 
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider), None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), Some(&provider), None).unwrap();
     match outcome {
         IbKeyOutcome::Approved { approval_url, session_id, .. } => {
             assert_eq!(session_id, RUN_A_SESSION_ID);
@@ -1765,7 +1784,7 @@ fn ib_key_2fa_cr_slow_provider_keeps_heartbeats_flowing() {
         Ok(CODE.to_string())
     });
 
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider), None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), Some(&provider), None).unwrap();
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
 
     let sent = &stream.written;
@@ -1808,7 +1827,7 @@ fn a_slow_provider_s_code_is_sent_on_a_quiet_socket() {
     });
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-    let outcome = do_ib_key_2fa(&mut stream, "2a", deadline, Some(&provider), None)
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", deadline, Some(&provider), None)
         .expect("the code reaches the wire on a quiet socket");
     assert!(matches!(outcome, IbKeyOutcome::Approved { .. }), "{outcome:?}");
     assert!(
@@ -1837,7 +1856,7 @@ fn ib_key_2fa_cr_code_rejected_on_state_4_failed() {
     );
 
     let provider: CodeProvider = std::sync::Arc::new(|_| Ok(WRONG_CODE.to_string()));
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider), None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), Some(&provider), None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     assert!(err.to_string().contains("C/R code rejected"),
         "expected C/R rejection message; got {err}");
@@ -1870,7 +1889,7 @@ fn ib_key_2fa_cr_does_not_burn_a_code_after_the_deadline() {
         Ok(CODE.to_string())
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
-    let err = do_ib_key_2fa(&mut stream, "2a", deadline, Some(&provider), None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", deadline, Some(&provider), None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::TimedOut, "got {err}");
     assert!(
         !stream.written.windows(submission.len()).any(|f| f == submission),
@@ -1892,7 +1911,7 @@ fn ib_key_2fa_cr_does_not_burn_a_code_after_the_deadline() {
         Ok(CODE.to_string())
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
-    let err = do_ib_key_2fa(&mut stream, "2a", deadline, Some(&provider), None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", deadline, Some(&provider), None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::TimedOut, "got {err}");
     assert!(
         !stream.written.windows(submission.len()).any(|f| f == submission),
@@ -1906,7 +1925,7 @@ fn ib_key_2fa_cr_does_not_burn_a_code_after_the_deadline() {
         frame_xyz(&xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["PASSED"])),
         );
     let provider: CodeProvider = std::sync::Arc::new(|_| Ok(CODE.to_string()));
-    let _ = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider), None);
+    let _ = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), Some(&provider), None);
     assert!(
         stream.written.windows(submission.len()).any(|f| f == submission),
         "the positive control: a live deadline still submits",
@@ -1926,7 +1945,7 @@ fn ib_key_2fa_cr_provider_error_aborts_login() {
     let provider: CodeProvider = std::sync::Arc::new(|_| {
         Err(io::Error::new(io::ErrorKind::Interrupted, "user cancelled"))
     });
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider), None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), Some(&provider), None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::Interrupted);
 }
 
@@ -1953,7 +1972,7 @@ fn ib_key_2fa_rejects_an_unexpected_swcr_token_state() {
 
     let began = std::time::Instant::now();
     let deadline = began + std::time::Duration::from_secs(1);
-    let err = do_ib_key_2fa(&mut stream, "2a", deadline, None, None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", deadline, None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "got {err}");
     assert!(
         began.elapsed() < std::time::Duration::from_millis(500),
@@ -1972,14 +1991,14 @@ fn ib_key_2fa_rejections_do_not_echo_server_supplied_text() {
 
     let state4 = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &[SERVER_TEXT]);
         let mut stream = ScriptedStream::new(frame_xyz(&state4));
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "got {err}");
     assert!(!err.to_string().contains(SERVER_TEXT),
         "state=4 rejection must not echo the server's field; got {err}");
 
     let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &[SERVER_TEXT]);
         let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
-    let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap_err();
+    let err = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "got {err}");
     assert!(!err.to_string().contains(SERVER_TEXT),
         "AUTH_FINISH rejection must not echo the server's field; got {err}");
@@ -2035,7 +2054,7 @@ fn an_srp_group_that_is_not_this_venue_s_stops_the_logon() {
 fn a_connect_response_read_by_the_gate_is_handed_on() {
     let payload = format!("{NS_VERSION};{NS_CONNECT_RESPONSE};ok;");
     let mut stream = ScriptedStream::new(frame_xyz(payload.as_bytes()));
-    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+    let outcome = do_ib_key_2fa(&mut stream, NS_VERSION, "2a", far_future_deadline(), None, None).unwrap();
     match outcome {
         IbKeyOutcome::Skipped { unread: Some(raw) } => {
             assert_eq!(raw, payload.as_bytes(), "handed back as it arrived");
@@ -2052,7 +2071,7 @@ fn a_fix_start_read_by_the_security_code_gate_is_handed_on() {
     let mut stream = ScriptedStream::new(frame_xyz(payload.as_bytes()));
     let provider = code_provider_returning("123456");
     let outcome =
-        do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), None).unwrap();
+        do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), None).unwrap();
     assert!(
         matches!(outcome, IbKeyOutcome::Skipped { unread: Some(ref raw) } if raw == payload.as_bytes()),
         "the gate kept a message it did not own: {outcome:?}",
@@ -2116,7 +2135,7 @@ fn taking_back_a_code_wait_waits_for_its_provider_and_submits_nothing() {
         let cancel = Arc::clone(&cancel);
         std::thread::spawn(move || {
             let mut stream = RepliesAfterWrite::with_preface(Vec::new(), vec![0xff], Vec::new());
-            let result = do_security_code_2fa(&mut stream, Instant::now() + Duration::from_secs(5), Some(&provider), Some(&cancel));
+            let result = do_security_code_2fa(&mut stream, NS_VERSION, Instant::now() + Duration::from_secs(5), Some(&provider), Some(&cancel));
             (result, stream.written)
         })
     };
@@ -2140,7 +2159,7 @@ fn a_taken_back_code_wait_never_calls_its_provider() {
         Arc::new(move |_| { called.store(true, Ordering::Release); Ok("123456".into()) })
     };
     let mut stream = ScriptedStream::new(Vec::new());
-    let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider), Some(&cancel)).unwrap_err();
+    let err = do_security_code_2fa(&mut stream, NS_VERSION, far_future_deadline(), Some(&provider), Some(&cancel)).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::Interrupted);
     assert!(!called.load(Ordering::Acquire));
     assert!(stream.written.is_empty());
