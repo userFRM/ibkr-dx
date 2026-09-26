@@ -262,9 +262,11 @@ impl<T> Default for Pending<T> {
 /// A warning is not an answer to anything: the connection notices, and a
 /// warning about a request that goes on, such as an order placed without
 /// something it asked for. ib_async reads every code from 2100 to 2199 as a
-/// warning, and so does this.
+/// warning, and so does this. A query message, which a gateway says of a
+/// request while the historical connection is down and as it comes back, is
+/// one too: the request's answer follows it.
 fn is_warning(code: i64) -> bool {
-    (2100..2200).contains(&code)
+    (2100..2200).contains(&code) || code == i64::from(crate::error_codes::HISTORICAL_QUERY_MESSAGE)
 }
 
 /// The venue's naming of a description, with what the caller stated put back

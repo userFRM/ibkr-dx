@@ -1114,35 +1114,27 @@ impl HotLoop {
         push_hmds_unavailable(&self.shared, req_id, from_historical);
     }
 
-    /// Poll the historical connection, and where the poll saw it go, take the
-    /// scan rows parked behind their naming with the scans the drop failed.
-    /// Every scan is the historical service's; left parked, a batch was
-    /// released at its deadline and the caller handed rows and an end for a
-    /// scan it had just been told had failed.
+    /// Poll the historical connection, and end the head timestamps the venue
+    /// has not answered in the time a gateway waits for one, whether or not
+    /// the connection is up.
     pub(crate) fn poll_historical(&mut self) {
-        let historical_was_up = self.hmds_conn.is_some();
         self.hmds.poll(&mut self.hmds_conn, &self.shared, &self.event_tx, &mut self.hb);
-        if historical_was_up && self.hmds_conn.is_none() {
-            self.abandon_parked_scans();
-        }
+        self.hmds.time_out_head_timestamps(Instant::now(), &self.shared);
     }
 
     /// Drop the scan rows parked behind their contract lookups. The scans
-    /// they belong to are failed when the historical connection is given
-    /// up, so releasing their rows on the sweep would hand a caller an
-    /// answer to a scan it was just told had failed.
+    /// they belong to are failed once this client stops trying for the
+    /// historical connection, so releasing their rows on the sweep would hand
+    /// a caller an answer to a scan it was just told had failed. A drop alone
+    /// leaves them: the scans go on, as a gateway keeps them.
     fn abandon_parked_scans(&mut self) {
         self.ccp.pending_scanner_enrichment.clear();
         self.hmds.scanner_batches.clear();
     }
 
-    /// Give up the historical connection and drop what was parked behind
-    /// it. Every path that abandons this connection outside `poll_historical`
-    /// routes through here, so the parked scans go with it however the drop
-    /// is seen.
+    /// Give up the historical connection.
     fn give_up_historical(&mut self) {
         self.hmds.disconnect(&mut self.hmds_conn, &self.shared, &self.event_tx);
-        self.abandon_parked_scans();
     }
 
     fn poll_control_commands(&mut self) {
@@ -1494,6 +1486,10 @@ impl HotLoop {
                             &self.shared, req_id, crate::error_codes::Refusal::VALIDATION,
                             told, false,
                         );
+                    } else if self.hmds.refused_as_a_second_query(req_id, &self.shared) {
+                        // Refused whether or not the connection is up: a
+                        // request waiting to be asked again once it is back
+                        // is still answering under the number.
                     } else if self.hmds_conn.is_none() {
                         // keepUpToDate sends via CCP but bars/end arrive on
                         // HMDS — both paths need an authed HMDS socket to
@@ -1569,6 +1565,7 @@ impl HotLoop {
                     // call: its entry goes and its late answer matches nothing.
                     let held = self.hmds.pending_historical.iter().any(|(_, rid)| *rid == req_id)
                         || self.hmds.held.iter().any(|a| a.req_id == req_id)
+                        || self.hmds.asked_again.iter().any(|a| a.req_id == req_id)
                         || self.hmds.keep_up_to_date_reqs.contains(&req_id)
                         || self.hmds.pending_schedule.iter().any(|(_, rid, _)| *rid == req_id)
                         || self.ccp.pending_named.iter()
@@ -1585,6 +1582,9 @@ impl HotLoop {
                         );
                     }
                     self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchHistorical { .. } | ControlCommand::FetchHistoricalSchedule { .. }));
+                    // One waiting to be asked again once the connection is
+                    // back is not asked.
+                    self.hmds.asked_again.retain(|a| a.req_id != req_id);
                     // What the venue already sent and nobody has read yet
                     // goes with the request. Left queued, the next request
                     // under this number is answered with this one's.
@@ -1661,7 +1661,7 @@ impl HotLoop {
                     let parked = self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchHeadTimestamp { .. }));
                     // As above: the answers already queued go with it.
                     self.shared.reference.purge_head_timestamp_for(req_id);
-                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid, _)| *rid == req_id) {
+                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid, ..)| *rid == req_id) {
                         let (query_id, ..) = self.hmds.pending_head_ts.remove(pos);
                         self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
                     } else if !parked {
@@ -1741,8 +1741,8 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelScanner { req_id } => {
-                    if let Some(pos) = self.hmds.pending_scanner.iter().position(|(_, rid)| *rid == req_id) {
-                        let (scan_id, _) = self.hmds.pending_scanner.remove(pos);
+                    if let Some(pos) = self.hmds.pending_scanner.iter().position(|(_, rid, _)| *rid == req_id) {
+                        let (scan_id, ..) = self.hmds.pending_scanner.remove(pos);
                         self.hmds.send_scanner_cancel(&scan_id, &mut self.hmds_conn, &mut self.hb);
                     } else {
                         // A caller withdrawing a scan this client is not
@@ -1769,17 +1769,11 @@ impl HotLoop {
                     self.shared.reference.purge_scanner_data_for(req_id);
                 }
                 ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, start_time, end_time, max_results } => {
+                    // A second under a number still answering one is asked
+                    // too, as a gateway asks it: each is answered under the
+                    // number.
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
-                    } else if self.hmds.pending_news.iter().any(|(_, rid)| *rid == req_id) {
-                        // As a second bar query under a live number is refused:
-                        // two queries under one number answer twice, and a
-                        // withdrawal reaches one of them.
-                        push_hmds_refusal(
-                            &self.shared, req_id, crate::error_codes::DUPLICATE_HISTORICAL_QUERY,
-                            format!("request {req_id} is already answering a news query: withdraw it before asking for another under the same number"),
-                            false,
-                        );
                     } else {
                         self.hmds.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results, &self.shared, &mut self.hmds_conn, &mut self.hb);
                     }
@@ -1799,14 +1793,10 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
+                    // As a news request: a second under a live number is
+                    // asked too, as a gateway asks it.
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
-                    } else if self.hmds.pending_articles.iter().any(|(_, rid)| *rid == req_id) {
-                        push_hmds_refusal(
-                            &self.shared, req_id, crate::error_codes::DUPLICATE_HISTORICAL_QUERY,
-                            format!("request {req_id} is already answering an article query: withdraw it before asking for another under the same number"),
-                            false,
-                        );
                     } else {
                         self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &self.shared, &mut self.hmds_conn, &mut self.hb);
                     }
@@ -3725,6 +3715,12 @@ impl HotLoop {
     fn poll_optional_farm_reconnects(&mut self) {
         self.maybe_spawn_hmds_reconnect();
         self.poll_hmds_reconnect();
+        // A connection this session no longer dials for asks nothing again.
+        if (self.hmds_halted.is_some() || self.reconnect_halted.is_some())
+            && self.hmds.give_up_those_asked_again(&self.shared)
+        {
+            self.abandon_parked_scans();
+        }
         self.maybe_spawn_secdef_reconnect();
         self.poll_secdef_reconnect();
     }
@@ -3754,7 +3750,7 @@ impl HotLoop {
                     self.pending_hmds_reconnect = None;
                     return;
                 }
-                self.hmds.reconnect(conn, &mut self.hmds_conn, &self.context.market, &mut self.hb);
+                self.hmds.reconnect(conn, &mut self.hmds_conn, &self.context.market, &mut self.hb, &self.shared);
                 self.hb.last_hmds_recv = Instant::now();
                 self.hb.last_hmds_sent = Instant::now();
                 // The probe that went unanswered belonged to the dead session.
@@ -3788,6 +3784,9 @@ impl HotLoop {
                     self.hmds_halted = Some(reason);
                     return;
                 }
+                self.hmds.tell_those_waiting(
+                    &self.shared, "HMDS connection attempt failed.  Connection will be re-attempted...",
+                );
                 if self.hmds_reconnect_attempt == HMDS_NOTIFY_AFTER_ATTEMPTS {
                     log::error!(
                         "HMDS still down after {HMDS_NOTIFY_AFTER_ATTEMPTS} attempts — historical data is unavailable until it answers; retries continue",
@@ -3799,6 +3798,9 @@ impl HotLoop {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 log::error!("HMDS reconnect thread dropped without result");
                 self.pending_hmds_reconnect = None;
+                self.hmds.tell_those_waiting(
+                    &self.shared, "HMDS connection attempt failed.  Connection will be re-attempted...",
+                );
                 // A thread that never answered is a spent attempt like any
                 // other. Leaving the due time on the instant that authorised
                 // this one makes the next pass spawn immediately, and the one
@@ -5056,7 +5058,7 @@ mod tests {
         let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.hmds_conn = Some(conn);
-        hl.hmds.pending_head_ts.push(("TickHeadClient1;;265598@BEST TRADES;;0;;true;;0;;U".to_string(), req_id, 1));
+        hl.hmds.pending_head_ts.push(("TickHeadClient1;;265598@BEST TRADES;;0;;true;;0;;U".to_string(), req_id, 1, std::time::Instant::now()));
         hl.set_control_rx(rx);
         tx.send(crate::types::ControlCommand::CancelHeadTimestamp { req_id }).unwrap();
         hl.poll_control_commands();
@@ -8204,14 +8206,15 @@ mod tests {
         assert!(shared.market.drain_tick_news().is_empty(), "nothing after the withdrawal");
     }
 
-    /// A second historical-news request under a number still answering is
-    /// refused, as a second bar query is: two queries under one number answer
-    /// twice, and a withdrawal reaches one of them.
+    /// A second news or article request under a number still answering one is
+    /// asked too, as a gateway asks it: it refuses neither, and each is
+    /// answered under the number. A withdrawal of the news withdraws every
+    /// query under it. Both were refused with 386 in this client's own words.
     #[test]
-    fn a_second_news_request_under_a_live_number_is_refused() {
+    fn a_second_news_or_article_request_under_a_live_number_is_asked_too() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
-        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
         hl.set_control_rx(rx);
         let (conn, _peer) = crate::protocol::connection::Connection::for_test();
         hl.hmds_conn = Some(conn);
@@ -8221,12 +8224,79 @@ mod tests {
                 start_time: String::new(), end_time: String::new(), max_results: 10,
             })
             .unwrap();
+            tx.send(ControlCommand::FetchNewsArticle {
+                req_id: 8, provider_code: "BRFG".into(), article_id: "BRFG$1".into(),
+            })
+            .unwrap();
         }
         hl.poll_control_commands();
-        assert_eq!(hl.hmds.pending_news.len(), 1, "one query answers under the number");
+        assert_eq!(hl.hmds.pending_news.len(), 2, "both news queries answer under the number");
+        assert_eq!(hl.hmds.pending_articles.len(), 2, "and both article queries");
+        tx.send(ControlCommand::CancelHistoricalNews { req_id: 7 }).unwrap();
+        hl.poll_control_commands();
+        assert!(hl.hmds.pending_news.is_empty(), "the withdrawal takes every news query under it");
         let told = shared.reference.drain_historical_errors();
-        assert_eq!(told.len(), 1, "the second is refused: {told:?}");
-        assert_eq!((told[0].0, told[0].1), (7, 386), "{told:?}");
+        assert!(told.is_empty(), "nothing is refused: {told:?}");
+    }
+
+    /// A bar request a dropped historical connection left to be asked again,
+    /// and a scan running, hears of each attempt to bring the connection back
+    /// that fails, in a gateway's words, and is failed once this client stops
+    /// trying for it: nothing is left to ask it on. The scan's rows parked
+    /// behind their naming go with it. A second bar request under the waiting
+    /// one's number is refused as a duplicate while the connection is down,
+    /// and ends nothing: failed under 504 as a request with no connection, it
+    /// let the program's side forget the one still to be asked again.
+    #[test]
+    fn a_bar_request_left_to_be_asked_again_hears_each_failed_attempt() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        hl.hmds.asked_again.push(hmds::BarAsk {
+            schedule: false, req_id: 7, con_id: 12087792, end_date_time: String::new(), duration: "1 D".into(),
+            bar_size: "1 hour".into(), what_to_show: "MIDPOINT".into(), use_rth: false,
+            include_expired: false, symbol: "EUR".into(), sec_type: "CASH".into(), exchange: "IDEALPRO".into(),
+        });
+        hl.hmds.pending_scanner.push(("APISCAN1:8".to_string(), 8, String::new()));
+        hl.ccp.pending_scanner_enrichment.push(crate::engine::hot_loop::ccp::PendingScannerEnrichment {
+            api_req_id: 8,
+            result: crate::control::scanner::ScannerResult { con_ids: Vec::new(), entries: Vec::new(), scan_time: String::new(), error_text: String::new() },
+            awaiting: Default::default(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(Err(io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused"))).unwrap();
+        hl.pending_hmds_reconnect = Some(rx);
+        hl.poll_hmds_reconnect();
+        let failed = "Historical Market Data Service query message:HMDS connection attempt failed.  \
+                      Connection will be re-attempted...";
+        assert_eq!(
+            shared.reference.drain_historical_errors(),
+            [(7, 165, failed.to_string()), (8, 165, failed.to_string())],
+        );
+        // A second bar request under its number is refused as a gateway
+        // refuses it, and the one waiting goes on waiting.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::FetchHistorical {
+            contract: ContractRef { con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() },
+            req_id: 7, end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
+            what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1,
+            include_expired: false, filters: Default::default(),
+        }).unwrap();
+        hl.poll_control_commands();
+        assert_eq!(
+            shared.reference.drain_historical_errors(),
+            [(7, 386, "Duplicate ticker ID for API historical data query".to_string())],
+        );
+        assert!(hmds::tests::over(&shared).is_empty(), "and ends nothing");
+        assert_eq!(hl.hmds.asked_again.len(), 1);
+        hl.hmds_halted = Some(retry::DisconnectReason::ByDesign);
+        hl.poll_optional_farm_reconnects();
+        let told = shared.reference.drain_historical_errors();
+        assert!(matches!(told.as_slice(), [(7, 504, _), (8, 504, _)]), "{told:?}");
+        assert_eq!(hmds::tests::over(&shared), [7], "and the bar request is over");
+        assert!(hl.hmds.asked_again.is_empty() && hl.hmds.pending_scanner.is_empty());
+        assert!(hl.ccp.pending_scanner_enrichment.is_empty(), "and the scan's parked rows go with it");
     }
 
     /// A calendar withdrawal that throws away an answer already queued acted,
@@ -8567,12 +8637,31 @@ mod tests {
         assert!(shared.reference.drain_historical_news().is_empty(), "the queued answer went with the withdrawal");
     }
 
-    /// A historical drop takes the scan rows parked behind their naming with
-    /// the scans it failed. Left parked, their deadline released them and the
-    /// caller was handed rows and an end for a scan it had just been told had
-    /// failed.
+    /// A head timestamp the venue has not answered in five seconds ends, told
+    /// 162 in a gateway's words, as a gateway ends it, whether or not the
+    /// connection is up; one asked since goes on waiting.
     #[test]
-    fn a_historical_drop_takes_the_parked_scan_rows_with_it() {
+    fn a_head_timestamp_left_unanswered_times_out() {
+        let shared = Arc::new(SharedState::new());
+        let mut hl = HotLoop::new(shared.clone(), None, None);
+        let now = Instant::now();
+        hl.hmds.pending_head_ts.push(("hts_1".to_string(), 7, 1, now - std::time::Duration::from_secs(6)));
+        hl.hmds.pending_head_ts.push(("hts_2".to_string(), 8, 1, now));
+
+        hl.poll_historical();
+
+        assert_eq!(
+            shared.reference.drain_historical_errors(),
+            [(7, 162, "Historical Market Data Service error message:Request Timed Out".to_string())],
+        );
+        assert_eq!(hl.hmds.pending_head_ts.len(), 1);
+        assert_eq!(hl.hmds.pending_head_ts[0].1, 8, "the one asked since goes on waiting");
+    }
+
+    /// A historical drop leaves the scan rows parked behind their naming: the
+    /// scans go on, as a gateway keeps them, and the rows are theirs.
+    #[test]
+    fn a_historical_drop_leaves_the_parked_scan_rows() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
         let (conn, peer) = crate::protocol::connection::Connection::for_test();
@@ -8586,7 +8675,7 @@ mod tests {
         });
         hl.poll_historical();
         assert!(hl.hmds_conn.is_none(), "the drop is seen");
-        assert!(hl.ccp.pending_scanner_enrichment.is_empty(), "and the parked rows go with the scans");
+        assert_eq!(hl.ccp.pending_scanner_enrichment.len(), 1, "and the parked rows stay with the scans");
     }
 
     /// A contract numbered beyond what a request carries is refused on a
@@ -9630,39 +9719,6 @@ mod withdrawal_tests {
             "the farm's recovery is not ended by the trading connection's spent clock",
         );
     }
-
-    /// A historical liveness timeout takes the parked scan rows with it, as a
-    /// drop seen by the poll does. The scans were failed when the connection
-    /// was given up; releasing their rows on the sweep would answer a scan the
-    /// caller was just told had failed.
-    #[test]
-    fn a_historical_liveness_timeout_takes_the_parked_scan_rows() {
-        let shared = Arc::new(SharedState::new());
-        let mut hl = HotLoop::new(shared, None, None);
-        let (conn, peer) = crate::protocol::connection::Connection::for_test();
-        drop(peer);
-        hl.hmds_conn = Some(conn);
-        // Silent well past the dead-after threshold, and not a stall in this
-        // process (the check ran a moment ago).
-        hl.hb.last_liveness_check = Instant::now();
-        hl.hb.last_hmds_recv = Instant::now() - std::time::Duration::from_secs(600);
-        hl.ccp.pending_scanner_enrichment.push(crate::engine::hot_loop::ccp::PendingScannerEnrichment {
-            api_req_id: 9,
-            result: crate::control::scanner::ScannerResult {
-                con_ids: Vec::new(), entries: Vec::new(), scan_time: String::new(), error_text: String::new(),
-            },
-            awaiting: Default::default(),
-            deadline: Instant::now() + std::time::Duration::from_secs(60),
-        });
-
-        hl.check_heartbeats();
-        assert!(hl.hmds_conn.is_none(), "the silent connection is given up");
-        assert!(
-            hl.ccp.pending_scanner_enrichment.is_empty(),
-            "and the parked rows go with it, not on to the sweep",
-        );
-    }
-
 }
 
 /// Admission never waits, and what is admitted and not finished is counted.

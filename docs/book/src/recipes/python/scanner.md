@@ -47,7 +47,10 @@ reading.
 
 Which scan codes and locations are valid is the venue's list.
 `req_scanner_parameters()` fetches it, and an unknown code comes back as a
-stated refusal on the `error` callback.
+stated refusal on the `error` callback. When the historical connection drops, a
+running scan is told 165 as it drops, at each attempt to bring it back that
+fails and once it is back, and is then subscribed again and goes on under its
+number, as a gateway does; a 165 ends nothing.
 
 ## Run it
 

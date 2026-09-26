@@ -527,27 +527,18 @@ impl Drop for Reading {
 /// hands out ids well past `u32::MAX`, so the ibapi idiom of one counter for
 /// orders and requests hit it on the first call. Refuse instead.
 pub(crate) fn wire_req_id(req_id: i64) -> Result<u32, Refusal> {
+    // A gateway reads the number as four bytes, signed, and refuses one that
+    // does not fit as a number it could not read. The calls that answer
+    // number themselves past that, in a band of their own, and are the only
+    // ones that may.
+    if !answering_now() && let Some(why) = unread_number(req_id) {
+        return Err(why);
+    }
     let id = u32::try_from(req_id).map_err(|_| {
         Refusal::validation(format!(
             "req_id {req_id} is outside the range this request can carry (0..={})", u32::MAX,
         ))
     })?;
-    // The band the answering calls number themselves in is not a caller's to
-    // use. An answer is handed to whoever is waiting under its number, so a
-    // request numbered inside it has its answer taken by one of those calls,
-    // about something it did not ask for — and that call loses its own.
-    //
-    // Told apart by who is asking rather than by the number, because the number
-    // is held precisely while the collision is possible: an answering call
-    // marks itself for the length of its own call, and nothing else can.
-    if crate::bridge::ReferenceState::is_ask_id(id) && !answering_now() {
-        return Err(Refusal::validation(format!(
-            "req_id {req_id} is inside the range this client numbers its own answering \
-             calls in, and an answer under it would be taken for one of theirs: number \
-             the request below {}",
-            crate::bridge::ReferenceState::ASK_ID_BASE,
-        )));
-    }
     // The top of the range already means something: it is what this client
     // reports when a message names no request at all, and it reaches a caller
     // as minus one. A request numbered with it is answered under a number that
@@ -574,12 +565,12 @@ pub(crate) fn wire_req_id(req_id: i64) -> Result<u32, Refusal> {
     Ok(id)
 }
 
-/// The refusal of a market-data request, or of its withdrawal, whose number a
-/// gateway cannot read: it reads the number as four bytes, signed, and answers
-/// one that does not fit under no request, the number being what it could not
+/// The refusal of a request, or of its withdrawal, whose number a gateway
+/// cannot read: it reads the number as four bytes, signed, and answers one
+/// that does not fit under no request, the number being what it could not
 /// read. Every number this client keeps for its own work lies past that, so a
-/// program cannot reach one of its subscriptions.
-pub(crate) fn unread_md_number(req_id: i64) -> Option<Refusal> {
+/// program cannot reach one of them.
+pub(crate) fn unread_number(req_id: i64) -> Option<Refusal> {
     i32::try_from(req_id).is_err().then(|| Refusal::stated(
         crate::error_codes::REQUEST_NOT_READ,
         format!(

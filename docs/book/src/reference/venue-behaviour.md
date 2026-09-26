@@ -173,6 +173,30 @@ with every one of them, as a gateway does.
   bar request still answering is refused with 386, *Duplicate ticker ID for
   API historical data query*, as a gateway refuses it, and the bar request
   goes on answering.
+- A news or article request under the number of one still answering is asked
+  as well, as a gateway asks it, and each is answered under the number.
+- When the historical connection drops, a bar request kept up to date ends on
+  10182, *Failed to request live updates (disconnected)*, as a gateway ends
+  it, whether its history was still arriving or it was on its updates. One not
+  kept up to date, or a trading schedule, still arriving is told 165,
+  *Historical Market Data Service query message:HMDS server disconnect
+  occurred.  Attempting reconnection...*, told again at each attempt to bring
+  the connection back that fails, and once it is back is told *HMDS server
+  connection was successful.* and asked again from the start; its answer then
+  arrives with its end. A scan is told the same and is subscribed again under
+  the name it ran under, going on under its number. A 165 is a notice and ends
+  nothing, and the calls that wait for an answer wait through it. A head
+  timestamp, a histogram and historical ticks are told nothing, as a gateway
+  tells them nothing; a histogram and ticks asked on the connection that went
+  are not answered, as on a gateway. A connection this client stops trying for
+  fails the requests waiting to be asked again, and the scans, under 504. A
+  fundamentals, news or article request, the scanner's parameters and a
+  contract's corporate actions are still failed at the drop under 504: a
+  gateway asks the first four on connections of their own, which this client
+  carries on the historical one, and the last is this client's own question.
+- A head timestamp the venue has not answered in five seconds ends on 162,
+  *Historical Market Data Service error message:Request Timed Out*, as a
+  gateway ends it.
 - A fundamental report is asked about a stock alone. A gateway refuses one on
   a contract stated as any other type, or stating none, before looking it up,
   with *Please enter a valid security type* under 321; so does this client.

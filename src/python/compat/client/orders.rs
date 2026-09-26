@@ -292,6 +292,7 @@ impl EClient {
         exercise_quantity: i32, account: &str, r#override: i32,
         manual_order_time: &str, customer_account: &str, professional_customer: bool,
     ) -> PyResult<()> {
+        if self.number_unread(req_id)? { return Ok(()); }
         let exercising = crate::types::model::ErrorOrigin::Order { id: req_id, op: crate::types::model::OrderOp::Exercise };
         if let Err(why) = self.core.refuse_if_readonly("an exercise") {
             return self.report_refusal_as(py, exercising, Refusal::validation(why));

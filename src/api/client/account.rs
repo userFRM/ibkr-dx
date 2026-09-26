@@ -56,6 +56,7 @@ impl EClient {
     /// active request number is refused under 102. A model is taken and not
     /// applied, with a log notice once per session.
     pub fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         // The account is checked before the request number is subscribed.
         if let Err(why) = ClientCore::check_pnl_account(&self.shared, &self.accounts, &self.account_id, account) {
@@ -83,6 +84,7 @@ impl EClient {
     /// itself, on a gateway as here, so the updates stopping is what the call
     /// does.
     pub fn cancel_pnl(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         self.core.unsubscribe_pnl(req_id);
         if let Err(why) = self.send(ControlCommand::CancelPnl { req_id, single: false }) {
             self.report_reason(req_id, &why);
@@ -93,6 +95,7 @@ impl EClient {
     /// The account is checked as for the account-level profit. A model is
     /// taken and not applied, with a log notice once per session.
     pub fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         if let Err(why) = ClientCore::check_pnl_account(&self.shared, &self.accounts, &self.account_id, account) {
             log::warn!("{}", why.message);
@@ -114,6 +117,7 @@ impl EClient {
 
     /// Cancel single-position PnL subscription. Matches `cancelPnLSingle` in C++.
     pub fn cancel_pnl_single(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.unsubscribe_pnl_single(req_id);
         if let Err(why) = self.send(ControlCommand::CancelPnl { req_id, single: true }) { self.report_reason(req_id, &why); }
@@ -126,6 +130,7 @@ impl EClient {
     /// a log notice once per session. Validation and the limit of two standing
     /// summary requests follow a gateway.
     pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         let accounts = if group == "All" { self.accounts.clone() } else {
             ClientCore::note_account_selection(&self.shared, group);
@@ -145,6 +150,7 @@ impl EClient {
 
     /// Cancel account summary. Matches `cancelAccountSummary` in C++.
     pub fn cancel_account_summary(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.unsubscribe_account_summary(req_id);
     }
@@ -230,6 +236,7 @@ impl EClient {
     pub fn req_account_updates_multi(
         &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
     ) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() {
             return self.report_reason(req_id, &Refusal::not_connected("Not connected"));
         }
@@ -260,6 +267,7 @@ impl EClient {
     /// A request the engine still holds is withdrawn, never answered; one it
     /// answered stops where the withdrawal stands, after its answer.
     pub fn cancel_account_updates_multi(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         if let Err(why) = self.send(ControlCommand::Retire(Retirement::AccountUpdatesMulti(req_id))) {
             self.report_reason(req_id, &why);
@@ -269,6 +277,7 @@ impl EClient {
     /// Subscribe to holdings of the named account under this request number.
     /// A model is taken and not applied, with a log notice once per session.
     pub fn req_positions_multi(&self, req_id: i64, account: &str, model_code: &str) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() {
             return self.report_reason(req_id, &Refusal::not_connected("Not connected"));
         }
@@ -299,6 +308,7 @@ impl EClient {
     // A request the engine still holds is withdrawn, never answered; one it
     // answered stops where the withdrawal stands, after its answer.
     pub fn cancel_positions_multi(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         if let Err(why) = self.send(ControlCommand::Retire(Retirement::PositionsMulti(req_id))) {
             self.report_reason(req_id, &why);

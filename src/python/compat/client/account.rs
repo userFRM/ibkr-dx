@@ -95,6 +95,7 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         if let Err(why) = self.check_pnl_account(account) {
             return self.report_refusal(py, req_id, why);
         }
@@ -117,6 +118,7 @@ impl EClient {
     /// Cancel single-position P&L subscription.
     fn cancel_pnl_single(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         self.core.unsubscribe_pnl_single(req_id);
         if let Err(why) = self.send_control(&_tx, ControlCommand::CancelPnl { req_id, single: true }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
@@ -131,6 +133,7 @@ impl EClient {
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, py: Python<'_>, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         let shared = self.shared_state()?;
         let accounts = if group_name == "All" { self.accounts.lock().unwrap().clone() } else {
             crate::client_core::ClientCore::note_account_selection(&shared, group_name);
@@ -152,6 +155,7 @@ impl EClient {
     /// Cancel account summary.
     fn cancel_account_summary(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         self.core.unsubscribe_account_summary(req_id);
         Ok(())
     }
@@ -286,6 +290,7 @@ impl EClient {
     /// answered stops where the withdrawal stands, after its answer.
     fn cancel_account_updates_multi(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         let retire = crate::types::Retirement::AccountUpdatesMulti(req_id);
         if let Err(why) = self.send_control(&tx, ControlCommand::Retire(retire)) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
@@ -322,6 +327,7 @@ impl EClient {
     // answered stops where the withdrawal stands, after its answer.
     fn cancel_positions_multi(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         let retire = crate::types::Retirement::PositionsMulti(req_id);
         if let Err(why) = self.send_control(&tx, ControlCommand::Retire(retire)) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));

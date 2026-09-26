@@ -39,6 +39,7 @@ impl EClient {
     /// as a gateway waits, and answered from `process_msgs` rather than by
     /// holding this call.
     pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.refuse_session(&Refusal::not_connected("Not connected")); }
         match self.shared.reference.ask_smart_components(req_id, bbo_exchange) {
             Ok(Some(components)) => {
@@ -135,6 +136,7 @@ impl EClient {
     /// taken it, and a venue that refuses states why on [`Wrapper::error`](crate::api::wrapper::Wrapper::error)
     /// under the same number.
     pub fn replace_fa(&self, req_id: i64, fa_data_type: i32, cxml: &str) {
+        if self.number_unread(req_id) { return; }
         if let Err(why) = (|| -> Result<(), Refusal> {
             let partition = advisor_partition(fa_data_type)
                 .ok_or_else(|| format!("no advisor configuration is named by {fa_data_type}"))?;
@@ -178,6 +180,7 @@ impl EClient {
         &self, req_id: i64, contract: &super::Contract,
         option_price: f64, under_price: f64,
     ) {
+        if self.number_unread(req_id) { return; }
         self.calculate(req_id, contract, true, option_price, under_price);
     }
 
@@ -186,6 +189,7 @@ impl EClient {
         &self, req_id: i64, contract: &super::Contract,
         volatility: f64, under_price: f64,
     ) {
+        if self.number_unread(req_id) { return; }
         self.calculate(req_id, contract, false, volatility, under_price);
     }
 
@@ -282,11 +286,13 @@ impl EClient {
     /// here, so a caller that changes its mind is not left watching a
     /// contract it no longer asks about.
     pub fn cancel_calculate_implied_volatility(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         self.forget_option_calc(req_id);
     }
 
     /// As for [`cancel_calculate_implied_volatility`](Self::cancel_calculate_implied_volatility).
     pub fn cancel_calculate_option_price(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         self.forget_option_calc(req_id);
     }
 
@@ -306,6 +312,7 @@ impl EClient {
     /// a contract. Nothing about one crosses this wire, so they are kept here
     /// and served to callers from here.
     pub fn query_display_groups(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.query_display_groups(req_id);
         self.say_group_events();
@@ -314,6 +321,7 @@ impl EClient {
     /// Follow a display group. Answered on `display_group_updated`, at once
     /// with what the group holds and again whenever it changes.
     pub fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.subscribe_to_group_events(req_id, group_id);
         self.say_group_events();
@@ -321,6 +329,7 @@ impl EClient {
 
     /// Stop following a display group.
     pub fn unsubscribe_from_group_events(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.unsubscribe_from_group_events(req_id);
     }
@@ -329,6 +338,7 @@ impl EClient {
     /// `conId@exchange`, or `none` to empty it. Every follower of that group is
     /// told, including this one.
     pub fn update_display_group(&self, req_id: i64, contract_info: &str) {
+        if self.number_unread(req_id) { return; }
         if let Err(why) = (|| -> Result<(), Refusal> {
             self.core.update_display_group(req_id, contract_info)
                 .map_err(Refusal::from)?;
@@ -407,6 +417,7 @@ impl EClient {
     /// Request soft dollar tiers. Matches `reqSoftDollarTiers` in C++.
     /// Gateway-local — returns tiers parsed from CCP logon tag 6560.
     pub fn req_soft_dollar_tiers(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.refuse_session(&Refusal::not_connected("Not connected")); }
         let tiers = self.shared.reference.soft_dollar_tiers();
         self.reply(crate::bridge::Reply::SoftDollarTiers(req_id, tiers));
@@ -446,7 +457,7 @@ impl EClient {
             // for as `warn` told the caller nothing and left them believing
             // they had set the level they named.
             _ => {
-                return self.report_reason(crate::bridge::ReferenceState::NO_REQUEST as i64, &Refusal::stated(
+                return self.refuse_session(&Refusal::stated(
                     LOG_LEVEL_INVALID,
                     format!("set_server_log_level: {log_level} is not a log level; it is 1 to 5"),
                 ));
@@ -463,7 +474,7 @@ impl EClient {
         }
         // A program that installed its own logger keeps it, and saying the
         // level moved when it did not is worse than saying it did not.
-        self.report_reason(crate::bridge::ReferenceState::NO_REQUEST as i64, &Refusal::stated(
+        self.refuse_session(&Refusal::stated(
             LOG_LEVEL_INVALID,
             format!(
                 "set_server_log_level: {level} was not applied because this session did \
@@ -477,6 +488,7 @@ impl EClient {
     /// Request user info. Matches `reqUserInfo` in C++.
     /// Gateway-local — returns whiteBrandingId from CCP logon.
     pub fn req_user_info(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         if self.session_over() { return self.refuse_session(&Refusal::not_connected("Not connected")); }
         let id = self.shared.reference.white_branding_id();
         self.reply(crate::bridge::Reply::UserInfo(req_id, id));
@@ -490,6 +502,9 @@ impl EClient {
     /// a number too wide to carry: it is reported against no request rather
     /// than against its own low half.
     pub(crate) fn report_reason(&self, req_id: i64, reason: &Refusal) {
+        if let Some(unread) = self.unread_first(req_id, reason) {
+            return self.refuse_session(&unread);
+        }
         match super::carried_under(req_id) {
             crate::bridge::ReferenceState::NO_REQUEST => self.refuse_session(reason),
             id => self.refuse_request(i64::from(id), reason),
@@ -498,6 +513,9 @@ impl EClient {
 
     /// A request refused at its call, under its own number.
     pub(crate) fn refuse_request(&self, req_id: i64, why: &Refusal) {
+        if let Some(unread) = self.unread_first(req_id, why) {
+            return self.refuse_session(&unread);
+        }
         self.refuse(
             crate::types::model::ErrorOrigin::Request { id: req_id, ends: true },
             i64::from(why.code), &why.message,
@@ -536,6 +554,33 @@ impl EClient {
     }
 
 
+
+    /// What a gateway says of a request whose number it cannot read, in place
+    /// of whatever else was wrong with it: it reads the number first, and
+    /// says nothing past it. A session that is over is said first, as EClient
+    /// says it, and a number one of the calls that answer took for its own
+    /// question is that call's.
+    fn unread_first(&self, req_id: i64, why: &Refusal) -> Option<Refusal> {
+        if why.code == Refusal::NOT_CONNECTED
+            || u64::try_from(req_id).is_ok_and(super::a_question_of_ours)
+        {
+            return None;
+        }
+        super::unread_number(req_id)
+    }
+
+    /// Whether a request's number is one a gateway cannot read, the caller
+    /// told so under no request where it is. A session that is over says that
+    /// first, as EClient does.
+    pub(crate) fn number_unread(&self, req_id: i64) -> bool {
+        let Some(why) = super::unread_number(req_id) else { return false };
+        if self.session_over() {
+            self.refuse_request(req_id, &Refusal::not_connected("Not connected"));
+        } else {
+            self.refuse_session(&why);
+        }
+        true
+    }
 
     /// Refused against the session and no request.
     pub(crate) fn refuse_session(&self, why: &Refusal) {

@@ -815,7 +815,10 @@ impl ReferenceState {
     }
 
     pub fn take_error_for(&self, req_id: u32) -> Option<(i32, String)> {
-        let (_, code, msg, _) = self.historical_errors.take_first(|(id, ..)| *id == req_id)?;
+        // A query message is a notice its answer follows, not a refusal.
+        let (_, code, msg, _) = self.historical_errors.take_first(|(id, code, ..)| {
+            *id == req_id && *code != crate::error_codes::HISTORICAL_QUERY_MESSAGE
+        })?;
         Some((code, msg))
     }
 
@@ -1251,6 +1254,16 @@ impl ReferenceState {
             Self::NO_REQUEST => api::ErrorOrigin::Session,
             id if id >= Self::ASK_ID_BASE => api::ErrorOrigin::Internal(id),
             id => api::ErrorOrigin::Request { id: i64::from(id), ends: true },
+        };
+        self.push_error_from(req_id, origin, code, message);
+    }
+
+    /// A notice under the request numbered `req_id`, which its answer
+    /// follows: it ends nothing.
+    #[doc(hidden)] pub fn push_historical_notice(&self, req_id: u32, code: i32, message: String) {
+        let origin = match req_id {
+            id if id >= Self::ASK_ID_BASE => api::ErrorOrigin::Internal(id),
+            id => api::ErrorOrigin::Request { id: i64::from(id), ends: false },
         };
         self.push_error_from(req_id, origin, code, message);
     }

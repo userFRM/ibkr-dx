@@ -4,6 +4,8 @@ The callback shape is right for a program with its own event loop and wrong for
 asking one question. These check the shape that answers directly.
 """
 
+import threading
+
 import pytest
 
 import ibkr_dx
@@ -118,6 +120,27 @@ def test_a_series_answered_in_parts_is_not_cut_at_the_first_part():
     c._test_push_historical_data(req_id, [("t2", 2.0, 2.0, 2.0, 2.0, 2)], True)
     bars = c.historical_data(spy(), "", "1 D", "1 min", "TRADES")
     assert [b.close for b in bars] == [1.0, 2.0]
+
+
+def test_a_query_message_is_waited_through():
+    """A gateway says a query message of a request while the historical
+    connection is down and as it comes back; the request is asked again and
+    its bars follow. Taken for a refusal, the call raised the notice."""
+    c = connected()
+    req_id = c._test_peek_ask_id()
+    c._test_push_historical_error(
+        req_id, 165,
+        "Historical Market Data Service query message:HMDS server disconnect occurred.  "
+        "Attempting reconnection...",
+    )
+    # The bars follow the notice while the call waits.
+    later = threading.Timer(
+        0.2, c._test_push_historical_data, (req_id, [("t1", 1.0, 1.0, 1.0, 1.0, 1)], True),
+    )
+    later.start()
+    bars = c.historical_data(spy(), "", "1 D", "1 min", "TRADES")
+    later.join()
+    assert [b.close for b in bars] == [1.0]
 
 
 def test_the_earliest_data_comes_back_as_a_value():

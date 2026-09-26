@@ -1382,6 +1382,15 @@ impl EClient {
         req_id: i64,
         refusal: crate::error_codes::Refusal,
     ) -> PyResult<()> {
+        // A gateway reads the number first, and says nothing past it of one
+        // it cannot read; a session that is over is said first, as EClient
+        // says it.
+        if refusal.code != crate::error_codes::Refusal::NOT_CONNECTED
+            && !u64::try_from(req_id).is_ok_and(crate::api::client::a_question_of_ours)
+            && let Some(unread) = crate::api::client::unread_number(req_id)
+        {
+            return self.report_refusal_as(py, crate::types::model::ErrorOrigin::Session, unread);
+        }
         self.report_refusal_as(py, request_origin(req_id), refusal)
     }
 
@@ -1503,7 +1512,25 @@ impl EClient {
     /// different path here than it takes there. What the handler raises is
     /// logged if ordinary, as `notify` logs it, and otherwise ends the call.
     pub(crate) fn tx_or_report(&self, req_id: i64) -> PyResult<Option<Sender<ControlCommand>>> {
-        self.tx_or_report_as(request_origin(req_id))
+        let Some(tx) = self.tx_or_report_as(request_origin(req_id))? else { return Ok(None) };
+        // A gateway reads the request's number before anything else in it.
+        if self.number_unread(req_id)? { return Ok(None) }
+        Ok(Some(tx))
+    }
+
+    /// Whether a request's number is one a gateway cannot read, the caller
+    /// told so under no request where it is, as on the other surface. A number
+    /// one of the calls that answer took for its own question is that call's.
+    pub(crate) fn number_unread(&self, req_id: i64) -> PyResult<bool> {
+        if u64::try_from(req_id).is_ok_and(crate::api::client::a_question_of_ours) {
+            return Ok(false);
+        }
+        match crate::api::client::unread_number(req_id) {
+            Some(why) => Python::attach(|py| {
+                self.report_refusal_as(py, crate::types::model::ErrorOrigin::Session, why)
+            }).map(|()| true),
+            None => Ok(false),
+        }
     }
 
     /// As [`tx_or_report`](Self::tx_or_report), for a request that carries
@@ -2802,52 +2829,40 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
-    /// An id a caller numbers themselves need not fit the width the request
-    /// carries. Truncating it answers under an id they never used, so it is
-    /// refused instead.
+    /// A request's number is read as a gateway reads it, four bytes signed:
+    /// one that does not fit is refused under -1 in a gateway's words, as on
+    /// the other surface, and nothing reaches the engine. Those past four
+    /// bytes unsigned raised, and those below them were taken.
     #[test]
-    fn a_req_id_past_u32_is_refused_rather_than_truncated() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, rx, _shared, _w) = wired_client(py);
-            let big = u32::MAX as i64 + 1;
-            for method in [
-                "cancel_historical_data", "cancel_head_time_stamp", "cancel_scanner_subscription",
-                "cancel_fundamental_data", "cancel_histogram_data", "cancel_mkt_depth",
-                "cancel_real_time_bars",
-            ] {
-                let Err(err) = client.call_method1(py, method, (big,)) else {
-                    panic!("{method} accepted a req_id it cannot carry");
-                };
-                assert!(err.to_string().contains("outside the range"), "{method}: got {err}");
-            }
-            assert!(rx.try_recv().is_err(), "a refused req_id must reach no engine command");
-        });
-    }
-
-    /// A market-data request, and its withdrawal, read the number as a gateway
-    /// reads it, four bytes signed: one that does not fit is refused under -1
-    /// in a gateway's words, as on the other surface, and nothing reaches the
-    /// engine.
-    #[test]
-    fn a_market_data_number_past_four_bytes_is_refused_as_a_gateway_refuses_it() {
+    fn a_number_past_four_bytes_is_refused_as_a_gateway_refuses_it() {
         Python::initialize();
         Python::attach(|py| {
             let spy = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
             let scan = Py::new(py, crate::python::compat::contract::SpreadScan::default()).unwrap();
             for bad in [
-                i64::from(i32::MAX) + 1, crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64 + 1,
-                i64::from(i32::MIN) - 1,
+                i64::from(i32::MAX) + 1, crate::bridge::ReferenceState::ASK_ID_BASE as i64 - 1,
+                crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64 + 1,
             ] {
                 let (client, rx, shared, _w) = wired_client(py);
                 client.call_method1(py, "req_mkt_data", (bad, &spy)).unwrap();
                 client.call_method1(py, "req_mkt_data_ex", (bad, &spy)).unwrap();
                 client.call_method1(py, "req_spread_scan", (bad, &spy, &scan)).unwrap();
-                client.call_method1(py, "cancel_mkt_data", (bad,)).unwrap();
+                client.call_method1(py, "req_tick_by_tick_data", (bad, &spy, "Last", 0i32, false)).unwrap();
+                client.call_method1(py, "req_contract_details", (bad, &spy)).unwrap();
+                client.call_method1(py, "req_account_summary", (bad, "All", "NetLiquidation")).unwrap();
+                let withdrawals = [
+                    "cancel_mkt_data", "cancel_historical_data", "cancel_head_time_stamp",
+                    "cancel_scanner_subscription", "cancel_fundamental_data", "cancel_histogram_data",
+                    "cancel_mkt_depth", "cancel_real_time_bars", "cancel_tick_by_tick_data",
+                    "cancel_account_summary", "req_soft_dollar_tiers", "query_display_groups",
+                ];
+                for method in withdrawals {
+                    client.call_method1(py, method, (bad,)).unwrap();
+                }
                 let told = format!(
                     "Error reading request: Unable to parse field: 'Client Req Id' for input string: '{bad}'",
                 );
-                assert_eq!(shared.drain_refused(), vec![(-1, 320, told); 4], "{bad}");
+                assert_eq!(shared.drain_refused(), vec![(-1, 320, told); 6 + withdrawals.len()], "{bad}");
                 assert!(rx.try_recv().is_err(), "{bad}: and nothing reaches the engine");
             }
         });
@@ -3779,30 +3794,6 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 client.connected.load(Ordering::Relaxed),
                 "a session that came back still reads as disconnected",
             );
-        });
-    }
-
-    /// A stream numbered past what the request carries is refused rather than
-    /// narrowed. Narrowed, the venue's refusal of it came back under a number
-    /// another request was using, and this one stayed open with nothing to
-    /// withdraw it by.
-    #[test]
-    fn a_tick_by_tick_stream_is_refused_a_req_id_the_request_cannot_carry() {
-        Python::initialize();
-        Python::attach(|py| {
-            let (client, rx, _shared, _w) = wired_client(py);
-            let contract = Py::new(py, Contract {
-                con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-                ..Default::default()
-            }).unwrap();
-            let err = client
-                .call_method1(
-                    py, "req_tick_by_tick_data",
-                    (u32::MAX as i64 + 1, &contract, "Last", 0i32, false),
-                )
-                .unwrap_err();
-            assert!(err.to_string().contains("outside the range"), "got {err}");
-            assert!(rx.try_recv().is_err(), "a refused req_id must reach no engine command");
         });
     }
 

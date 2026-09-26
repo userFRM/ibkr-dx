@@ -1000,8 +1000,10 @@ account — see [Evidence](https://github.com/userFRM/ibkr-dx/blob/main/docs/evi
 <summary><b>What happens when a connection drops?</b></summary>
 
 It is rebuilt on its own and the subscriptions it was serving are asked for
-again, under the request the caller made. Connections are independent: a quote
-feed reconnecting does not disturb an order in flight.
+again, under the request the caller made, save what a gateway ends at the
+drop: a bar request kept up to date ends on 10182, as a gateway ends it.
+Connections are independent: a quote feed reconnecting does not disturb an
+order in flight.
 
 As on a gateway, the caller hears 1100 as the trading connection drops, and
 1102 once the connection that replaced it has named the working orders, with
@@ -1062,8 +1064,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,200 | No |
-| Python | 1,190 | No |
+| Rust, unit and integration | 3,196 | No |
+| Python | 1,191 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

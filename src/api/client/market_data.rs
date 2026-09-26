@@ -3,7 +3,7 @@
 use crate::types::*;
 use crate::error_codes::Refusal;
 
-use super::{unread_md_number, wire_req_id, Contract, EClient};
+use super::{wire_req_id, Contract, EClient};
 
 impl EClient {
     // ── Market Data ──
@@ -21,7 +21,7 @@ impl EClient {
     pub fn req_spread_scan(
         &self, req_id: i64, contract: &Contract, scan: &crate::types::SpreadScan,
     ) {
-        if self.md_number_unread(req_id) {
+        if self.number_unread(req_id) {
             return;
         }
         if let Err(why) = (|| -> Result<(), Refusal> {
@@ -130,7 +130,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
     ) {
-        if self.md_number_unread(req_id) {
+        if self.number_unread(req_id) {
             return;
         }
         if let Err(why) = self.try_req_mkt_data(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot) {
@@ -186,7 +186,7 @@ impl EClient {
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
         mode_9887: i32, mkt_data_options: &[crate::types::model::TagValue],
     ) {
-        if self.md_number_unread(req_id) {
+        if self.number_unread(req_id) {
             return;
         }
         if let Err(why) = self.try_req_mkt_data_ex(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode_9887, mkt_data_options) {
@@ -253,26 +253,13 @@ impl EClient {
         // the band this client keeps. A call still waiting on its answer in
         // that band is not, and its number is refused like any other.
         if !self.shared.reference.is_ours(crate::bridge::RecordKind::Quotes, req_id)
-            && self.md_number_unread(req_id)
+            && self.number_unread(req_id)
         {
             return;
         }
         if let Err(why) = self.try_cancel_mkt_data(req_id) {
             self.refuse_request(req_id, &why);
         }
-    }
-
-    /// Whether a market-data number is one a gateway cannot read, the caller
-    /// told so under no request where it is. A session that is over says that
-    /// first, as EClient does.
-    fn md_number_unread(&self, req_id: i64) -> bool {
-        let Some(why) = unread_md_number(req_id) else { return false };
-        if self.session_over() {
-            self.refuse_request(req_id, &Refusal::not_connected("Not connected"));
-        } else {
-            self.refuse_session(&why);
-        }
-        true
     }
 
     /// [`cancel_mkt_data`](Self::cancel_mkt_data), with its refusal handed back to the
@@ -347,6 +334,7 @@ impl EClient {
 
     /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++.
     pub fn cancel_tick_by_tick_data(&self, req_id: i64) {
+        if self.number_unread(req_id) { return; }
         // The engine took the stream before this, so it decides whether there
         // is one to withdraw, and refuses a number that carries none, as a
         // caller branching on it is owed.

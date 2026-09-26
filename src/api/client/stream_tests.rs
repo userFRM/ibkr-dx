@@ -294,7 +294,7 @@ fn a_calls_answer_and_refusal_arrive_after_what_was_pushed_before_it() {
     let first = w.position_of("order_status:41:").expect("the first report");
     let answer = w.position_of("current_time").expect("the answer");
     let second = w.position_of("order_status:42:").expect("the second report");
-    let refusal = w.position_of("error:-1:").expect("the refusal");
+    let refusal = w.position_of("error:-1:319:").expect("the refusal, under its own code");
     assert!(first < answer && answer < second && second < refusal, "{:?}", w.0);
 }
 

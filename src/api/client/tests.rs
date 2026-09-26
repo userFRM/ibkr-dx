@@ -687,20 +687,6 @@ fn a_preview_is_no_longer_tracked_while_its_own_callback_runs() {
     );
 }
 
-/// Every request checks the number it was given, including this one.
-///
-/// It was the only surface that did not. Unchecked here, the number was
-/// narrowed further down instead, so a caller numbering its requests from the
-/// order counter — which the venue lets run past what a request id holds — had
-/// this stream's refusals reported against somebody else's request.
-#[test]
-fn a_tick_by_tick_stream_checks_the_number_it_was_given() {
-    let (client, _rx, _shared) = test_client();
-    let err = crate::api::client::tests::reported(&client, || client.req_tick_by_tick_data(u32::MAX as i64 + 1, &spy(), "Last", 0, false))
-        .expect_err("a number no request id can hold is refused");
-    assert!(err.message.contains("req_id"), "got: {err}");
-}
-
 /// Withdrawing a held order forgets it rather than telling the venue.
 ///
 /// It was never sent, so the venue knows no such order — and left queued, the
@@ -4448,103 +4434,110 @@ fn a_bracket_that_never_reached_the_engine_leaves_nothing_tracked() {
     );
 }
 
-/// A req_id reaches these requests' wire form as u32. `next_order_id()` hands
-/// out ids near 1.7e12, so a caller running one counter for orders and
-/// requests — the ibapi idiom — wraps every one of these: the venue receives an
-/// id nobody chose, and the callback carries that id.
+/// A request's number is read as a gateway reads it, four bytes signed. One
+/// that does not fit -- every number at and above `0x8000_0000`, the ones this
+/// client keeps for its own work among them -- is refused under -1 with 320 in
+/// a gateway's words, whatever else is wrong with the request, and nothing
+/// reaches the engine. The requests below carry the number as four bytes
+/// unsigned, so a negative one is refused too; the largest that fits is sent.
+/// Numbers from `0x8000_0000` up to the ones this client keeps were taken,
+/// and a gateway reads none of them.
 #[test]
 fn an_unwireable_req_id_is_refused() {
-    type Call = fn(&EClient, i64) -> Result<(), Refusal>;
+    type Call = fn(&EClient, i64);
+    let unread = |bad: i64| {
+        [(-1, 320, format!("Error reading request: Unable to parse field: 'Client Req Id' for input string: '{bad}'"))]
+    };
     let calls: &[(&str, Call)] = &[
-        ("req_historical_data", |c, id| c.try_req_historical_data(id, &spy(), "", "1 D", "1 min", "TRADES", true, 1, false)),
-        ("cancel_historical_data", |c, id| crate::api::client::tests::reported(c, || c.cancel_historical_data(id))),
-        ("req_head_time_stamp", |c, id| c.try_req_head_time_stamp(id, &spy(), "TRADES", true, 1)),
-        ("cancel_head_time_stamp", |c, id| crate::api::client::tests::reported(c, || c.cancel_head_time_stamp(id))),
-        ("req_contract_details", |c, id| c.try_req_contract_details(id, &spy())),
-        ("req_matching_symbols", |c, id| c.try_req_matching_symbols(id, "SP")),
-        ("req_sec_def_opt_params", |c, id| c.try_req_sec_def_opt_params(id, "SPY", "", "STK", 756733)),
-        ("req_scanner_subscription", |c, id| c.try_req_scanner_subscription(id, "STK", "STK.US", "TOP_PERC_GAIN", 10, &[], "")),
-        ("cancel_scanner_subscription", |c, id| c.try_cancel_scanner_subscription(id)),
-        ("req_historical_news", |c, id| c.try_req_historical_news(id, 756733, "BRFG", "", "", 10)),
-        ("req_news_article", |c, id| crate::api::client::tests::reported(c, || c.req_news_article(id, "BRFG", "BRFG$1"))),
-        ("req_fundamental_data", |c, id| c.try_req_fundamental_data(id, &spy(), "ReportSnapshot")),
-        ("cancel_fundamental_data", |c, id| crate::api::client::tests::reported(c, || c.cancel_fundamental_data(id))),
-        ("req_histogram_data", |c, id| c.try_req_histogram_data(id, &spy(), true, "3 days")),
-        ("cancel_histogram_data", |c, id| crate::api::client::tests::reported(c, || c.cancel_histogram_data(id))),
-        ("req_historical_ticks", |c, id| crate::api::client::tests::reported(c, || c.req_historical_ticks(id, &spy(), "", "20260101 16:00:00", 100, "TRADES", true, false))),
-        ("req_historical_schedule", |c, id| c.try_req_historical_schedule(id, &spy(), "", "1 D", true)),
-        ("req_mkt_depth", |c, id| crate::api::client::tests::reported(c, || c.req_mkt_depth(id, &spy(), 5, false))),
+        ("req_historical_data", |c, id| c.req_historical_data(id, &spy(), "", "1 D", "1 min", "TRADES", true, 1, false)),
+        ("cancel_historical_data", |c, id| c.cancel_historical_data(id)),
+        ("req_head_time_stamp", |c, id| c.req_head_time_stamp(id, &spy(), "TRADES", true, 1)),
+        ("cancel_head_time_stamp", |c, id| c.cancel_head_time_stamp(id)),
+        ("req_contract_details", |c, id| c.req_contract_details(id, &spy())),
+        ("req_matching_symbols", |c, id| c.req_matching_symbols(id, "SP")),
+        ("req_sec_def_opt_params", |c, id| c.req_sec_def_opt_params(id, "SPY", "", "STK", 756733)),
+        ("req_scanner_subscription", |c, id| c.req_scanner_subscription(id, "STK", "STK.US", "TOP_PERC_GAIN", 10, &[], "")),
+        ("cancel_scanner_subscription", |c, id| c.cancel_scanner_subscription(id)),
+        ("req_historical_news", |c, id| c.req_historical_news(id, 756733, "BRFG", "", "", 10)),
+        ("req_news_article", |c, id| c.req_news_article(id, "BRFG", "BRFG$1")),
+        ("req_fundamental_data", |c, id| c.req_fundamental_data(id, &spy(), "ReportSnapshot")),
+        ("cancel_fundamental_data", |c, id| c.cancel_fundamental_data(id)),
+        ("req_histogram_data", |c, id| c.req_histogram_data(id, &spy(), true, "3 days")),
+        ("cancel_histogram_data", |c, id| c.cancel_histogram_data(id)),
+        ("req_historical_ticks", |c, id| c.req_historical_ticks(id, &spy(), "", "20260101 16:00:00", 100, "TRADES", true, false)),
+        ("req_historical_schedule", |c, id| c.req_historical_schedule(id, &spy(), "", "1 D", true)),
+        ("req_mkt_depth", |c, id| c.req_mkt_depth(id, &spy(), 5, false)),
         // Asks for the book first: a withdrawal now says when it holds none,
         // and that refusal is not the one this test is about.
         ("cancel_mkt_depth", |c, id| {
-            let _ = crate::api::client::tests::reported(c, || c.req_mkt_depth(id, &spy(), 5, false));
-            crate::api::client::tests::reported(c, || c.cancel_mkt_depth(id))
+            c.req_mkt_depth(id, &spy(), 5, false);
+            c.shared.drain_refused();
+            c.cancel_mkt_depth(id);
         }),
-        ("req_real_time_bars", |c, id| crate::api::client::tests::reported(c, || c.req_real_time_bars(id, &spy(), 5, "TRADES", true))),
-        ("cancel_real_time_bars", |c, id| crate::api::client::tests::reported(c, || c.cancel_real_time_bars(id))),
+        ("req_real_time_bars", |c, id| c.req_real_time_bars(id, &spy(), 5, "TRADES", true)),
+        ("cancel_real_time_bars", |c, id| c.cancel_real_time_bars(id)),
+        ("req_tick_by_tick_data", |c, id| c.req_tick_by_tick_data(id, &spy(), "Last", 0, false)),
+    ];
+    let unfit = [
+        i64::from(i32::MAX) + 1, crate::bridge::ReferenceState::ASK_ID_BASE as i64 - 1,
+        crate::bridge::ReferenceState::ASK_ID_BASE as i64, crate::bridge::ENGINE_ID_BASE as i64,
+        u32::MAX as i64, u32::MAX as i64 + 1,
     ];
     for (name, call) in calls {
-        for bad in [u32::MAX as i64 + 1, -1] {
+        for bad in unfit {
             let (client, rx, _shared) = test_client();
-            let err = match call(&client, bad) {
-                Err(e) => e,
-                Ok(()) => panic!("{name}({bad}) must be refused"),
-            };
-            assert!(err.message.contains("req_id"), "{name}: the error names the field: {err}");
-            assert!(rx.try_recv().is_err(), "{name}: and nothing reaches the wire");
+            call(&client, bad);
+            assert_eq!(client.shared.drain_refused(), unread(bad), "{name}({bad})");
+            assert!(rx.try_recv().is_err(), "{name}({bad}): and nothing reaches the engine");
         }
-        // The largest id a request can take is one below the first band this
-        // client reserves. Above it are the numbers the answering calls hold
-        // and the ones the engine numbers its own lookups with, and an answer
-        // under either is taken by this client rather than handed on.
         let (client, rx, _shared) = test_client();
-        let largest = crate::bridge::ReferenceState::ASK_ID_BASE as i64 - 1;
-        if let Err(e) = call(&client, largest) {
-            panic!("{name}: the largest usable id must still request: {e}");
-        }
-        assert!(rx.try_recv().is_ok(), "{name}: and it reaches the wire");
-
-        // And the band above it is not a caller's, which is what a request
-        // numbered there used to be answered as: read as internal, its
-        // callbacks kept rather than delivered.
-        let (client, rx, _shared) = test_client();
+        call(&client, -1);
+        let refused = client.shared.drain_refused();
         assert!(
-            call(&client, crate::bridge::ENGINE_ID_BASE as i64).is_err(),
-            "{name}: a request numbered where the engine numbers its own is answered to nobody",
+            refused.last().is_some_and(|(_, _, message)| message.contains("req_id")),
+            "{name}(-1) is refused, the field named: {refused:?}",
         );
-        assert!(rx.try_recv().is_err(), "{name}: and nothing reaches the wire under it");
-
+        assert!(rx.try_recv().is_err(), "{name}(-1): and nothing reaches the engine");
         let (client, rx, _shared) = test_client();
-        let refused = call(&client, u32::MAX as i64);
-        assert!(refused.is_err(), "{name}: the number that means no request is not one");
-        assert!(rx.try_recv().is_err(), "{name}: and nothing reaches the wire under it");
+        let largest = i64::from(i32::MAX);
+        call(&client, largest);
+        assert!(client.shared.drain_refused().is_empty(), "{name}: the largest number that fits is taken");
+        assert!(rx.try_recv().is_ok(), "{name}: and it reaches the engine");
     }
+    // Read first: what else is wrong with the request is not reached.
+    let (client, rx, _shared) = test_client();
+    let bad = i64::from(i32::MAX) + 1;
+    client.req_historical_data(bad, &spy(), "", "1 D", "7 fortnights", "TRADES", true, 1, false);
+    assert_eq!(client.shared.drain_refused(), unread(bad), "a bar size refused as well");
+    assert!(rx.try_recv().is_err());
 
-    // A market-data request, and its withdrawal, read the number as a gateway
-    // reads it, four bytes signed: one that does not fit is refused under -1
-    // in a gateway's words, and nothing reaches the engine. That takes in every
-    // number this client keeps for its own subscriptions.
-    type Ask = fn(&EClient, i64);
-    let market: &[(&str, Ask)] = &[
+    // A market-data request, and its withdrawal, and the requests answered
+    // from what the session holds, read the number whole, a negative one
+    // included, and refuse one that does not fit alike.
+    let whole: &[(&str, Call)] = &[
         ("req_mkt_data", |c, id| c.req_mkt_data(id, &spy(), "", false, false)),
         ("req_mkt_data_ex", |c, id| c.req_mkt_data_ex(id, &spy(), "", false, false, 0, &[])),
         ("req_spread_scan", |c, id| c.req_spread_scan(id, &spy(), &Default::default())),
         ("cancel_mkt_data", |c, id| c.cancel_mkt_data(id)),
+        ("cancel_tick_by_tick_data", |c, id| c.cancel_tick_by_tick_data(id)),
+        ("req_pnl", |c, id| c.req_pnl(id, "", "")),
+        ("cancel_pnl", |c, id| c.cancel_pnl(id)),
+        ("req_account_summary", |c, id| c.req_account_summary(id, "All", "NetLiquidation")),
+        ("cancel_account_summary", |c, id| c.cancel_account_summary(id)),
+        ("req_executions", |c, id| c.req_executions(id, &Default::default())),
+        ("calculate_implied_volatility", |c, id| c.calculate_implied_volatility(id, &spy(), 1.0, 100.0)),
+        ("query_display_groups", |c, id| c.query_display_groups(id)),
+        ("req_soft_dollar_tiers", |c, id| c.req_soft_dollar_tiers(id)),
+        ("req_user_info", |c, id| c.req_user_info(id)),
     ];
-    for (name, call) in market {
+    for (name, call) in whole {
         for bad in [
             i64::from(i32::MAX) + 1, crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64 + 1,
             i64::from(i32::MIN) - 1,
         ] {
             let (client, rx, _shared) = test_client();
             call(&client, bad);
-            assert_eq!(
-                client.shared.drain_refused(),
-                [(-1, 320, format!(
-                    "Error reading request: Unable to parse field: 'Client Req Id' for input string: '{bad}'",
-                ))],
-                "{name}({bad})",
-            );
+            assert_eq!(client.shared.drain_refused(), unread(bad), "{name}({bad})");
             assert!(rx.try_recv().is_err(), "{name}({bad}): and nothing reaches the engine");
         }
         // A session that is over says so first, as EClient does.
@@ -9297,59 +9290,6 @@ fn a_chargeable_snapshot_is_asked_for_even_where_the_contract_is_watched() {
 }
 
 
-/// A caller cannot number a request the way this client numbers its own.
-///
-/// An answer finds whoever is waiting by that number. A caller using one from
-/// the band the answering calls number themselves in has its answer handed to
-/// one of those calls, which asked about something else — and the caller waits
-/// out a deadline for an answer that was given away.
-#[test]
-fn a_caller_cannot_take_a_number_this_client_reserves() {
-    use crate::bridge::ReferenceState;
-    let (client, rx, _shared) = test_client();
-    let spy = spy();
-
-    // Refused, and told so under the number it used, by the read that
-    // delivers everything else: said nothing, it reads as a request that
-    // vanished.
-    let taken = ReferenceState::ASK_ID_BASE as i64;
-    client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231");
-    let heard = settled(&client, &rx);
-    assert!(
-        matches!(heard.as_slice(), [one] if one.starts_with(&format!("error:{taken}:"))),
-        "a request numbered {taken} must be refused under its own number: {heard:?}",
-    );
-
-    // Every request, not one of them: a number from that band collides on
-    // whichever call carries it.
-    assert!(
-        client.try_req_historical_data(taken, &spy, "", "1 D", "1 hour", "TRADES", true, 1, false).is_err(),
-        "bars numbered inside the band must be refused too",
-    );
-    assert!(
-        client.try_req_contract_details(taken, &spy).is_err(),
-        "and a contract lookup",
-    );
-
-    // Refused whether or not this session happens to be holding that number.
-    // Held is exactly when the collision is possible, so a check that lets a
-    // held one through is open precisely when it matters.
-    _shared.reference.note_ours(crate::bridge::RecordKind::Answer, taken);
-    assert!(
-        crate::api::client::tests::reported(&client, || client.req_adjustments(taken, 4815747, "STK", "SMART", "20240101", "20241231")).is_err(),
-        "held or not, the band is not a caller's to number in",
-    );
-    _shared.reference.forget_ours(crate::bridge::RecordKind::Answer, taken);
-
-    // The number below the band is a caller's to use, and still works.
-    assert!(
-        crate::api::client::tests::reported(&client, || client.req_adjustments(taken - 1, 4815747, "STK", "SMART", "20240101", "20241231")).is_ok(),
-        "the band is a ceiling on caller numbers, not a ban on large ones",
-    );
-    // And an ordinary request is unaffected.
-    assert!(client.try_req_contract_details(1, &spy).is_ok());
-}
-
 /// A refusal against a request too wide to carry is reported against no
 /// request, not against its own low half.
 ///
@@ -9376,27 +9316,6 @@ fn a_refusal_for_an_uncarryable_request_is_not_delivered_under_another() {
     );
 }
 
-/// The engine numbers the lookups it takes for itself above a line, and an
-/// answer above that line is kept rather than handed on.
-#[test]
-fn a_request_numbered_where_the_engine_numbers_its_own_is_refused() {
-    use crate::api::client::wire_req_id;
-    use crate::bridge::{ENGINE_ID_BASE, ReferenceState};
-
-    let refused = wire_req_id(ENGINE_ID_BASE as i64).expect_err("the band is not a caller's");
-    assert!(
-        refused.message.contains("lookups it takes"),
-        "the refusal does not say why: {}", refused.message,
-    );
-    assert!(wire_req_id(ENGINE_ID_BASE as i64 + 1).is_err());
-    // Everything from the answering band up was already refused; this band sat
-    // above it and fell through, which is the gap. Below both is a caller's.
-    assert!(
-        wire_req_id(ReferenceState::ASK_ID_BASE as i64 - 1).is_ok(),
-        "a number below every reserved band stopped being a caller's",
-    );
-}
-
 /// The venue names the working orders after the connect returns, and a global
 /// cancel is composed from what has been named. Issued before the naming
 /// lands, it waits for it — without the wait it counted no instruments, sent
@@ -9418,6 +9337,37 @@ fn a_global_cancel_waits_for_the_venue_to_name_the_working_orders() {
     );
 }
 
+
+/// A call waiting for its bars waits through a query message, which a gateway
+/// says of a request while the historical connection is down and as it comes
+/// back: the request is asked again and its bars follow. Taken for a refusal,
+/// the call returned the notice in place of the bars.
+#[test]
+fn a_call_waiting_for_bars_waits_through_a_query_message() {
+    let (client, rx, shared) = test_client();
+    let waiting = std::thread::spawn(move || {
+        client.historical_data(&spy(), "", "1 D", "1 hour", "TRADES", true)
+    });
+    let req_id = loop {
+        if let ControlCommand::FetchHistorical { req_id, .. } = rx.recv().expect("the call asks") {
+            break req_id;
+        }
+    };
+    shared.reference.push_historical_notice(
+        req_id, crate::error_codes::HISTORICAL_QUERY_MESSAGE,
+        "Historical Market Data Service query message:HMDS server disconnect occurred.  \
+         Attempting reconnection...".to_string(),
+    );
+    shared.reference.push_historical_data(req_id, HistoricalResponse {
+        query_id: String::new(), timezone: String::new(), is_complete: true,
+        bars: vec![HistoricalBar {
+            time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0,
+            volume: 1000, wap: 102.0, count: 50, end: String::new(),
+        }],
+    });
+    let bars = waiting.join().unwrap().expect("the bars, not the notice");
+    assert_eq!(bars.len(), 1);
+}
 
 /// A call answered here does not wait on its own turn to name a contract the
 /// caller gave by id alone.

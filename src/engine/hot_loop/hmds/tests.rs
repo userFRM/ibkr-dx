@@ -65,7 +65,7 @@ fn a_reconnect_puts_the_tick_by_tick_streams_back() {
     hmds.disconnected = true;
     hmds.reconnect(
         crate::protocol::connection::Connection::new_raw(sock).unwrap(),
-        &mut conn, &market, &mut hb,
+        &mut conn, &market, &mut hb, &SharedState::new(),
     );
 
     assert!(!hmds.disconnected, "the transport is live again");
@@ -81,11 +81,6 @@ fn a_reconnect_puts_the_tick_by_tick_streams_back() {
 /// The routing for a five-second bar stream is a ticker id the session
 /// issued. A reconnect that kept the routing and re-sent nothing left the
 /// bars stopped with the connection reporting healthy.
-///
-/// A keep-up-to-date request needs only this stream restored: its bars are
-/// folded from it, and the partial bar survives the reconnect. A second
-/// request for the same stream leaves two subscriptions upstream for one
-/// caller.
 #[test]
 fn a_reconnect_asks_for_the_five_second_bars_again() {
     let mut hmds = HmdsState::new();
@@ -97,38 +92,18 @@ fn a_reconnect_asks_for_the_five_second_bars_again() {
     let mut hb = HeartbeatState::new();
     hmds.send_realtime_bar_subscribe(9, 265598, "", "STK", "SMART", "TRADES", true, &mut conn, &mut hb);
     let first = hmds.rtbar_subs[0].0.clone();
-    // State a keep-up-to-date request leaves behind: the stream and the
-    // partial bar.
-    hmds.keep_up_to_date_reqs.insert(9);
-    hmds.forming_bars.push(super::FormingBar {
-        req_id: 9,
-        seconds: 60,
-        opened_at: 0,
-        daily_session: None, closed_at: None,
-        bar: Default::default(),
-        weighted: 0.0,
-        queued: Vec::new(),
-    });
 
     let sock2 = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (_peer2, _) = listener.accept().unwrap();
     hmds.disconnected = true;
     hmds.reconnect(
         crate::protocol::connection::Connection::new_raw(sock2).unwrap(),
-        &mut conn, &market, &mut hb,
+        &mut conn, &market, &mut hb, &SharedState::new(),
     );
 
     assert_eq!(hmds.rtbar_subs.len(), 1, "the stream is asked for again");
     assert_ne!(hmds.rtbar_subs[0].0, first, "under a new query, not the dead session's");
     assert_eq!(hmds.rtbar_subs[0].1, 9, "still answering the caller's request id");
-    assert_eq!(
-        hmds.forming_bars.iter().filter(|f| f.req_id == 9).count(), 1,
-        "and the bar it was folding is still the one being folded",
-    );
-    assert!(
-        hmds.pending_historical.iter().all(|(_, rid)| *rid != 9),
-        "nothing else is asked for on its behalf: one request, one stream",
-    );
 }
 
 use super::*;
@@ -367,7 +342,7 @@ fn query_error_releases_head_timestamp_without_sentinel() {
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
     let mut conn: Option<Connection> = None;
-    hmds.pending_head_ts.push(("hts_1004".to_string(), 42, 1));
+    hmds.pending_head_ts.push(("hts_1004".to_string(), 42, 1, std::time::Instant::now()));
 
     let msg = make_query_error_msg("hts_1004", "No head timestamp");
     hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
@@ -2174,9 +2149,9 @@ mod forming_bar_tests {
 #[test]
 fn each_scan_gets_its_own_answer() {
     let mut hmds = super::HmdsState::new();
-    hmds.pending_scanner.push(("APISCAN1:10001".to_string(), 10001));
-    hmds.pending_scanner.push(("APISCAN2:10002".to_string(), 10002));
-    hmds.pending_scanner.push(("APISCAN3:10003".to_string(), 10003));
+    hmds.pending_scanner.push(("APISCAN1:10001".to_string(), 10001, String::new()));
+    hmds.pending_scanner.push(("APISCAN2:10002".to_string(), 10002, String::new()));
+    hmds.pending_scanner.push(("APISCAN3:10003".to_string(), 10003, String::new()));
 
     for (named, expected) in [
         ("APISCAN1:10001", 10001),
@@ -2199,7 +2174,7 @@ fn each_scan_gets_its_own_answer() {
 #[test]
 fn an_answer_naming_no_running_scan_is_not_handed_to_another() {
     let mut hmds = super::HmdsState::new();
-    hmds.pending_scanner.push(("APISCAN1:10001".to_string(), 10001));
+    hmds.pending_scanner.push(("APISCAN1:10001".to_string(), 10001, String::new()));
     assert_eq!(hmds.scanner_answered("<ScanResponse></ScanResponse>"), None);
     assert_eq!(hmds.scanner_answered("<ScanResponse><id>APISCAN9:99</id></ScanResponse>"), None);
     // The one it does name still answers.
@@ -2613,8 +2588,8 @@ mod hmds_correlation_tests {
                 },
             )
         };
-        hmds.pending_head_ts.push((id_of(1), 41, 1));
-        hmds.pending_head_ts.push((id_of(2), 42, 1));
+        hmds.pending_head_ts.push((id_of(1), 41, 1, std::time::Instant::now()));
+        hmds.pending_head_ts.push((id_of(2), 42, 1, std::time::Instant::now()));
 
         let xml = format!(
             "<ResultSetHeadTimeStamp><id>{}</id><eoq>true</eoq>\
@@ -2640,7 +2615,7 @@ mod hmds_correlation_tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_head_ts.push(("hts_of_another_query".to_string(), 71, 1));
+        hmds.pending_head_ts.push(("hts_of_another_query".to_string(), 71, 1, std::time::Instant::now()));
         hmds.pending_histogram.push(("hg_of_another_query".to_string(), 72));
 
         for xml in [
@@ -2902,35 +2877,6 @@ fn a_withdrawal_waiting_for_its_number_leaves_a_shared_stream_running() {
 }
 }
 
-mod hmds_transport_tests {
-    use super::super::*;
-    use crate::bridge::SharedState;
-    use crate::protocol::connection::Connection;
-
-    /// One-shot requests are failed when the connection is lost. Only
-    /// historical bars carry a timeout, so the rest would never complete.
-    #[test]
-    fn a_lost_connection_answers_the_requests_it_took_with_it() {
-        let mut hmds = HmdsState::new();
-        let shared = SharedState::new();
-        let mut conn: Option<Connection> = None;
-        hmds.pending_head_ts.push(("hts".to_string(), 61, 1));
-        hmds.pending_fundamental.push(("fund".to_string(), 62));
-        hmds.pending_ticks.push(("tk".to_string(), 63, "TRADES".to_string()));
-
-        hmds.disconnect(&mut conn, &shared, &None);
-
-        let errors = shared.reference.drain_historical_errors();
-        for req_id in [61, 62, 63] {
-            assert!(
-                errors.iter().any(|(rid, ..)| *rid == req_id),
-                "request {req_id} was told the connection went: {errors:?}",
-            );
-        }
-        assert!(hmds.pending_head_ts.is_empty(), "and nothing is left waiting");
-    }
-}
-
 /// A query id that is a prefix of another does not take its answer.
 ///
 /// The bar replies are matched by the name the reply states, the same as every
@@ -3166,21 +3112,46 @@ fn a_refused_batch_takes_the_kept_up_to_date_stream_with_it() {
     assert_eq!(errors[0].0, 7);
 }
 
-/// A request that failed because its connection went is failed in its stream
-/// half as well: a reconnect asks again for the streams that are still wanted,
-/// and one whose request the caller was told had failed is not among them.
-/// Left on the reconnect list, the bars resume under a number already
-/// answered, and answer whatever is next asked under it.
+/// When the historical connection drops, a bar request kept up to date ends,
+/// told 10182, as a gateway ends it, and nothing of it is asked for again. One
+/// not kept up to date is still arriving, as is a trading schedule, and a scan
+/// goes on: each is told 165 that the connection went, a notice that ends
+/// nothing, and once it is back it is told so and asked again from the start,
+/// the scan under the name it ran under. A bar stream of its own that is still
+/// wanted is asked for again. A head timestamp, a histogram and historical
+/// ticks are told nothing and go on waiting, as a gateway leaves them; a
+/// fundamentals request is still failed.
+///
+/// All were failed alike, under this client's own words, and one kept up to
+/// date had its stream asked for again with nothing left to fold it into.
 #[test]
-fn a_disconnect_does_not_resurrect_a_failed_request_s_stream() {
+fn a_drop_ends_a_kept_bar_request_and_asks_the_others_again() {
+    use crate::types::model::ErrorOrigin;
     let mut hmds = HmdsState::new();
     let shared = SharedState::new();
     let market = crate::engine::market_state::MarketState::new();
     let mut hb = HeartbeatState::new();
-    let mut conn: Option<Connection> = None;
+    let (first, _first_peer) = Connection::for_test();
+    let mut conn = Some(first);
+    // What the program is told, with what each is about, and which requests
+    // are over.
+    let said = |shared: &SharedState| {
+        let mut errors = Vec::new();
+        let mut over = Vec::new();
+        for (_, record) in shared.take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false }) {
+            match record {
+                crate::bridge::Record::HistoricalError((origin, code, text)) => errors.push((origin, code, text)),
+                crate::bridge::Record::HistoricalOver(id) => over.push(id),
+                _ => {}
+            }
+        }
+        (errors, over)
+    };
+    let notice = |id: i64| ErrorOrigin::Request { id, ends: false };
 
     // A request kept up to date, still waiting on its batch. Beside it, an
-    // ordinary bar stream that is still wanted.
+    // ordinary bar stream that is still wanted, and a request not kept up to
+    // date whose history is on its way.
     hmds.pending_historical.push(("hist_4001".to_string(), 9));
     hmds.keep_up_to_date_reqs.insert(9);
     hmds.rtbar_subs.push(("rt_4002".to_string(), 9, None, 0.01, 1.0));
@@ -3196,40 +3167,70 @@ fn a_disconnect_does_not_resurrect_a_failed_request_s_stream() {
         req_id: 10, con_id: 265598, sec_type: "STK".into(), exchange: "SMART".into(),
         what_to_show: "TRADES".into(), use_rth: true,
     });
+    assert!(hmds.send_historical_request_ex(
+        11, 12087792, "", "1 D", "1 hour", "MIDPOINT", false, false, false,
+        "EUR", "CASH", "IDEALPRO", &mut conn, &mut hb, &shared,
+    ));
+    // And a trading schedule, which is a bar request of its own kind, and a
+    // scan.
+    hmds.send_schedule_request(12, 265598, "STK", "SMART", "", "1 W", true, &mut conn, &mut hb);
+    hmds.send_scanner_subscribe(13, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 10, Vec::new(), &mut conn, &mut hb, &shared);
+    let scan_id = hmds.pending_scanner[0].0.clone();
+    // The one-shot queries.
+    hmds.pending_head_ts.push(("hts".to_string(), 14, 1, std::time::Instant::now()));
+    hmds.pending_histogram.push(("hgm".to_string(), 15));
+    hmds.pending_ticks.push(("tk".to_string(), 16, "TRADES".to_string()));
+    hmds.pending_fundamental.push(("fund".to_string(), 17));
 
     hmds.disconnect(&mut conn, &shared, &None);
 
-    assert!(
-        shared.reference.drain_historical_errors().iter().any(|(rid, ..)| *rid == 9),
-        "the caller was told the request failed",
+    let query_message = "Historical Market Data Service query message:";
+    let went = format!("{query_message}HMDS server disconnect occurred.  Attempting reconnection...");
+    let (errors, over) = said(&shared);
+    assert_eq!(
+        errors[..4],
+        [
+            (ErrorOrigin::Request { id: 9, ends: true }, 10182, "Failed to request live updates (disconnected)".to_string()),
+            (notice(11), 165, went.clone()),
+            (notice(12), 165, went.clone()),
+            (notice(13), 165, went),
+        ],
     );
     assert!(
-        hmds.rtbar_resub.iter().all(|r| r.req_id != 9),
-        "and nothing asks for its stream again",
+        matches!(&errors[4..], [(ErrorOrigin::Request { id: 17, ends: true }, 504, _)]),
+        "only the fundamentals request is failed: {errors:?}",
     );
-    assert!(hmds.rtbar_subs.iter().all(|(_, rid, ..)| *rid != 9));
+    assert_eq!(over, [9], "the request kept up to date is over, and the others are not");
+    assert!(hmds.rtbar_resub.iter().all(|r| r.req_id != 9), "nothing asks for its stream again");
     assert!(hmds.forming_bars.iter().all(|f| f.req_id != 9));
-    assert!(
-        hmds.rtbar_resub.iter().any(|r| r.req_id == 10),
-        "a stream that is still wanted survives the disconnect",
+    assert!(hmds.rtbar_resub.iter().any(|r| r.req_id == 10), "a stream still wanted survives the drop");
+    assert_eq!(
+        (hmds.pending_head_ts.len(), hmds.pending_histogram.len(), hmds.pending_ticks.len()),
+        (1, 1, 1),
+        "the one-shot queries go on waiting",
     );
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (_peer, _) = listener.accept().unwrap();
-    hmds.reconnect(
-        Connection::new_raw(sock).unwrap(),
-        &mut conn, &market, &mut hb,
-    );
+    let (second, mut peer) = Connection::for_test();
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    hmds.reconnect(second, &mut conn, &market, &mut hb, &shared);
 
-    assert!(
-        hmds.rtbar_subs.iter().all(|(_, rid, ..)| *rid != 9),
-        "the failed request's stream was not asked for again",
+    let back = format!("{query_message}HMDS server connection was successful.");
+    assert_eq!(
+        said(&shared).0,
+        [(notice(11), 165, back.clone()), (notice(12), 165, back.clone()), (notice(13), 165, back)],
     );
-    assert!(
-        hmds.rtbar_subs.iter().any(|(_, rid, ..)| *rid == 10),
-        "and the wanted one was",
-    );
+    assert!(hmds.rtbar_subs.iter().all(|(_, rid, ..)| *rid != 9), "the ended request's stream is not asked for");
+    assert!(hmds.rtbar_subs.iter().any(|(_, rid, ..)| *rid == 10), "and the wanted one is");
+    let mut sent = String::new();
+    while !(sent.contains("<contractID>12087792</contractID>") && sent.contains("sched_") && sent.contains(&scan_id)) {
+        let more = read_frame(&mut peer);
+        assert!(!more.is_empty(), "the history, the schedule and the scan are asked again: {sent:?}");
+        sent.push_str(&String::from_utf8_lossy(&more));
+    }
+    assert!(sent.contains("<timeLength>1 d</timeLength>"), "from the start: {sent:?}");
+    assert!(hmds.held.iter().any(|h| h.req_id == 11), "and held for again");
+    assert!(hmds.pending_schedule.iter().any(|(_, rid, _)| *rid == 12), "and the schedule asked again");
+    assert_eq!(hmds.pending_scanner.len(), 1, "and the scan runs on under its number");
 }
 
 /// A number already answering a historical query does not take a second one.
@@ -3385,7 +3386,7 @@ fn a_scan_batch_with_an_unreadable_row_is_said_not_dropped() {
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
     let mut conn: Option<Connection> = None;
-    hmds.pending_scanner.push(("APISCAN1:9".to_string(), 9));
+    hmds.pending_scanner.push(("APISCAN1:9".to_string(), 9, String::new()));
     let xml = "<ScanResponse><id>APISCAN1:9</id><scanTime>2026-09-06 13:00:00</scanTime><Contract><contractID>not-a-contract</contractID></Contract></ScanResponse>";
     let msg = fix::fix_build(&[(fix::TAG_MSG_TYPE, "U"), (6040, "10005"), (6118, xml)], 1);
     hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
@@ -3479,7 +3480,7 @@ fn an_unreadable_scan_batch_does_not_end_the_scan() {
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
     let mut conn: Option<Connection> = None;
-    hmds.pending_scanner.push(("APISCAN1:9".to_string(), 9));
+    hmds.pending_scanner.push(("APISCAN1:9".to_string(), 9, String::new()));
     let xml = "<ScanResponse><id>APISCAN1:9</id><scanTime>2026-09-06 13:00:00</scanTime><Contract><contractID>not-a-contract</contractID></Contract></ScanResponse>";
     let msg = fix::fix_build(&[(fix::TAG_MSG_TYPE, "U"), (6040, "10005"), (6118, xml)], 1);
     hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
@@ -3616,7 +3617,7 @@ fn a_head_timestamp_is_written_the_way_it_was_asked_for() {
     taken(&rx, &into);
     client.req_head_time_stamp(11, &spy, "NOSUCH", true, 1);
     taken(&rx, &into);
-    let asked = rx.engine().hmds.pending_head_ts.iter().find(|(_, rid, _)| *rid == 11)
+    let asked = rx.engine().hmds.pending_head_ts.iter().find(|(_, rid, ..)| *rid == 11)
         .map(|(query, ..)| query.clone()).expect("the first is awaited");
     let answer = format!(
         "35=W\x016118=<ResultSetHeadTimeStamp><id>{asked}</id><eoq>true</eoq>\

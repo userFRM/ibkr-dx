@@ -335,6 +335,7 @@ impl EClient {
             ));
         };
         let Some(tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         self.send_control(&tx, ControlCommand::AdvisorConfig {
             req_id,
             // Replacing it with what is carried.
@@ -351,6 +352,7 @@ impl EClient {
     /// `display_group_list`.
     fn query_display_groups(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         self.core.query_display_groups(req_id);
         self.say_group_events()
     }
@@ -359,6 +361,7 @@ impl EClient {
     /// `display_group_updated`.
     fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         self.core.subscribe_to_group_events(req_id, group_id);
         self.say_group_events()
     }
@@ -366,6 +369,7 @@ impl EClient {
     /// Stop watching a display group.
     fn unsubscribe_from_group_events(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         self.core.unsubscribe_from_group_events(req_id);
         Ok(())
     }
@@ -373,6 +377,7 @@ impl EClient {
     /// Tell a display group what to show.
     fn update_display_group(&self, req_id: i64, contract_info: &str) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         // The reference client answers a request it cannot serve on the error
         // callback and returns normally. Raising here would make a caller
         // written against it fall over on a request that merely came in the
@@ -438,6 +443,7 @@ impl EClient {
     /// from the dispatch loop rather than by holding this call.
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         let shared = self.shared_state()?;
         match shared.reference.ask_smart_components(req_id, bbo_exchange) {
             Ok(Some(sc)) => {
@@ -474,6 +480,7 @@ impl EClient {
     /// to. Answered on `soft_dollar_tiers`.
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         let shared = self.shared_state()?;
         let tiers = shared.reference.soft_dollar_tiers();
         let mut objs: Vec<Py<SoftDollarTierPy>> = Vec::with_capacity(tiers.len());
@@ -560,6 +567,7 @@ impl EClient {
     /// Ask what this login is entitled to. Answered on `user_info`.
     fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
+        if self.number_unread(req_id)? { return Ok(()); }
         let shared = self.shared_state()?;
         let id = shared.reference.white_branding_id();
         self.deliver(py, "user_info", (req_id, id))?;

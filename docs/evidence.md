@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,390 offline, and 184 more that live in the suites run against a broker session |
+| Tests | 4,387 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,9 +72,9 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,200 | No |
+| Rust unit and integration | 3,196 | No |
 | Rust, live | 9 | Yes |
-| Python | 1,190 | No |
+| Python | 1,191 | No |
 | Python, live | 124 | Yes |
 | Paper compatibility suite (154 phases) | 51 tests | Yes |
 
@@ -204,13 +204,16 @@ client's own allocation; what a gateway answers the same way is on
   from the caller cannot be told apart from one allocated here. This client
   allocates the same way, from one upward, and keys its subscriptions on it.
 - **A request id states four bytes, and the top quarter of that range is this
-  client's own allocation.** A caller numbers requests below `0xC000_0000`; at
-  and above it are the ids this client allocates for the questions it asks on a
-  caller's behalf, and above `0xF000_0000` the ones the engine asks for itself.
-  A negative id is refused, save on a market-data request, which carries its
-  number whole, and so is one inside the range, by number rather than
-  answered, because answered it would be indistinguishable from one of this
-  client's own and its reply withheld. An order may be numbered wider —
+  client's own allocation.** A caller numbers requests below `0x8000_0000`, as
+  a gateway reads them; at and above `0xC000_0000` are the ids this client
+  allocates for the questions it asks on a caller's behalf, and above
+  `0xF000_0000` the ones the engine asks for itself. One at or above
+  `0x8000_0000` is refused under -1 with 320, as a gateway refuses a number it
+  cannot read. A negative id is refused, save on a market-data request, which
+  carries its number whole: the other requests carry it as four bytes
+  unsigned, where it reads as one in this client's own band, and answered it
+  would be indistinguishable from one of this client's own and its reply
+  withheld. An order may be numbered wider —
   the venue takes a wider one — but an order id reused as a request id has to
   satisfy this, and the interface this client mirrors encourages one counter
   for both.

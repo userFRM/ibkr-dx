@@ -27,7 +27,10 @@ told why on `error`, and nothing follows it: a gateway states no end after a
 refusal, so a program waiting for the end stops on the error too. A request
 kept up to date whose five-second stream the venue refuses is told nothing, as
 a gateway tells it nothing: a history still to come arrives with its end, and
-no update follows.
+no update follows. When the historical connection drops, a request kept up to
+date ends on 10182, and one still arriving is told 165 and asked again once the
+connection is back, as a gateway does. A 165 is a notice and ends nothing: the
+call that waits for the bars waits through it.
 
 With `keep_up_to_date: true` the bar still forming goes on from the history's
 last bar, as a gateway's does: the live five-second bars inside it are folded

@@ -285,6 +285,14 @@ pub const NO_SUCH_SUBSCRIPTION: i32 = 300;
 /// the two are different requests and a caller branches on which it made.
 pub const DUPLICATE_HISTORICAL_QUERY: i32 = 386;
 
+/// The code a bar request kept up to date is ended under when the historical
+/// connection drops, as a gateway ends it.
+pub const LIVE_UPDATES_DISCONNECTED: i32 = 10182;
+
+/// The code a gateway tells a bar request what becomes of it under while the
+/// historical connection is down and as it comes back.
+pub const HISTORICAL_QUERY_MESSAGE: i32 = 165;
+
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)

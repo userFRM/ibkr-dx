@@ -79,9 +79,9 @@ pub(crate) struct HmdsState {
     /// failed where that is stated.
     pub(crate) pending_historical: Vec<(String, u32)>,
     /// Each head timestamp awaited: the name it went out under, the caller's
-    /// number, and the form its answer is written in, which belongs to the
-    /// request, as a gateway keeps it with the request.
-    pub(crate) pending_head_ts: Vec<(String, u32, i32)>,
+    /// number, the form its answer is written in, which belongs to the
+    /// request, as a gateway keeps it with the request, and when it went out.
+    pub(crate) pending_head_ts: Vec<(String, u32, i32, Instant)>,
     pub(crate) pending_scanner_params: bool,
     /// Questions for the scanner's parameters asked while one is on the wire.
     ///
@@ -89,7 +89,10 @@ pub(crate) struct HmdsState {
     /// sent when the one before it is answered, or refused with the connection
     /// it would have gone out on.
     pub(crate) scanner_params_queued: usize,
-    pub(crate) pending_scanner: Vec<(String, u32)>,
+    /// The scans running: the name each went out under, the caller's number,
+    /// and the subscription as it was sent, to be sent again once a dropped
+    /// connection is back, as a gateway subscribes it again.
+    pub(crate) pending_scanner: Vec<(String, u32, String)>,
     pub(crate) next_scanner_id: u32,
     pub(crate) pending_news: Vec<(String, u32)>,
     pub(crate) pending_articles: Vec<(String, u32)>,
@@ -144,6 +147,48 @@ pub(crate) struct HmdsState {
     /// The day on this machine's calendar the actions are held on. A gateway
     /// lets go of every one it holds when its day turns.
     pub(crate) actions_held_on: Option<jiff::civil::Date>,
+    /// What each bar or schedule request still arriving was asked with, so
+    /// that one not kept up to date can be asked again once a dropped
+    /// connection is back, as a gateway asks it again.
+    pub(crate) bar_asks: Vec<BarAsk>,
+    /// The bar requests a dropped connection left to be asked again once it
+    /// is back.
+    pub(crate) asked_again: Vec<BarAsk>,
+}
+
+/// A bar or schedule request as it was asked, to be asked again.
+#[derive(Clone, Debug)]
+pub(crate) struct BarAsk {
+    /// Whether it asked for the trading schedule rather than bars.
+    pub(crate) schedule: bool,
+    pub(crate) req_id: u32,
+    pub(crate) con_id: i64,
+    pub(crate) end_date_time: String,
+    pub(crate) duration: String,
+    pub(crate) bar_size: String,
+    pub(crate) what_to_show: String,
+    pub(crate) use_rth: bool,
+    pub(crate) include_expired: bool,
+    pub(crate) symbol: String,
+    pub(crate) sec_type: String,
+    pub(crate) exchange: String,
+}
+
+/// What a gateway says of a bar request's query, or of a scan, while the
+/// historical connection is down and as it comes back: its words after its
+/// heading for such messages.
+const QUERY_MESSAGE: &str = "Historical Market Data Service query message:";
+
+/// How long a gateway waits on the venue's answer to a head timestamp before
+/// it ends the request.
+const HEAD_TIMESTAMP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Say a query message under a request: a notice its answer follows, so it
+/// ends nothing.
+fn tell_query_message(shared: &SharedState, req_id: u32, what: &str) {
+    shared.reference.push_historical_notice(
+        req_id, crate::error_codes::HISTORICAL_QUERY_MESSAGE, format!("{QUERY_MESSAGE}{what}"),
+    );
 }
 
 /// Wire security type for a historical query. Empty falls back to the stock
@@ -472,6 +517,8 @@ impl HmdsState {
             held: Vec::new(),
             actions_held: std::collections::HashMap::new(),
             actions_held_on: None,
+            bar_asks: Vec::new(),
+            asked_again: Vec::new(),
         }
     }
 
@@ -483,21 +530,131 @@ impl HmdsState {
     /// of the process, on both the liveness timeout and the ordinary
     /// receive-error path.
     ///
-    /// Unanswered one-shot requests are failed here. Streaming subscriptions
-    /// are restored on reconnect; one-shot requests are not, and only
-    /// historical bars carry a timeout, so the rest would never complete.
+    /// Bar and schedule requests and scans are told what a gateway tells
+    /// them, and those not kept up to date are asked again on reconnect. A
+    /// head timestamp, a histogram and historical ticks are told nothing and
+    /// go on waiting, as a gateway leaves them. Other unanswered one-shot
+    /// requests are failed here. Streaming subscriptions are restored on
+    /// reconnect; one-shot requests are not, so the rest would never
+    /// complete.
     pub(crate) fn disconnect(
         &mut self, hmds_conn: &mut Option<Connection>, shared: &SharedState,
         event_tx: &Option<crate::engine::hot_loop::EventSink>,
     ) {
         self.disconnected = true;
         *hmds_conn = None;
+        self.tell_the_bar_requests_of_the_drop(shared);
+        self.tell_those_waiting(shared, "HMDS server disconnect occurred.  Attempting reconnection...");
         self.fail_pending("the historical connection went away before the venue answered", shared);
         // The venue says when this connection breaks, and a caller waiting on
         // history has nothing else to read it from.
         crate::engine::hot_loop::announce_venue_data(
             shared, event_tx, crate::bridge::VenueDataConnection::Historical, false,
         );
+    }
+
+    /// Tell each bar or schedule request what a gateway tells it when the
+    /// historical connection drops.
+    ///
+    /// One kept up to date ends, told 10182: whether its history was still
+    /// arriving or it was on its updates, nothing more follows, and it is not
+    /// asked for again. Any other is still arriving: it is told 165 that the
+    /// connection went and is being tried again, and it is asked again from
+    /// the start once the connection is back, its pages so far let go.
+    fn tell_the_bar_requests_of_the_drop(&mut self, shared: &SharedState) {
+        let mut kept: Vec<u32> = self.keep_up_to_date_reqs.drain().collect();
+        kept.sort_unstable();
+        for req_id in kept {
+            self.let_go_of_bar_request(req_id);
+            super::push_hmds_refusal(
+                shared, req_id, crate::error_codes::LIVE_UPDATES_DISCONNECTED,
+                "Failed to request live updates (disconnected)".to_string(), true,
+            );
+        }
+        let waiting: Vec<BarAsk> = self.bar_asks.iter()
+            .filter(|ask| self.still_arriving(ask))
+            .cloned()
+            .collect();
+        self.bar_asks.clear();
+        for ask in waiting {
+            self.let_go_of_bar_request(ask.req_id);
+            self.asked_again.push(ask);
+        }
+    }
+
+    /// Let go of everything a bar request holds here: its series, its
+    /// queries, and the stream and bar that keep it up to date.
+    fn let_go_of_bar_request(&mut self, req_id: u32) {
+        let own_actions: Vec<String> = self.held.iter()
+            .filter(|held| held.req_id == req_id)
+            .filter_map(|held| held.actions_query.clone())
+            .collect();
+        self.pending_adjustments.retain(|(q, ..)| !own_actions.contains(q));
+        self.held.retain(|held| held.req_id != req_id);
+        self.pending_historical.retain(|(_, rid)| *rid != req_id);
+        self.pending_schedule.retain(|(_, rid, _)| *rid != req_id);
+        self.rtbar_subs.retain(|(_, rid, ..)| *rid != req_id);
+        self.rtbar_resub.retain(|r| r.req_id != req_id);
+        self.forming_bars.retain(|f| f.req_id != req_id);
+    }
+
+    /// Whether the request an ask was made for is still arriving.
+    fn still_arriving(&self, ask: &BarAsk) -> bool {
+        if ask.schedule {
+            self.pending_schedule.iter().any(|(_, rid, _)| *rid == ask.req_id)
+        } else {
+            self.held.iter().any(|held| held.req_id == ask.req_id)
+        }
+    }
+
+    /// Keep what a request was asked with, and let go of what was kept for
+    /// requests no longer arriving.
+    fn note_ask(&mut self, ask: BarAsk) {
+        let asks = std::mem::take(&mut self.bar_asks);
+        self.bar_asks = asks.into_iter()
+            .filter(|a| (a.req_id, a.schedule) != (ask.req_id, ask.schedule) && self.still_arriving(a))
+            .collect();
+        self.bar_asks.push(ask);
+    }
+
+    /// Tell each bar request waiting to be asked again, and each scan
+    /// running, what a gateway tells it of the connection: that it went, that
+    /// an attempt to bring it back failed, or that it is back.
+    pub(crate) fn tell_those_waiting(&self, shared: &SharedState, what: &str) {
+        for ask in &self.asked_again {
+            tell_query_message(shared, ask.req_id, what);
+        }
+        for (_, req_id, _) in &self.pending_scanner {
+            tell_query_message(shared, *req_id, what);
+        }
+    }
+
+    /// Fail the bar requests waiting to be asked again, and the scans
+    /// waiting to be subscribed again, once the connection is not to be
+    /// brought back: nothing is left to ask them on. Whether any scan was.
+    pub(crate) fn give_up_those_asked_again(&mut self, shared: &SharedState) -> bool {
+        for ask in std::mem::take(&mut self.asked_again) {
+            super::push_hmds_unavailable(shared, ask.req_id, true);
+        }
+        let scans = std::mem::take(&mut self.pending_scanner);
+        for (_, req_id, _) in &scans {
+            super::push_hmds_unavailable(shared, *req_id, false);
+        }
+        !scans.is_empty()
+    }
+
+    /// End each head timestamp the venue has not answered in the time a
+    /// gateway waits for one, as a gateway ends it.
+    pub(crate) fn time_out_head_timestamps(&mut self, now: Instant, shared: &SharedState) {
+        let (late, waiting) = std::mem::take(&mut self.pending_head_ts).into_iter()
+            .partition(|(.., sent)| now.duration_since(*sent) >= HEAD_TIMESTAMP_WAIT);
+        self.pending_head_ts = waiting;
+        for (query_id, req_id, ..) in late {
+            log::warn!("head timestamp req_id={req_id} query_id={query_id:?} was not answered in time");
+            super::push_hmds_error(
+                shared, req_id, "Historical Market Data Service error message:Request Timed Out".to_string(), false,
+            );
+        }
     }
 
     /// Report every unanswered one-shot request as failed, and forget it.
@@ -531,12 +688,9 @@ impl HmdsState {
         // request kinds use the error channel alone.
         stranded.extend(self.pending_historical.drain(..)
             .filter(|(_, rid)| !held_ids.contains(rid)).map(|(_, rid)| (rid, true)));
-        stranded.extend(self.pending_head_ts.drain(..).map(|(_, rid, _)| (rid, false)));
-        stranded.extend(self.pending_scanner.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_news.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_articles.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_fundamental.drain(..).map(|(_, rid)| (rid, false)));
-        stranded.extend(self.pending_histogram.drain(..).map(|(_, rid)| (rid, false)));
         // A request of the caller's own holds a slot for its answer, and a
         // query dropped here is one nothing will answer.
         stranded.extend(self.pending_adjustments.drain(..)
@@ -544,7 +698,6 @@ impl HmdsState {
             .inspect(|(_, rid, _)| shared.reference.stop_waiting_for_adjustments(*rid))
             .map(|(_, rid, _)| (rid, false)));
         stranded.extend(self.pending_schedule.drain(..).map(|(_, rid, _)| (rid, false)));
-        stranded.extend(self.pending_ticks.drain(..).map(|(_, rid, _)| (rid, false)));
         if stranded.is_empty() {
             return;
         }
@@ -582,6 +735,7 @@ impl HmdsState {
         hmds_conn: &mut Option<Connection>,
         market: &crate::engine::market_state::MarketState,
         hb: &mut HeartbeatState,
+        shared: &SharedState,
     ) {
         *hmds_conn = Some(conn);
         self.disconnected = false;
@@ -641,6 +795,38 @@ impl HmdsState {
         }
         if !bars.is_empty() {
             log::info!("HMDS reconnected, re-subscribed {} real-time bar streams", bars.len());
+        }
+
+        // A bar request the drop left waiting, and a scan, is told the
+        // connection is back, and is asked again from the start, as a gateway
+        // asks it again: a scan under the name it ran under.
+        self.tell_those_waiting(shared, "HMDS server connection was successful.");
+        for (scan_id, req_id, xml) in &self.pending_scanner {
+            let Some(conn) = hmds_conn.as_mut() else { break };
+            let ts = chrono_free_timestamp();
+            match conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10003"),
+                (6118, xml),
+            ]) {
+                Ok(()) => hb.last_hmds_sent = Instant::now(),
+                Err(e) => log::warn!("scan req_id={req_id} {scan_id} was not subscribed again: {e}"),
+            }
+        }
+        for ask in std::mem::take(&mut self.asked_again) {
+            if ask.schedule {
+                self.send_schedule_request(
+                    ask.req_id, ask.con_id, &ask.sec_type, &ask.exchange, &ask.end_date_time,
+                    &ask.duration, ask.use_rth, hmds_conn, hb,
+                );
+            } else {
+                self.send_historical_request_ex(
+                    ask.req_id, ask.con_id, &ask.end_date_time, &ask.duration, &ask.bar_size,
+                    &ask.what_to_show, ask.use_rth, false, ask.include_expired, &ask.symbol,
+                    &ask.sec_type, &ask.exchange, hmds_conn, hb, shared,
+                );
+            }
         }
     }
 
@@ -968,7 +1154,7 @@ impl HmdsState {
                         if let Some(pos) = self.pending_head_ts.iter()
                             .position(|(qid, ..)| answers(xml_tag, qid))
                         {
-                            let (_, req_id, format_date) = self.pending_head_ts.remove(pos);
+                            let (_, req_id, format_date, _) = self.pending_head_ts.remove(pos);
                             // Written as its own request asked for it.
                             let resp = crate::control::historical::HeadTimestampResponse {
                                 head_timestamp: crate::protocol::datetime::bar_date_as_asked(
@@ -1204,7 +1390,7 @@ impl HmdsState {
                                     released_req_id = Some(req_id);
                                 }
                             } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, ..)| states(qid, q)) {
-                                let (_, req_id, _) = self.pending_head_ts.remove(pos);
+                                let (_, req_id, ..) = self.pending_head_ts.remove(pos);
                                 released_req_id = Some(req_id);
                             } else if let Some(pos) = self.pending_histogram.iter().position(|(q, _)| states(qid, q)) {
                                 let (_, req_id) = self.pending_histogram.remove(pos);
@@ -1233,8 +1419,8 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_schedule.iter().position(|(q, _, _)| states(qid, q)) {
                                 let (_, req_id, _) = self.pending_schedule.remove(pos);
                                 released_req_id = Some(req_id);
-                            } else if let Some(pos) = self.pending_scanner.iter().position(|(q, _)| states(qid, q)) {
-                                let (_, req_id) = self.pending_scanner.remove(pos);
+                            } else if let Some(pos) = self.pending_scanner.iter().position(|(q, ..)| states(qid, q)) {
+                                let (_, req_id, _) = self.pending_scanner.remove(pos);
                                 released_req_id = Some(req_id);
                             } else if let Some(pos) =
                                 self.tbt_subscriptions.iter().position(|sub| states(qid, &sub.query_id))
@@ -2099,13 +2285,14 @@ fn build_tbt_query(
         hb.last_hmds_sent = Instant::now();
     }
 
-    /// Whether a bar request answers under `req_id`, its series held or its
-    /// query open, and if so the second query refused under it, as a gateway
+    /// Whether a bar request answers under `req_id`, its series held, its
+    /// query open or it waiting to be asked again, and if so the second query refused under it, as a gateway
     /// refuses a bar request, a head timestamp or a histogram under the number
     /// of a live bar request, before anything of the second exists.
     pub(crate) fn refused_as_a_second_query(&self, req_id: u32, shared: &SharedState) -> bool {
         let answering = self.held.iter().any(|held| held.req_id == req_id)
-            || self.pending_historical.iter().any(|(_, id)| *id == req_id);
+            || self.pending_historical.iter().any(|(_, id)| *id == req_id)
+            || self.asked_again.iter().any(|ask| ask.req_id == req_id);
         if answering {
             // Refused without ending anything: the request that is answering
             // goes on answering. Ended, its caller's side would let go of what
@@ -2145,6 +2332,13 @@ fn build_tbt_query(
         hb: &mut HeartbeatState,
         shared: &SharedState,
     ) -> bool {
+        let ask = BarAsk {
+            schedule: false, req_id, con_id,
+            end_date_time: end_date_time.to_string(), duration: duration.to_string(),
+            bar_size: bar_size.to_string(), what_to_show: what_to_show.to_string(),
+            use_rth, include_expired,
+            symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+        };
         let duration = crate::control::historical::normalize_duration(duration);
         let duration = duration.as_str();
         let end_date_time = if end_date_time.is_empty() {
@@ -2254,6 +2448,7 @@ fn build_tbt_query(
             complete: false,
             along: Along::default(),
         });
+        self.note_ask(ask);
         if fold == Fold::None {
             self.ask_stretch(req_id, &req, &crate::control::historical::Stretch::whole(&req), hmds_conn, hb, shared);
             return true;
@@ -2808,7 +3003,7 @@ fn build_tbt_query(
             Ok(()) => {
                 log::info!("Sent head timestamp request: req_id={req_id} con_id={con_id}");
                 hb.last_hmds_sent = Instant::now();
-                self.pending_head_ts.push((query_id, req_id, format_date));
+                self.pending_head_ts.push((query_id, req_id, format_date, Instant::now()));
             }
             Err(e) => {
                 log::warn!("head timestamp did not go out: req_id={req_id} con_id={con_id}: {e}");
@@ -2875,7 +3070,7 @@ fn build_tbt_query(
         // does. And the withdrawal takes one entry, so the other stayed
         // running and went on delivering rows under a number the caller had
         // withdrawn.
-        if self.pending_scanner.iter().any(|(_, id)| *id == req_id) {
+        if self.pending_scanner.iter().any(|(_, id, _)| *id == req_id) {
             super::push_hmds_refusal(
                 shared,
                 req_id,
@@ -2924,7 +3119,7 @@ fn build_tbt_query(
             Ok(()) => {
                 hb.last_hmds_sent = Instant::now();
                 log::info!("Sent scanner subscribe: req_id={req_id} scan_code={scan_code}");
-                self.pending_scanner.push((scan_id, req_id));
+                self.pending_scanner.push((scan_id, req_id, xml));
             }
             Err(e) => {
                 log::warn!("scanner subscribe did not go out: req_id={req_id} scan_code={scan_code}: {e}");
@@ -2954,8 +3149,8 @@ fn build_tbt_query(
         let found = self
             .pending_scanner
             .iter()
-            .find(|(scan_id, _)| scan_id == named)
-            .map(|(_, req_id)| *req_id);
+            .find(|(scan_id, ..)| scan_id == named)
+            .map(|(_, req_id, _)| *req_id);
         if found.is_none() {
             // A scan this session is not running: already withdrawn, or
             // belonging to another session on this login.
@@ -3323,14 +3518,18 @@ fn build_tbt_query(
         hb: &mut HeartbeatState,
         shared: &SharedState,
     ) {
-        let named = self.pending_news.iter()
-            .position(|(_, rid)| *rid == req_id)
-            .map(|pos| self.pending_news.remove(pos).0);
+        // Every query under the number: more than one is asked under a
+        // number still answering, as a gateway asks it.
+        let named: Vec<String> = self.pending_news.iter()
+            .filter(|(_, rid)| *rid == req_id)
+            .map(|(q, _)| q.clone())
+            .collect();
+        self.pending_news.retain(|(_, rid)| *rid != req_id);
         // Said whether or not there is a connection to send the withdrawal
         // on: what the caller is being told is that this client holds nothing
         // under that number, which is true either way. A withdrawal that
         // returns in silence reads exactly like one that acted.
-        let Some(query_id) = named else {
+        if named.is_empty() {
             super::push_hmds_refusal(
                 shared,
                 req_id,
@@ -3339,22 +3538,24 @@ fn build_tbt_query(
                 false,
             );
             return;
-        };
+        }
         let Some(conn) = hmds_conn.as_mut() else { return };
-        let xml = crate::control::xml::cancel_query(&query_id);
-        let ts = chrono_free_timestamp();
-        // Said as what it is where it did not go: logged as sent, a withdrawal
-        // that never left reads as one the venue took.
-        let sent = conn.send_fix(&[
-            (fix::TAG_MSG_TYPE, "U"),
-            (fix::TAG_SENDING_TIME, &ts),
-            (6040, "10031"),
-            (6118, &xml),
-        ]);
-        hb.last_hmds_sent = Instant::now();
-        match sent {
-            Ok(()) => log::info!("Sent historical news cancel: req_id={req_id}"),
-            Err(e) => log::warn!("historical news cancel for req_id={req_id} was not sent: {e}; the venue may go on answering it"),
+        for query_id in named {
+            let xml = crate::control::xml::cancel_query(&query_id);
+            let ts = chrono_free_timestamp();
+            // Said as what it is where it did not go: logged as sent, a
+            // withdrawal that never left reads as one the venue took.
+            let sent = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10031"),
+                (6118, &xml),
+            ]);
+            hb.last_hmds_sent = Instant::now();
+            match sent {
+                Ok(()) => log::info!("Sent historical news cancel: req_id={req_id} query={query_id}"),
+                Err(e) => log::warn!("historical news cancel for req_id={req_id} was not sent: {e}; the venue may go on answering it"),
+            }
         }
     }
 
@@ -3459,6 +3660,7 @@ fn build_tbt_query(
     }
 
     pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        let (asked_end, asked_duration) = (end_date_time.to_string(), duration.to_string());
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let duration = crate::control::historical::normalize_duration(duration);
@@ -3483,6 +3685,12 @@ fn build_tbt_query(
             log::info!("Sent schedule request: req_id={req_id} con_id={con_id}");
         }
         self.pending_schedule.push((query_id, req_id, end_date_time));
+        self.note_ask(BarAsk {
+            schedule: true, req_id, con_id,
+            end_date_time: asked_end, duration: asked_duration,
+            bar_size: String::new(), what_to_show: String::new(), use_rth, include_expired: false,
+            symbol: String::new(), sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+        });
     }
 
     /// Every historical query still waiting on the venue.

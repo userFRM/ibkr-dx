@@ -263,6 +263,7 @@ impl EClient {
         exercise_quantity: i32, account: &str, override_: bool,
         stated: crate::client_core::ExerciseStates,
     ) {
+        if self.number_unread(req_id) { return; }
         if let Err(why) = (|| -> Result<(), Refusal> {
             self.refuse_if_trading_is_over("an exercise")?;
             self.core.refuse_if_readonly("an exercise").map_err(Refusal::validation)?;
@@ -777,6 +778,7 @@ impl EClient {
     /// gateway does both. A refused request is told so on `error` and nothing
     /// else, as a gateway tells it.
     pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter) {
+        if self.number_unread(req_id) { return; }
         if let Some(why) = self.shared.reference.session_over() {
             return self.refuse_request(req_id, &Refusal::not_connected(why));
         }

@@ -499,10 +499,10 @@ impl EClient {
     /// reported on `error` under 300.
     #[pyo3(signature = (req_id))]
     fn cancel_adjustments(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         let wire = wire_req_id(req_id)?;
         // What it held is let go of in the engine's step, in its place after
         // the request it withdraws.
-        let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         if let Err(why) = self.send_control(
             &tx, ControlCommand::CancelCorporateActions { req_id: wire },
         ) {
