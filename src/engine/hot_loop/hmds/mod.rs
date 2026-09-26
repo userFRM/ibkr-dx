@@ -90,22 +90,9 @@ pub(crate) struct HmdsState {
     pub(crate) next_scanner_id: u32,
     pub(crate) pending_news: Vec<(String, u32)>,
     pub(crate) pending_articles: Vec<(String, u32)>,
+    /// Fundamentals requests still waiting on their answer, by the name they
+    /// went out under. The answer ends one, as it ends one on a gateway.
     pub(crate) pending_fundamental: Vec<(String, u32)>,
-    /// Fundamentals requests the venue has answered once, by the name they went
-    /// out under.
-    ///
-    /// An answer is not the venue saying it has stopped serving the request, so
-    /// a caller withdrawing one after the first reply still has something to
-    /// withdraw — and the withdrawal has to name the request, which the answer
-    /// used to take away with it. Emptied when the withdrawal is sent and when
-    /// the connection goes.
-    pub(crate) answered_fundamental: Vec<(String, u32)>,
-    /// The name a news request went out under, kept after its answer.
-    ///
-    /// The venue serves a news query past the reply that answers it, and the
-    /// withdrawal has to name the query. Held for the same reason the
-    /// fundamentals one is, and dropped with the connection.
-    pub(crate) answered_news: Vec<(String, u32)>,
     pub(crate) pending_histogram: Vec<(String, u32)>,
     /// In-flight corporate-action queries: the id the request went out under,
     /// the request it answers, and the contract it asked about.
@@ -239,11 +226,15 @@ pub(crate) struct FormingBar {
     pub(crate) bar: crate::types::RealTimeBar,
     /// Volume-weighted price needs the weights kept as they arrive.
     pub(crate) weighted: f64,
+    /// The five-second bars that arrived before the history was in, held and
+    /// folded in once it is, as a gateway holds and folds them.
+    pub(crate) queued: Vec<crate::types::RealTimeBar>,
 }
 
 impl FormingBar {
     /// Fold a five-second bar in, and answer with the bar as it now stands, or
-    /// with nothing where a day's bar in hand opened after it.
+    /// with nothing where the bar in hand opened after it, as a gateway passes
+    /// over an update older than its current bar.
     ///
     /// A day's bar is the one the history last stated until that one ends. A
     /// five-second bar from its end on opens the next from itself, as a
@@ -267,7 +258,11 @@ impl FormingBar {
             }
             self.daily_session.map_or(0, |(start, _)| start)
         } else {
-            opening(self.seconds, five.timestamp)
+            let opened_at = opening(self.seconds, five.timestamp);
+            if opened_at < self.opened_at {
+                return None;
+            }
+            opened_at
         };
         if opened_at != self.opened_at {
             self.opened_at = opened_at;
@@ -460,8 +455,6 @@ impl HmdsState {
             pending_news: Vec::new(),
             pending_articles: Vec::new(),
             pending_fundamental: Vec::new(),
-            answered_fundamental: Vec::new(),
-            answered_news: Vec::new(),
             pending_histogram: Vec::new(),
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
@@ -538,10 +531,6 @@ impl HmdsState {
         stranded.extend(self.pending_news.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_articles.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_fundamental.drain(..).map(|(_, rid)| (rid, false)));
-        // Answered already, so nobody is waiting on them: forgotten rather
-        // than reported as failed.
-        self.answered_fundamental.clear();
-        self.answered_news.clear();
         stranded.extend(self.pending_histogram.drain(..).map(|(_, rid)| (rid, false)));
         // A request of the caller's own holds a slot for its answer, and a
         // query dropped here is one nothing will answer.
@@ -1482,12 +1471,9 @@ impl HmdsState {
                                 } else if let Some(pos) = self.pending_news.iter()
                                     .position(|(qid, _)| answers(xml, qid))
                                 {
-                                    let named = self.pending_news.remove(pos);
-                                    let req_id = named.1;
-                                    // The name outlives the answer: the venue
-                                    // serves the query past it, and a
-                                    // withdrawal has to say which query.
-                                    self.answered_news.push(named);
+                                    // The answer ends it: a gateway keeps
+                                    // nothing of a news query it has answered.
+                                    let (_, req_id) = self.pending_news.remove(pos);
                                     if let Some(raw) = &raw_bytes {
                                         let (headlines, has_more) = crate::control::news::parse_news_payload(raw);
                                         shared.reference.push_historical_news(req_id, headlines, has_more);
@@ -1524,12 +1510,10 @@ impl HmdsState {
                                 let at = self.pending_fundamental.iter()
                                     .position(|(qid, _)| *qid == echoed);
                                 if let Some(at) = at {
-                                    let named = self.pending_fundamental.remove(at);
-                                    let req_id = named.1;
-                                    // Kept by name: the answer is not the venue
-                                    // saying it has stopped, so a withdrawal
-                                    // after it still has something to withdraw.
-                                    self.answered_fundamental.push(named);
+                                    // The answer ends it, as it ends one on a
+                                    // gateway: withdrawn after it, there is
+                                    // nothing left to withdraw.
+                                    let (_, req_id) = self.pending_fundamental.remove(at);
                                     shared.reference.push_fundamental_data(req_id, data);
                                 } else {
                                     shared.market.note_unread_wire(
@@ -1885,8 +1869,18 @@ impl HmdsState {
                     shared.market.push_real_time_bar(*req_id, bar);
                     continue;
                 };
-                if let Some(now) = forming.fold(&bar) {
-                    shared.market.push_bar_in_session(*req_id, now, forming.daily_session);
+                // Nothing is sent of the bar still forming before the history
+                // it goes on from: a gateway holds a five-second bar that comes
+                // first, and folds it into the history's last bar with the
+                // next one to arrive after the history is in.
+                if self.held.iter().any(|held| held.req_id == *req_id) {
+                    forming.queued.push(bar);
+                    continue;
+                }
+                for five in std::mem::take(&mut forming.queued).iter().chain([&bar]) {
+                    if let Some(now) = forming.fold(five) {
+                        shared.market.push_bar_in_session(*req_id, now, forming.daily_session);
+                    }
                 }
             }
         }
@@ -2720,7 +2714,8 @@ fn build_tbt_query(
         true
     }
 
-    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, what_to_show: &str, use_rth: bool, include_expired: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, contract: &crate::types::ContractRef, what_to_show: &str, use_rth: bool, include_expired: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        let con_id = contract.con_id;
         // The head-timestamp table, which is the bar one and the rate: this
         // was a third divergent copy with a silent TRADES fallback.
         let data_type = match crate::control::historical::head_timestamp_data_type(what_to_show) {
@@ -2731,14 +2726,19 @@ fn build_tbt_query(
                 return;
             }
         };
-        // Security type and exchange come from the cached contract
-        // definition. A fixed CS/SMART describes a future or currency pair as
-        // a US stock, and the request is answered for that instrument.
-        //
-        // Left empty where no definition is cached. The server reads these
-        // fields, so an invented description returns another instrument.
-        let Some(described) = shared.reference.get_contract(con_id).filter(|c| {
-            !c.sec_type.is_empty() && !c.exchange.is_empty()
+        // The contract's type and exchange as the request states them, as a
+        // bar request states them: given by the caller, or named by the venue
+        // where the caller gave the id alone. The cached definition stands in
+        // only where the request states neither. A fixed CS/SMART describes a
+        // future or currency pair as a US stock, and the request is answered
+        // for that instrument; the server reads these fields, so an invented
+        // description returns another instrument.
+        let stated = (!contract.sec_type.is_empty() && !contract.exchange.is_empty())
+            .then(|| (contract.sec_type.clone(), contract.exchange.clone()));
+        let Some((sec_type, exchange)) = stated.or_else(|| {
+            shared.reference.get_contract(con_id)
+                .filter(|c| !c.sec_type.is_empty() && !c.exchange.is_empty())
+                .map(|c| (c.sec_type, c.exchange))
         }) else {
             let told = format!(
                 "contract {con_id} has no definition here yet, and a head timestamp \
@@ -2753,8 +2753,8 @@ fn build_tbt_query(
         let req = crate::control::historical::HeadTimestampRequest {
             query_id: format!("tk_{qid}"),
             con_id: con_id as u32,
-            sec_type: described.sec_type.clone(),
-            exchange: described.exchange.clone(),
+            sec_type,
+            exchange,
             data_type,
             use_rth,
             include_expired,
@@ -3142,7 +3142,8 @@ fn build_tbt_query(
         }
     }
 
-    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str, shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, contract: &crate::types::ContractRef, report_type: &str, shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        let con_id = contract.con_id as u32;
         use crate::control::fundamental::ReportType;
         let rt = match report_type {
             "ReportSnapshot" | "snapshot" => ReportType::Snapshot,
@@ -3160,12 +3161,15 @@ fn build_tbt_query(
                 return;
             }
         };
-        // As with the head timestamp: the contract's own description, not a US
-        // stock's.
-        // As with the head timestamp: the cached contract description, empty
-        // where none is cached.
-        let Some(described) = shared.reference.get_contract(con_id as i64).filter(|c| {
-            !c.sec_type.is_empty() && !c.currency.is_empty()
+        // As with the head timestamp: the contract's own type and currency, as
+        // the request states them once the venue has named it, and the cached
+        // definition only where it states neither.
+        let stated = (!contract.sec_type.is_empty() && !contract.currency.is_empty())
+            .then(|| (contract.sec_type.clone(), contract.currency.clone()));
+        let Some((sec_type, currency)) = stated.or_else(|| {
+            shared.reference.get_contract(i64::from(con_id))
+                .filter(|c| !c.sec_type.is_empty() && !c.currency.is_empty())
+                .map(|c| (c.sec_type, c.currency))
         }) else {
             let told = format!(
                 "contract {con_id} has no definition here yet, and a fundamentals \
@@ -3183,8 +3187,8 @@ fn build_tbt_query(
         self.next_hmds_query_id += 1;
         let req = crate::control::fundamental::FundamentalRequest {
             con_id,
-            sec_type: described.sec_type.clone(),
-            currency: described.currency.clone(),
+            sec_type,
+            currency,
             report_type: rt,
             query_id: query_id.clone(),
         };
@@ -3224,42 +3228,21 @@ fn build_tbt_query(
         self.pending_fundamental.push((query_id, req_id));
     }
 
-    /// Tell the venue to stop serving a fundamentals request.
+    /// Tell the venue to stop serving a fundamentals request still waiting on
+    /// its answer, under the name it went out with, which is its own.
     ///
-    /// Withdrawing it here alone left the venue serving a subscription nobody
-    /// was reading, for as long as the session lasted.
+    /// One answered, or one never asked, is withdrawn in silence, as a gateway
+    /// withdraws it: nothing is waiting, and nothing is said.
     pub(crate) fn send_fundamental_cancel(
         &mut self,
         req_id: u32,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
-        shared: &SharedState,
     ) {
-        // Sent whether or not this client still has the request on its own
-        // list. That list is emptied by the first response the venue sends,
-        // which is not the same moment the venue stops serving it — so gating
-        // the withdrawal on it sent nothing in the case that actually leaks.
-        // Withdrawn under the name it went out with, which is its own.
-        let named = self.pending_fundamental.iter()
-            .position(|(_, rid)| *rid == req_id)
-            .map(|pos| self.pending_fundamental.remove(pos).0)
-            .or_else(|| {
-                self.answered_fundamental.iter()
-                    .position(|(_, rid)| *rid == req_id)
-                    .map(|pos| self.answered_fundamental.remove(pos).0)
-            });
-        // As above: this client holds nothing under that number whether or
-        // not there is a connection to say it on.
-        let Some(query_id) = named else {
-            super::push_hmds_refusal(
-                shared,
-                req_id,
-                NO_SUCH_SUBSCRIPTION,
-                format!("no fundamentals query is waiting under request {req_id}"),
-                false,
-            );
+        let Some(pos) = self.pending_fundamental.iter().position(|(_, rid)| *rid == req_id) else {
             return;
         };
+        let (query_id, _) = self.pending_fundamental.remove(pos);
         let Some(conn) = hmds_conn.as_mut() else { return };
         let xml = crate::control::xml::cancel_query(&query_id);
         let ts = chrono_free_timestamp();
@@ -3332,13 +3315,12 @@ fn build_tbt_query(
         true
     }
 
-    /// Withdraw a news query the venue is still serving.
+    /// Withdraw a news query still waiting on its answer.
     ///
     /// One message: the historical envelope, the subtype that names a news
     /// withdrawal, and the same document every other withdrawal carries — the
-    /// id the query went out under. Sent whether or not this client still has
-    /// the request on its pending list, because that list is emptied by the
-    /// first response and the venue serves the query past it.
+    /// id the query went out under. A query answered is over, as a gateway
+    /// holds it over, and withdrawn after its answer it names nothing.
     pub(crate) fn send_news_cancel(
         &mut self,
         req_id: u32,
@@ -3348,12 +3330,7 @@ fn build_tbt_query(
     ) {
         let named = self.pending_news.iter()
             .position(|(_, rid)| *rid == req_id)
-            .map(|pos| self.pending_news.remove(pos).0)
-            .or_else(|| {
-                self.answered_news.iter()
-                    .position(|(_, rid)| *rid == req_id)
-                    .map(|pos| self.answered_news.remove(pos).0)
-            });
+            .map(|pos| self.pending_news.remove(pos).0);
         // Said whether or not there is a connection to send the withdrawal
         // on: what the caller is being told is that this client holds nothing
         // under that number, which is true either way. A withdrawal that

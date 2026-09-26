@@ -196,6 +196,20 @@ pub(crate) fn settled(client: &EClient, rx: &Engine) -> Vec<String> {
     w.events
 }
 
+/// Take the bar requests the calls sent as the engine takes them: what the
+/// engine states of each, ahead of its answer.
+pub(crate) fn engine_takes_bars(rx: &Engine, shared: &SharedState) {
+    for cmd in rx.try_iter() {
+        if let ControlCommand::FetchHistorical {
+            req_id, end_date_time, duration, bar_size, keep_up_to_date, format_date, ..
+        } = cmd {
+            shared.reference.push_historical_taken(crate::bridge::HistoricalTaken {
+                req_id, format_date, end_date_time, duration, bar_size, keep_up_to_date,
+            });
+        }
+    }
+}
+
 /// What the engine refused of what the calls handed it, once it has taken
 /// them: the number each is reported under, its code and its words.
 pub(crate) fn engine_refused(rx: &Engine, shared: &SharedState) -> Vec<(i64, i64, String)> {
@@ -891,31 +905,6 @@ fn a_bracket_held_back_goes_out_when_its_last_leg_transmits() {
     client.try_place_order(72, &spy(), &held(72, 70, true)).expect("and this one sends them");
     let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(sent.len(), 3, "the parent, the sibling and this one: {sent:?}");
-}
-
-/// A stream taking a number a finished lookup used is a stream, not an update.
-///
-/// A completed historical request left the number marked as one whose bars
-/// belong to it, and only a new or a cancelled historical request cleared the
-/// mark. Backfill and then stream on one number — which is how it is written —
-/// and every bar of the stream arrived as an update to the request that had
-/// already ended, so a caller that overrode only the stream read it as dead.
-#[test]
-fn a_stream_on_a_finished_lookups_number_is_a_stream() {
-    let (client, rx, _shared) = test_client();
-    client.core.hist_initial_complete.lock().unwrap().insert(4242);
-    assert!(
-        client.core.hist_initial_complete.lock().unwrap().contains(&4242),
-        "the lookup finished",
-    );
-
-    crate::api::client::tests::reported(&client, || client.req_real_time_bars(4242, &spy(), 5, "TRADES", true))
-        .expect("the stream takes the number");
-    assert!(
-        !client.core.hist_initial_complete.lock().unwrap().contains(&4242),
-        "and the number is a stream's again, not a finished lookup's",
-    );
-    let _ = rx;
 }
 
 /// A quantity that is not a number, or overflows the fixed-point form, becomes
@@ -6821,37 +6810,35 @@ fn a_head_timestamp_is_written_the_way_it_was_asked_for() {
     assert!(w.events.iter().any(|e| e == "head_timestamp:12:20200101-00:00:00"));
 }
 
-/// A reused request id starts a new request: its completion latch is cleared, so
-/// the bars arrive as initial data and `historical_data_end` fires again.
+/// A reused request id starts a new request: one that has ended leaves
+/// nothing behind, so the next request's bars arrive as its history and
+/// `historical_data_end` fires again.
 #[test]
 fn a_historical_request_under_a_used_id_answers_from_the_beginning() {
-    let (client, _rx, shared) = test_client();
-    // As the first request left it.
-    client.core.hist_initial_complete.lock().unwrap().insert(13);
-
-    client
-        .try_req_historical_data(13, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false)
-        .expect("the request is sent");
-    shared.reference.push_historical_data(13, HistoricalResponse {
-        query_id: String::new(), timezone: String::new(),
-        bars: vec![HistoricalBar {
-            time: "20200101-00:00:00".into(), open: 1.0, high: 1.0, low: 1.0, close: 1.0,
-            volume: 1, wap: 1.0, count: 1, end: String::new(),
-        }],
-        is_complete: true,
-    });
+    let (client, rx, shared) = test_client();
     let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(
-        w.events.iter().any(|e| e.starts_with("historical_data:13:")),
+    for _ in 0..2 {
+        client
+            .try_req_historical_data(13, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false)
+            .expect("the request is sent");
+        engine_takes_bars(&rx, &shared);
+        shared.reference.push_historical_data(13, HistoricalResponse {
+            query_id: String::new(), timezone: String::new(),
+            bars: vec![HistoricalBar {
+                time: "20200101-00:00:00".into(), open: 1.0, high: 1.0, low: 1.0, close: 1.0,
+                volume: 1, wap: 1.0, count: 1, end: String::new(),
+            }],
+            is_complete: true,
+        });
+        client.process_msgs(&mut w);
+    }
+    let heard = |prefix: &str| w.events.iter().filter(|e| e.starts_with(prefix)).count();
+    assert_eq!(
+        heard("historical_data:13:"), 2,
         "the bars answering a new request arrived as updates to the old one: {:?}",
         w.events,
     );
-    assert!(
-        w.events.iter().any(|e| e.starts_with("historical_data_end:13")),
-        "and the request never ended: {:?}",
-        w.events,
-    );
+    assert_eq!(heard("historical_data_end:13"), 2, "and the request never ended: {:?}", w.events);
 }
 
 /// A trade callback names the stream it carries: tick type 1 = Last,
@@ -7911,9 +7898,11 @@ fn a_kept_up_to_date_request_reports_its_history_then_its_updates() {
                          _c: f64, _v: f64, _w: f64, _n: i32) { self.real_time.push(req_id); }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut heard = Heard::default();
 
+    client.req_historical_data(9, &spy(), "", "1 D", "1 day", "TRADES", true, 1, true);
+    engine_takes_bars(&rx, &shared);
     // The initial answer, complete.
     shared.reference.push_historical_data(9, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
@@ -7932,7 +7921,7 @@ fn a_kept_up_to_date_request_reports_its_history_then_its_updates() {
         bars: vec![HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() }],
         is_complete: false,
     });
-    shared.market.push_real_time_bar(9, Default::default());
+    shared.market.push_bar_in_session(9, Default::default(), None);
     client.process_msgs(&mut heard);
 
     assert_eq!(heard.updates, vec![9, 9], "both continued bars are updates");
@@ -8682,38 +8671,29 @@ fn every_order_the_venue_has_finished_comes_back_though_numbers_repeat() {
 #[test]
 fn a_request_named_by_id_refuses_a_contract_that_has_none() {
     let (client, _rx, _shared) = test_client();
-    let described = crate::types::model::Contract {
-        symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
-        ..Default::default()
-    };
-    assert!(client.try_req_fundamental_data(1, &described, "ReportSnapshot").is_err());
-    assert!(client.try_req_histogram_data(2, &described, true, "3 days").is_err());
     assert!(client.try_req_historical_news(3, -1, "BRFG", "", "", 5).is_err());
     assert!(
         crate::api::client::tests::reported(&client, || client.req_historical_ticks(4, &spy(), "", "", -1, "TRADES", true, false)).is_err(),
         "a count below zero asked for four billion ticks",
     );
-
-    // And one that carries the id is sent.
-    assert!(client.try_req_fundamental_data(5, &spy(), "ReportSnapshot").is_ok());
-    assert!(client.try_req_histogram_data(6, &spy(), true, "3 days").is_ok());
 }
 
 /// A refusal that can never work keeps its own number.
 ///
-/// A contract the venue has not named is refused before anything is
-/// sent, under the number that says so. Rewritten as "not connected",
-/// it read as a session problem, and a caller retried for ever what
-/// no session could carry.
+/// A fundamentals report about a contract not stated as a stock is refused
+/// before anything is sent, as a gateway refuses it, in its words and under
+/// the number that says so. Rewritten as "not connected", it read as a
+/// session problem, and a caller retried for ever what no session could
+/// carry.
 #[test]
 fn a_permanent_refusal_keeps_its_own_number() {
     let (client, _rx, _shared) = test_client();
     let refused = client
         .fundamental_data(&Contract::default(), "ReportsOwnership")
-        .expect_err("a contract without the venue's id cannot be asked about");
+        .expect_err("a contract stating no type cannot be asked about");
     assert_eq!(
-        refused.code,
-        Refusal::VALIDATION,
+        (refused.code, refused.message.as_str()),
+        (Refusal::VALIDATION, "Please enter a valid security type"),
         "a permanent refusal is not a session problem: {refused}",
     );
 }
@@ -8815,7 +8795,7 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
         }
     }
 
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut heard = Heard::default();
 
     let bar = HistoricalBar {
@@ -8826,6 +8806,7 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
     let _ = client.try_req_historical_data(
         1, &spy(), "", "1 D", "1 day", "TRADES", true, 1, false,
     );
+    engine_takes_bars(&rx, &shared);
     shared.reference.push_historical_data(1, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![bar.clone()], is_complete: true,
@@ -8837,6 +8818,7 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
     let _ = client.try_req_historical_data(
         2, &spy(), "", "1 D", "1 day", "TRADES", true, 2, false,
     );
+    engine_takes_bars(&rx, &shared);
     shared.reference.push_historical_data(2, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![bar.clone()], is_complete: true,
@@ -9540,13 +9522,22 @@ fn an_answering_call_does_not_wait_on_itself_to_name_a_contract_given_by_id() {
     }
 }
 
-/// A request for bars, a head timestamp, a histogram, ticks or a schedule
-/// that gives its contract by id alone goes to the engine as it stands, and
-/// the engine asks the venue to name it by that id before the request goes.
-/// Named at the call, the caller's thread waited out the lookup's round trip.
+/// A request for bars, a head timestamp, a histogram, ticks, a schedule or a
+/// fundamental report that gives its contract by id alone — a report's, a
+/// stock's with no currency — goes to the engine as it stands, and the engine
+/// asks the venue to name it by that id before the request goes. Named at the
+/// call, the caller's thread waited out the lookup's round trip. A histogram
+/// or a fundamental report describing its contract is named by that
+/// description, as a gateway names it: refused at the call, and a report given
+/// by id refused for want of a definition this session had not looked up, a
+/// program that kept its contracts was answered by neither.
 #[test]
 fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
     let by_id_alone = Contract { con_id: 495_512_563, ..Default::default() };
+    let described = Contract {
+        symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+        ..Default::default()
+    };
     let (client, rx, shared) = test_client();
     client.try_req_historical_data(1, &by_id_alone, "", "1 D", "1 hour", "TRADES", true, 1, false).expect("handed over");
     client.try_req_head_time_stamp(2, &by_id_alone, "TRADES", true, 1).expect("handed over");
@@ -9554,8 +9545,12 @@ fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
     crate::api::client::tests::reported(&client, || client.req_historical_ticks(4, &by_id_alone, "20250101 00:00:00", "", 10, "TRADES", true, false))
         .expect("handed over");
     client.try_req_historical_schedule(5, &by_id_alone, "", "1 D", true).expect("handed over");
+    let a_stock_by_id = Contract { con_id: 265_598, sec_type: "STK".into(), ..Default::default() };
+    client.try_req_fundamental_data(6, &a_stock_by_id, "ReportSnapshot").expect("handed over");
+    client.try_req_fundamental_data(7, &described, "ReportSnapshot").expect("handed over");
+    client.try_req_histogram_data(8, &described, true, "1 week").expect("handed over");
     let sent: Vec<ControlCommand> = rx.try_iter().collect();
-    assert_eq!(sent.len(), 5, "each is handed over as it stands: {sent:?}");
+    assert_eq!(sent.len(), 8, "each is handed over as it stands: {sent:?}");
 
     let mut engine = rx.engine();
     for cmd in sent {
@@ -9567,7 +9562,7 @@ fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
     }
     assert!(shared.reference.drain_historical_errors().is_empty(), "and nothing was refused");
     assert!(engine.ccp.withdraw_named(3, |_| true), "a held request is withdrawn by its own cancel");
-    assert_eq!(engine.ccp.pending_named.len(), 4);
+    assert_eq!(engine.ccp.pending_named.len(), 7);
 }
 
 /// A spread scan's text rides its own request, so two scans of one contract
@@ -10764,16 +10759,17 @@ fn a_map_of_venues_that_never_arrives_is_refused_as_a_gateway_refuses_it() {
 /// under the same request as seconds since the epoch with no zone.
 #[test]
 fn an_update_bar_is_dated_as_the_history_before_it() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     client.try_req_historical_data(5, &spy(), "", "1 D", "1 min", "TRADES", false, 1, true).expect("asked");
+    engine_takes_bars(&rx, &shared);
     shared.reference.push_historical_data(5, crate::control::historical::HistoricalResponse {
         query_id: "q5".into(), timezone: "US/Eastern".into(), is_complete: true, bars: Vec::new(),
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    shared.market.push_real_time_bar(5, crate::types::RealTimeBar {
+    shared.market.push_bar_in_session(5, crate::types::RealTimeBar {
         timestamp: 1_757_000_000, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 0.0, wap: 1.0, count: 1,
-    });
+    }, None);
     client.process_msgs(&mut w);
     assert!(
         w.events.iter().any(|e| e == "historical_data_update:5:20250904 11:33:20 US/Eastern"),
@@ -10789,7 +10785,7 @@ fn an_update_bar_is_dated_as_the_history_before_it() {
 /// a time for one bar.
 #[test]
 fn an_update_to_a_bar_of_a_day_or_longer_is_dated_by_its_day() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     for (req_id, size, opened_at, dated) in [
         (5u32, "1 day", 1_790_208_000u32, "20260924"),
         (6, "1 week", 1_789_948_800, "20260921"),
@@ -10798,16 +10794,17 @@ fn an_update_to_a_bar_of_a_day_or_longer_is_dated_by_its_day() {
         client
             .try_req_historical_data(i64::from(req_id), &spy(), "", "1 Y", size, "TRADES", true, 1, true)
             .expect("asked");
+        engine_takes_bars(&rx, &shared);
         shared.reference.push_historical_data(req_id, crate::control::historical::HistoricalResponse {
             query_id: format!("q{req_id}"), timezone: "US/Eastern".into(), is_complete: true,
             bars: Vec::new(),
         });
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
-        shared.market.push_real_time_bar(req_id, crate::types::RealTimeBar {
+        shared.market.push_bar_in_session(req_id, crate::types::RealTimeBar {
             timestamp: opened_at, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 0.0, wap: 1.0,
             count: 1,
-        });
+        }, None);
         client.process_msgs(&mut w);
         let said = format!("historical_data_update:{req_id}:{dated}");
         assert!(
@@ -12320,7 +12317,7 @@ fn contract_expiry_keeps_accepted_values_and_is_not_checked_on_fundamentals() {
 
 #[test]
 fn daily_history_and_updates_keep_dates_in_both_formats() {
-    let (client, _rx, shared) = test_client();
+    let (client, rx, shared) = test_client();
     for format in [1, 2] {
         for (offset, size, stated, end, day) in [
             (0, "1 day", "20260924-13:30:00", "20260924-20:00:00", "20260924"),
@@ -12332,6 +12329,7 @@ fn daily_history_and_updates_keep_dates_in_both_formats() {
             let req_id = (format * 10 + offset) as u32;
             client.req_historical_data(i64::from(req_id), &spy(), "", "1 Y", size,
                 "TRADES", true, format, true);
+            engine_takes_bars(&rx, &shared);
             shared.reference.push_historical_data(req_id, HistoricalResponse {
                 query_id: String::new(), timezone: "US/Eastern".into(), is_complete: true,
                 bars: vec![HistoricalBar {
@@ -12345,10 +12343,10 @@ fn daily_history_and_updates_keep_dates_in_both_formats() {
                 "{size}, format {format}: {:?}", heard.events);
             let midnight = crate::protocol::datetime::ib_datetime_to_unix(stated)
                 .unwrap_or_else(|| crate::protocol::datetime::ib_datetime_to_unix(&format!("{day}-00:00:00")).unwrap());
-            shared.market.push_real_time_bar(req_id, crate::types::RealTimeBar {
+            shared.market.push_bar_in_session(req_id, crate::types::RealTimeBar {
                 timestamp: midnight as u32, open: 1.0, high: 2.0, low: 0.5, close: 1.5,
                 volume: 10.0, wap: 1.2, count: 3,
-            });
+            }, None);
             client.process_msgs(&mut heard);
             assert!(heard.events.contains(&format!("historical_data_update:{req_id}:{day}")),
                 "{size}, format {format}: {:?}", heard.events);

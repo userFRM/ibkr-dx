@@ -41,15 +41,9 @@ impl EClient {
         if let Some(why) = self.options_refused(py, &crate::client_core::CHART_OPTIONS, chart_options)? {
             return self.report_refusal(py, req_id, why);
         }
-        // How this request wants its bar times written, as on the other
-        // surface: the venue states one form and the caller may want the other.
-        self.core.note_date_format(req_id, format_date);
-        // And what its range is counted from, which the reply does not state.
-        self.core.note_historical_span(req_id, end_date_time, duration_str, bar_size_setting);
-        // Whatever finished under this id before, this is a new request.
-        if let Ok(wire) = wire_req_id(req_id) {
-            self.core.historical_request_is_new(wire);
-        }
+        // How it wants its bar times written, and what its range is counted
+        // from, are written down where the engine takes the request, as on
+        // the other surface.
         if !what_to_show.eq_ignore_ascii_case("SCHEDULE")
             && let Err(why) = ClientCore::validate_historical_args(
                 bar_size_setting, what_to_show, keep_up_to_date, end_date_time,
@@ -82,6 +76,7 @@ impl EClient {
                     what_to_show: what_to_show.to_string(),
                     use_rth: use_rth != 0,
                     keep_up_to_date,
+                    format_date,
                     include_expired: contract.include_expired,
                     filters: contract.lookup_filters(),
                 }) {
@@ -95,8 +90,8 @@ impl EClient {
     fn cancel_historical_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         let wire = wire_req_id(req_id)?;
-        // A withdrawn stream leaves nothing running under this id.
-        self.core.historical_request_is_new(wire);
+        // A withdrawn request leaves nothing running under this id.
+        self.core.forget_historical(wire);
         if let Err(why) = self.send_control(&tx, ControlCommand::CancelHistorical { req_id: wire }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -141,6 +136,7 @@ impl EClient {
     /// Cancel head timestamp request.
     fn cancel_head_time_stamp(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        self.core.head_timestamp_ended(req_id);
         if let Err(why) = self.send_control(&tx, ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -401,8 +397,10 @@ impl EClient {
     /// Withdraw a historical news query.
     ///
     /// The TWS API has no call for this; the venue has a message for it. One
-    /// message carrying the number the query went out under, sent whether or
-    /// not the query has been answered: the venue serves it past the reply.
+    /// message carrying the number the query went out under, sent for a query
+    /// still waiting on its answer. A query answered is over, as a gateway
+    /// holds it over: withdrawn after its answer, it is refused as naming
+    /// nothing.
     fn cancel_historical_news(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         if let Err(why) = self.send_control(&tx, ControlCommand::CancelHistoricalNews {
@@ -533,10 +531,14 @@ impl EClient {
     ) -> PyResult<()> {
         let _ = fundamental_data_options;
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if let Err(why) = ClientCore::validate_fundamentals_type(&contract.sec_type) {
+            return self.report_refusal(py, req_id, why);
+        }
         if let Err(why) = self.send_control(&tx, ControlCommand::FetchFundamentalData {
                 req_id: wire_req_id(req_id)?,
-                con_id: super::wire_con_id("a request for a fundamental report", contract.con_id)?,
+                contract: contract.into(),
                 report_type: report_type.to_string(),
+                filters: contract.lookup_filters(),
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -684,11 +686,10 @@ impl EClient {
         // exchange, and both are the venue's to say.
         if let Err(why) = self.send_control(&tx, ControlCommand::FetchHistogramData {
                 req_id: wire_req_id(req_id)?,
-                con_id: super::wire_con_id("a request for a histogram", contract.con_id)?,
-                sec_type: contract.sec_type.clone(),
-                exchange: contract.exchange.clone(),
+                contract: contract.into(),
                 use_rth,
                 period: time_period.to_string(),
+                filters: contract.lookup_filters(),
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }

@@ -2139,7 +2139,7 @@ pub fn cancel_adjustments(&self, req_id: i64)
 
 #### `req_fundamental_data`
 
-Request fundamental data. Three reports, which are the three the venue states: `ReportSnapshot`, `RESC` for what analysts expect, and `CalendarReport` for what the issuer has coming. The contract is named by its venue id and nothing else of it is carried, so pass one that has an id: from `qualify_contract`, or from any contract-details answer. A description is refused rather than sent as a request about contract zero.
+Request fundamental data. Three reports, which are the three the venue states: `ReportSnapshot`, `RESC` for what analysts expect, and `CalendarReport` for what the issuer has coming. The report is asked about a stock as the venue names it, as a gateway asks it: a contract given by its description, or by its id with no currency beside it, is looked up first. A contract not stated as a stock is refused, as a gateway refuses it.
 
 ```rust
 pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str)
@@ -2169,7 +2169,7 @@ pub fn cancel_fundamental_data(&self, req_id: i64)
 
 #### `cancel_historical_news`
 
-Withdraw a historical news query. The TWS API has no call for this; the venue has a message for it. One message carrying the id the query went out under, which is the whole of what a withdrawal states. Sent whether or not the query has been answered: the venue serves it past the reply, so a withdrawal gated on this client's own pending list would send nothing in the case that leaves one running.
+Withdraw a historical news query. The TWS API has no call for this; the venue has a message for it. One message carrying the id the query went out under, which is the whole of what a withdrawal states, sent for a query still waiting on its answer. A query answered is over, as a gateway holds it over: withdrawn after its answer, it is refused as naming nothing.
 
 ```rust
 pub fn cancel_historical_news(&self, req_id: i64)
@@ -2183,7 +2183,7 @@ pub fn cancel_historical_news(&self, req_id: i64)
 
 #### `req_histogram_data`
 
-Request price histogram data. Named by its venue id, as `req_fundamental_data` is.
+Request price histogram data. Asked about the contract as the venue names it, as `req_fundamental_data` is.
 
 ```rust
 pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str)

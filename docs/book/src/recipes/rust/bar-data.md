@@ -26,7 +26,14 @@ was served.
 With `keep_up_to_date: true` the bar still forming goes on from the history's
 last bar, as a gateway's does: the live five-second bars inside it are folded
 into the open, high, low and volume the venue stated for it. Five-second bars
-are sent as the stream sends them. A daily session supplied with the history
+are sent as the stream sends them. One that arrives before the history is in
+is held, as a gateway holds it, and folded into the history's last bar with the
+next one after it; one from before the bar in hand opened is passed over. So
+nothing of the bar still forming is heard before `historical_data_end`, and
+every update is heard on `historical_data_update`, whatever else the request's
+number has done: a live bar stream under the same number is heard on
+`real_time_bar`, and a second request under the number, refused while this
+one answers, leaves this one's dates as it asked for them. A daily session supplied with the history
 keeps its opening and end across UTC midnight. Its updates use the session
 end's date on the series' timezone, as the history does, under both
 date-format settings. Timed daily history is returned as `yyyyMMdd`; explicit

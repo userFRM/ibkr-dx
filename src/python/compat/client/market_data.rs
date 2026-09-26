@@ -354,13 +354,6 @@ impl EClient {
             return self.report_refusal(py, req_id, why.into());
         }
         let wire = wire_req_id(req_id)?;
-        // A historical request that finished under this number left the number
-        // marked as one whose bars are updates to it, and only a new or a
-        // cancelled historical request cleared that mark. Backfill and then
-        // stream on the same number — the ordinary way to write it — and every
-        // bar of the stream arrived as `historical_data_update`, so a caller
-        // that overrode only `real_time_bar` read the stream as dead.
-        self.core.historical_request_is_new(wire);
         if let Err(why) = self.send_control(&tx, ControlCommand::SubscribeRealTimeBar {
                 contract: contract.into(),
                 req_id: wire,

@@ -107,6 +107,7 @@ fn a_reconnect_asks_for_the_five_second_bars_again() {
         daily_session: None, closed_at: None,
         bar: Default::default(),
         weighted: 0.0,
+        queued: Vec::new(),
     });
 
     let sock2 = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -288,7 +289,8 @@ fn a_head_timestamp_with_no_connection_is_refused_not_left_pending() {
         ..Default::default()
     });
 
-    hmds.send_head_timestamp_request(3, 265598, "TRADES", true, false, &mut conn, &mut hb, &shared);
+    let aapl = crate::types::ContractRef { con_id: 265598, ..Default::default() };
+    hmds.send_head_timestamp_request(3, &aapl, "TRADES", true, false, &mut conn, &mut hb, &shared);
 
     assert!(hmds.pending_head_ts.is_empty(), "a request that could not be sent is not left pending");
     let told = shared.reference.drain_historical_errors();
@@ -298,6 +300,34 @@ fn a_head_timestamp_with_no_connection_is_refused_not_left_pending() {
     );
 }
 
+
+/// A head timestamp states the contract's type and exchange as the request
+/// states them, as a bar request does, with no definition of it held: a
+/// program that kept its contracts was refused one until it happened to look
+/// the contract up.
+#[test]
+fn a_head_timestamp_states_the_contract_it_was_asked_about() {
+    use std::io::Read;
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+    let (conn, mut peer) = Connection::for_test();
+    let aapl = crate::types::ContractRef {
+        con_id: 265598, sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+        ..Default::default()
+    };
+
+    hmds.send_head_timestamp_request(3, &aapl, "TRADES", true, false, &mut Some(conn), &mut hb, &shared);
+
+    assert!(shared.reference.drain_historical_errors().is_empty(), "nothing is refused");
+    let mut sent = [0u8; 4096];
+    let n = peer.read(&mut sent).unwrap();
+    let sent = String::from_utf8_lossy(&sent[..n]);
+    assert!(
+        sent.contains("<contractID>265598</contractID><exchange>BEST</exchange><secType>STK</secType>"),
+        "{sent}",
+    );
+}
 
 #[test]
 fn query_error_releases_head_timestamp_without_sentinel() {
@@ -1103,7 +1133,7 @@ fn a_kept_up_to_date_request_refused_on_its_actions_takes_its_stream_with_it() {
     hmds.forming_bars.push(FormingBar {
         req_id: 42, seconds: 300, opened_at: 0,
         daily_session: None, closed_at: None,
-        bar: crate::types::RealTimeBar::default(), weighted: 0.0,
+        bar: crate::types::RealTimeBar::default(), weighted: 0.0, queued: Vec::new(),
     });
     let _ = read_frame(&mut peer);
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
@@ -2046,7 +2076,7 @@ mod forming_bar_tests {
         let mut forming = FormingBar {
             req_id: 1, seconds: 300, opened_at: 0,
             daily_session: None, closed_at: None,
-            bar: Default::default(), weighted: 0.0,
+            bar: Default::default(), weighted: 0.0, queued: Vec::new(),
         };
         // 14:35:00, then two more within the same five minutes.
         let first = forming.fold(&five(1_786_456_500, 10.0, 10.5, 9.5, 10.2, 100.0)).unwrap();
@@ -2078,7 +2108,7 @@ mod forming_bar_tests {
         let week = crate::control::historical::BarSize::Week1.seconds();
         let month = crate::control::historical::BarSize::Month1.seconds();
         let mut weekly = FormingBar {
-            req_id: 1, seconds: week, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0,
+            req_id: 1, seconds: week, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
         };
         // Sunday 20 September 2026 23:59:55, then Monday 21 September 00:00.
         let sunday = weekly.fold(&five(1_789_948_795, 10.0, 10.0, 10.0, 10.0, 5.0)).unwrap();
@@ -2088,7 +2118,7 @@ mod forming_bar_tests {
         assert_eq!((monday.open, monday.volume), (11.0, 7.0), "nothing carried over");
 
         let mut monthly = FormingBar {
-            req_id: 2, seconds: month, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0,
+            req_id: 2, seconds: month, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
         };
         // Saturday 31 January 2026 23:59:55, then Sunday 1 February 00:00.
         let january = monthly.fold(&five(1_769_903_995, 10.0, 10.0, 10.0, 10.0, 5.0)).unwrap();
@@ -2096,15 +2126,11 @@ mod forming_bar_tests {
         let february = monthly.fold(&five(1_769_904_000, 12.0, 12.0, 12.0, 12.0, 3.0)).unwrap();
         assert_eq!(february.timestamp, 1_769_904_000, "February opens on the 1st");
         // A leap day is in its own month.
-        let leap = monthly.fold(&five(1_709_208_000, 12.0, 12.0, 12.0, 12.0, 3.0)).unwrap();
-        assert_eq!(leap.timestamp, 1_706_745_600, "29 February 2024 is February's");
+        assert_eq!(opening(month, 1_709_208_000), 1_706_745_600, "29 February 2024 is February's");
 
         // A stamp in the epoch's first days, before any Monday: the week opens
         // at the epoch rather than counting back past it.
-        let mut early = FormingBar {
-            req_id: 3, seconds: week, opened_at: 1, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0,
-        };
-        assert_eq!(early.fold(&five(86_400, 1.0, 1.0, 1.0, 1.0, 1.0)).unwrap().timestamp, 0);
+        assert_eq!(opening(week, 86_400), 0);
     }
 
     /// The trade count comes off the wire at the full width the field carries,
@@ -2119,7 +2145,7 @@ mod forming_bar_tests {
         let mut forming = FormingBar {
             req_id: 1, seconds: 300, opened_at: 0,
             daily_session: None, closed_at: None,
-            bar: Default::default(), weighted: 0.0,
+            bar: Default::default(), weighted: 0.0, queued: Vec::new(),
         };
         let mut near_the_top = five(1_786_456_500, 10.0, 10.5, 9.5, 10.2, 100.0);
         near_the_top.count = i32::MAX - 1;
@@ -2486,6 +2512,44 @@ mod hmds_correlation_tests {
         );
     }
 
+    /// A news or a fundamentals query its answer has ended is over, as a
+    /// gateway holds it over: withdrawn after the answer, nothing goes to the
+    /// venue. A fundamentals withdrawal naming nothing says nothing, as a
+    /// gateway's says nothing; a news withdrawal, which is this client's own,
+    /// says that nothing is waiting.
+    #[test]
+    fn a_query_its_answer_ended_is_not_withdrawn_again() {
+        use std::io::Read;
+        let fundamentals = crate::control::fundamental::fundamentals_query_id(1);
+        for news in [true, false] {
+            let mut hmds = HmdsState::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let (conn, mut peer) = Connection::for_test();
+            peer.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+            let mut conn = Some(conn);
+            let reply = if news {
+                hmds.pending_news.push(("news_1".into(), 51));
+                "35=U\x016040=10032\x016118=<NewsResponse><id>news_1-headlines;;NewsQuery;;0;;true;;0;;U</id>\
+                 </NewsResponse>\x01".to_string()
+            } else {
+                hmds.pending_fundamental.push((fundamentals.clone(), 51));
+                format!("35=U\x016040=10012\x016118=<FundamentalsResponse><id>{fundamentals}</id>\
+                         </FundamentalsResponse>\x01")
+            };
+            hmds.process_hmds_message(reply.as_bytes(), &mut conn, &shared, &None, &mut hb);
+            if news {
+                hmds.send_news_cancel(51, &mut conn, &mut hb, &shared);
+            } else {
+                hmds.send_fundamental_cancel(51, &mut conn, &mut hb);
+            }
+            let mut sent = [0u8; 4096];
+            assert!(!matches!(peer.read(&mut sent), Ok(1..)), "news {news}: nothing goes to the venue");
+            let told: Vec<i32> = shared.reference.drain_historical_errors().iter().map(|e| e.1).collect();
+            assert_eq!(told, if news { vec![NO_SUCH_SUBSCRIPTION] } else { vec![] }, "news {news}");
+        }
+    }
+
     /// Two callers asking the same question of the same contract are two
     /// requests, and each is answered.
     ///
@@ -2633,7 +2697,7 @@ fn a_refused_stream_half_frees_the_number_it_was_kept_up_to_date_under() {
     hmds.keep_up_to_date_reqs.insert(9);
     hmds.rtbar_subs.push(("rt_4002".to_string(), 9, None, 0.01, 1.0));
     hmds.forming_bars.push(FormingBar {
-        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0,
+        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
     });
     let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<QueryError>\n\t<id>rt_4002</id>\n\t<error>no</error>\n</QueryError>\n";
     let mut msg = Vec::new();
@@ -3079,7 +3143,7 @@ fn a_refused_batch_takes_the_kept_up_to_date_stream_with_it() {
         what_to_show: "TRADES".into(), use_rth: true,
     });
     hmds.forming_bars.push(FormingBar {
-        req_id: 7, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0,
+        req_id: 7, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
     });
 
     hmds.process_hmds_message(
@@ -3124,7 +3188,7 @@ fn a_disconnect_does_not_resurrect_a_failed_request_s_stream() {
         what_to_show: "TRADES".into(), use_rth: true,
     });
     hmds.forming_bars.push(FormingBar {
-        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0,
+        req_id: 9, seconds: 60, opened_at: 0, daily_session: None, closed_at: None, bar: Default::default(), weighted: 0.0, queued: Vec::new(),
     });
     hmds.rtbar_subs.push(("rt_4003".to_string(), 10, None, 0.01, 1.0));
     hmds.rtbar_resub.push(RtBarRequest {
@@ -3417,8 +3481,10 @@ fn an_unreadable_scan_batch_does_not_end_the_scan() {
 /// stated for it. A day's is its session, kept across midnight UTC; a week is
 /// dated rather than timed. Started from the first five-second bar instead,
 /// the day's open and high were lost. A page arriving afterwards can describe
-/// an earlier bar, and the bar goes on from the later one. Five-second bars
-/// are sent as the stream sends them, one at the history's last stamp too.
+/// an earlier bar, and the bar goes on from the later one; a five-second bar
+/// from before the bar in hand opened is passed over, as a gateway passes an
+/// older update over. Five-second bars are sent as the stream sends them, one
+/// at the history's last stamp too.
 #[test]
 fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
     use crate::control::historical::BarSize;
@@ -3439,7 +3505,7 @@ fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
             BarSize::Hour1,
             "<time>20260714-13:30:00</time><endTime>20260714-14:00:00</endTime>",
             "<time>20260714-12:00:00</time><endTime>20260714-13:00:00</endTime>",
-            vec!["20260714-13:45:00", "20260714-13:50:00", "20260714-13:59:55"],
+            vec!["20260714-12:59:55", "20260714-13:45:00", "20260714-13:50:00", "20260714-13:59:55"],
             merged("20260714-13:30:00"),
         ),
         (
@@ -3463,7 +3529,7 @@ fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
         hmds.keep_up_to_date_reqs.insert(21);
         hmds.forming_bars.push(FormingBar {
             req_id: 21, seconds: size.seconds(), opened_at: 0, daily_session: None, closed_at: None,
-            bar: Default::default(), weighted: 0.0,
+            bar: Default::default(), weighted: 0.0, queued: Vec::new(),
         });
         let page = |bounds: &str| String::from_utf8(make_bar_msg("kept", true)).unwrap()
             .replace("<time>20260714-13:30:00</time>", bounds);
@@ -3475,7 +3541,7 @@ fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
             forming.fold(&crate::types::RealTimeBar {
                 timestamp: at(stamped), open: 1.0, high: 2.0, low: 0.5, close: 1.5,
                 volume: 10.0, wap: 1.0, count: 1,
-            }).unwrap();
+            });
         }
         let bar = forming.bar;
         let (opened, open, high, low, close, volume, wap, count) = expected;
@@ -3507,45 +3573,91 @@ fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
 ///   there, dated by it: 24 September, where the evening before closed.
 ///
 /// The contract's own sessions are in hand, and move nothing.
+///
+/// And each bar reaches the caller on the callback its request is answered
+/// on, whatever else the number has done:
+///
+/// - A five-second bar that arrives while the history is on its way is held,
+///   as a gateway holds it, and goes into the history's last bar once the
+///   history is in: nothing is heard of it before the history's end.
+/// - A second request under the number, refused because the first is still
+///   answering, leaves the first as it was: its bars are still updates, dated
+///   as it asked for them.
+/// - A live bar stream under the number a backfill then answers under is
+///   heard as a stream before the backfill and after it.
 #[test]
 fn a_days_bar_kept_up_to_date_rolls_over_at_midnight_utc() {
     use crate::control::contracts::{ContractSchedule, ScheduleSession};
+    // Every callback a bar can reach, with what it states.
     #[derive(Default)]
-    struct Heard(Vec<(String, f64, i64)>);
+    struct Heard(Vec<String>);
     impl crate::api::Wrapper for Heard {
         fn historical_data_update(&mut self, _: i64, bar: &crate::types::model::BarData) {
-            self.0.push((bar.date.clone(), bar.open, bar.volume));
+            self.0.push(format!("update {} {} {}", bar.date, bar.open, bar.volume));
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn real_time_bar(
+            &mut self, _: i64, time: i64, open: f64, _: f64, _: f64, _: f64, volume: f64, _: f64, _: i32,
+        ) {
+            self.0.push(format!("bar {time} {open} {volume}"));
+        }
+        fn error(&mut self, _: i64, _: i64, code: i64, _: &str, _: &str) {
+            self.0.push(format!("error {code}"));
         }
     }
-    // A five-second bar's stamp, price in cents and volume; an update's date,
-    // open and volume.
-    type Five = (&'static str, u32, u32);
-    type Update = (&'static str, f64, i64);
-    // The series' zone, where the history's last bar opened and closed, the
-    // five-second bars and the updates heard.
-    type Row = (&'static str, &'static str, &'static str, &'static [Five], &'static [Update]);
-    let rows: [Row; 2] = [
-        ("US/Central", "20260923-22:00:00", "20260924-21:00:00", &[
-            ("20260923-21:59:55", 9_900, 1),
-            ("20260924-22:00:05", 10_000, 5), ("20260925-00:00:05", 10_100, 7),
-            ("20260925-22:00:05", 10_200, 3),
-        ], &[("20260924", 100.0, 5), ("20260925", 101.0, 7), ("20260925", 101.0, 10)]),
-        ("US/Eastern", "20260924-08:00:00", "20260925-00:00:00", &[
-            ("20260925-08:00:05", 10_000, 5), ("20260925-08:00:10", 10_100, 7),
-        ], &[("20260924", 100.0, 5), ("20260924", 101.0, 7)]),
+    // What happens, in order: a five-second bar's stamp, price in cents and
+    // volume; the history arriving; the request made again under its number.
+    enum Step { Five(&'static str, u32, u32), History, Again }
+    use Step::{Again, Five, History};
+    // Whether the request keeps its bars up to date, rather than filling in
+    // behind a live bar stream under its number; the series' zone; where the
+    // history's last bar opened and closed; what happens; what is heard.
+    type Row = (bool, &'static str, &'static str, &'static str, &'static [Step], &'static [&'static str]);
+    let rows: [Row; 5] = [
+        (true, "US/Central", "20260923-22:00:00", "20260924-21:00:00", &[
+            History,
+            Five("20260923-21:59:55", 9_900, 1),
+            Five("20260924-22:00:05", 10_000, 5), Five("20260925-00:00:05", 10_100, 7),
+            Five("20260925-22:00:05", 10_200, 3),
+        ], &["update 20260924 100 5", "update 20260925 101 7", "update 20260925 101 10"]),
+        (true, "US/Eastern", "20260924-08:00:00", "20260925-00:00:00", &[
+            History, Five("20260925-08:00:05", 10_000, 5), Five("20260925-08:00:10", 10_100, 7),
+        ], &["update 20260924 100 5", "update 20260924 101 7"]),
+        // The history still on its way.
+        (true, "US/Central", "20260923-22:00:00", "20260924-21:00:00", &[
+            Five("20260924-15:00:05", 10_100, 7), History, Five("20260924-15:00:10", 10_200, 3),
+        ], &["update 20260924 100 1007", "update 20260924 100 1010"]),
+        // Asked for again, in seconds since the epoch, while it answers.
+        (true, "US/Central", "20260923-22:00:00", "20260924-21:00:00", &[
+            History, Five("20260924-15:00:05", 10_100, 7), Again, Five("20260924-15:00:10", 10_200, 3),
+        ], &["update 20260924 100 1007", "error 386", "update 20260924 100 1010"]),
+        // A stream, and then a backfill under its number.
+        (false, "US/Central", "20260923-22:00:00", "20260924-21:00:00", &[
+            Five("20260924-15:00:05", 10_100, 7), History, Five("20260924-15:00:10", 10_200, 3),
+        ], &["bar 1790262005 101 7", "bar 1790262010 102 3"]),
     ];
-    for (zone, opened, closed, fives, heard) in rows {
-        let (client, _rx, shared) = crate::api::client::tests::test_client();
-        client.req_historical_data(21, &crate::api::client::tests::spy(), "", "1 W", "1 day",
-            "TRADES", false, 1, true);
+    for (row, (kept, zone, opened, closed, steps, heard)) in rows.into_iter().enumerate() {
+        let (client, rx, shared) = crate::api::client::tests::test_client();
+        let spy = crate::api::client::tests::spy();
+        if !kept {
+            client.req_real_time_bars(21, &spy, 5, "TRADES", false);
+        }
+        client.req_historical_data(21, &spy, "", "1 W", "1 day", "TRADES", false, 1, kept);
+        crate::api::client::tests::engine_takes_bars(&rx, &shared);
         let mut hmds = HmdsState::new();
         let mut hb = HeartbeatState::new();
         hmds.pending_historical.push(("daily".into(), 21));
-        hmds.keep_up_to_date_reqs.insert(21);
-        hmds.forming_bars.push(FormingBar {
-            req_id: 21, seconds: 86_400, opened_at: 0, daily_session: None, closed_at: None,
-            bar: Default::default(), weighted: 0.0,
+        hmds.held.push(HeldSeries {
+            req_id: 21, fold: Fold::None, bars: Vec::new(), timezone: String::new(),
+            actions_query: None, actions: None, complete: false, along: Default::default(),
         });
+        if kept {
+            hmds.keep_up_to_date_reqs.insert(21);
+            hmds.forming_bars.push(FormingBar {
+                req_id: 21, seconds: 86_400, opened_at: 0, daily_session: None, closed_at: None,
+                bar: Default::default(), weighted: 0.0, queued: Vec::new(),
+            });
+        }
         hmds.rtbar_subs.push(("rt_21".into(), 21, Some(4002), 0.01, 1.0));
         hmds.rtbar_resub.push(RtBarRequest {
             req_id: 21, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
@@ -3566,8 +3678,6 @@ fn a_days_bar_kept_up_to_date_rolls_over_at_midnight_utc() {
         let history = String::from_utf8(make_bar_msg("daily", true)).unwrap()
             .replace("20260714-13:30:00</time>", &format!("{opened}</time><endTime>{closed}</endTime>"))
             .replace("<tz>UTC</tz>", &format!("<tz>{zone}</tz>"));
-        hmds.process_hmds_message(history.as_bytes(), &mut None, &shared, &None, &mut hb);
-        client.process_msgs(&mut Heard::default());
         let five = |at: &str, cents: u32, volume: u32| {
             let at = crate::protocol::datetime::ib_datetime_to_unix(at).unwrap() as u32;
             let payload = crate::control::historical::tests::single_tick_payload(cents, volume);
@@ -3580,13 +3690,26 @@ fn a_days_bar_kept_up_to_date_rolls_over_at_midnight_utc() {
             msg.extend_from_slice(b"\x018349=AABBCCDD\x01");
             msg
         };
-        for (at, cents, volume) in fives {
-            hmds.process_hmds_message(&five(at, *cents, *volume), &mut None, &shared, &None, &mut hb);
-        }
         let mut got = Heard::default();
-        client.process_msgs(&mut got);
-        let heard: Vec<_> = heard.iter().map(|(day, open, volume)| (day.to_string(), *open, *volume)).collect();
-        assert_eq!(got.0, heard, "{zone}");
+        for step in steps {
+            match step {
+                History => hmds.process_hmds_message(history.as_bytes(), &mut None, &shared, &None, &mut hb),
+                Five(at, cents, volume) => {
+                    hmds.process_hmds_message(&five(at, *cents, *volume), &mut None, &shared, &None, &mut hb)
+                }
+                Again => {
+                    client.req_historical_data(21, &spy, "", "1 W", "1 day", "TRADES", false, 2, true);
+                    // Refused by the engine, which states nothing of it taken.
+                    rx.try_iter().for_each(drop);
+                    assert!(!hmds.send_historical_request_ex(
+                        21, 756733, "", "1 W", "1 day", "TRADES", false, false, false, "SPY", "STK",
+                        "SMART", &mut None, &mut hb, &shared,
+                    ));
+                }
+            }
+            client.process_msgs(&mut got);
+        }
+        assert_eq!(got.0, heard, "row {row}");
     }
 }
 

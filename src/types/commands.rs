@@ -522,6 +522,9 @@ pub enum ControlCommand {
         use_rth: bool,
         /// Whether the venue keeps sending once the window is answered.
         keep_up_to_date: bool,
+        /// How the caller asked for its bar times to be written: 2 for
+        /// seconds since the epoch, anything else for the venue's spelling.
+        format_date: i32,
         /// Whether a contract that has already expired is in scope, as the
         /// caller's contract states it.
         include_expired: bool,
@@ -695,10 +698,13 @@ pub enum ControlCommand {
     FetchFundamentalData {
         /// The caller's number for the request this answers.
         req_id: u32,
-        /// The venue's id for the contract.
-        con_id: u32,
+        /// The contract this names.
+        contract: ContractRef,
         /// Which fundamental report.
         report_type: String,
+        /// What tells two contracts on one underlying apart, for the
+        /// lookup that names this one when the caller passed no id.
+        filters: SecDefFilters,
     },
     /// Cancel fundamental data request.
     CancelFundamentalData {
@@ -719,16 +725,15 @@ pub enum ControlCommand {
     FetchHistogramData {
         /// The caller's number for the request this answers.
         req_id: u32,
-        /// The venue's id for the contract.
-        con_id: u32,
-        /// What kind of contract it is, as the query has to describe it.
-        sec_type: String,
-        /// Where it is routed, likewise.
-        exchange: String,
+        /// The contract this names.
+        contract: ContractRef,
         /// Whether to count only regular trading hours.
         use_rth: bool,
         /// Over what window.
         period: String,
+        /// What tells two contracts on one underlying apart, for the
+        /// lookup that names this one when the caller passed no id.
+        filters: SecDefFilters,
     },
     /// Cancel histogram data request.
     CancelHistogramData {

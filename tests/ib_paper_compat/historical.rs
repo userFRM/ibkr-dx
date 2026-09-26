@@ -76,7 +76,9 @@ pub(super) fn phase_historical_data(mut conns: Conns) -> Conns {
         bar_size: "5 mins".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
-        keep_up_to_date: false, include_expired: false,
+        keep_up_to_date: false,
+        format_date: 1,
+        include_expired: false,
         filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -144,7 +146,9 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns) -> Conns {
         bar_size: "1 day".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
-        keep_up_to_date: false, include_expired: false,
+        keep_up_to_date: false,
+        format_date: 1,
+        include_expired: false,
         filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -200,7 +204,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns) -> Conns {
     );
 
     // Request 5-min bars for 5 days (multi-chunk response, cancelable)
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 7700, end_date_time: now_ib_timestamp(), duration: "5 D".into(), bar_size: "5 mins".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 7700, end_date_time: now_ib_timestamp(), duration: "5 D".into(), bar_size: "5 mins".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // Wait for first chunk
@@ -277,7 +281,7 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns) -> Conns {
     // bar size and duration the venue refused as an invalid length, and that
     // limit was lifted, so the phase reported SKIP twice a run and verified
     // nothing. If this one is ever answered with bars, the skip below says so.
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(), exchange: "IDEALPRO".into(), currency: "USD".to_string(), ..Default::default() }, req_id: REQ_ID, end_date_time: now_ib_timestamp(), duration: "1 D".into(), bar_size: "1 hour".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(), exchange: "IDEALPRO".into(), currency: "USD".to_string(), ..Default::default() }, req_id: REQ_ID, end_date_time: now_ib_timestamp(), duration: "1 D".into(), bar_size: "1 hour".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -472,8 +476,10 @@ pub(super) fn phase_fundamental_data(mut conns: Conns) -> Conns {
         lookup_returned_nothing("no definition came back for AAPL, so no fundamental report on it");
     }
     control_tx.send(ControlCommand::FetchFundamentalData {
-        req_id: 8300, con_id: 265598,
+        req_id: 8300,
+        contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
         report_type: "ReportSnapshot".into(),
+        filters: Default::default(),
     }).unwrap();
 
     let mut got_data = false;
@@ -696,11 +702,13 @@ pub(super) fn phase_histogram_data(mut conns: Conns) -> Conns {
 
     control_tx.send(ControlCommand::FetchHistogramData {
         req_id: 3001,
-        con_id: 756733,
-        sec_type: "STK".to_string(),
-        exchange: "SMART".to_string(),
+        contract: ibkr_dx::types::ContractRef {
+            con_id: 756733, sec_type: "STK".to_string(), exchange: "SMART".to_string(),
+            ..Default::default()
+        },
         use_rth: true,
         period: "1 week".to_string(),
+        filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -973,8 +981,9 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns) -> Conns {
     }
     control_tx.send(ControlCommand::FetchFundamentalData {
         req_id: 7001,
-        con_id: 265598,
+        contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
         report_type: "ReportSnapshot".to_string(),
+        filters: Default::default(),
     }).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -1022,9 +1031,9 @@ pub(super) fn phase_parallel_historical(mut conns: Conns) -> Conns {
     let end_dt = format_utc_timestamp(now);
 
     // Send 3 requests in quick succession
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 8001, end_date_time: end_dt.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 8002, end_date_time: end_dt.clone(), duration: "5 d".to_string(), bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 8003, end_date_time: end_dt, duration: "1 W".to_string(), bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 8001, end_date_time: end_dt.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 8002, end_date_time: end_dt.clone(), duration: "5 d".to_string(), bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 8003, end_date_time: end_dt, duration: "1 W".to_string(), bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -1148,7 +1157,9 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns) -> Conns {
         bar_size: "1 hour".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
-        keep_up_to_date: false, include_expired: false,
+        keep_up_to_date: false,
+        format_date: 1,
+        include_expired: false,
         filters: Default::default(),
     }).unwrap();
 
@@ -1239,7 +1250,7 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns) -> Conns {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let end_dt = format_utc_timestamp(now);
 
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 11001, end_date_time: end_dt, duration: "1 Y".to_string(), bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 11001, end_date_time: end_dt, duration: "1 Y".to_string(), bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1303,7 +1314,7 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns) -> Conns {
     // Request 2 weeks of 1-hour bars ending after the March DST transition
     // DST 2026: March 8 (second Sunday of March) — spring forward
     // End date: March 14 2026, covering March 2-14 (spans DST)
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 12001, end_date_time: "20260314-20:00:00".to_string(), duration: "2 W".to_string(), bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 12001, end_date_time: "20260314-20:00:00".to_string(), duration: "2 W".to_string(), bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1376,7 +1387,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns) -> Conns {
     let now = now_ib_timestamp();
 
     // 1. FetchHistorical + CancelHistorical
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 20001, end_date_time: now.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 20001, end_date_time: now.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     control_tx.send(ControlCommand::CancelHistorical { req_id: 20001 }).unwrap();
 
     // 2. FetchHeadTimestamp + CancelHeadTimestamp
@@ -1385,14 +1396,23 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns) -> Conns {
 
     // 3. FetchFundamentalData + CancelFundamentalData
     control_tx.send(ControlCommand::FetchFundamentalData {
-        req_id: 20003, con_id: 265598, report_type: "ReportsFinStatements".to_string(),
+        req_id: 20003,
+        contract: ibkr_dx::types::ContractRef { con_id: 265598, ..Default::default() },
+        report_type: "ReportsFinStatements".to_string(),
+        filters: Default::default(),
     }).unwrap();
     control_tx.send(ControlCommand::CancelFundamentalData { req_id: 20003 }).unwrap();
 
     // 4. FetchHistogramData + CancelHistogramData
     control_tx.send(ControlCommand::FetchHistogramData {
-        req_id: 20004, con_id: 756733, sec_type: "STK".to_string(),
-        exchange: "SMART".to_string(), use_rth: true, period: "1 week".to_string(),
+        req_id: 20004,
+        contract: ibkr_dx::types::ContractRef {
+            con_id: 756733, sec_type: "STK".to_string(), exchange: "SMART".to_string(),
+            ..Default::default()
+        },
+        use_rth: true,
+        period: "1 week".to_string(),
+        filters: Default::default(),
     }).unwrap();
     control_tx.send(ControlCommand::CancelHistogramData { req_id: 20004 }).unwrap();
 
@@ -1475,7 +1495,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns) -> Conns {
     // Step 2: Fire 5 historical requests while order is pending
     let now = now_ib_timestamp();
     for i in 0..5u32 {
-        control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 30001 + i, end_date_time: now.clone(), duration: "1 d".to_string(), bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+        control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 30001 + i, end_date_time: now.clone(), duration: "1 d".to_string(), bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     }
 
     control_tx.send(ControlCommand::Subscribe { req_id: 90014, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, frozen: false, delayed_frozen: false, regulatory_snapshot: false, snapshot: false,

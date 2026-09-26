@@ -326,6 +326,25 @@ pub struct MarketDataTaken {
     pub marked: bool,
 }
 
+/// A bar request the engine has taken, as its caller's side writes down what
+/// the request asked for: ahead of every record answering it. A request the
+/// engine refuses leaves what the number's live request asked for as it was.
+#[derive(Clone, Debug)]
+pub struct HistoricalTaken {
+    /// The caller's number for the request.
+    pub req_id: u32,
+    /// How the caller asked for its bar times to be written.
+    pub format_date: i32,
+    /// The end the caller named, or empty for the moment of asking.
+    pub end_date_time: String,
+    /// How far back from that end.
+    pub duration: String,
+    /// How long its bars are.
+    pub bar_size: String,
+    /// Whether it keeps its bars up to date once its history is in.
+    pub keep_up_to_date: bool,
+}
+
 /// What the engine did with an order a caller placed, for the caller's side's
 /// record of it.
 #[derive(Clone, Debug)]
@@ -522,10 +541,13 @@ pub enum Record {
     CompanionRefusal((InstrumentId, u64, u32, String)),
     /// A broadcast notice.
     NewsBulletin(NewsBulletin),
-    /// A real-time bar, under its request, with the session a day's bar kept
-    /// up to date belongs to.
-    RealTimeBar(super::SessionBar),
+    /// A real-time bar, under its request.
+    RealTimeBar((u32, crate::types::RealTimeBar)),
+    /// A bar still forming, under the request that keeps its bars up to date.
+    HistoricalUpdate(super::SessionBar),
     // ── Reference ──
+    /// A bar request the engine has taken.
+    HistoricalTaken(Box<HistoricalTaken>),
     /// A refusal or notice stated under a request, with what it is about.
     HistoricalError((api::ErrorOrigin, i32, String)),
     /// Bars answering a request.
@@ -856,8 +878,14 @@ impl super::SharedState {
         m.news_bulletins.take_below(cut, |_| !bulletins, Record::NewsBulletin, &mut out);
         m.real_time_bars.take_below(
             cut,
-            |(id, _, _)| kept_back(Some(RecordKind::Bars), request(*id)),
+            |(id, _)| kept_back(Some(RecordKind::Bars), request(*id)),
             Record::RealTimeBar,
+            &mut out,
+        );
+        m.bar_updates.take_below(
+            cut,
+            |(id, ..)| kept_back(Some(RecordKind::Bars), request(*id)),
+            Record::HistoricalUpdate,
             &mut out,
         );
 
@@ -867,6 +895,12 @@ impl super::SharedState {
             cut,
             |(id, ..)| error_kept_back(*id),
             |(_, code, msg, origin)| Record::HistoricalError((origin, code, msg)),
+            &mut out,
+        );
+        r.historical_taken.take_below(
+            cut,
+            |taken| kept_back(answer, request(taken.req_id)),
+            |taken| Record::HistoricalTaken(Box::new(taken)),
             &mut out,
         );
         r.historical_data.take_below(

@@ -496,52 +496,51 @@ impl EClient {
             Record::NewsBulletin(b) => {
                 wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
             }
-            // Real-time bars, and the continued half of a keep-up-to-date
-            // request. The two arrive on one feed and are told apart by
-            // whether the request has already answered with its history.
-            Record::RealTimeBar((req_id, bar, session)) => {
-                if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
-                    // A forming bar is stamped at its open, in seconds since
-                    // the epoch; dated as the history before it was, in the
-                    // caller's format on the zone the series was stated on.
-                    let bd = BarData {
-                        date: self.core.bar_time_for_epoch(
-                            req_id as i64, i64::from(bar.timestamp), session,
-                        ),
-                        open: bar.open,
-                        high: bar.high,
-                        low: bar.low,
-                        close: bar.close,
-                        volume: bar.volume as i64,
-                        wap: bar.wap,
-                        bar_count: bar.count,
-                        timezone: String::new(),
-                        // A forming bar has not ended, and the stream states
-                        // no end for one.
-                        end: String::new(),
-                    };
-                    wrapper.historical_data_update(req_id as i64, &bd);
-                } else {
-                    wrapper.real_time_bar(
-                        req_id as i64, bar.timestamp as i64,
-                        bar.open, bar.high, bar.low, bar.close,
-                        bar.volume, bar.wap, bar.count,
-                    );
-                }
+            Record::RealTimeBar((req_id, bar)) => {
+                wrapper.real_time_bar(
+                    req_id as i64, bar.timestamp as i64,
+                    bar.open, bar.high, bar.low, bar.close,
+                    bar.volume, bar.wap, bar.count,
+                );
+            }
+            // The bar still forming of a request kept up to date, stamped at
+            // its open in seconds since the epoch; dated as the history before
+            // it was, in the caller's format on the zone the series was stated
+            // on.
+            Record::HistoricalUpdate((req_id, bar, session)) => {
+                let bd = BarData {
+                    date: self.core.bar_time_for_epoch(
+                        req_id as i64, i64::from(bar.timestamp), session,
+                    ),
+                    open: bar.open,
+                    high: bar.high,
+                    low: bar.low,
+                    close: bar.close,
+                    volume: bar.volume as i64,
+                    wap: bar.wap,
+                    bar_count: bar.count,
+                    timezone: String::new(),
+                    // A forming bar has not ended, and the stream states no
+                    // end for one.
+                    end: String::new(),
+                };
+                wrapper.historical_data_update(req_id as i64, &bd);
             }
 
             // What the venue refused under a request, in its place: a book's
             // reset ahead of the levels that follow it, a query error ahead
             // of the empty end that follows it.
             Record::HistoricalError((origin, code, msg)) => {
+                self.core.head_timestamp_ended(origin.id());
                 wrapper.error_from(origin, raised_now(), i64::from(code), &msg, "");
             }
+            Record::HistoricalTaken(taken) => self.core.historical_taken(&taken),
             // Historical data → historical_data + historical_data_end, and
             // after that end, historical_data_update. A keep-up-to-date
             // request answers once with the history and then keeps speaking;
             // the reference client separates the two.
             Record::HistoricalData((req_id, response)) => {
-                let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
+                let is_update = self.core.historical_answered(req_id as i64);
                 self.core.note_historical_zone(req_id as i64, &response.timezone);
                 for bar in &response.bars {
                     let bd = BarData {
@@ -563,11 +562,11 @@ impl EClient {
                     }
                 }
                 if response.is_complete && !is_update {
-                    self.core.hist_initial_complete.lock().unwrap().insert(req_id);
                     // The range the request covered, which is what a caller
                     // pages backwards with.
                     let (from, to) =
                         self.core.historical_range_for(req_id as i64, &response.timezone);
+                    self.core.historical_ended(req_id as i64);
                     wrapper.historical_data_end(req_id as i64, &from, &to);
                 }
             }
@@ -579,7 +578,9 @@ impl EClient {
             Record::HeadTimestamp((req_id, response)) => {
                 // Returned in the form `format_date` asked for. The wire
                 // carries one form; `bar_time_for` converts it.
-                let stated = self.core.bar_time_for(req_id as i64, &response.head_timestamp, "");
+                let stated = crate::protocol::datetime::bar_date_as_asked(
+                    &response.head_timestamp, self.core.head_timestamp_ended(req_id as i64), "",
+                );
                 wrapper.head_timestamp(req_id as i64, &stated);
             }
             Record::ContractDetails((req_id, def)) => {

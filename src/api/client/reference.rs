@@ -101,20 +101,13 @@ impl EClient {
         ClientCore::validate_historical_args(
             bar_size, what_to_show, keep_up_to_date, end_date_time, &contract.sec_type,
         )?;
-        // How this request wants its bar times written. The venue states one
-        // form; whichever the caller asked for is what is written.
-        self.core.note_date_format(req_id, format_date);
-        // And what its range is counted from, which the reply does not state.
-        self.core.note_historical_span(req_id, end_date_time, duration, bar_size);
-        let wire = wire_req_id(req_id)?;
-        // Whatever finished under this id before, this is a new request. The
-        // other surface said so and this one did not: the id stayed marked
-        // finished, so the bars answering the new request were delivered as
-        // updates continuing the old one and its end never fired.
-        self.core.historical_request_is_new(wire);
+        // How it wants its bar times written, and what its range is counted
+        // from, which the reply states neither of, are written down where the
+        // engine takes the request: one it refuses, as a second request under
+        // a number still answering, leaves that one's as they were.
         self.send(ControlCommand::FetchHistorical {
             contract: contract.into(),
-            req_id: wire,
+            req_id: wire_req_id(req_id)?,
             end_date_time: end_date_time.into(),
             duration: duration.into(),
             bar_size: bar_size.into(),
@@ -122,6 +115,7 @@ impl EClient {
             what_to_show: what_to_show.into(),
             use_rth,
             keep_up_to_date,
+            format_date,
             include_expired: contract.include_expired,
         })
     }
@@ -130,8 +124,8 @@ impl EClient {
     pub fn cancel_historical_data(&self, req_id: i64) {
         if let Err(why) = (|| -> Result<(), Refusal> {
             let wire = wire_req_id(req_id)?;
-            // A withdrawn stream leaves nothing running under this id.
-            self.core.historical_request_is_new(wire);
+            // A withdrawn request leaves nothing running under this id.
+            self.core.forget_historical(wire);
             self.send(ControlCommand::CancelHistorical { req_id: wire })
         })() {
             self.refuse_request(req_id, &why);
@@ -337,6 +331,7 @@ impl EClient {
     /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
     pub fn cancel_head_time_stamp(&self, req_id: i64) {
         if let Err(why) = (|| -> Result<(), Refusal> {
+            self.core.head_timestamp_ended(req_id);
             self.send(ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? })
         })() {
             self.refuse_request(req_id, &why);
@@ -606,11 +601,10 @@ impl EClient {
     /// `RESC` for what analysts expect, and `CalendarReport` for what the
     /// issuer has coming.
     ///
-    /// The contract is named by its venue id and nothing else of it is
-    /// carried, so pass one that has an id: from
-    /// [`qualify_contract`](EClient::qualify_contract), or from any
-    /// contract-details answer. A description is refused rather than sent as a
-    /// request about contract zero.
+    /// The report is asked about a stock as the venue names it, as a gateway
+    /// asks it: a contract given by its description, or by its id with no
+    /// currency beside it, is looked up first. A contract not stated as a
+    /// stock is refused, as a gateway refuses it.
     pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) {
         if let Err(why) = self.try_req_fundamental_data(req_id, contract, report_type) {
             self.refuse_request(req_id, &why);
@@ -620,10 +614,12 @@ impl EClient {
     /// [`req_fundamental_data`](Self::req_fundamental_data), with its refusal handed back to the
     /// caller rather than pushed into the session's order.
     pub(crate) fn try_req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), Refusal> {
+        ClientCore::validate_fundamentals_type(&contract.sec_type)?;
         self.send(ControlCommand::FetchFundamentalData {
             req_id: wire_req_id(req_id)?,
-            con_id: wire_con_id(contract.con_id, "a request for a fundamental report")?,
+            contract: contract.into(),
             report_type: report_type.into(),
+            filters: contract.lookup_filters(),
         })
     }
 
@@ -641,10 +637,9 @@ impl EClient {
     ///
     /// The TWS API has no call for this; the venue has a message for it. One
     /// message carrying the id the query went out under, which is the whole
-    /// of what a withdrawal states. Sent whether or not the query has been
-    /// answered: the venue serves it past the reply, so a withdrawal gated on
-    /// this client's own pending list would send nothing in the case that
-    /// leaves one running.
+    /// of what a withdrawal states, sent for a query still waiting on its
+    /// answer. A query answered is over, as a gateway holds it over:
+    /// withdrawn after its answer, it is refused as naming nothing.
     pub fn cancel_historical_news(&self, req_id: i64) {
         if let Err(why) = (|| -> Result<(), Refusal> {
             self.send(ControlCommand::CancelHistoricalNews { req_id: wire_req_id(req_id)? })
@@ -658,7 +653,7 @@ impl EClient {
 
     /// Request price histogram data. Matches `reqHistogramData` in C++.
     ///
-    /// Named by its venue id, as
+    /// Asked about the contract as the venue names it, as
     /// [`req_fundamental_data`](EClient::req_fundamental_data) is.
     pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) {
         if let Err(why) = self.try_req_histogram_data(req_id, contract, use_rth, period) {
@@ -675,11 +670,10 @@ impl EClient {
         // exchange, and both are the venue's to say.
         self.send(ControlCommand::FetchHistogramData {
             req_id: wire_req_id(req_id)?,
-            con_id: wire_con_id(contract.con_id, "a request for a histogram")?,
-            sec_type: contract.sec_type.clone(),
-            exchange: contract.exchange.clone(),
+            contract: contract.into(),
             use_rth,
             period: period.into(),
+            filters: contract.lookup_filters(),
         })
     }
 

@@ -621,39 +621,40 @@ impl EClient {
             Record::NewsBulletin(b) => {
                 call_wrapper!(self, py, shared, "update_news_bulletin", (b.msg_id as i64, b.msg_type, b.message.as_str(), b.exchange.as_str()));
             }
-            Record::RealTimeBar((req_id, bar, session)) => {
-                if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
-                    // keepUpToDate bar → dispatch as historical_data_update,
-                    // dated as the history before it was.
-                    let bar_obj = BarData::new(
-                        self.core.bar_time_for_epoch(
-                            req_id as i64, i64::from(bar.timestamp), session,
-                        ),
-                        bar.open, bar.high, bar.low, bar.close,
-                        bar.volume as i64, bar.wap, bar.count,
-                        String::new(), // streaming bars carry no timezone
-                        // A forming bar has not ended, and the stream states no
-                        // end for one.
-                        String::new(),
-                    );
-                    let bar_py = Py::new(py, bar_obj)?.into_any();
-                    call_wrapper!(self, py, shared, "historical_data_update", (req_id as i64, &bar_py));
-                } else {
-                    call_wrapper!(self, py, shared, "real_time_bar", (
-                        req_id as i64,
-                        bar.timestamp as i64,
-                        bar.open, bar.high, bar.low, bar.close,
-                        bar.volume, bar.wap, bar.count,
-                    ));
-                }
+            Record::RealTimeBar((req_id, bar)) => {
+                call_wrapper!(self, py, shared, "real_time_bar", (
+                    req_id as i64,
+                    bar.timestamp as i64,
+                    bar.open, bar.high, bar.low, bar.close,
+                    bar.volume, bar.wap, bar.count,
+                ));
+            }
+            // The bar still forming of a request kept up to date, dated as the
+            // history before it was.
+            Record::HistoricalUpdate((req_id, bar, session)) => {
+                let bar_obj = BarData::new(
+                    self.core.bar_time_for_epoch(
+                        req_id as i64, i64::from(bar.timestamp), session,
+                    ),
+                    bar.open, bar.high, bar.low, bar.close,
+                    bar.volume as i64, bar.wap, bar.count,
+                    String::new(), // streaming bars carry no timezone
+                    // A forming bar has not ended, and the stream states no
+                    // end for one.
+                    String::new(),
+                );
+                let bar_py = Py::new(py, bar_obj)?.into_any();
+                call_wrapper!(self, py, shared, "historical_data_update", (req_id as i64, &bar_py));
             }
 
             // What the venue refused under a request, in its place.
             Record::HistoricalError((origin, code, msg)) => {
+                self.core.head_timestamp_ended(origin.id());
                 say_error!(self, py, shared, origin, i64::from(code), &msg);
             }
+            Record::HistoricalTaken(taken) => self.core.historical_taken(&taken),
             Record::HistoricalData((req_id, response)) => {
-                let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
+                let is_update = self.core.historical_answered(req_id as i64);
                 self.core.note_historical_zone(req_id as i64, &response.timezone);
                 for bar in &response.bars {
                     let bar_obj = BarData::new(
@@ -671,11 +672,11 @@ impl EClient {
                     }
                 }
                 if response.is_complete && !is_update {
-                    self.core.hist_initial_complete.lock().unwrap().insert(req_id);
                     // The range the request covered, which a caller paging
                     // backwards feeds in as its next end.
                     let (from, to) =
                         self.core.historical_range_for(req_id as i64, &response.timezone);
+                    self.core.historical_ended(req_id as i64);
                     call_wrapper!(self, py, shared, "historical_data_end",
                         (req_id as i64, from.as_str(), to.as_str()));
                 }
@@ -685,8 +686,8 @@ impl EClient {
             }
             Record::HeadTimestamp((req_id, response)) => {
                 // Seconds since the epoch where the caller asked for them.
-                let stated = if self.core.asked_date_format(req_id as i64) == 2 {
-                    self.core.bar_time_for(req_id as i64, &response.head_timestamp, "")
+                let stated = if self.core.head_timestamp_ended(req_id as i64) == 2 {
+                    crate::protocol::datetime::bar_date_as_asked(&response.head_timestamp, 2, "")
                 } else {
                     response.head_timestamp.clone()
                 };

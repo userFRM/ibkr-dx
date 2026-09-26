@@ -408,17 +408,9 @@ impl EClient {
             // Refused here rather than turned into trades on the way out: a
             // misspelled "BID" answered with trade bars looks like data.
             crate::control::historical::BarDataType::from_api_str(what_to_show)?;
-            let wire = wire_req_id(req_id)?;
-            // A historical request that finished under this number left the number
-            // marked as one whose bars are updates to it, and only a new or a
-            // cancelled historical request cleared that mark. Backfill and then
-            // stream on the same number — the ordinary way to write it — and every
-            // bar of the stream arrived as an update to the finished request, so a
-            // caller that overrode only the stream read it as dead.
-            self.core.historical_request_is_new(wire);
             self.send(ControlCommand::SubscribeRealTimeBar {
                 contract: contract.into(),
-                req_id: wire,
+                req_id: wire_req_id(req_id)?,
                 filters: contract.lookup_filters(),
                 what_to_show: what_to_show.into(),
                 use_rth,

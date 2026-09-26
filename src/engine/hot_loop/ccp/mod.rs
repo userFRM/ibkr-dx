@@ -655,6 +655,8 @@ pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::
         | C::FetchHeadTimestamp { contract, .. }
         | C::FetchHistoricalTicks { contract, .. }
         | C::FetchHistoricalSchedule { contract, .. }
+        | C::FetchHistogramData { contract, .. }
+        | C::FetchFundamentalData { contract, .. }
         | C::SubscribeRealTimeBar { contract, .. }
         | C::SubscribeDepth { contract, .. }
         | C::SubscribeTbt { contract, .. } => Some(contract),
@@ -663,7 +665,8 @@ pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::
 }
 
 /// The venue's id for a contract a request gives by that id alone: no
-/// security type or no exchange stated beside it.
+/// security type or no exchange stated beside it, or, for a fundamentals
+/// request, which routes on no exchange, no currency.
 ///
 /// A request states both and the venue routes on both, so both are the
 /// venue's to say: asked for by id, it answers with them. Stamped with a guess
@@ -672,20 +675,19 @@ pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::
 /// bars never were, and a book with no exchange is refused before any lookup.
 pub(crate) fn named_by_id_alone(cmd: &crate::types::ControlCommand) -> Option<(i64, &str)> {
     use crate::types::ControlCommand as C;
-    let (con_id, sec_type, exchange) = match cmd {
-        C::Subscribe { contract, .. } =>
-            (contract.con_id, &contract.sec_type, &contract.exchange),
-        C::FetchHistogramData { con_id, sec_type, exchange, .. } => {
-            (i64::from(*con_id), sec_type, exchange)
-        }
-        C::FetchHistorical { contract, .. }
+    let (contract, stated) = match cmd {
+        C::FetchFundamentalData { contract, .. } => (contract, &contract.currency),
+        C::Subscribe { contract, .. }
+        | C::FetchHistorical { contract, .. }
         | C::FetchHeadTimestamp { contract, .. }
         | C::FetchHistoricalTicks { contract, .. }
         | C::FetchHistoricalSchedule { contract, .. }
-        | C::SubscribeTbt { contract, .. } => (contract.con_id, &contract.sec_type, &contract.exchange),
+        | C::FetchHistogramData { contract, .. }
+        | C::SubscribeTbt { contract, .. } => (contract, &contract.exchange),
         _ => return None,
     };
-    (con_id != 0 && (sec_type.is_empty() || exchange.is_empty())).then_some((con_id, exchange.as_str()))
+    (contract.con_id != 0 && (contract.sec_type.is_empty() || stated.is_empty()))
+        .then_some((contract.con_id, contract.exchange.as_str()))
 }
 
 /// The filters that go with that contract.
@@ -697,6 +699,8 @@ fn filters_named(cmd: &crate::types::ControlCommand) -> crate::types::SecDefFilt
         | C::FetchHeadTimestamp { filters, .. }
         | C::FetchHistoricalTicks { filters, .. }
         | C::FetchHistoricalSchedule { filters, .. }
+        | C::FetchHistogramData { filters, .. }
+        | C::FetchFundamentalData { filters, .. }
         | C::SubscribeRealTimeBar { filters, .. }
         | C::SubscribeDepth { filters, .. }
         | C::SubscribeTbt { filters, .. } => filters.clone(),
@@ -741,24 +745,28 @@ fn name_the_contract(cmd: &mut crate::types::ControlCommand, def: &crate::contro
                 if contract.exchange.is_empty() { contract.exchange = named.exchange; }
             }
         }
+        // A fundamentals request states the contract's type and currency as
+        // the venue names them, however it was described.
+        C::FetchFundamentalData { contract, filters, .. } => {
+            *contract = (&named).into();
+            *filters = named.lookup_filters();
+        }
         C::FetchHistorical { contract, filters, .. }
         | C::FetchHeadTimestamp { contract, filters, .. }
         | C::FetchHistoricalTicks { contract, filters, .. }
         | C::FetchHistoricalSchedule { contract, filters, .. }
+        | C::FetchHistogramData { contract, filters, .. }
         | C::SubscribeRealTimeBar { contract, filters, .. }
         | C::SubscribeDepth { contract, filters, .. }
         | C::SubscribeTbt { contract, filters, .. } if by_id => {
             *contract = (&named).into();
             *filters = named.lookup_filters();
         }
-        C::FetchHistogramData { sec_type, exchange, .. } if by_id => {
-            sec_type.clone_from(&named.sec_type);
-            exchange.clone_from(&named.exchange);
-        }
         C::FetchHistorical { contract, .. }
         | C::FetchHeadTimestamp { contract, .. }
         | C::FetchHistoricalTicks { contract, .. }
         | C::FetchHistoricalSchedule { contract, .. }
+        | C::FetchHistogramData { contract, .. }
         | C::SubscribeRealTimeBar { contract, .. }
         | C::SubscribeDepth { contract, .. }
         | C::SubscribeTbt { contract, .. } => contract.con_id = def.con_id as i64,
@@ -777,7 +785,8 @@ pub(crate) fn request_id(cmd: &crate::types::ControlCommand) -> Option<u32> {
         | crate::types::ControlCommand::SubscribeRealTimeBar { req_id, .. }
         | crate::types::ControlCommand::SubscribeDepth { req_id, .. } => Some(*req_id),
         crate::types::ControlCommand::SubscribeTbt { req_id, .. } => u32::try_from(*req_id).ok(),
-        crate::types::ControlCommand::FetchHistogramData { req_id, .. } => Some(*req_id),
+        crate::types::ControlCommand::FetchHistogramData { req_id, .. }
+        | crate::types::ControlCommand::FetchFundamentalData { req_id, .. } => Some(*req_id),
         _ => None,
     }
 }

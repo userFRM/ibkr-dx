@@ -1444,8 +1444,16 @@ impl HotLoop {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
                     self.register_contract(con_id, symbol, &sec_type, &exchange, &identity, "");
                 }
-                ControlCommand::FetchHistorical { contract, req_id, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } => {
+                ControlCommand::FetchHistorical { contract, req_id, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, format_date, include_expired, .. } => {
                     let ContractRef { con_id, symbol, sec_type, exchange, .. } = contract;
+                    // What the caller's side writes the request's dates and
+                    // range from, stated where the request is taken and
+                    // nowhere else: a refused one leaves the number's live
+                    // request as it was.
+                    let taken = crate::bridge::HistoricalTaken {
+                        req_id, format_date, end_date_time: end_date_time.clone(),
+                        duration: duration.clone(), bar_size: bar_size.clone(), keep_up_to_date,
+                    };
                     // What the surfaces refuse of a request kept up to date,
                     // or of the adjusted series, before the command is sent: a
                     // size the fold cannot build out of five-second bars —
@@ -1515,6 +1523,9 @@ impl HotLoop {
                             use_rth, false, include_expired, &symbol, &sec_type, &exchange,
                             &mut self.hmds_conn, &mut self.hb, &self.shared,
                         );
+                        if sent {
+                            self.shared.reference.push_historical_taken(taken);
+                        }
                         if sent && let Ok(size) = crate::control::historical::BarSize::from_api_str(&bar_size) {
                             self.hmds.keep_up_to_date_reqs.insert(req_id);
                             self.hmds.forming_bars.retain(|f| f.req_id != req_id);
@@ -1526,14 +1537,15 @@ impl HotLoop {
                                 closed_at: None,
                                 bar: Default::default(),
                                 weighted: 0.0,
+                                queued: Vec::new(),
                             });
                             self.hmds.send_realtime_bar_subscribe(
                                 req_id, con_id, &symbol, &sec_type, &exchange, &what_to_show,
                                 use_rth, &mut self.hmds_conn, &mut self.hb,
                             );
                         }
-                    } else {
-                        self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, include_expired, &symbol, &sec_type, &exchange, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                    } else if self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, include_expired, &symbol, &sec_type, &exchange, &mut self.hmds_conn, &mut self.hb, &self.shared) {
+                        self.shared.reference.push_historical_taken(taken);
                     }
                 }
                 ControlCommand::CancelHistorical { req_id } => {
@@ -1625,11 +1637,10 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHeadTimestamp { contract, req_id, what_to_show, use_rth, include_expired, .. } => {
-                    let ContractRef { con_id, .. } = contract;
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth, include_expired, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                        self.hmds.send_head_timestamp_request(req_id, &contract, &what_to_show, use_rth, include_expired, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::FetchContractDetails { contract, req_id, include_expired, filters } => {
@@ -1794,17 +1805,19 @@ impl HotLoop {
                         self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &self.shared, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
-                ControlCommand::FetchFundamentalData { req_id, con_id, report_type } => {
+                ControlCommand::FetchFundamentalData { req_id, contract, report_type, .. } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_fundamental_data_request(req_id, con_id, &report_type, &self.shared, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_fundamental_data_request(req_id, &contract, &report_type, &self.shared, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelFundamentalData { req_id } => {
+                    // One still waiting for its contract's name goes too.
+                    self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchFundamentalData { .. }));
                     // As above: the answers already queued go with it.
                     self.shared.reference.purge_fundamental_for(req_id);
-                    self.hmds.send_fundamental_cancel(req_id, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                    self.hmds.send_fundamental_cancel(req_id, &mut self.hmds_conn, &mut self.hb);
                 }
                 ControlCommand::CancelHistoricalNews { req_id } => {
                     // As its neighbours: the answers already queued go with it,
@@ -1824,11 +1837,11 @@ impl HotLoop {
                         );
                     }
                 }
-                ControlCommand::FetchHistogramData { req_id, con_id, sec_type, exchange, use_rth, period } => {
+                ControlCommand::FetchHistogramData { req_id, contract, use_rth, period, .. } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_histogram_request(req_id, con_id, &sec_type, &exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_histogram_request(req_id, contract.con_id as u32, &contract.sec_type, &contract.exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
@@ -4876,6 +4889,7 @@ mod tests {
             closed_at: None,
             bar: Default::default(),
             weighted: 0.0,
+            queued: Vec::new(),
         });
 
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
@@ -5252,6 +5266,7 @@ mod tests {
             what_to_show: "TRADES".into(),
             use_rth: true,
             keep_up_to_date: true,
+            format_date: 1,
             include_expired: false,
             filters: Default::default(),
         })
@@ -5293,6 +5308,7 @@ mod tests {
             what_to_show: "TRADES".into(),
             use_rth: true,
             keep_up_to_date: true,
+            format_date: 1,
             include_expired: false,
             filters: Default::default(),
         })
@@ -5329,6 +5345,7 @@ mod tests {
                 what_to_show: "ADJUSTED_LAST".into(),
                 use_rth: true,
                 keep_up_to_date: false,
+                format_date: 1,
                 include_expired: false,
                 filters: Default::default(),
             })
@@ -7424,6 +7441,7 @@ mod tests {
             what_to_show: "TRADES".into(),
             use_rth: true,
             keep_up_to_date: false,
+            format_date: 1,
             include_expired: false,
             filters: Default::default(),
         })
@@ -8268,7 +8286,7 @@ mod tests {
         let ask = |con_id: i64, symbol: &str| ControlCommand::FetchHistorical {
             req_id: 7, contract: stock(con_id, symbol),
             end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 min".into(),
-            what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: true,
+            what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: true, format_date: 1,
             include_expired: false, filters: Default::default(),
         };
         tx.send(ask(756733, "SPY")).unwrap();
@@ -9531,20 +9549,17 @@ mod withdrawal_tests {
         );
     }
 
-    /// Withdrawing a news or fundamentals query this client is not waiting on
-    /// is answered too, and under the number that says nothing was waiting
-    /// rather than the data service's own.
+    /// Withdrawing a news query or a calendar query this client is not
+    /// waiting on is answered too, and under the number that says nothing was
+    /// waiting rather than the data service's own.
     ///
-    /// Both returned in silence, while the calendar withdrawal beside them
-    /// reported -- three withdrawals in one area, two behaviours. And the
-    /// calendar reported under the service's number, which says the service
-    /// reported a difficulty with a request it answered. Nothing was waiting;
-    /// that is a different thing.
+    /// The calendar reported under the service's number, which says the
+    /// service reported a difficulty with a request it answered. Nothing was
+    /// waiting; that is a different thing.
     #[test]
     fn withdrawing_a_query_that_is_not_waiting_says_so() {
         for (what, cmd) in [
             ("news", crate::types::ControlCommand::CancelHistoricalNews { req_id: 9 }),
-            ("fundamentals", crate::types::ControlCommand::CancelFundamentalData { req_id: 9 }),
             ("the calendar", crate::types::ControlCommand::CancelCalendar { req_id: 9 }),
         ] {
             let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);

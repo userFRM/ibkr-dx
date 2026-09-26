@@ -1148,6 +1148,11 @@ pub struct HistoricalAsk {
     pub by_day: bool,
     /// The latest timed daily session supplied with the history.
     pub daily_session: Option<(i64, i64)>,
+    /// Whether it keeps its bars up to date once its history is in.
+    pub keep_up_to_date: bool,
+    /// Whether its history has been delivered, so a page after it continues
+    /// it rather than answering afresh.
+    pub answered: bool,
 }
 
 /// What a market-data request's generic tick list asks for.
@@ -1505,24 +1510,15 @@ pub struct ClientCore {
     /// The type sent with each instrument's subscription. Every watcher reads
     /// that feed, even when it asked for another type or takes over as holder.
     mdt_by_instrument: Mutex<HashMap<InstrumentId, i32>>,
-    /// Which requests asked for their bar times as seconds since the epoch.
-    ///
-    /// The venue states a time in one form and the client formats it for the
-    /// caller. A caller handed the other form is reading a date as a number or
-    /// a number as a date. Only the request that asked is affected, so this is
-    /// kept per request rather than for the session.
-    /// What each historical request asked for: the form its bar times are
-    /// wanted in, and the end and duration its range is derived from. The
-    /// reply states neither, and the range stated beside the last bar is the
-    /// request's own, so the request is what has to be kept.
+    /// What each bar request the engine has taken asked for: the form its bar
+    /// times are wanted in, and the end and duration its range is derived
+    /// from. The reply states neither, and the range stated beside the last
+    /// bar is the request's own, so the request is what has to be kept — for
+    /// as long as it answers, as a gateway keeps it.
     historical_asks: Mutex<HashMap<i64, HistoricalAsk>>,
-    // Historical data keepUpToDate: req_ids that have completed initial batch.
-    // Subsequent bars for these req_ids dispatch as historical_data_update.
-    // Cleared when a request is made under the id again
-    // `historical_request_is_new`.
-    /// Which historical requests have finished their first batch, so
-    /// a later bar under the same id is a continuation rather than a new answer.
-    pub hist_initial_complete: Mutex<HashSet<u32>>,
+    /// The form each head timestamp asked for its answer in, until it is
+    /// answered, refused or withdrawn.
+    head_timestamp_formats: Mutex<HashMap<i64, i32>>,
 
     // News subscription state
     /// Every provider this account may read.
@@ -1740,7 +1736,7 @@ impl ClientCore {
             models_as_they_stand: Mutex::new(HashMap::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
-            hist_initial_complete: Mutex::new(HashSet::new()),
+            head_timestamp_formats: Mutex::new(HashMap::new()),
             // Empty until something states them. Which providers an account
             // may read is the venue's answer, given at logon; a pair of codes
             // standing in for it asked for news from providers the account
@@ -1826,7 +1822,7 @@ impl ClientCore {
         self.models_as_they_stand.lock().unwrap().clear();
         self.mdt_by_instrument.lock().unwrap().clear();
         self.historical_asks.lock().unwrap().clear();
-        self.hist_initial_complete.lock().unwrap().clear();
+        self.head_timestamp_formats.lock().unwrap().clear();
         self.news_providers.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();
         // What the venue named for a description belongs to the session that
@@ -2089,17 +2085,6 @@ impl ClientCore {
         }
     }
 
-    /// A request is being made under this id, so whatever a request under it
-    /// finished before is over.
-    ///
-    /// Bars answering a fresh request were delivered as though they continued
-    /// the last one — as updates, with no completion — because the id had
-    /// been marked finished and nothing unmarked it. A caller looping over
-    /// contracts under one id was answered once and never again.
-    pub fn historical_request_is_new(&self, req_id: u32) {
-        self.hist_initial_complete.lock().unwrap().remove(&req_id);
-    }
-
     // ── Subscription management ──
 
     /// Ask the engine for a market-data subscription.
@@ -2300,6 +2285,16 @@ impl ClientCore {
             ));
         }
         Ok(())
+    }
+
+    /// What a gateway refuses of a fundamentals request before it looks the
+    /// contract up: a type it does not read as a stock's, `STK` or `CS` in
+    /// any case, in its words.
+    pub fn validate_fundamentals_type(sec_type: &str) -> Result<(), Refusal> {
+        if sec_type.eq_ignore_ascii_case("STK") || sec_type.eq_ignore_ascii_case("CS") {
+            return Ok(());
+        }
+        Err(Refusal::validation("Please enter a valid security type"))
     }
 
     /// Check the contract month or date before requesting the contract.
@@ -5719,29 +5714,60 @@ impl ClientCore {
         std::borrow::Cow::Owned(sent)
     }
 
-    /// Remember how a request asked for its bar times to be written.
+    /// Remember how a head timestamp asked for its answer to be written.
     ///
     /// The reference client numbers the two forms: 1 for the venue's
     /// spelling, 2 for seconds since the epoch. Anything else is 1, which is
     /// what that client does with a number it does not know.
     pub fn note_date_format(&self, req_id: i64, format_date: i32) {
-        self.historical_asks.lock().unwrap().entry(req_id).or_default().format_date = format_date;
+        self.head_timestamp_formats.lock().unwrap().insert(req_id, format_date);
     }
 
-    /// The end and the duration a bar request named, which its range is
-    /// counted from once its bars have all arrived, and the size of its bars,
-    /// which says how the bar still forming is dated.
-    pub fn note_historical_span(
-        &self, req_id: i64, end_date_time: &str, duration: &str, bar_size: &str,
-    ) {
+    /// The form a head timestamp asked for, which its answer, refusal or
+    /// withdrawal ends: 1 where none was asked, as the reference client takes
+    /// it.
+    pub fn head_timestamp_ended(&self, req_id: i64) -> i32 {
+        self.head_timestamp_formats.lock().unwrap().remove(&req_id).unwrap_or(1)
+    }
+
+    /// Write down what a bar request the engine has taken asked for, in place
+    /// of whatever a request under its number asked for before: the form of
+    /// its bar times, the end and the duration its range is counted from once
+    /// its bars have all arrived, and the size of its bars, which says how the
+    /// bar still forming is dated.
+    pub fn historical_taken(&self, taken: &crate::bridge::HistoricalTaken) {
         use crate::control::historical::BarSize;
+        self.historical_asks.lock().unwrap().insert(i64::from(taken.req_id), HistoricalAsk {
+            format_date: taken.format_date,
+            end_date_time: taken.end_date_time.clone(),
+            duration: taken.duration.clone(),
+            by_day: BarSize::from_api_str(&taken.bar_size)
+                .is_ok_and(|size| size.seconds() >= BarSize::Day1.seconds()),
+            keep_up_to_date: taken.keep_up_to_date,
+            ..Default::default()
+        });
+    }
+
+    /// Whether a bar request's history has been delivered.
+    pub fn historical_answered(&self, req_id: i64) -> bool {
+        self.historical_asks.lock().unwrap().get(&req_id).is_some_and(|ask| ask.answered)
+    }
+
+    /// A bar request's history has been delivered: one kept up to date goes
+    /// on answering, and any other has ended, as a gateway ends it there.
+    pub fn historical_ended(&self, req_id: i64) {
         let mut asks = self.historical_asks.lock().unwrap();
-        let ask = asks.entry(req_id).or_default();
-        ask.end_date_time = end_date_time.to_string();
-        ask.duration = duration.to_string();
-        ask.daily_session = None;
-        ask.by_day = BarSize::from_api_str(bar_size)
-            .is_ok_and(|size| size.seconds() >= BarSize::Day1.seconds());
+        match asks.get_mut(&req_id) {
+            Some(ask) if ask.keep_up_to_date => ask.answered = true,
+            _ => {
+                asks.remove(&req_id);
+            }
+        }
+    }
+
+    /// A bar request withdrawn: nothing answers under its number any longer.
+    pub fn forget_historical(&self, req_id: u32) {
+        self.historical_asks.lock().unwrap().remove(&i64::from(req_id));
     }
 
     /// The range a finished request covered, as stated beside the last bar.
@@ -5753,12 +5779,6 @@ impl ClientCore {
                 crate::protocol::datetime::historical_range(&a.end_date_time, &a.duration, zone)
             })
             .unwrap_or_default()
-    }
-
-    /// The date form the caller asked for under `req_id`: 1 where none was
-    /// asked, as the reference client takes it.
-    pub fn asked_date_format(&self, req_id: i64) -> i32 {
-        self.historical_asks.lock().unwrap().get(&req_id).map_or(1, |ask| ask.format_date)
     }
 
     /// A bar's time, written the way the request that asked for it wanted.
@@ -5814,7 +5834,9 @@ impl ClientCore {
         if zone.is_empty() {
             return;
         }
-        self.historical_asks.lock().unwrap().entry(req_id).or_default().zone = zone.to_string();
+        if let Some(ask) = self.historical_asks.lock().unwrap().get_mut(&req_id) {
+            ask.zone = zone.to_string();
+        }
     }
 
     /// A continuing bar's time as the caller asked bars to be dated, on the

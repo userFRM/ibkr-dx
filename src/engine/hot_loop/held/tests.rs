@@ -897,6 +897,7 @@ fn what_is_held_at_the_stop_that_is_not_an_order_is_withdrawn_in_silence() {
         what_to_show: "TRADES".into(),
         use_rth: true,
         keep_up_to_date: false,
+        format_date: 1,
         include_expired: false,
     })
     .unwrap();

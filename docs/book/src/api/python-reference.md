@@ -1742,7 +1742,7 @@ def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_dat
 
 #### `cancel_historical_news`
 
-Withdraw a historical news query.  The TWS API has no call for this; the venue has a message for it. One message carrying the number the query went out under, sent whether or not the query has been answered: the venue serves it past the reply.
+Withdraw a historical news query.  The TWS API has no call for this; the venue has a message for it. One message carrying the number the query went out under, sent for a query still waiting on its answer. A query answered is over, as a gateway holds it over: withdrawn after its answer, it is refused as naming nothing.
 
 ```python
 def cancel_historical_news(req_id)

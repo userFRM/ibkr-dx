@@ -5352,6 +5352,7 @@ fn a_request_naming_a_contract_waits_to_be_given_its_id() {
             what_to_show: "TRADES".into(),
         use_rth: true,
         keep_up_to_date: false,
+        format_date: 1,
         include_expired: false,
         filters: Default::default(),
     };
@@ -5377,7 +5378,7 @@ fn a_request_naming_a_contract_waits_to_be_given_its_id() {
     }
 
     // And one the venue never names is reported rather than left waiting.
-    let unnamed = crate::types::ControlCommand::FetchHistorical { contract: crate::types::ContractRef { con_id: 0, symbol: "NOSUCH".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, end_date_time: String::new(), req_id: 8, duration: "1 D".into(), bar_size: "1 hour".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() };
+    let unnamed = crate::types::ControlCommand::FetchHistorical { contract: crate::types::ContractRef { con_id: 0, symbol: "NOSUCH".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, end_date_time: String::new(), req_id: 8, duration: "1 D".into(), bar_size: "1 hour".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() };
     ccp.hold_until_named(unnamed, &mut None, &mut HeartbeatState::new(), &shared);
     ccp.pending_named[0].2 -= CcpState::NAMING_TIMEOUT + Duration::from_secs(1);
     ccp.sweep_pending_named(&shared);
@@ -5407,7 +5408,7 @@ fn a_request_giving_its_contract_by_id_alone_goes_out_as_the_venue_names_it() {
     let by_id = |req_id| C::FetchHistorical {
         contract: crate::types::ContractRef { con_id: 495_512_563, ..Default::default() },
         req_id, end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
-        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false,
+        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1,
         include_expired: false, filters: Default::default(),
     };
 
@@ -5427,14 +5428,14 @@ fn a_request_giving_its_contract_by_id_alone_goes_out_as_the_venue_names_it() {
 
     // A histogram states the two beside the id, and is named the same way.
     let histogram = |req_id| C::FetchHistogramData {
-        req_id, con_id: 495_512_563, sec_type: String::new(), exchange: String::new(),
-        use_rth: true, period: "1 week".into(),
+        req_id, contract: crate::types::ContractRef { con_id: 495_512_563, ..Default::default() },
+        use_rth: true, period: "1 week".into(), filters: Default::default(),
     };
     assert!(ccp.hold_until_named(histogram(9), &mut None, &mut HeartbeatState::new(), &shared).is_none());
     let (_, mut held, _) = ccp.pending_named.remove(0);
     name_the_contract(&mut held, &es);
     assert!(
-        matches!(&held, C::FetchHistogramData { sec_type, exchange, .. } if sec_type == "FUT" && exchange == "CME"),
+        matches!(&held, C::FetchHistogramData { contract, .. } if contract.sec_type == "FUT" && contract.exchange == "CME"),
         "{held:?}",
     );
     // And withdrawn by its own cancel while it waits.
@@ -9856,7 +9857,7 @@ fn a_connection_that_dies_takes_the_lookups_waiting_on_it_with_it() {
     let bars = crate::types::ControlCommand::FetchHistorical {
         contract: crate::types::ContractRef { con_id: 0, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() },
         req_id: 12, end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
-        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false,
+        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false,
         filters: Default::default(),
     };
     assert!(ccp.hold_until_named(bars, &mut None, &mut HeartbeatState::new(), &shared).is_none());
@@ -10060,6 +10061,7 @@ fn a_request_waiting_to_be_named_is_withdrawn_with_the_rest() {
         what_to_show: "TRADES".into(),
         use_rth: true,
         keep_up_to_date: false,
+        format_date: 1,
         include_expired: false,
         filters: Default::default(),
     };

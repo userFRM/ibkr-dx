@@ -2823,7 +2823,15 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         Python::initialize();
         Python::attach(|py| {
             let (client, _rx, shared, w) = wired_client(py);
-            client.get().core.hist_initial_complete.lock().unwrap().insert(1);
+            // The lookup, taken and answered.
+            shared.reference.push_historical_taken(crate::bridge::HistoricalTaken {
+                req_id: 1, format_date: 1, end_date_time: String::new(), duration: "1 D".into(),
+                bar_size: "1 day".into(), keep_up_to_date: false,
+            });
+            shared.reference.push_historical_data(1, crate::control::historical::HistoricalResponse {
+                query_id: String::new(), timezone: String::new(), is_complete: true, bars: Vec::new(),
+            });
+            client.borrow(py).dispatch_once(py, &shared).unwrap();
             let contract = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
             client.call_method1(py, "req_real_time_bars", (1i64, &contract)).unwrap();
             shared.market.push_real_time_bar(1, RealTimeBar { timestamp: 1_700_000_000, ..Default::default() });
@@ -2832,7 +2840,7 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
             let g = pyo3::types::PyDict::new(py);
             g.set_item("w", &w).unwrap();
             let names: Vec<String> = py
-                .eval(c"[c[0] for c in w.calls]", Some(&g), None)
+                .eval(c"[c[0] for c in w.calls if c[0] not in ('historicalDataEnd', 'historical_data_end')]", Some(&g), None)
                 .unwrap().extract().unwrap();
             assert_eq!(names, ["realtimeBar"], "the stream's bar went somewhere else");
         });
@@ -3546,8 +3554,10 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                     ("20260924-00:00:00", "20260925-01:00:00"),
                 ] {
                     let (client, _rx, shared, wrapper) = wired_client(py);
-                    client.get().core.note_date_format(21, format);
-                    client.get().core.note_historical_span(21, "", "1 D", "1 day");
+                    shared.reference.push_historical_taken(crate::bridge::HistoricalTaken {
+                        req_id: 21, format_date: format, end_date_time: String::new(),
+                        duration: "1 D".into(), bar_size: "1 day".into(), keep_up_to_date: true,
+                    });
                     shared.reference.push_historical_data(21, crate::control::historical::HistoricalResponse {
                         query_id: String::new(), timezone: "US/Eastern".into(), is_complete: true,
                         bars: vec![crate::control::historical::HistoricalBar {
@@ -3556,11 +3566,10 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                         }],
                     });
                     client.get().dispatch_once(py, &shared).unwrap();
-                    client.get().core.hist_initial_complete.lock().unwrap().insert(21);
-                    shared.market.push_real_time_bar(21, crate::types::RealTimeBar {
+                    shared.market.push_bar_in_session(21, crate::types::RealTimeBar {
                         timestamp: crate::protocol::datetime::ib_datetime_to_unix(start).unwrap() as u32,
                         open: 1.0, high: 2.0, low: 0.5, close: 1.5, volume: 10.0, wap: 1.2, count: 3,
-                    });
+                    }, None);
                     client.get().dispatch_once(py, &shared).unwrap();
                     let globals = pyo3::types::PyDict::new(py);
                     globals.set_item("w", &wrapper).unwrap();

@@ -145,9 +145,14 @@ with every one of them, as a gateway does.
   but SMART is asked of any type. Nothing of an issuer is stated beside an
   identifier.
 - Only a details request looks a contract up by identifier or issuer. Market
-  data, depth, bars, head timestamps, ticks and the rest carry neither to a
-  gateway, which looks their contract up by its description; so does this
-  client, whatever else the contract holds.
+  data, depth, bars, head timestamps, histograms, fundamental reports, ticks
+  and the rest carry neither to a gateway, which looks their contract up by its
+  description; so does this client, whatever else the contract holds. A
+  request stating the contract's id, its type and its exchange goes out as it
+  stands.
+- A fundamental report is asked about a stock alone. A gateway refuses one on
+  a contract stated as any other type, or stating none, before looking it up,
+  with *Please enter a valid security type* under 321; so does this client.
 - A venue or currency left empty is not stated on the lookup.
 - `includeExpired` is stated on every lookup by description a details request
   makes, and a bars, head-timestamp or ticks request carries it to the venue

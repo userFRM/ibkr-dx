@@ -68,8 +68,6 @@ def test_a_contract_id_below_zero_does_not_wrap():
     bad = ibkr_dx.Contract()
     bad.conId = -1
     for call in (
-        lambda: c.req_fundamental_data(1, bad, "ReportsFinSummary"),
-        lambda: c.req_histogram_data(2, bad, True, "3 days"),
         lambda: c.req_historical_news(3, -1, "BRFG", "", "", 10),
     ):
         try:

@@ -43,8 +43,9 @@ pub struct TickReqParams {
     pub snapshot_permissions: i64,
 }
 
-/// A bar under its request, with the session, as the moments it opens and
-/// closes, that a day's bar kept up to date belongs to.
+/// A bar still forming under the request that keeps its bars up to date, with
+/// the session, as the moments it opens and closes, that a day's bar belongs
+/// to.
 pub type SessionBar = (u32, RealTimeBar, Option<(u32, u32)>);
 
 /// Which of a gateway's option computations a tick is.
@@ -203,7 +204,9 @@ pub struct MarketDataState {
     pub(super) tbt_quotes: Queue<TbtQuote>,
     /// The point between the two, each time it moved.
     pub(super) tbt_mids: Queue<TbtMid>,
-    pub(super) real_time_bars: Queue<SessionBar>,
+    pub(super) real_time_bars: Queue<(u32, RealTimeBar)>,
+    /// The bars still forming of requests that keep their bars up to date.
+    pub(super) bar_updates: Queue<SessionBar>,
     pub(super) depth_updates: Queue<DepthUpdate>,
     /// Books that were dropped for running away unread, and have not been
     /// asked for again.
@@ -368,6 +371,7 @@ impl MarketDataState {
             tbt_quotes: Queue::with_capacity(stamps, 256),
             tbt_mids: Queue::with_capacity(stamps, 256),
             real_time_bars: Queue::with_capacity(stamps, 64),
+            bar_updates: Queue::with_capacity(stamps, 64),
             depth_updates: Queue::with_capacity(stamps, 64),
             depth_dropped: Mutex::new(std::collections::HashSet::new()),
             books_let_go: Mutex::new(Vec::new()),
@@ -566,26 +570,7 @@ impl MarketDataState {
 
     /// Take every real time bars waiting, leaving none.
     pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
-        self.real_time_bars.drain().into_iter().map(|(req_id, bar, _)| (req_id, bar)).collect()
-    }
-
-    /// Take the bars a dispatch loop should deliver, leaving behind those a
-    /// stream is going to read by id.
-    ///
-    /// A stream cannot hold the session's turn — it outlives any one read of
-    /// it — so its records are left where it will find them, the way the
-    /// answering calls' own are. `mine` says which ids this session is reading
-    /// for itself; see `ReferenceState::is_ours`.
-    pub fn drain_real_time_bars_for_dispatch(
-        &self, mine: impl Fn(u32) -> bool,
-    ) -> Vec<(u32, RealTimeBar)> {
-        self.real_time_bars.take_if(|e| !mine(e.0)).into_iter()
-            .map(|(req_id, bar, _)| (req_id, bar)).collect()
-    }
-
-    /// Bars answering one request, leaving other requests' alone.
-    pub fn take_real_time_bars_for(&self, req_id: u32) -> Vec<RealTimeBar> {
-        self.real_time_bars.take_if(|b| b.0 == req_id).into_iter().map(|b| b.1).collect()
+        self.real_time_bars.drain()
     }
 
     /// Book changes answering one request.
@@ -886,7 +871,7 @@ impl MarketDataState {
 
 
     #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
-        self.push_bar_in_session(req_id, bar, None);
+        self.real_time_bars.push_bounded((req_id, bar), STREAM_BACKLOG_LIMIT, "real_time_bars");
     }
 
     /// A bar kept up to date, with the session it belongs to where it is a
@@ -894,7 +879,7 @@ impl MarketDataState {
     pub(crate) fn push_bar_in_session(
         &self, req_id: u32, bar: RealTimeBar, session: Option<(u32, u32)>,
     ) {
-        self.real_time_bars.push_bounded((req_id, bar, session), STREAM_BACKLOG_LIMIT, "real_time_bars");
+        self.bar_updates.push_bounded((req_id, bar, session), STREAM_BACKLOG_LIMIT, "bar_updates");
     }
 
     #[doc(hidden)] pub fn push_depth_update(&self, update: DepthUpdate) {
@@ -979,7 +964,8 @@ impl MarketDataState {
     /// already arrived and nobody has read. Left there, the next request under
     /// the same number is served the previous stream's bars.
     #[doc(hidden)] pub fn purge_real_time_bars(&self, req_id: u32) {
-        self.real_time_bars.retain(|(id, _, _)| *id != req_id);
+        self.real_time_bars.retain(|(id, _)| *id != req_id);
+        self.bar_updates.retain(|(id, ..)| *id != req_id);
     }
 
     /// Throw away tick-by-tick records still queued under a request.

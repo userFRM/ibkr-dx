@@ -2627,7 +2627,7 @@ fn timeout_sweeps_phase_live() {
     assert!(!row_after_end, "a row arrived AFTER end — ordering regression");
 
     // 3. Historical bars — must complete without tripping the idle sweep.
-    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 6003, end_date_time: String::new(), duration: "5 D".into(), bar_size: "1 day".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).expect("send historical failed");
+    control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 6003, end_date_time: String::new(), duration: "5 D".into(), bar_size: "1 day".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).expect("send historical failed");
     let deadline = Instant::now() + Duration::from_secs(45);
     let (mut bars, mut complete, mut hist_err) = (0usize, false, None::<String>);
     while Instant::now() < deadline && !complete && hist_err.is_none() {

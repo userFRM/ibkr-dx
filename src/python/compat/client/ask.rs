@@ -442,8 +442,10 @@ impl EClient {
         let what = format!("the earliest data for {} {}", contract.sec_type, contract.symbol);
         let r = wait_for(py, &shared, req_id, &what, |sh| {
             sh.reference.take_head_timestamp_for(req_id as u32)
-        })?;
-        Ok(r.head_timestamp)
+        });
+        // Its answer, or the reason there is none, ends the request.
+        self.core.head_timestamp_ended(req_id);
+        Ok(r?.head_timestamp)
     }
 
     /// Contracts whose symbol or name matches a pattern.

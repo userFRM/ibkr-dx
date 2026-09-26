@@ -19,11 +19,13 @@ use super::EClient;
 /// the session holds, the completed-orders exchange — is handed to a loop of
 /// its own, and what that loop builds is kept as the commands it would send.
 /// Everything else a call sends is kept as it was sent, and a question as it
-/// was asked, for a test to read.
+/// was asked, for a test to read. A bar request is taken as the engine takes
+/// one it can send: what it asked for is stated ahead of its answer.
 pub(crate) struct TestEngine {
     into: std::sync::mpsc::Sender<ControlCommand>,
     engine: crate::engine::hot_loop::HotLoop,
     out: std::collections::VecDeque<String>,
+    shared: Arc<SharedState>,
 }
 
 impl TestEngine {
@@ -31,7 +33,7 @@ impl TestEngine {
         let mut engine = crate::engine::hot_loop::HotLoop::new(shared.clone(), None, None);
         let (into, taken) = std::sync::mpsc::channel();
         engine.set_control_rx(taken);
-        Self { into, engine, out: std::collections::VecDeque::new() }
+        Self { into, engine, out: std::collections::VecDeque::new(), shared: shared.clone() }
     }
 
     /// Take what the calls sent, and give the loop a lap.
@@ -62,6 +64,16 @@ impl TestEngine {
             // rather than sending it on as it stands.
             if question {
                 self.out.push_back(format!("{cmd:?}"));
+            }
+            if let ControlCommand::FetchHistorical {
+                req_id, end_date_time, duration, bar_size, keep_up_to_date, format_date, ..
+            } = &cmd
+            {
+                self.shared.reference.push_historical_taken(crate::bridge::HistoricalTaken {
+                    req_id: *req_id, format_date: *format_date, end_date_time: end_date_time.clone(),
+                    duration: duration.clone(), bar_size: bar_size.clone(),
+                    keep_up_to_date: *keep_up_to_date,
+                });
             }
             if order || question {
                 let _ = self.into.send(cmd);
@@ -824,6 +836,9 @@ impl EClient {
         timezone: &str, ends: Option<Vec<String>>,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
+        // What the calls asked for is taken first, as the engine takes a
+        // request before anything answers it.
+        self._test_pump();
         let bar_list: Vec<HistoricalBar> = bars.into_iter().enumerate().map(|(index, (time, o, h, l, c, v))| {
             HistoricalBar {
                 time, open: o, high: h, low: l, close: c, volume: v, wap: 0.0, count: 0,

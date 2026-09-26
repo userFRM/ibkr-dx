@@ -172,6 +172,7 @@ pub struct ReferenceState {
     /// count from the same number, so a set shared between them would let one
     /// release what the other is waiting on.
     ours_in_flight: Mutex<std::collections::HashSet<(RecordKind, i64)>>,
+    pub(super) historical_taken: Queue<HistoricalTaken>,
     pub(super) historical_data: Queue<(u32, HistoricalResponse)>,
     pub(super) head_timestamps: Queue<(u32, HeadTimestampResponse)>,
     pub(super) contract_details: Queue<(u32, ContractDefinition)>,
@@ -369,6 +370,7 @@ impl ReferenceState {
     pub(super) fn stamping(stamps: &Stamps) -> Self {
         Self {
             ours_in_flight: Mutex::new(Default::default()),
+            historical_taken: Queue::new(stamps),
             historical_data: Queue::with_capacity(stamps, 16),
             head_timestamps: Queue::with_capacity(stamps, 8),
             contract_details: Queue::with_capacity(stamps, 16),
@@ -624,6 +626,7 @@ impl ReferenceState {
 
     /// Throw away bars still queued under a request.
     pub fn purge_historical_for(&self, req_id: u32) {
+        self.historical_taken.retain(|taken| taken.req_id != req_id);
         self.historical_data.retain(|(id, _)| *id != req_id);
     }
 
@@ -1103,6 +1106,10 @@ impl ReferenceState {
     }
 
     // ── Hot-loop-side writers ──
+
+    #[doc(hidden)] pub fn push_historical_taken(&self, taken: HistoricalTaken) {
+        self.historical_taken.push(taken);
+    }
 
     #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
         self.historical_data.push((req_id, response));

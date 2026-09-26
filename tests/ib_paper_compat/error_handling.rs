@@ -91,7 +91,7 @@ pub(super) fn phase_pacing_violation_recovery(conns: Conns) -> Conns {
     // minutes, so this is well inside it by design.
     let num_requests = 10u32;
     for i in 0..num_requests {
-        control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 14000 + i, end_date_time: end_dt.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, include_expired: false, filters: Default::default() }).unwrap();
+        control_tx.send(ControlCommand::FetchHistorical { contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".to_string(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "".to_string(), ..Default::default() }, req_id: 14000 + i, end_date_time: end_dt.clone(), duration: "1 d".to_string(), bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() }).unwrap();
     }
 
     control_tx.send(ControlCommand::Subscribe { req_id: 90012, contract: ibkr_dx::types::ContractRef { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: "STK".into(), currency: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new() }, filters: Default::default(), mode_9887: 0, delayed_mode: None, frozen: false, delayed_frozen: false, regulatory_snapshot: false, snapshot: false,
