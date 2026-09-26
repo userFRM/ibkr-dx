@@ -408,8 +408,10 @@ Unable to parse field: 'Manual Order Indicator' for input string: '…'*).
 ## Request ids
 
 This client keeps request ids at and above `0xC000_0000` for the questions it
-asks itself, and refuses a request stated under one of them, or under a
-negative id, rather than answering it. The interface this client mirrors
+asks itself, and refuses a request stated under one of them, a market-data
+request included, rather than answering it. It refuses one stated under a
+negative id too, except a market-data request, which carries its number whole,
+as a gateway reads it. The interface this client mirrors
 encourages one counter for orders and requests, and a program that keeps one
 meets this once the account's order ids reach `0xC000_0000`: the next valid id
 is then one no request can be stated under.

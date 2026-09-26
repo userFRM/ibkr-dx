@@ -2809,6 +2809,12 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 };
                 assert!(err.to_string().contains("outside the range"), "{method}: got {err}");
             }
+            // And a market-data request, which carries its number whole.
+            let spy = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
+            let Err(err) = client.call_method1(py, "req_mkt_data", (big, &spy)) else {
+                panic!("req_mkt_data accepted a req_id it cannot carry");
+            };
+            assert!(err.to_string().contains("outside the range"), "req_mkt_data: got {err}");
             assert!(rx.try_recv().is_err(), "a refused req_id must reach no engine command");
         });
     }

@@ -901,6 +901,11 @@ impl EClient {
         delayed_allowed: bool,
     ) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        // As on the other surface: a number every other request refuses is
+        // refused here too, and a negative one is read as a gateway reads it.
+        if req_id >= 0 {
+            wire_req_id(req_id)?;
+        }
         let shared = self.shared_state()?;
         // What tells two listings of one symbol apart, taken whole. A caller
         // who names an option's class, its local name or where it is listed

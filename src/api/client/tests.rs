@@ -4594,6 +4594,23 @@ fn an_unwireable_req_id_is_refused() {
         assert!(refused.is_err(), "{name}: the number that means no request is not one");
         assert!(rx.try_recv().is_err(), "{name}: and nothing reaches the wire under it");
     }
+
+    // A market-data request carries its number whole, and a negative one is
+    // read as a gateway reads it; what the others refuse above, it refuses.
+    let market: &[(&str, Call)] = &[
+        ("req_mkt_data", |c, id| c.try_req_mkt_data(id, &spy(), "", false, false)),
+        ("req_mkt_data_ex", |c, id| c.try_req_mkt_data_ex(id, &spy(), "", false, false, 0, &[])),
+        ("req_spread_scan", |c, id| {
+            crate::api::client::tests::reported(c, || c.req_spread_scan(id, &spy(), &Default::default()))
+        }),
+    ];
+    for (name, call) in market {
+        for bad in [u32::MAX as i64 + 1, crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64] {
+            let (client, rx, _shared) = test_client();
+            assert!(call(&client, bad).is_err(), "{name}({bad}) is answered to nobody");
+            assert!(rx.try_recv().is_err(), "{name}({bad}): and nothing reaches the wire");
+        }
+    }
 }
 
 #[test]

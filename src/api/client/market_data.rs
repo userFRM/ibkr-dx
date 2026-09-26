@@ -218,6 +218,12 @@ impl EClient {
         calculation: Option<Box<crate::types::Calculation>>,
         delayed_allowed: bool,
     ) -> Result<(), Refusal> {
+        // A number every other request refuses is refused here too: one in the
+        // ranges this client and its engine number their own work in is
+        // answered to nobody. A negative one is read as a gateway reads it.
+        if req_id >= 0 {
+            wire_req_id(req_id)?;
+        }
         self.core.register_mkt_data(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,

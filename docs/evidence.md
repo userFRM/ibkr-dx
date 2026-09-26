@@ -207,9 +207,10 @@ client's own allocation; what a gateway answers the same way is on
   client's own allocation.** A caller numbers requests below `0xC000_0000`; at
   and above it are the ids this client allocates for the questions it asks on a
   caller's behalf, and above `0xF000_0000` the ones the engine asks for itself.
-  A negative id is refused, and so is one inside the range, by number rather
-  than answered, because answered it would be indistinguishable from one of
-  this client's own and its reply withheld. An order may be numbered wider —
+  A negative id is refused, save on a market-data request, which carries its
+  number whole, and so is one inside the range, by number rather than
+  answered, because answered it would be indistinguishable from one of this
+  client's own and its reply withheld. An order may be numbered wider —
   the venue takes a wider one — but an order id reused as a request id has to
   satisfy this, and the interface this client mirrors encourages one counter
   for both.
