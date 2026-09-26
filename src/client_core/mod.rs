@@ -3579,7 +3579,7 @@ impl ClientCore {
             }
             crate::bridge::OrderBook::RevisionForgotten(order_id) => self.undo_restatement(order_id),
             crate::bridge::OrderBook::RevisionRefused(reject) => {
-                self.retire_rejected(&reject);
+                self.restore_refused(&reject);
             }
         }
     }
@@ -3700,22 +3700,18 @@ impl ClientCore {
         )
     }
 
-    /// Retire the client's record of an order the venue rejected as unknown,
-    /// and say what that rejection reports.
+    /// Put the client's record of an order back where a refusal leaves it,
+    /// and say what that refusal reports.
     ///
-    /// Reason 1 is UnknownOrder: the venue has said the order does not exist,
-    /// and the engine has already retired its record. The client's own record
-    /// has to go with it, or the open-order snapshot keeps reporting the order
-    /// the rejection was about.
+    /// No refusal retires the record, whatever reason it states: a gateway
+    /// retires no order on one, and the engine keeps its own.
     ///
     /// The code says the cancel was refused, and which of the two ways. 202
     /// means an order that was cancelled, so reporting it for a refused cancel
     /// states the opposite and invites a replacement against an order still
     /// working. 10147 means "not found", which is one reason among several.
-    pub(crate) fn retire_rejected(&self, reject: &CancelReject) -> (i64, String) {
-        if reject.reason_code == 1 {
-            self.untrack_order(reject.order_id);
-        } else {
+    pub(crate) fn restore_refused(&self, reject: &CancelReject) -> (i64, String) {
+        {
             let mut orders = self.open_orders.lock().unwrap();
             if let Some(tracked) = orders.get_mut(&reject.order_id) {
                 // The record took the cancel ahead of the venue's answer, and

@@ -331,19 +331,13 @@ impl HotLoop {
 
     /// Released work keeps its admission order and shares the lap's allowance.
     pub(crate) fn work_through_orders(&mut self, left: &mut usize) {
-        // Remove terms only when the venue has finished with an order or said
-        // it knows none. A revision then has nothing to revise; a placement
-        // kept unsent stays, because the venue has never been given it.
+        // Remove terms only when the venue has finished with an order. A
+        // revision then has nothing to revise; a placement kept unsent stays,
+        // because the venue has never been given it.
         let orders = &self.shared.orders;
         if orders.take_numbers_changed() {
-            self.intake.placed.retain(|id, _| {
-                !orders.number_finished(*id) && !orders.number_unknown_to_the_venue(*id)
-            });
-            self.intake.kept.retain(|k| {
-                k.places_the_order()
-                    || !(orders.number_finished(k.order_id)
-                        || orders.number_unknown_to_the_venue(k.order_id))
-            });
+            self.intake.placed.retain(|id, _| !orders.number_finished(*id));
+            self.intake.kept.retain(|k| k.places_the_order() || !orders.number_finished(k.order_id));
         }
         self.intake.waiting_ids.clear();
         for _ in 0..self.intake.waiting.len() {
@@ -393,8 +387,7 @@ impl HotLoop {
     fn working(&self, order_id: u64) -> bool {
         let orders = &self.shared.orders;
         let placed_here = self.intake.placed.contains_key(&order_id)
-            && !orders.number_finished(order_id)
-            && !orders.number_unknown_to_the_venue(order_id);
+            && !orders.number_finished(order_id);
         (placed_here || orders.venue_is_working(order_id))
             && !self.intake.keeps_a_placement(order_id)
     }
@@ -794,9 +787,6 @@ impl HotLoop {
         // The caller's side records the order before anything the venue says
         // about it: the record stands ahead of the order in the session's
         // order, and the venue's answer to it after.
-        if !replacing {
-            self.shared.orders.number_placed_again(order_id);
-        }
         self.shared.push_call_record(Record::OrderBook(OrderBook::Taken(Box::new(TakenOrder {
             order_id,
             contract: p.contract.clone(),
@@ -847,7 +837,6 @@ impl HotLoop {
                 }
                 self.intake.generated.insert(child.wire_id, order_id);
                 self.remember_attachment(child.wire_id, child.order.order_id, p.order.client_id, &request, p.order.what_if);
-                self.shared.orders.number_placed_again(child.wire_id);
                 self.shared.push_call_record(Record::OrderBook(OrderBook::Taken(Box::new(TakenOrder {
                     order_id: child.wire_id, contract: p.contract.clone(), order: child.order.clone(), instrument, restated: false,
                 }))));
@@ -1298,7 +1287,6 @@ impl HotLoop {
             leg(sl_id, exit_action, "STP", 0.0, b.stop_loss, parent_id),
         ] {
             let order_id = order.order_id as u64;
-            self.shared.orders.number_placed_again(order_id);
             self.shared.push_call_record(Record::OrderBook(OrderBook::Taken(Box::new(
                 TakenOrder {
                     order_id,

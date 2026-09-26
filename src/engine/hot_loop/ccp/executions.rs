@@ -3158,17 +3158,11 @@ impl CcpState {
 
         let Some(oid) = orig_clord else { return };
 
-        // FIX CxlRejReason 1 = UnknownOrder: the venue is stating that the
-        // order does not exist on its side. Restoring it to working asserted
-        // the opposite of the message being handled, and the engine's own view
-        // governs subsequent cancels, modifies and reconnect bookkeeping — so a
-        // phantom order persisted there while the cache row that would have
-        // surfaced it was removed.
-        //
-        // Read as a positive statement, not as an absence: a missing or
-        // unparseable tag 102 is synthesized as -1 here and says nothing, so it
-        // takes the same path as the reasons that do mean the order is working.
-        let unknown_order = reason_code == 1;
+        // The reason on tag 102 moves nothing here: a gateway does not read it,
+        // and retires no order on a refusal whatever reason it states. An order
+        // retired on reason 1 left the book while the venue could still be
+        // working it — out of reach of a cancel-all, its slot free to go to
+        // another contract. It is carried to the caller as stated.
 
         // The answer to a replace arrives on this message too, and the record
         // took the attempt ahead of it. Where the venue refuses the attempt
@@ -3187,7 +3181,7 @@ impl CcpState {
         // Whether the caller had withdrawn this order before the venue
         // answered the change, read before anything is written back.
         let mut withdrawn_before_the_restore = false;
-        if reject_type == 2 && !unknown_order {
+        if reject_type == 2 {
             let refused_revision = parsed.get(&11)
                 .map(|c| revision_of(c))
                 .unwrap_or_else(|| *context.modify_versions.get(&oid).unwrap_or(&0));
@@ -3207,24 +3201,13 @@ impl CcpState {
         // Where the refusal says the order finished rather than that it stands.
         let mut finished_by_the_refusal: Option<crate::types::OrderStatus> = None;
         let instrument = if let Some(order) = context.order(oid).copied() {
-            if unknown_order {
-                // Terminal and removed, which is what the reject states.
-                // Holding the record in a non-working status instead is not an
-                // option here: those are excluded from the open-order count
-                // that guards instrument reclamation, so the slot could be
-                // handed to another contract while a retained order still
-                // pointed at it, and a late fill would move the wrong position.
-                //
-                // A fill that races the rejection is not lost with the order:
-                // the untracked-fill path books it and moves the position.
-                context.retire_order(oid);
             // A refused cancellation always leaves the order standing, so its
             // status always goes back. A refused change does too — but only
             // where it is the change the order is still waiting on: one the
             // venue answered before a cancel went out says nothing about where
             // the order stands now, and forcing it back to working undid the
             // withdrawal the caller had been told about.
-            } else if reject_type != 2 || answers_a_live_revision {
+            if reject_type != 2 || answers_a_live_revision {
                 // The reject states where the order stands, and a cancel the
                 // venue refuses is very often refused BECAUSE the order
                 // finished — which is what it says on that tag. Read past it,
@@ -3272,19 +3255,6 @@ impl CcpState {
         } else {
             0
         };
-
-        // Drop the stale cache entry so subsequent req_open_orders stops
-        // returning it. Other reasons leave the cache alone; a follow-up exec
-        // report will reconcile.
-        //
-        // No synthetic status update is queued alongside it. The cancel-reject
-        // below is the report, and both dispatchers drain fills ahead of order
-        // updates — so an update queued here would reach a caller after the
-        // fill that raced it, stating the order was gone when it had just been
-        // told the order filled.
-        if unknown_order {
-            shared.orders.remove_order_info(oid);
-        }
 
         // A cancel is very often refused because the order finished, and the
         // refusal states which on tag 39. Taken as a status and nothing more,

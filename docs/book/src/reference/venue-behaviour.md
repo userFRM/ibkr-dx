@@ -478,6 +478,11 @@ out, in the open-orders view and under its own permId: the refusal is about the
 cancel, not the order. After the error, the order is restated through
 `open_order` and `order_status` in that state, as a gateway restates it.
 
+A refusal on the venue's own cancel-reject message is reported under 10147
+where it says it holds no such order, and 10148 otherwise. Neither takes the
+order out of the book or the open-orders view: a gateway retires no order on a
+refusal, whatever reason it states.
+
 ## Reports behind a withdrawal
 
 A cancel takes the order to a revision of its own, past every one the order

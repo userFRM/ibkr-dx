@@ -2808,7 +2808,7 @@ fn a_fill_is_not_the_venues_answer_to_a_replacement() {
         &shared, 42, crate::types::OrderStatus::PartiallyFilled, 10.0, 90.0, 0,
     );
     // And then refuses the change.
-    core.retire_rejected(&refusal(2));
+    core.restore_refused(&refusal(2));
 
     assert_eq!(price_on_record(&core), 100.0, "the record states what the venue holds");
 }
@@ -2817,7 +2817,7 @@ fn a_fill_is_not_the_venues_answer_to_a_replacement() {
 fn a_refused_cancellation_does_not_roll_back_a_replacement() {
     let (core, shared, revision) = working_at(100.0);
     core.restate_order(Some(&shared), 42, ApiContract::default(), revision, 0);
-    core.retire_rejected(&refusal(1));
+    core.restore_refused(&refusal(1));
 
     assert_eq!(
         price_on_record(&core), 101.0,
@@ -2837,7 +2837,7 @@ fn the_venue_taking_the_replacement_settles_it() {
     );
     core.settle_replacement(42);
     // A refusal behind the acceptance names something the venue has answered.
-    core.retire_rejected(&refusal(2));
+    core.restore_refused(&refusal(2));
 
     assert_eq!(
         price_on_record(&core), 101.0,
@@ -2852,7 +2852,7 @@ fn a_restatement_that_never_left_is_undone() {
     core.undo_restatement(42);
 
     assert_eq!(price_on_record(&core), 100.0, "the record states what the venue holds");
-    core.retire_rejected(&refusal(2));
+    core.restore_refused(&refusal(2));
     assert_eq!(price_on_record(&core), 100.0, "and there is nothing left to put back twice");
 }
 
@@ -2933,7 +2933,7 @@ fn a_replayed_order_is_recorded_as_the_venue_states_it() {
 fn a_refusal_that_states_no_status_still_puts_the_terms_back() {
     let (core, shared, revision) = working_at(100.0);
     core.restate_order(Some(&shared), 42, ApiContract::default(), revision, 0);
-    core.retire_rejected(&crate::types::CancelReject {
+    core.restore_refused(&crate::types::CancelReject {
         order_id: 42, instrument: 0, reject_type: 2, reason_code: -1,
         answers_a_live_change: true, still_working: None, timestamp_ns: 0,
     });
@@ -2951,13 +2951,13 @@ fn a_refusal_that_states_no_status_still_puts_the_terms_back() {
 #[test]
 fn a_refusal_from_this_side_states_no_reason_code() {
     let (core, _shared, _revision) = working_at(100.0);
-    let (_, ours) = core.retire_rejected(&crate::types::CancelReject {
+    let (_, ours) = core.restore_refused(&crate::types::CancelReject {
         order_id: 42, instrument: 0, reject_type: 2, reason_code: -1,
         answers_a_live_change: true, still_working: None, timestamp_ns: 0,
     });
     assert_eq!(ours, "Order 42 modify rejected", "no reason, and none invented");
 
-    let (_, theirs) = core.retire_rejected(&crate::types::CancelReject {
+    let (_, theirs) = core.restore_refused(&crate::types::CancelReject {
         order_id: 42, instrument: 0, reject_type: 1, reason_code: 0,
         answers_a_live_change: true, still_working: None, timestamp_ns: 0,
     });
@@ -3001,7 +3001,7 @@ fn the_slot_cache_cannot_be_read_before_it_is_emptied() {
 fn a_refusal_of_a_change_already_answered_puts_nothing_back() {
     let (core, shared, revision) = working_at(100.0);
     core.restate_order(Some(&shared), 42, ApiContract::default(), revision, 0);
-    core.retire_rejected(&crate::types::CancelReject {
+    core.restore_refused(&crate::types::CancelReject {
         order_id: 42, instrument: 0, reject_type: 2, reason_code: 0,
         still_working: None, answers_a_live_change: false, timestamp_ns: 0,
     });

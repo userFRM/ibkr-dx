@@ -3328,73 +3328,15 @@ fn tracked_for_cancel(context: &mut Context) {
     context.update_order_status(42, crate::types::OrderStatus::PendingCancel, false);
 }
 
-/// A cancel answered with UnknownOrder says the order does not exist on
-/// the venue's side. Forcing it back to working asserts the opposite of the
-/// message being handled, and the engine's own view governs subsequent
-/// cancels, modifies and reconnect bookkeeping, so a phantom order persists
-/// there while the cache row that would surface it is removed.
+/// A refused cancel leaves the order in place, whatever reason it states.
+///
+/// A gateway does not read the reason on a refusal, and retires no order on
+/// one. Retired on reason 1, that the venue holds no such order, an order the
+/// venue could still be working left the book: out of reach of a cancel-all,
+/// and its slot free to go to another contract.
 #[test]
-fn an_unknown_order_rejection_retires_the_order() {
-    let mut ccp = CcpState::new();
-    let mut context = Context::new();
-    let shared = SharedState::new();
-    tracked_for_cancel(&mut context);
-    shared.orders.push_order_info(42, RichOrderInfo {
-        contract: api::Contract::default(),
-        order: api::Order::default(),
-        order_state: api::OrderState::default(),
-        last_exec: api::Execution::default(),
-    });
-
-    ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
-
-    assert!(
-        context.order(42).is_none(),
-        "the engine must not keep asserting an order the gateway says is not there",
-    );
-    assert!(
-        shared.orders.get_order_info(42).is_none(),
-        "and the cache row goes with it",
-    );
-    // The rejection itself is the report. A synthetic status update queued
-    // here would reach the caller behind a fill that raced it, because both
-    // dispatchers drain fills ahead of order updates.
-    assert!(shared.orders.drain_order_updates().is_empty());
-    assert_eq!(shared.orders.drain_cancel_rejects().len(), 1);
-}
-
-/// A fill that raced the rejection is recoverable, on the terms the
-/// untracked-fill path sets: the execution has to carry its
-/// contract id, because nothing else says which instrument moved, and it
-/// must not be resend-marked, because a replayed execution for an order
-/// this session does not track is history rather than news. An execution
-/// that carries neither is dropped — the same as it was before this change
-/// for any order already removed from the book.
-#[test]
-fn an_execution_racing_an_unknown_order_rejection_still_books() {
-    let mut ccp = CcpState::new();
-    let mut context = Context::new();
-    let shared = SharedState::new();
-    tracked_for_cancel(&mut context);
-
-    ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
-    let frame = exec_report_frame(&[
-        (39, "1"), (17, "e-1"), (150, "F"), (32, "40"), (31, "100.0"), (151, "60"),
-        (6008, "756733"), (38, "100"), (54, "1"),
-    ]);
-    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
-
-    assert_eq!(shared.orders.drain_fills().len(), 1, "the fill books");
-    assert_eq!(context.position(0), 40.0, "and the position moves");
-}
-
-/// Only a stated UnknownOrder retires the order. Every other stated reason
-/// means it is still working and the cancel arrived at the wrong moment; an
-/// absent or unparseable tag 102 states nothing at all and is synthesized
-/// as -1, so it takes the same path rather than retiring on an absence.
-#[test]
-fn any_other_rejection_leaves_the_order_in_place() {
-    for code in ["0", "2", "-1", ""] {
+fn a_rejection_leaves_the_order_in_place_whatever_its_reason() {
+    for code in ["0", "1", "2", "-1", ""] {
         let mut ccp = CcpState::new();
         let mut context = Context::new();
         let shared = SharedState::new();
@@ -3405,7 +3347,7 @@ fn any_other_rejection_leaves_the_order_in_place() {
         assert_eq!(
             context.order(42).expect("still tracked").status,
             crate::types::OrderStatus::Submitted,
-            "reason {code:?} does not say the order is gone",
+            "reason {code:?} does not take the order out of the book",
         );
     }
 }
@@ -8970,8 +8912,9 @@ fn a_recovered_orders_replace_rejection_restores_its_terms_and_name() {
 /// sent for.
 ///
 /// A recovered order answers to the permanent id the venue stated beside it,
-/// so the cancel goes out naming that. The first refusal retires the order and
-/// drops the record the name was resolved through — leaving the second with
+/// so the cancel goes out naming that. A first refusal stating the order
+/// filled retires it and drops the record the name was resolved through —
+/// leaving the second with
 /// only the digits, which name whichever live order happens to carry that
 /// number. The cancel's own name on tag 11 is this client's own and still
 /// says which order it was sent for.
@@ -9009,7 +8952,7 @@ fn a_second_cancel_refusal_does_not_retire_an_unrelated_order() {
     assert_eq!(cancel.get(&41).map(String::as_str), Some("9000.0"));
 
     let refusal = exec_report_frame(&[
-        (35, "9"), (434, "1"), (102, "1"),
+        (35, "9"), (434, "1"), (39, "2"),
         (11, cancel.get(&11).expect("the cancel carries its own name")),
         (41, "9000.0"),
     ]);
@@ -9070,34 +9013,6 @@ fn a_refused_revision_puts_back_the_name_the_venue_holds() {
         cancel.split('\u{1}').any(|f| f == "41=42.0"),
         "it names the order the venue holds, not the revision it refused: {cancel}",
     );
-}
-
-/// A refusal naming an order the venue does not hold retires it. The fallback
-/// kept against the attempt must not bring the order back: this passes on the
-/// unfixed code too — it guards the restore above against resurrecting.
-#[test]
-fn a_refusal_of_a_gone_order_resurrects_nothing() {
-    use std::io::Read;
-    let (mut context, shared) = working_order_state();
-    let mut ccp = CcpState::new();
-    let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
-    let mut conn = Some(conn);
-    let mut hb = HeartbeatState::new();
-    let mut buf = [0u8; 4096];
-
-    context.modify_ex(42, 105 * PRICE_SCALE, 200, false, 0, b'1', 0);
-    crate::engine::hot_loop::order_builder::drain_and_send_orders(
-        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false, &None, &mut 64,);
-    let n = peer.read(&mut buf).unwrap();
-    assert!(String::from_utf8_lossy(&buf[..n]).contains("35=G"), "the replace went out");
-
-    let mut frame = std::collections::HashMap::new();
-    frame.insert(41u32, "42.1".to_string());
-    frame.insert(434u32, "2".to_string());
-    frame.insert(102u32, "1".to_string()); // UnknownOrder: the venue holds no such order
-    ccp.handle_cancel_reject(&frame, &mut context, &shared, &None);
-
-    assert!(context.order(42).is_none(), "the order stays gone");
 }
 
 /// An accepted replace spends the fallback: a refusal arriving behind the
@@ -9428,7 +9343,7 @@ fn a_refused_revision_travels_on_the_channel_a_refusal_travels_on() {
                 }
                 crate::bridge::Record::CancelReject(reject) => {
                     assert_eq!(code, 399, "the venue's refusal needs no second generic error");
-                    core.retire_rejected(&reject);
+                    core.restore_refused(&reject);
                     refusals.push(reject);
                 }
                 crate::bridge::Record::OrderInactive((id, error, reason, op)) => {
@@ -10760,7 +10675,7 @@ fn a_leg_whose_reply_cannot_be_read_still_counts() {
 /// session is keyed here by the id the venue stated beside it, while the name
 /// it answers to comes from the permanent one. Read back as digits, the
 /// refusal reached whatever order that number matched — so the order the
-/// caller had cancelled stayed pending for good, and another was retired in
+/// caller had cancelled stayed pending for good, and another was put back in
 /// its place.
 #[test]
 fn a_refusal_reaches_the_order_whose_name_it_states() {
@@ -10779,6 +10694,7 @@ fn a_refusal_reaches_the_order_whose_name_it_states() {
     context.insert_order(crate::types::Order::new(
         9000, instrument, Side::Buy, 100 * crate::types::QTY_SCALE, 100 * PRICE_SCALE, b'2', b'0', 0,
     ));
+    context.update_order_status(9000, crate::types::OrderStatus::PreSubmitted, false);
 
     let mut frame = std::collections::HashMap::new();
     frame.insert(41u32, "9000.0".to_string());
@@ -10786,13 +10702,13 @@ fn a_refusal_reaches_the_order_whose_name_it_states() {
     frame.insert(102u32, "1".to_string());
     ccp.handle_cancel_reject(&frame, &mut context, &shared, &None);
 
-    assert!(
-        context.order(42).is_none(),
-        "the refusal did not reach the order whose cancel it answers",
+    assert_eq!(
+        context.order(42).map(|o| o.status), Some(crate::types::OrderStatus::Submitted),
+        "the refusal reaches the order whose cancel it answers",
     );
-    assert!(
-        context.order(9000).is_some(),
-        "and it retired the order whose number the name happened to read as",
+    assert_eq!(
+        context.order(9000).map(|o| o.status), Some(crate::types::OrderStatus::PreSubmitted),
+        "and not the order whose number the name happens to read as",
     );
 }
 

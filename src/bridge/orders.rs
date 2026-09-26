@@ -25,8 +25,6 @@ pub(crate) const REPLAY_WAIT: Duration = Duration::from_secs(3);
 struct Numbers {
     /// Finished: filled, cancelled or refused.
     finished: std::collections::HashSet<u64>,
-    /// Named in a refusal of a cancel as an order the venue does not know.
-    unknown: std::collections::HashSet<u64>,
 }
 
 /// Attachment fields stated by execution reports, including explicit zeroes.
@@ -725,7 +723,7 @@ impl OrderState {
         }
     }
 
-    /// Take the notice that finished or unknown numbers need their held terms removed.
+    /// Take the notice that finished numbers need their held terms removed.
     pub(crate) fn take_numbers_changed(&self) -> bool {
         self.numbers_changed.load(Ordering::Relaxed)
             && self.numbers_changed.swap(false, Ordering::AcqRel)
@@ -735,17 +733,6 @@ impl OrderState {
     /// session.
     pub fn number_finished(&self, order_id: u64) -> bool {
         self.numbers.lock().unwrap().finished.contains(&order_id)
-    }
-
-    /// Whether the venue last said it knows no order under this number.
-    pub fn number_unknown_to_the_venue(&self, order_id: u64) -> bool {
-        self.numbers.lock().unwrap().unknown.contains(&order_id)
-    }
-
-    /// A number is being placed under again: what the venue said it did not
-    /// know is about the order before.
-    #[doc(hidden)] pub fn number_placed_again(&self, order_id: u64) {
-        self.numbers.lock().unwrap().unknown.remove(&order_id);
     }
 
     /// The venue is working another order under a number an order finished
@@ -806,11 +793,6 @@ impl OrderState {
     }
 
     #[doc(hidden)] pub fn push_cancel_reject(&self, reject: CancelReject) {
-        // Reason 1: the venue says the order does not exist.
-        if reject.reason_code == 1 {
-            self.numbers.lock().unwrap().unknown.insert(reject.order_id);
-            self.numbers_changed.store(true, Ordering::Release);
-        }
         self.cancel_rejects.push(reject);
     }
 

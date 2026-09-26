@@ -276,7 +276,7 @@ impl EClient {
             // leave the record on what the venue holds.
             Record::ReplacementTaken(order_id) => self.core.settle_replacement(order_id),
             Record::CancelReject(reject) => {
-                let (code, msg) = self.core.retire_rejected(&reject);
+                let (code, msg) = self.core.restore_refused(&reject);
                 let origin = ErrorOrigin::Order { id: self.core.api_order_id(reject.order_id), op: reject.refuses() };
                 wrapper.error_from(origin, raised_now(), code, &msg, "");
             }
