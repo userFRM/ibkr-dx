@@ -1644,7 +1644,9 @@ mod withdrawing_one_stream_tests {
             .collect();
         let start = frame.windows(5).position(|w| w == b"35=E\x01").unwrap() + 5;
         let end = frame.windows(6).position(|w| w == b"\x018349=").unwrap();
-        let number = crate::protocol::tbt_stream::frame_ticker_id(&frame[start..end])
+        let number = crate::protocol::tbt_stream::Records::new(&frame[start..end])
+            .and_then(|mut records| records.next_stream())
+            .map(|(stream, _)| stream)
             .expect("the frame names its stream");
         for kind in [TbtType::AllLast, TbtType::Last] {
             let mut hmds = HmdsState::new();
@@ -1660,6 +1662,109 @@ mod withdrawing_one_stream_tests {
                 "each print names the stream it arrived on, {kind:?}: {heard:?}",
             );
         }
+    }
+
+    /// Two streams on one contract share frames, and each record is read as
+    /// its own stream's.
+    ///
+    /// A frame the venue sent with every trade and every quote change open on
+    /// the same crypto, at 08:43 UTC on the twenty-sixth of September 2026: ten
+    /// records, quotes on the second stream with two trades on the first among
+    /// them. The market stood at 84,272.75 bid, 84,273.50 offered, and the
+    /// contract moves in a quarter. Read by the kind of the frame's first
+    /// record, the trades were lost and every quote after the first came back
+    /// at twice the market, with sizes in the tens of billions.
+    ///
+    /// The venue goes on sending a withdrawn stream's records, among those of
+    /// the stream still open: they are stepped over by their length, and the
+    /// quotes after them are still read. So is a record of a stream this
+    /// session never held, measured by where the next record's moment falls.
+    #[test]
+    fn records_of_two_streams_in_one_frame_are_each_read_as_their_own() {
+        let hex: String =
+            crate::protocol::tbt_stream::A_CAPTURED_INTERLEAVED_FRAME.split_whitespace().collect();
+        let frame: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let quarter = crate::types::PRICE_SCALE / 4;
+        let both_trades =
+            [(1, 336_982 * quarter, 26, 1_790_412_160), (1, 337_092 * quarter, 3_488, 1_790_412_183)];
+        for (trades_withdrawn, expected_trades) in [(false, &both_trades[..]), (true, &[][..])] {
+            let mut hmds = HmdsState::new();
+            let shared = crate::bridge::SharedState::new();
+            for (caller, kind) in [(1, TbtType::AllLast), (2, TbtType::BidAsk)] {
+                let mut sub = stream(caller, 7, kind);
+                sub.min_tick = quarter;
+                sub.size_tick = 1e-8;
+                hmds.tbt_subscriptions.push(sub);
+            }
+            if trades_withdrawn {
+                hmds.send_tbt_unsubscribe(1, 7, &mut None, &mut HeartbeatState::new());
+            }
+
+            hmds.process_hmds_message(&frame, &mut None, &shared, &None, &mut HeartbeatState::new());
+
+            let trades: Vec<_> = shared.market.drain_tbt_trades().into_iter()
+                .map(|t| (t.req_id, t.price, t.size, t.timestamp)).collect();
+            assert_eq!(
+                trades, expected_trades,
+                "the trades, on the stream that carries them (withdrawn: {trades_withdrawn})",
+            );
+            let quotes = shared.market.drain_tbt_quotes();
+            assert_eq!(quotes.len(), 8, "eight quote changes (withdrawn: {trades_withdrawn}): {quotes:?}");
+            assert!(
+                quotes.iter().all(|q| q.req_id == 2 && q.bid == 337_091 * quarter && q.ask == 337_094 * quarter),
+                "every quote at the market that was there: {quotes:?}",
+            );
+            assert_eq!(
+                quotes.last().map(|q| (q.bid_size, q.ask_size)),
+                Some((57_112, 2_373_231)),
+                "and the last one's sizes, read from where that record starts",
+            );
+        }
+
+        // A record of a stream this session never held, ahead of a quote on the
+        // stream it does hold.
+        let mut hmds = HmdsState::new();
+        let shared = crate::bridge::SharedState::new();
+        let mut held = stream(2, 7, TbtType::BidAsk);
+        held.min_tick = quarter;
+        held.size_tick = 1e-8;
+        hmds.tbt_subscriptions.push(held);
+        let field = |mut value: u64| {
+            let mut groups = Vec::new();
+            loop {
+                groups.push((value & 0x7F) as u8);
+                value >>= 7;
+                if value == 0 {
+                    break;
+                }
+            }
+            groups.reverse();
+            *groups.last_mut().unwrap() |= 0x80;
+            groups
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload: Vec<u8> = [9, now, 5, 6, 0, 1, 1, 2, now, 337_091, 337_094, 0, 60_600, 2_373_227]
+            .into_iter()
+            .flat_map(field)
+            .collect();
+        let mut message = b"35=E\x01".to_vec();
+        message.extend_from_slice(&((payload.len() * 8) as u16).to_be_bytes());
+        message.extend_from_slice(&payload);
+
+        hmds.process_hmds_message(&message, &mut None, &shared, &None, &mut HeartbeatState::new());
+
+        let quotes: Vec<_> = shared.market.drain_tbt_quotes().into_iter()
+            .map(|q| (q.req_id, q.bid, q.ask, q.bid_size, q.ask_size)).collect();
+        assert_eq!(
+            quotes,
+            [(2, 337_091 * quarter, 337_094 * quarter, 60_600, 2_373_227)],
+            "the quote after a record of a stream never held",
+        );
     }
 
     /// A contract can carry two streams — every trade, and every quote change.
@@ -1746,11 +1851,11 @@ mod withdrawing_one_stream_tests {
             let withdrawal = super::read_frame(&mut peer);
             if shares {
                 assert!(withdrawal.is_empty(), "the sibling is still waiting for the shared number");
-                assert!(!hmds.tbt_withdrawn.contains(&41));
+                assert!(!hmds.tbt_withdrawn.contains_key(&41));
             } else {
                 assert!(String::from_utf8_lossy(&withdrawal).contains("<id>rtTicker:41</id>"),
                     "another contract or wire kind does not hold this stream");
-                assert!(hmds.tbt_withdrawn.contains(&41));
+                assert!(hmds.tbt_withdrawn.contains_key(&41));
             }
 
             let number = if shares { 41 } else { 42 };
@@ -1803,7 +1908,7 @@ mod withdrawing_one_stream_tests {
         hmds.process_hmds_message(ack, &mut conn, &shared, &None, &mut hb);
         let by_number = String::from_utf8_lossy(&super::read_frame(&mut peer)).into_owned();
         assert!(by_number.contains("<id>rtTicker:41</id>"), "withdrawn by the venue's number: {by_number:?}");
-        assert!(hmds.tbt_withdrawn.contains(&41), "and its ticks are known as withdrawn");
+        assert!(hmds.tbt_withdrawn.contains_key(&41), "and its ticks are known as withdrawn");
         assert!(hmds.tbt_subscriptions.is_empty(), "nothing is reopened by the acknowledgement");
     }
 
@@ -1827,7 +1932,9 @@ mod withdrawing_one_stream_tests {
             .collect();
         let start = frame.windows(5).position(|w| w == b"35=E\x01").unwrap() + 5;
         let end = frame.windows(6).position(|w| w == b"\x018349=").unwrap();
-        let number = crate::protocol::tbt_stream::frame_ticker_id(&frame[start..end])
+        let number = crate::protocol::tbt_stream::Records::new(&frame[start..end])
+            .and_then(|mut records| records.next_stream())
+            .map(|(stream, _)| stream)
             .expect("the frame names its stream");
         for caller in [1, 2] {
             let mut sub = stream(caller, 7, TbtType::BidAsk);
@@ -1842,11 +1949,11 @@ mod withdrawing_one_stream_tests {
 
         hmds.send_tbt_unsubscribe(1, 7, &mut conn, &mut hb);
         assert!(super::read_frame(&mut peer).is_empty(), "the stream is left running for the other caller");
-        assert!(!hmds.tbt_withdrawn.contains(&number), "and is not marked withdrawn");
+        assert!(!hmds.tbt_withdrawn.contains_key(&number), "and is not marked withdrawn");
         hmds.send_tbt_unsubscribe(2, 7, &mut conn, &mut hb);
         let withdrawn = String::from_utf8_lossy(&super::read_frame(&mut peer)).into_owned();
         assert!(withdrawn.contains(&format!("<id>rtTicker:{number}</id>")), "the last to leave withdraws it: {withdrawn:?}");
-        assert!(hmds.tbt_withdrawn.contains(&number));
+        assert!(hmds.tbt_withdrawn.contains_key(&number));
     }
 
     /// A caller taken on under a number another caller already holds joins
@@ -1868,7 +1975,9 @@ mod withdrawing_one_stream_tests {
             .collect();
         let start = frame.windows(5).position(|w| w == b"35=E\x01").unwrap() + 5;
         let end = frame.windows(6).position(|w| w == b"\x018349=").unwrap();
-        let number = crate::protocol::tbt_stream::frame_ticker_id(&frame[start..end])
+        let number = crate::protocol::tbt_stream::Records::new(&frame[start..end])
+            .and_then(|mut records| records.next_stream())
+            .map(|(stream, _)| stream)
             .expect("the frame names its stream");
         let scaled = (0.00005 * crate::types::PRICE_SCALE as f64).round() as i64;
 
@@ -2659,7 +2768,7 @@ fn a_withdrawal_waiting_for_its_number_leaves_a_shared_stream_running() {
     hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
 
     assert!(
-        !hmds.tbt_withdrawn.contains(&55),
+        !hmds.tbt_withdrawn.contains_key(&55),
         "the number is not marked withdrawn while another caller reads it",
     );
     assert!(

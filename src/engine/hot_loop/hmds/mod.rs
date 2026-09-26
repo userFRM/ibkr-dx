@@ -57,14 +57,14 @@ pub(crate) struct HmdsState {
     /// this venue does not act on sends ticks for the rest of the session, and
     /// several hundred identical warnings bury whatever else is in the log.
     ///
-    /// Read for the wording of that one line and for nothing else. What a tick
-    /// belongs to is decided from the subscriptions this client holds, so a
-    /// number in here refuses nothing: the venue hands its numbers out again,
-    /// and a set of withdrawn ones that decided whether an answer counted
-    /// silently killed every later subscription that drew a number off it.
-    /// This one only chooses which warning to print about ticks already going
-    /// nowhere.
-    pub(crate) tbt_withdrawn: std::collections::HashSet<u64>,
+    /// Read for the wording of that one line, and for the kind each stream
+    /// was, whose record length steps over the records that keep arriving so
+    /// the ones after them in a frame are still read. What a tick belongs to is
+    /// decided from the subscriptions this client holds, so a number in here
+    /// refuses nothing: the venue hands its numbers out again, and a set of
+    /// withdrawn ones that decided whether an answer counted silently killed
+    /// every later subscription that drew a number off it.
+    pub(crate) tbt_withdrawn: std::collections::HashMap<u64, TbtType>,
     /// Streams withdrawn before the venue had numbered them, by the name this
     /// client asked under. A late acknowledgement is withdrawn by its
     /// stream number as well.
@@ -441,10 +441,11 @@ pub(crate) struct Along {
 
 impl HmdsState {
     pub(crate) fn new() -> Self {
+        std::sync::LazyLock::force(&TBT_READING_FROM);
         Self {
             next_tbt_req_id: 1,
             tbt_subscriptions: Vec::new(),
-            tbt_withdrawn: std::collections::HashSet::new(),
+            tbt_withdrawn: std::collections::HashMap::new(),
             tbt_withdrawn_unnumbered: std::collections::HashMap::new(),
             tbt_reported: std::collections::HashSet::new(),
             next_hmds_query_id: 1000,
@@ -826,7 +827,7 @@ impl HmdsState {
                                 );
                                 return;
                             }
-                            self.tbt_withdrawn.insert(ack.venue_id);
+                            self.tbt_withdrawn.insert(ack.venue_id, kind);
                             Self::send_tbt_cancel(&format!("rtTicker:{}", ack.venue_id), hmds_conn, hb);
                             return;
                         }
@@ -1696,84 +1697,103 @@ impl HmdsState {
             shared.market.note_unread_wire("tbt-frame", hex);
         }
 
-        // Which subscription a frame belongs to is stated on the frame. Taking
-        // the first subscription instead attributed every record to whichever
-        // was made first, so a second contract's trades were reported under the
-        // first contract's name — visibly, once two were running at once.
-        let stated = crate::protocol::tbt_stream::frame_ticker_id(body);
-        // Every subscription the venue serves under this number. It answers a
-        // second query on a contract and kind with the number it gave the
-        // first, so two callers can share one stream, and each hears every
-        // record of it; routed to whichever subscription came first, the
-        // second caller heard nothing.
-        let holders: Vec<usize> = stated
-            .map(|id| {
-                self.tbt_subscriptions
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, sub)| sub.venue_id == id)
-                    .map(|(at, _)| at)
-                    .collect()
-            })
-            .unwrap_or_default();
-        // A frame naming a subscription this session does not hold is not
-        // attributed to another one.
-        if holders.is_empty() {
-            // Said once per stream rather than once per tick. A withdrawal this
-            // venue does not act on goes on delivering for the rest of the
-            // session, and several hundred identical lines bury the rest of the
-            // log without saying anything the first one did not.
-            if let Some(id) = stated
-                && self.tbt_reported.insert(id)
-            {
-                if self.tbt_withdrawn.contains(&id) {
-                    log::warn!(
-                        "the venue is still sending ticks for stream {id}, which this \
-                         session withdrew; they are dropped, and it does not stop until \
-                         the session ends",
-                    );
-                } else {
-                    log::warn!(
-                        "a tick names stream {id}, which this session does not hold; dropped",
-                    );
+        let Some(mut records) = tbt_stream::Records::new(body) else { return };
+        // Each record states which stream it belongs to, and a frame carries
+        // the records of every stream that had something to say: every trade
+        // and every quote change on one contract arrive interleaved in the same
+        // frames. Each is read by the layout of the stream it names and handed
+        // to that stream's holders, as a gateway reads them. Routed by the
+        // frame's first record, every record in it was read as that one's
+        // kind, and a quote stream came back at twice the market with sizes in
+        // the tens of billions.
+        while let Some((stated, seconds)) = records.next_stream() {
+            // Every subscription the venue serves under this number. It answers
+            // a second query on a contract and kind with the number it gave the
+            // first, so two callers can share one stream, and each hears every
+            // record of it; routed to whichever subscription came first, the
+            // second caller heard nothing.
+            let holders: Vec<usize> = self
+                .tbt_subscriptions
+                .iter()
+                .enumerate()
+                .filter(|(_, sub)| sub.venue_id == stated)
+                .map(|(at, _)| at)
+                .collect();
+            // A record naming a subscription this session does not hold is not
+            // attributed to another one. It is stepped over by its length, as a
+            // gateway steps over one, so the records after it in the frame are
+            // still read: the length of the kind a withdrawn stream was, and
+            // for a stream this session never held, the length the moment of
+            // the record after it points to.
+            if holders.is_empty() {
+                // Said once per stream rather than once per tick. A withdrawal
+                // this venue does not act on goes on delivering for the rest of
+                // the session, and several hundred identical lines bury the rest
+                // of the log without saying anything the first one did not.
+                if self.tbt_reported.insert(stated) {
+                    if self.tbt_withdrawn.contains_key(&stated) {
+                        log::warn!(
+                            "the venue is still sending ticks for stream {stated}, which \
+                             this session withdrew; they are dropped, and it does not stop \
+                             until the session ends",
+                        );
+                    } else {
+                        log::warn!(
+                            "a tick names stream {stated}, which this session does not \
+                             hold; dropped",
+                        );
+                    }
                 }
-            }
-            return;
-        }
-        for at in holders {
-            let instrument = self.tbt_subscriptions[at].instrument;
-            // Which request this arrived under, as the caller numbered it. A
-            // contract can carry several streams, so the contract alone does not
-            // say which one a record belongs to.
-            let caller_req_id = self.tbt_subscriptions[at].caller_req_id;
-            // The layout of a record is the layout of the stream it arrived on,
-            // which is a property of the subscription and not of the contract.
-            let asked_for = self.tbt_subscriptions[at].kind;
-            let kind = frame_kind(asked_for);
-
-            // A move is stated in whole increments of the contract's own smallest
-            // one, so without that increment a move cannot be turned into a price.
-            let mts = self.tbt_subscriptions[at].min_tick;
-            if mts <= 0 {
-                log::warn!(
-                    "a tick arrived for an instrument whose smallest increment is not \
-                     known, so its price cannot be worked out; dropped rather than guessed"
-                );
+                let fields = match self.tbt_withdrawn.get(&stated) {
+                    Some(kind) => frame_kind(*kind).fields(),
+                    None => records.guess_fields(tbt_moment),
+                };
+                if records.skip(fields).is_none() {
+                    return;
+                }
                 continue;
             }
+            let from = records.clone();
+            for at in holders {
+                let instrument = self.tbt_subscriptions[at].instrument;
+                // Which request this arrived under, as the caller numbered it. A
+                // contract can carry several streams, so the contract alone does
+                // not say which one a record belongs to.
+                let caller_req_id = self.tbt_subscriptions[at].caller_req_id;
+                // The layout of a record is the layout of the stream it arrived
+                // on, which is a property of the subscription and not of the
+                // contract.
+                let asked_for = self.tbt_subscriptions[at].kind;
+                let kind = frame_kind(asked_for);
+                // What sizes move in for this contract. Stated once, when the
+                // venue took the subscription on.
+                let size_tick = self.tbt_subscriptions[at].size_tick;
+                let mts = self.tbt_subscriptions[at].min_tick;
+                // Decoded in whole increments and scaled by whole numbers
+                // afterwards, so a session of moves cannot drift the way adding
+                // fractions would. Every holder reads the same record from the
+                // same place, so each one's reading ends where the next record
+                // starts.
+                let mut reading = from.clone();
+                let Some(record) =
+                    reading.read(kind, 1.0, &mut self.tbt_subscriptions[at].running)
+                else {
+                    return;
+                };
+                records = reading;
 
-            // What sizes move in for this contract. Stated once, when the venue
-            // took the subscription on.
-            let size_tick = self.tbt_subscriptions[at].size_tick;
-            // Decoded in whole increments and scaled by whole numbers afterwards,
-            // so a session of moves cannot drift the way adding fractions would.
-            let running = &mut self.tbt_subscriptions[at].running;
-            let Some(frame) = tbt_stream::decode_frame(body, kind, 1.0, running) else {
-                continue;
-            };
+                // A move is stated in whole increments of the contract's own
+                // smallest one, so without that increment a move cannot be
+                // turned into a price.
+                if mts <= 0 {
+                    log::warn!(
+                        "a tick arrived for an instrument whose smallest increment is not \
+                         known, so its price cannot be worked out; dropped rather than guessed"
+                    );
+                    continue;
+                }
 
-            for stamped in &frame.records {
-                match &stamped.record {
+                match record {
                     TbtRecord::Trade(t) => {
                         let trade = crate::types::TbtTrade {
                             instrument,
@@ -1785,9 +1805,9 @@ impl HmdsState {
                             // hundred-millionths for a crypto — and is then held in
                             // the form every reader divides by.
                             size: scaled_size(t.size, size_tick),
-                            timestamp: stamped.seconds,
-                            exchange: t.exchange.clone(),
-                            conditions: t.conditions.clone(),
+                            timestamp: seconds,
+                            exchange: t.exchange,
+                            conditions: t.conditions,
                             past_limit: t.past_limit,
                             unreported: t.unreported,
                         };
@@ -1802,7 +1822,7 @@ impl HmdsState {
                             ask: (q.ask as i64).saturating_mul(mts),
                             bid_size: scaled_size(q.bid_size, size_tick),
                             ask_size: scaled_size(q.ask_size, size_tick),
-                            timestamp: stamped.seconds,
+                            timestamp: seconds,
                             bid_past_low: q.bid_past_low,
                             ask_past_high: q.ask_past_high,
                         };
@@ -1814,7 +1834,7 @@ impl HmdsState {
                             instrument,
                             req_id: caller_req_id,
                             price: ticks.saturating_mul(mts),
-                            timestamp: stamped.seconds,
+                            timestamp: seconds,
                         };
                         shared.market.push_tbt_mid(mid);
                         emit(event_tx, Event::TbtMid(mid));
@@ -2044,7 +2064,7 @@ fn build_tbt_query(
         // with. Kept so records that keep arriving after this are recognised as
         // the ones this withdrawal was meant to stop.
         if gone.venue_id != 0 {
-            self.tbt_withdrawn.insert(gone.venue_id);
+            self.tbt_withdrawn.insert(gone.venue_id, gone.kind);
         }
         // A numbered tick stream is withdrawn in its real-time namespace.
         // Before acknowledgement, withdraw the query by its original name
@@ -3628,4 +3648,22 @@ pub(crate) fn frame_kind(asked_for: crate::types::TbtType) -> crate::protocol::t
         TbtType::MidPoint => TbtKind::MidPoint,
         TbtType::AllLast | TbtType::Last => TbtKind::AllLast,
     }
+}
+
+/// When this process began reading tick-by-tick streams, five seconds early, in
+/// seconds since the epoch.
+static TBT_READING_FROM: std::sync::LazyLock<i64> = std::sync::LazyLock::new(|| {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64);
+    (millis - 5_000) / 1_000
+});
+
+/// Whether a field reads as the moment of a record: set, and a second from
+/// when this process began reading to three days on.
+fn tbt_moment(value: i32) -> bool {
+    value != 0
+        && value != i32::MAX
+        && value != i32::MIN
+        && (*TBT_READING_FROM..*TBT_READING_FROM + 259_200).contains(&i64::from(value))
 }

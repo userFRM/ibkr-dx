@@ -19,6 +19,7 @@
 /// return a wrong value and carry on: it leaves the position in the middle of
 /// the next field, and everything after it is nonsense. That is why a kind's
 /// field count is followed exactly rather than guessed at.
+#[derive(Clone)]
 pub struct Bits<'a> {
     bytes: &'a [u8],
     /// Position in bits, not bytes.
@@ -141,11 +142,11 @@ pub enum TbtKind {
 impl TbtKind {
     /// How many fields a record of this kind nominally carries.
     ///
-    /// A description of the format, not a bound the reader is held to: a trade
-    /// record can restate its size at greater width, so `read_record` reads
-    /// what each kind's own fields say rather than counting to this. It is
-    /// here because it is the shape the venue writes, and what a reader of the
-    /// format wants to know first.
+    /// Not a bound the reader is held to: a trade record can restate its size
+    /// at greater width, so `read_record` reads what each kind's own fields say
+    /// rather than counting to this. It is the length a record of a stream
+    /// this session has withdrawn is stepped over by, as a gateway steps over
+    /// one, since that stream's records are no longer read.
     pub fn fields(self) -> usize {
         match self {
             Self::Last | Self::AllLast | Self::BidAsk => 5,
@@ -234,105 +235,111 @@ pub struct RunningPrice {
     mid_ticks: i64,
 }
 
-/// One record, and the second the venue stamped that record with.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TbtStamped {
-    /// Seconds since the epoch, from this record's own header.
-    pub seconds: u64,
-    /// What the record says.
-    pub record: TbtRecord,
+/// The records of a frame, read one at a time.
+///
+/// Every record states which stream it belongs to and when it happened, and a
+/// frame carries the records of every stream that had something to say: two
+/// streams open on one contract share frames, their records interleaved. A
+/// record's layout is its own stream's, so each is read by the kind of the
+/// stream it names, as a gateway reads them. Read by the kind of the frame's
+/// first record, a trade after a run of quotes was taken for a quote, and every
+/// record after it was read from the wrong place — prices of twice the market
+/// and sizes in the tens of billions.
+#[derive(Clone)]
+pub struct Records<'a> {
+    bits: Bits<'a>,
 }
 
-/// A frame: one subscription and the records it carries.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TbtFrame {
-    /// The venue's number for the stream.
-    pub ticker_id: u64,
-    /// The records in this frame, each with the moment it happened.
-    pub records: Vec<TbtStamped>,
-}
-
-/// Read every record in a frame.
-///
-/// A frame opens with two bytes saying how many bits of payload follow, and the
-/// payload is what those bits say it is rather than whatever is left in the
-/// message — a message carries a field after the payload, and reading to the
-/// end of it swallows that field as though it were data.
-///
-/// Every record then states which subscription it belongs to and when it
-/// happened, so a frame can carry records of more than one moment. A reading
-/// that takes those once for the whole frame consumes the second record's
-/// header as though it were the first record's prices.
-///
-/// `min_tick` is the contract's own smallest increment, which is what a price
-/// move is counted in. `running` carries prices forward and must be the same
-/// one across every frame of a subscription.
-pub fn decode_frame(
-    body: &[u8],
-    kind: TbtKind,
-    min_tick: f64,
-    running: &mut RunningPrice,
-) -> Option<TbtFrame> {
-    if body.len() < 2 {
-        return None;
+impl<'a> Records<'a> {
+    /// The records a frame's body carries.
+    ///
+    /// A frame opens with two bytes saying how many bits of payload follow, and
+    /// the payload is what those bits say it is rather than whatever is left in
+    /// the message — a message carries a field after the payload, and reading
+    /// to the end of it swallows that field as though it were data.
+    pub fn new(body: &'a [u8]) -> Option<Self> {
+        if body.len() < 2 {
+            return None;
+        }
+        // The count is two bytes and wraps at sixty-five thousand bits, which
+        // is eight kilobytes of records — a batch that size states nought.
+        // Recovered against how much arrived, the way every other bit-counted
+        // section of this wire is: read as stated, a frame at the wrap decoded
+        // as no records at all, and one past it as its own first eight
+        // kilobytes.
+        let bits_stated = crate::protocol::tick_decoder::bits_carried(
+            u16::from_be_bytes([body[0], body[1]]),
+            body.len(),
+        );
+        // A length the bytes do not satisfy is a frame cut short: refused
+        // rather than read as the shorter frame it is not, which would deliver
+        // part of a moment's records as the whole of them.
+        let payload = body.get(2..2 + bits_stated.div_ceil(8))?;
+        Some(Self { bits: Bits::new(payload) })
     }
-    // The count is two bytes and wraps at sixty-five thousand bits, which is
-    // eight kilobytes of records — a batch that size states nought. Recovered
-    // against how much arrived, the way every other bit-counted section of this
-    // wire is: read as stated, a frame at the wrap decoded as no records at
-    // all, and one past it as its own first eight kilobytes.
-    let bits_stated = crate::protocol::tick_decoder::bits_carried(
-        u16::from_be_bytes([body[0], body[1]]),
-        body.len(),
-    );
-    let bytes_stated = bits_stated.div_ceil(8);
-    // A length the bytes do not satisfy is a frame cut short: refused rather
-    // than read as the shorter frame it is not, which would deliver part of
-    // a moment's records as the whole of them.
-    let payload = body.get(2..2 + bytes_stated)?;
 
-    let mut bits = Bits::new(payload);
-    let mut records = Vec::new();
-    let mut ticker_id = 0;
+    /// The stream the next record belongs to and the second it happened, from
+    /// the record's own header.
+    ///
+    /// Nothing once what is left is too short to hold a header: that is what
+    /// is left over after the last record, not a record that failed to read.
+    pub fn next_stream(&mut self) -> Option<(u64, u64)> {
+        if self.bits.remaining() < 16 {
+            return None;
+        }
+        Some((self.bits.unsigned()?, self.bits.unsigned()?))
+    }
 
-    // A record needs at least its own header, so anything shorter is what is
-    // left over rather than a record that failed to read.
-    while bits.remaining() >= 16 {
-        let Some(id) = bits.unsigned() else { break };
-        let Some(at) = bits.unsigned() else { break };
-        match read_record(&mut bits, kind, min_tick, running) {
-            Some(record) => {
-                ticker_id = id;
-                // Kept with the record it came from. Held once for the frame,
-                // the last record's second overwrote every earlier one, and a
-                // frame carrying a second's worth of prints stamped them all
-                // at the moment the last of them happened.
-                records.push(TbtStamped { seconds: at, record });
+    /// The record after the header just read, laid out as `kind` lays one out.
+    ///
+    /// `min_tick` is the contract's own smallest increment, which is what a
+    /// price move is counted in. `running` carries the stream's prices forward
+    /// and must be the same one across every record of the stream.
+    pub fn read(
+        &mut self,
+        kind: TbtKind,
+        min_tick: f64,
+        running: &mut RunningPrice,
+    ) -> Option<TbtRecord> {
+        read_record(&mut self.bits, kind, min_tick, running)
+    }
+
+    /// Step over the record after the header just read, `fields` fields long.
+    ///
+    /// Every field ends on the octet whose top bit is set, whatever it holds,
+    /// so a record is passed by its count of fields without being understood,
+    /// and the records after it in the frame are still found.
+    pub fn skip(&mut self, fields: usize) -> Option<()> {
+        for _ in 0..fields {
+            self.bits.unsigned()?;
+        }
+        Some(())
+    }
+
+    /// How many fields long the record after the header just read is, for a
+    /// stream whose layout is not known: two where the fourth field on is a
+    /// moment, the second of the next record's header after a record of two
+    /// fields; five where the seventh is; none where neither is, or where the
+    /// frame ends first. A field is taken here as a 32-bit whole number, as a
+    /// gateway takes it for this.
+    pub fn guess_fields(&self, is_moment: impl Fn(i32) -> bool) -> usize {
+        let mut ahead = self.bits.clone();
+        let mut nth = |n: usize| -> Option<i32> {
+            let mut value = 0;
+            for _ in 0..n {
+                value = ahead.unsigned()? as u32 as i32;
             }
-            None => break,
+            Some(value)
+        };
+        match nth(4) {
+            Some(fourth) if is_moment(fourth) => 2,
+            Some(_) => match nth(3) {
+                Some(seventh) if is_moment(seventh) => 5,
+                _ => 0,
+            },
+            None => 0,
         }
     }
-
-    Some(TbtFrame { ticker_id, records })
-}
-
-/// Which subscription a frame's records belong to, as the frame states it.
-///
-/// Every record names it, and they agree within a frame. Reading it without
-/// decoding the rest lets a caller route the frame before it knows how to read
-/// what is in it.
-pub fn frame_ticker_id(body: &[u8]) -> Option<u64> {
-    if body.len() < 2 {
-        return None;
-    }
-    // Read the way the frame itself reads it, or the two disagree about where
-    // one frame's records end.
-    let bits_stated = crate::protocol::tick_decoder::bits_carried(
-        u16::from_be_bytes([body[0], body[1]]),
-        body.len(),
-    );
-    let payload = body.get(2..2 + bits_stated.div_ceil(8))?;
-    Bits::new(payload).unsigned()
 }
 
 /// A size, which the venue may state in one number or in two.
@@ -462,10 +469,52 @@ pub(crate) const A_CAPTURED_QUOTE_FRAME: &str = "383d4f01393d303130380133353d450
     800e1765f03d04c08106536549c48081800e1765f00d5a61b08106536549c4\
     8080800d7923d00d5a61b001383334393d363932384333303801";
 
+/// A frame the venue sent with every trade and every quote change open on one
+/// crypto, on the twenty-sixth of September 2026: ten records of two streams,
+/// interleaved — quotes on the second, with two trades on the first among them.
+#[cfg(test)]
+pub(crate) const A_CAPTURED_INTERLEAVED_FRAME: &str = "383d4f01393d303138300133353d450104f08206555e0b961449c31449c68003\
+    59b801106ceb8106555e0b801448d6809a80808206555e0b978080800359b801\
+    106ce98206555e0b978080800359b801106cea8206555e0b978080800359b801\
+    106ceb8206555e0b978080800359b801106cec8206555e0b978080800359b801\
+    106ced8206555e0b978080800359b801106cee8106555e0b9700ee801ba08080\
+    8206555e0b97808080033e9801106cef01383334393d454138323846363401";
+
 #[cfg(test)]
 mod tests {
 
     use super::*;
+
+    /// One record, and the second the venue stamped that record with.
+    #[derive(Debug)]
+    struct TbtStamped {
+        seconds: u64,
+        record: TbtRecord,
+    }
+
+    /// A frame of one stream: its number and the records it carries.
+    #[derive(Debug)]
+    struct TbtFrame {
+        ticker_id: u64,
+        records: Vec<TbtStamped>,
+    }
+
+    /// Every record of a frame that carries one stream, read as `kind`.
+    fn decode_frame(
+        body: &[u8],
+        kind: TbtKind,
+        min_tick: f64,
+        running: &mut RunningPrice,
+    ) -> Option<TbtFrame> {
+        let mut records = Records::new(body)?;
+        let mut frame = TbtFrame { ticker_id: 0, records: Vec::new() };
+        while let Some((id, seconds)) = records.next_stream() {
+            let Some(record) = records.read(kind, min_tick, running) else { break };
+            frame.ticker_id = id;
+            frame.records.push(TbtStamped { seconds, record });
+        }
+        Some(frame)
+    }
 
     /// Write the wire encodings, so a test frame is built the way a
     /// frame is built rather than by hand.
@@ -691,10 +740,6 @@ mod tests {
             "every record in it is read, not nought of them: {}",
             frame.records.len(),
         );
-        assert_eq!(
-            frame_ticker_id(&body), Some(frame.ticker_id),
-            "and the two readers of the count agree where the records end",
-        );
     }
 
     /// One quote record, headed by its subscription and its moment.
@@ -813,7 +858,6 @@ mod tests {
             decode_frame(cut, TbtKind::BidAsk, 0.00005, &mut running).is_none(),
             "a frame short of its stated length is not a frame",
         );
-        assert!(frame_ticker_id(cut).is_none(), "and it names no subscription");
         assert_eq!(running, RunningPrice::default(), "nothing it carried was read");
     }
 
@@ -838,6 +882,39 @@ mod tests {
         assert_eq!(TbtKind::AllLast.fields(), 5);
         assert_eq!(TbtKind::BidAsk.fields(), 5);
         assert_eq!(TbtKind::MidPoint.fields(), 2);
+    }
+
+    /// A record of a stream this session does not read is measured by where
+    /// the moment of the record after it falls: five fields where the seventh
+    /// field on is one, two where the fourth is, and none where the frame ends
+    /// before either.
+    #[test]
+    fn a_record_of_an_unread_stream_is_measured_by_the_moment_after_it() {
+        let moment = |value: i32| (1_790_412_000..1_790_413_000).contains(&value);
+        let hex: String = A_CAPTURED_INTERLEAVED_FRAME.split_whitespace().collect();
+        let message: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let start = message.windows(5).position(|w| w == b"35=E\x01").unwrap() + 5;
+        let end = message.windows(6).position(|w| w == b"\x018349=").unwrap();
+        let mut records = Records::new(&message[start..end]).expect("a frame");
+        let mut measured = Vec::new();
+        while let Some((stream, _)) = records.next_stream() {
+            measured.push(records.guess_fields(moment));
+            let kind = if stream == 1 { TbtKind::AllLast } else { TbtKind::BidAsk };
+            records.read(kind, 1.0, &mut RunningPrice::default()).expect("a record");
+        }
+        assert_eq!(measured, [5, 5, 5, 5, 5, 5, 5, 5, 5, 0], "trades and quotes are five fields long");
+
+        let mid = |at: u64| {
+            let mut w = Writer::default();
+            w.unsigned(3).unsigned(at).signed(1).unsigned(0);
+            w.out
+        };
+        let body = frame(&[mid(1_790_412_100), mid(1_790_412_101)]);
+        let mut records = Records::new(&body).expect("a frame");
+        records.next_stream().expect("a header");
+        assert_eq!(records.guess_fields(moment), 2, "a midpoint is two");
     }
 }
 
