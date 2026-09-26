@@ -6017,9 +6017,11 @@ impl FarmState {
         };
         self.rt_volume_totals.insert((instrument, tick_type), (value, shares, trades));
 
-        let moved_shares = shares - was_shares;
+        // Taken as a gateway takes them, in the totals' own widths, wrapping
+        // where two totals the venue does not send lie too far apart.
+        let moved_shares = shares.wrapping_sub(was_shares);
         let moved_value = value - was_value;
-        let moved_trades = trades - was_trades;
+        let moved_trades = trades.wrapping_sub(was_trades);
         // A trade of no shares has no price: the venue divides by the share
         // difference and states nothing where it is nought, rather than
         // standing in the last price it knew.
