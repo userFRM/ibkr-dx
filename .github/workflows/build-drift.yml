@@ -1,10 +1,11 @@
 name: build drift
 
-# The build number this client states at logon is a constant here, and the
-# vendor moves theirs every few weeks. Nothing notices, so this does: nightly,
-# it compares the two and keeps one issue open while they differ.
+# The build number this client states at logon is a constant here, the latest
+# the vendor ships, and the vendor moves it every few weeks. Nothing notices, so
+# this does: nightly, it compares the latest published build with the one last
+# recorded and fails the run while they differ.
 #
-# It opens an issue rather than a pull request on purpose. What a client states
+# It reports rather than opening a pull request on purpose. What a client states
 # at logon decides what the server does with it, and that is a change to make
 # deliberately against a paper session, not one to merge unattended overnight.
 
@@ -65,15 +66,12 @@ jobs:
             echo "$REPORT"
             echo '```'
             echo
-            echo "The constants are \`IB_BUILD\` and \`IB_VERSION\` in \`src/config.rs\`."
-            echo
-            echo "A stale build is tolerated because the logon marks the client as a"
-            echo "rolling-release build, which skips the server's allow-list check. That is"
-            echo "one flag between these constants and a refused login, so a new build is"
-            echo "worth trying — against a paper session, since what is stated at logon"
+            echo "The constants are \`IB_BUILD\`, \`IB_VERSION\` and \`IB_ENCODED\` in"
+            echo "\`src/config.rs\`, and they state the latest build the vendor ships: the"
+            echo "venue decides what a session is offered by the build it states. Move them"
+            echo "to the new build against a paper session, since what is stated at logon"
             echo "decides what the server does with it."
             echo
-            echo "Record the build in \`.github/gateway-build.json\` once it has been"
-            echo "looked at, whether or not the constants move."
+            echo "Record the build in \`.github/gateway-build.json\` in the same change."
           } >> "$GITHUB_STEP_SUMMARY"
           exit 1

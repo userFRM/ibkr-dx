@@ -1170,12 +1170,13 @@ fn reconnect_ccp_attempt(
         auth.username.clone()
     };
     let connect_req = format!(
-        "{};{};{};{};{};27;{};{};{};{};",
+        "{};{};{};{};{};{};{};{};{};{};",
         NS_VERSION_MIN,
         ns::NS_CONNECT_REQUEST,
         display_name,
         flags,
         NS_VERSION,
+        IB_LAUNCHER_VERSION,
         auth.hw_info,
         auth.server_session_id,
         auth.encoded,
@@ -2228,14 +2229,14 @@ impl Gateway {
             .map_or_else(session::get_session_id, |r| r.server_session_id.clone());
         let connect_req = match resume_key.as_ref() {
             Some(key) => format!(
-                "{};{};{};{};{};27;{};{};{};{};",
+                "{};{};{};{};{};{};{};{};{};{};",
                 NS_VERSION_MIN, ns::NS_CONNECT_REQUEST, display_name, flags, NS_VERSION,
-                hw_info, session_id, encoded, token_short_hash(key),
+                IB_LAUNCHER_VERSION, hw_info, session_id, encoded, token_short_hash(key),
             ),
             None => format!(
-                "{};{};{};{};{};27;{};{};{};",
+                "{};{};{};{};{};{};{};{};{};",
                 NS_VERSION_MIN, ns::NS_CONNECT_REQUEST, display_name, flags, NS_VERSION,
-                hw_info, session_id, encoded,
+                IB_LAUNCHER_VERSION, hw_info, session_id, encoded,
             ),
         };
         session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;

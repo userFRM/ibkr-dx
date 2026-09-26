@@ -12,11 +12,15 @@
 /// so a session can be pointed at a newer pair without waiting for a release —
 /// which is the difference between a stale constant costing a restart and it
 /// costing an outage, on the day the server stops accepting this one.
-pub const IB_BUILD: &str = "10401";
+pub const IB_BUILD: &str = "10511";
 /// What this client announces as its version.
-pub const IB_VERSION: &str = "c";
-/// What it announces as its client string.
-pub const IB_ENCODED: &str = "17.0.10.0.101/W/en_US/G";
+pub const IB_VERSION: &str = "a";
+/// What it announces as its client string: the runtime, the first letter of
+/// the platform, the locale and the kind of installation, as a gateway of the
+/// build above states them.
+pub const IB_ENCODED: &str = "25.0.2.0.101/L/en_US/S";
+/// The launcher version the connection request states beside them.
+pub const IB_LAUNCHER_VERSION: u32 = 28;
 
 /// The build this client announces. Overridable for a session that must
 /// match a particular one.

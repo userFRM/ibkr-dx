@@ -2,18 +2,15 @@
 """Compare the build this client announces against the one the vendor ships.
 
 At logon the client states a build number and a build letter. Those are
-constants in `src/config.rs`, and the vendor moves theirs every few weeks
-without telling anyone. Today a stale one is tolerated because the logon also
-marks the client as a rolling-release build, which skips the server's
-allow-list check — but that is one flag standing between a stale constant and
-a refused login, and nothing here notices when the gap widens.
+constants in `src/config.rs`, and they are the latest build the vendor ships:
+the venue decides what a session is offered by the build it states, so a stale
+one is a session offered less. The vendor moves its build every few weeks
+without telling anyone, and nothing else here notices.
 
-So this notices. What it reports on is the vendor publishing something new,
-not the gap between their build and ours: that gap is deliberate, and a check
-that reports it reports every night, which is the same as reporting nothing.
-The build we last looked at is written down, and this speaks up when the
-vendor moves past it. It changes nothing on its own — what a client announces
-at logon decides what the server does with it, and that is not a thing to bump
+So this notices. The latest build is written down once it has been looked at,
+and this speaks up when the vendor's latest channel moves past it. It changes
+nothing on its own — what a client announces at logon decides what the server
+does with it, so a new build is moved to against a paper session, not bumped
 unattended.
 
     check_build_drift.py --self-check   # prove the parsing, no network
@@ -36,10 +33,11 @@ CHANNELS = {
     "stable": "https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/version.json",
 }
 
-# Only one channel decides whether this reports. The other is printed for
-# context and nothing more: a check that reports every night reports nothing,
-# because the issue it keeps open stops being read after the second one.
-TRACKED = "stable"
+# Only one channel decides whether this reports: the one the client announces.
+# The other is printed for context and nothing more: a check that reports every
+# night reports nothing, because the report it keeps raising stops being read
+# after the second one.
+TRACKED = "latest"
 
 
 def unwrap(body):
@@ -83,9 +81,8 @@ def self_check():
     assert unwrap('cb({"buildVersion":"10.49.1d"});')["buildVersion"] == "10.49.1d"
     assert unwrap('{"buildVersion":"10.49.1d"}')["buildVersion"] == "10.49.1d"
     assert announced('pub const IB_BUILD: &str = "10401";\npub const IB_VERSION: &str = "c";') == ("10401", "c")
-    # The deliberate gap between what we announce and what the vendor ships is
-    # not what this reports on, so a build we have already looked at is quiet
-    # however far it is from ours.
+    # A build already looked at is quiet; only one the vendor has moved to since
+    # is reported.
     with open(SEEN) as f:
         seen = json.load(f)
     assert TRACKED in seen, f"{SEEN} names no {TRACKED} build"
