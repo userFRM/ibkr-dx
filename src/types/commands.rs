@@ -553,6 +553,9 @@ pub enum ControlCommand {
         use_rth: bool,
         /// Whether an expired contract is meant, as the bar query states it.
         include_expired: bool,
+        /// How the answer is written: 2 for seconds since the epoch, anything
+        /// else as the venue states it.
+        format_date: i32,
         /// What tells two contracts on one underlying apart, for the
         /// lookup that names this one when the caller passed no id.
         filters: SecDefFilters,

@@ -290,7 +290,7 @@ fn a_head_timestamp_with_no_connection_is_refused_not_left_pending() {
     });
 
     let aapl = crate::types::ContractRef { con_id: 265598, ..Default::default() };
-    hmds.send_head_timestamp_request(3, &aapl, "TRADES", true, false, &mut conn, &mut hb, &shared);
+    hmds.send_head_timestamp_request(3, &aapl, "TRADES", true, false, 1, &mut conn, &mut hb, &shared);
 
     assert!(hmds.pending_head_ts.is_empty(), "a request that could not be sent is not left pending");
     let told = shared.reference.drain_historical_errors();
@@ -301,32 +301,52 @@ fn a_head_timestamp_with_no_connection_is_refused_not_left_pending() {
 }
 
 
-/// A head timestamp states the contract's type and exchange as the request
-/// states them, as a bar request does, with no definition of it held: a
-/// program that kept its contracts was refused one until it happened to look
-/// the contract up.
+/// A head timestamp and a fundamental report are asked about the contract the
+/// request states, with no definition of it held: a program that kept its
+/// contracts was refused both until it happened to look the contract up. Each
+/// states it as a gateway does. A head timestamp states the type and the
+/// exchange in their own forms however they were spelled; a fundamental report
+/// states a stock in dollars, whatever the contract, as a gateway states every
+/// one it asks for.
 #[test]
 fn a_head_timestamp_states_the_contract_it_was_asked_about() {
     use std::io::Read;
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-    let (conn, mut peer) = Connection::for_test();
     let aapl = crate::types::ContractRef {
-        con_id: 265598, sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+        con_id: 265598, sec_type: "cs".into(), exchange: "ISLAND".into(), currency: "EUR".into(),
         ..Default::default()
     };
+    type Ask = fn(&mut HmdsState, &crate::types::ContractRef, &mut Option<Connection>, &mut HeartbeatState, &SharedState);
+    let rows: [(Ask, &[&str]); 2] = [
+        (
+            |hmds, contract, conn, hb, shared| {
+                hmds.send_head_timestamp_request(3, contract, "TRADES", true, false, 1, conn, hb, shared)
+            },
+            &["<contractID>265598</contractID><exchange>NASDAQ</exchange><secType>STK</secType>"],
+        ),
+        (
+            |hmds, contract, conn, hb, shared| {
+                hmds.send_fundamental_data_request(3, contract.con_id as u32, "ReportSnapshot", shared, conn, hb)
+            },
+            &[
+                "<contractID>265598</contractID><exchange>RTRSFND</exchange><secType>STK</secType>",
+                "<currency>USD</currency>",
+            ],
+        ),
+    ];
+    for (ask, stated) in rows {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let (conn, mut peer) = Connection::for_test();
+        ask(&mut hmds, &aapl, &mut Some(conn), &mut HeartbeatState::new(), &shared);
 
-    hmds.send_head_timestamp_request(3, &aapl, "TRADES", true, false, &mut Some(conn), &mut hb, &shared);
-
-    assert!(shared.reference.drain_historical_errors().is_empty(), "nothing is refused");
-    let mut sent = [0u8; 4096];
-    let n = peer.read(&mut sent).unwrap();
-    let sent = String::from_utf8_lossy(&sent[..n]);
-    assert!(
-        sent.contains("<contractID>265598</contractID><exchange>BEST</exchange><secType>STK</secType>"),
-        "{sent}",
-    );
+        assert!(shared.reference.drain_historical_errors().is_empty(), "nothing is refused");
+        let mut sent = [0u8; 4096];
+        let n = peer.read(&mut sent).unwrap();
+        let sent = String::from_utf8_lossy(&sent[..n]);
+        for stated in stated {
+            assert!(sent.contains(stated), "{stated}: {sent}");
+        }
+    }
 }
 
 #[test]
@@ -335,7 +355,7 @@ fn query_error_releases_head_timestamp_without_sentinel() {
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
     let mut conn: Option<Connection> = None;
-    hmds.pending_head_ts.push(("hts_1004".to_string(), 42));
+    hmds.pending_head_ts.push(("hts_1004".to_string(), 42, 1));
 
     let msg = make_query_error_msg("hts_1004", "No head timestamp");
     hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
@@ -2604,8 +2624,8 @@ mod hmds_correlation_tests {
                 },
             )
         };
-        hmds.pending_head_ts.push((id_of(1), 41));
-        hmds.pending_head_ts.push((id_of(2), 42));
+        hmds.pending_head_ts.push((id_of(1), 41, 1));
+        hmds.pending_head_ts.push((id_of(2), 42, 1));
 
         let xml = format!(
             "<ResultSetHeadTimeStamp><id>{}</id><eoq>true</eoq>\
@@ -2631,7 +2651,7 @@ mod hmds_correlation_tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_head_ts.push(("hts_of_another_query".to_string(), 71));
+        hmds.pending_head_ts.push(("hts_of_another_query".to_string(), 71, 1));
         hmds.pending_histogram.push(("hg_of_another_query".to_string(), 72));
 
         for xml in [
@@ -2854,7 +2874,7 @@ mod hmds_transport_tests {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_head_ts.push(("hts".to_string(), 61));
+        hmds.pending_head_ts.push(("hts".to_string(), 61, 1));
         hmds.pending_fundamental.push(("fund".to_string(), 62));
         hmds.pending_ticks.push(("tk".to_string(), 63, "TRADES".to_string()));
 
@@ -3505,7 +3525,10 @@ fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
             BarSize::Hour1,
             "<time>20260714-13:30:00</time><endTime>20260714-14:00:00</endTime>",
             "<time>20260714-12:00:00</time><endTime>20260714-13:00:00</endTime>",
-            vec!["20260714-12:59:55", "20260714-13:45:00", "20260714-13:50:00", "20260714-13:59:55"],
+            vec![
+                "20260714-12:59:55", "20260714-13:10:00", "20260714-13:45:00", "20260714-13:50:00",
+                "20260714-13:59:55",
+            ],
             merged("20260714-13:30:00"),
         ),
         (
@@ -3551,6 +3574,65 @@ fn a_kept_up_to_date_bar_goes_on_from_the_one_the_history_ends_on() {
             "{size:?}",
         );
     }
+}
+
+/// Give the engine behind a test client a connection to the data service, and
+/// have its own loop take what the calls send from here on: the far end of
+/// the connection, and where the calls' commands go to be taken.
+fn on_the_data_service(
+    rx: &crate::api::client::tests::Engine,
+) -> (std::net::TcpStream, std::sync::mpsc::Sender<crate::types::ControlCommand>) {
+    let (conn, peer) = Connection::for_test();
+    let (into, taken) = std::sync::mpsc::channel();
+    rx.engine().hmds_conn = Some(conn);
+    rx.engine().set_control_rx(taken);
+    (peer, into)
+}
+
+/// The engine's loop takes what the calls have sent so far.
+fn taken(rx: &crate::api::client::tests::Engine, into: &std::sync::mpsc::Sender<crate::types::ControlCommand>) {
+    rx.try_iter().for_each(|cmd| into.send(cmd).unwrap());
+    rx.engine().poll_once();
+}
+
+/// The engine hears what the data service says.
+fn the_service_says(rx: &crate::api::client::tests::Engine, shared: &SharedState, msg: &[u8]) {
+    let mut held = rx.engine();
+    let engine = &mut *held;
+    engine.hmds.process_hmds_message(msg, &mut engine.hmds_conn, shared, &None, &mut engine.hb);
+}
+
+/// A head timestamp is written in the form its own request asked for,
+/// whatever else is refused under its number, as a gateway keeps the form
+/// with the request. Kept by number on the caller's side, a second request
+/// under the number — here one naming a series there is none of, refused —
+/// took the first one's form with it, and the first was answered in the
+/// venue's spelling where it had asked for seconds since the epoch.
+#[test]
+fn a_head_timestamp_is_written_the_way_it_was_asked_for() {
+    let (client, rx, shared) = crate::api::client::tests::test_client();
+    let (_peer, into) = on_the_data_service(&rx);
+    let spy = crate::api::client::tests::spy();
+    client.req_head_time_stamp(11, &spy, "TRADES", true, 2);
+    taken(&rx, &into);
+    client.req_head_time_stamp(11, &spy, "NOSUCH", true, 1);
+    taken(&rx, &into);
+    let asked = rx.engine().hmds.pending_head_ts.iter().find(|(_, rid, _)| *rid == 11)
+        .map(|(query, ..)| query.clone()).expect("the first is awaited");
+    let answer = format!(
+        "35=W\x016118=<ResultSetHeadTimeStamp><id>{asked}</id><eoq>true</eoq>\
+         <headTS>20200101-00:00:00</headTS><tz>UTC</tz></ResultSetHeadTimeStamp>\x01",
+    );
+    the_service_says(&rx, &shared, answer.as_bytes());
+
+    let mut w = crate::api::wrapper::tests::RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:11:321:")), "the second is refused: {:?}", w.events);
+    assert!(
+        w.events.iter().any(|e| e == "head_timestamp:11:1577836800"),
+        "the first is answered in seconds since the epoch: {:?}",
+        w.events,
+    );
 }
 
 /// A day's bar kept up to date rolls over when the one the history stated
@@ -3639,30 +3721,21 @@ fn a_days_bar_kept_up_to_date_rolls_over_at_midnight_utc() {
     for (row, (kept, zone, opened, closed, steps, heard)) in rows.into_iter().enumerate() {
         let (client, rx, shared) = crate::api::client::tests::test_client();
         let spy = crate::api::client::tests::spy();
+        let (_peer, into) = on_the_data_service(&rx);
         if !kept {
             client.req_real_time_bars(21, &spy, 5, "TRADES", false);
         }
         client.req_historical_data(21, &spy, "", "1 W", "1 day", "TRADES", false, 1, kept);
-        crate::api::client::tests::engine_takes_bars(&rx, &shared);
-        let mut hmds = HmdsState::new();
-        let mut hb = HeartbeatState::new();
-        hmds.pending_historical.push(("daily".into(), 21));
-        hmds.held.push(HeldSeries {
-            req_id: 21, fold: Fold::None, bars: Vec::new(), timezone: String::new(),
-            actions_query: None, actions: None, complete: false, along: Default::default(),
-        });
-        if kept {
-            hmds.keep_up_to_date_reqs.insert(21);
-            hmds.forming_bars.push(FormingBar {
-                req_id: 21, seconds: 86_400, opened_at: 0, daily_session: None, closed_at: None,
-                bar: Default::default(), weighted: 0.0, queued: Vec::new(),
-            });
-        }
-        hmds.rtbar_subs.push(("rt_21".into(), 21, Some(4002), 0.01, 1.0));
-        hmds.rtbar_resub.push(RtBarRequest {
-            req_id: 21, con_id: 756733, sec_type: "STK".into(), exchange: "SMART".into(),
-            what_to_show: "TRADES".into(), use_rth: false,
-        });
+        taken(&rx, &into);
+        // The contract's actions, asked for first, state none; the bars are
+        // asked for then, and the stream is numbered.
+        let actions = rx.engine().hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 21)
+            .map(|(query, ..)| query.clone()).expect("the actions are asked for first");
+        the_service_says(&rx, &shared, &conadj_msg(&actions, 756733, ""));
+        let asked = rx.engine().hmds.pending_historical.iter().find(|(_, rid)| *rid == 21)
+            .map(|(query, _)| query.clone()).expect("and the bars once they are in");
+        rx.engine().hmds.rtbar_subs.iter_mut().find(|(_, rid, ..)| *rid == 21)
+            .expect("the stream is asked for").2 = Some(4002);
         shared.reference.note_schedule_key(756733, "p4002");
         let session = |start: &str, end: &str| ScheduleSession {
             start: start.into(), end: end.into(), trade_date: end[..8].into(),
@@ -3675,7 +3748,7 @@ fn a_days_bar_kept_up_to_date_rolls_over_at_midnight_utc() {
             ],
             liquid_hours: Vec::new(),
         });
-        let history = String::from_utf8(make_bar_msg("daily", true)).unwrap()
+        let history = String::from_utf8(make_bar_msg(&asked, true)).unwrap()
             .replace("20260714-13:30:00</time>", &format!("{opened}</time><endTime>{closed}</endTime>"))
             .replace("<tz>UTC</tz>", &format!("<tz>{zone}</tz>"));
         let five = |at: &str, cents: u32, volume: u32| {
@@ -3693,18 +3766,11 @@ fn a_days_bar_kept_up_to_date_rolls_over_at_midnight_utc() {
         let mut got = Heard::default();
         for step in steps {
             match step {
-                History => hmds.process_hmds_message(history.as_bytes(), &mut None, &shared, &None, &mut hb),
-                Five(at, cents, volume) => {
-                    hmds.process_hmds_message(&five(at, *cents, *volume), &mut None, &shared, &None, &mut hb)
-                }
+                History => the_service_says(&rx, &shared, history.as_bytes()),
+                Five(at, cents, volume) => the_service_says(&rx, &shared, &five(at, *cents, *volume)),
                 Again => {
                     client.req_historical_data(21, &spy, "", "1 W", "1 day", "TRADES", false, 2, true);
-                    // Refused by the engine, which states nothing of it taken.
-                    rx.try_iter().for_each(drop);
-                    assert!(!hmds.send_historical_request_ex(
-                        21, 756733, "", "1 W", "1 day", "TRADES", false, false, false, "SPY", "STK",
-                        "SMART", &mut None, &mut hb, &shared,
-                    ));
+                    taken(&rx, &into);
                 }
             }
             client.process_msgs(&mut got);

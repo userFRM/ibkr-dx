@@ -1636,11 +1636,11 @@ impl HotLoop {
                         self.hmds.send_adjustments_cancel_of(&query_id, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
-                ControlCommand::FetchHeadTimestamp { contract, req_id, what_to_show, use_rth, include_expired, .. } => {
+                ControlCommand::FetchHeadTimestamp { contract, req_id, what_to_show, use_rth, include_expired, format_date, .. } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_head_timestamp_request(req_id, &contract, &what_to_show, use_rth, include_expired, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                        self.hmds.send_head_timestamp_request(req_id, &contract, &what_to_show, use_rth, include_expired, format_date, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::FetchContractDetails { contract, req_id, include_expired, filters } => {
@@ -1655,8 +1655,8 @@ impl HotLoop {
                     let parked = self.ccp.withdraw_named(req_id, |cmd| matches!(cmd, ControlCommand::FetchHeadTimestamp { .. }));
                     // As above: the answers already queued go with it.
                     self.shared.reference.purge_head_timestamp_for(req_id);
-                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid)| *rid == req_id) {
-                        let (query_id, _) = self.hmds.pending_head_ts.remove(pos);
+                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid, _)| *rid == req_id) {
+                        let (query_id, ..) = self.hmds.pending_head_ts.remove(pos);
                         self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
                     } else if !parked {
                         // A withdrawal that took a parked request acted, and
@@ -1809,7 +1809,7 @@ impl HotLoop {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_fundamental_data_request(req_id, &contract, &report_type, &self.shared, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_fundamental_data_request(req_id, contract.con_id as u32, &report_type, &self.shared, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelFundamentalData { req_id } => {
@@ -5050,7 +5050,7 @@ mod tests {
         let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
         let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
         hl.hmds_conn = Some(conn);
-        hl.hmds.pending_head_ts.push(("TickHeadClient1;;265598@BEST TRADES;;0;;true;;0;;U".to_string(), req_id));
+        hl.hmds.pending_head_ts.push(("TickHeadClient1;;265598@BEST TRADES;;0;;true;;0;;U".to_string(), req_id, 1));
         hl.set_control_rx(rx);
         tx.send(crate::types::ControlCommand::CancelHeadTimestamp { req_id }).unwrap();
         hl.poll_control_commands();
@@ -8559,7 +8559,7 @@ mod tests {
         let mut hl = HotLoop::new(shared.clone(), None, None);
         hl.ccp.pending_named.push((7, ControlCommand::FetchHeadTimestamp {
             req_id: 7, contract: stock(0, "SPY"), what_to_show: "TRADES".into(),
-            use_rth: true, include_expired: false, filters: Default::default(),
+            use_rth: true, include_expired: false, format_date: 1, filters: Default::default(),
         }, std::time::Instant::now()));
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         hl.set_control_rx(rx);

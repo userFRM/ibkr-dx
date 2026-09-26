@@ -665,8 +665,7 @@ pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::
 }
 
 /// The venue's id for a contract a request gives by that id alone: no
-/// security type or no exchange stated beside it, or, for a fundamentals
-/// request, which routes on no exchange, no currency.
+/// security type or no exchange stated beside it.
 ///
 /// A request states both and the venue routes on both, so both are the
 /// venue's to say: asked for by id, it answers with them. Stamped with a guess
@@ -675,18 +674,17 @@ pub(crate) fn contract_of(cmd: &crate::types::ControlCommand) -> Option<&crate::
 /// bars never were, and a book with no exchange is refused before any lookup.
 pub(crate) fn named_by_id_alone(cmd: &crate::types::ControlCommand) -> Option<(i64, &str)> {
     use crate::types::ControlCommand as C;
-    let (contract, stated) = match cmd {
-        C::FetchFundamentalData { contract, .. } => (contract, &contract.currency),
+    let contract = match cmd {
         C::Subscribe { contract, .. }
         | C::FetchHistorical { contract, .. }
         | C::FetchHeadTimestamp { contract, .. }
         | C::FetchHistoricalTicks { contract, .. }
         | C::FetchHistoricalSchedule { contract, .. }
         | C::FetchHistogramData { contract, .. }
-        | C::SubscribeTbt { contract, .. } => (contract, &contract.exchange),
+        | C::SubscribeTbt { contract, .. } => contract,
         _ => return None,
     };
-    (contract.con_id != 0 && (contract.sec_type.is_empty() || stated.is_empty()))
+    (contract.con_id != 0 && (contract.sec_type.is_empty() || contract.exchange.is_empty()))
         .then_some((contract.con_id, contract.exchange.as_str()))
 }
 
@@ -745,12 +743,6 @@ fn name_the_contract(cmd: &mut crate::types::ControlCommand, def: &crate::contro
                 if contract.exchange.is_empty() { contract.exchange = named.exchange; }
             }
         }
-        // A fundamentals request states the contract's type and currency as
-        // the venue names them, however it was described.
-        C::FetchFundamentalData { contract, filters, .. } => {
-            *contract = (&named).into();
-            *filters = named.lookup_filters();
-        }
         C::FetchHistorical { contract, filters, .. }
         | C::FetchHeadTimestamp { contract, filters, .. }
         | C::FetchHistoricalTicks { contract, filters, .. }
@@ -769,7 +761,8 @@ fn name_the_contract(cmd: &mut crate::types::ControlCommand, def: &crate::contro
         | C::FetchHistogramData { contract, .. }
         | C::SubscribeRealTimeBar { contract, .. }
         | C::SubscribeDepth { contract, .. }
-        | C::SubscribeTbt { contract, .. } => contract.con_id = def.con_id as i64,
+        | C::SubscribeTbt { contract, .. }
+        | C::FetchFundamentalData { contract, .. } => contract.con_id = def.con_id as i64,
         _ => {}
     }
 }
@@ -2947,7 +2940,14 @@ impl CcpState {
         // list below, and what it named has to outlive it.
         let named = match contract_named(&cmd) {
             Some(c) if !c.symbol.is_empty() => c.clone(),
-            _ => return Some(cmd),
+            // Neither an id nor a symbol: a gateway's lookup names nothing by
+            // what is left, and it refuses the request there. Sent, it went
+            // out about contract zero.
+            Some(_) => {
+                Self::abandon_named(&cmd, 0, shared);
+                return None;
+            }
+            None => return Some(cmd),
         };
         let filters = described(filters_named(&cmd));
         // Stated on the request, a gateway states it on the lookup that names

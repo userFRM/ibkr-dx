@@ -111,10 +111,6 @@ impl ReportType {
 pub struct FundamentalRequest {
     /// The venue's id for the contract.
     pub con_id: u32,
-    /// What kind of contract it is, as the venue names it.
-    pub sec_type: String,
-    /// What currency that is in.
-    pub currency: String,
     /// Which report is wanted.
     pub report_type: ReportType,
     /// What this request calls itself, which the venue echoes on the answer.
@@ -143,6 +139,9 @@ pub fn echoed_query_id(xml: &str) -> String {
 }
 
 /// Build the XML query for a fundamental data request.
+///
+/// A stock in dollars, whatever the contract: a gateway states the two the
+/// same on every report it asks for, and serves stocks alone.
 pub fn build_fundamental_request_xml(req: &FundamentalRequest) -> String {
     let query_id = &req.query_id;
     format!(
@@ -151,19 +150,17 @@ pub fn build_fundamental_request_xml(req: &FundamentalRequest) -> String {
          <id>{query_id}</id>\
          <contractID>{con_id}</contractID>\
          <exchange>RTRSFND</exchange>\
-         <secType>{sec_type}</secType>\
+         <secType>STK</secType>\
          <source>API</source>\
          <needTotalValue>false</needTotalValue>\
          <wholeDays>false</wholeDays>\
          <delay>auto</delay>\
          <reportType>{report_type}</reportType>\
-         <currency>{currency}</currency>\
+         <currency>USD</currency>\
          </FundamentalsQuery>\
          </ListOfQueries>",
         con_id = req.con_id,
-        sec_type = req.sec_type,
         report_type = req.report_type.report_type_str(),
-        currency = req.currency,
     )
 }
 
@@ -267,8 +264,6 @@ mod tests {
         let req = FundamentalRequest {
             query_id: fundamentals_query_id(1),
             con_id: 265598,
-            sec_type: "STK".to_string(),
-            currency: "USD".to_string(),
             report_type: ReportType::Snapshot,
         };
         let xml = build_fundamental_request_xml(&req);
@@ -333,8 +328,7 @@ mod tests {
         assert_ne!(first, second, "two requests do not share a name");
 
         let asked = build_fundamental_request_xml(&FundamentalRequest {
-            con_id: 265598, sec_type: "STK".to_string(), currency: "USD".to_string(),
-            report_type: ReportType::Snapshot, query_id: first.clone(),
+            con_id: 265598, report_type: ReportType::Snapshot, query_id: first.clone(),
         });
         assert!(asked.contains(&format!("<id>{first}</id>")));
         assert_eq!(echoed_query_id(&asked), first, "and the answer is matched by it");

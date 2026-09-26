@@ -1742,7 +1742,7 @@ def req_historical_news(req_id, con_id, provider_codes, start_date_time, end_dat
 
 #### `cancel_historical_news`
 
-Withdraw a historical news query.  The TWS API has no call for this; the venue has a message for it. One message carrying the number the query went out under, sent for a query still waiting on its answer. A query answered is over, as a gateway holds it over: withdrawn after its answer, it is refused as naming nothing.
+Withdraw a historical news query.  The TWS API has no call for this; the venue has a message for it. One message carrying the number the query went out under, sent for a query still waiting on its answer. Nothing of a query is kept once it is answered, as a gateway keeps nothing of one: withdrawn after its answer, it is refused as naming nothing.
 
 ```python
 def cancel_historical_news(req_id)
@@ -1803,7 +1803,7 @@ def cancel_adjustments(req_id)
 
 #### `req_fundamental_data`
 
-Request fundamental data.  `fundamental_data_options` is taken and nothing in it is checked or applied, as through a gateway: a gateway reads no option list on this request.
+Request fundamental data.  The report is asked about the stock the venue's id names: a contract given by its description is looked up first, as a gateway looks it up. A contract not stated as a stock is refused, as a gateway refuses it.  `fundamental_data_options` is taken and nothing in it is checked or applied, as through a gateway: a gateway reads no option list on this request.
 
 ```python
 def req_fundamental_data(req_id, contract, report_type, fundamental_data_options=None)

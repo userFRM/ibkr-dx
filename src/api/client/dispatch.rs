@@ -531,7 +531,6 @@ impl EClient {
             // reset ahead of the levels that follow it, a query error ahead
             // of the empty end that follows it.
             Record::HistoricalError((origin, code, msg)) => {
-                self.core.head_timestamp_ended(origin.id());
                 wrapper.error_from(origin, raised_now(), i64::from(code), &msg, "");
             }
             Record::HistoricalTaken(taken) => self.core.historical_taken(&taken),
@@ -575,13 +574,9 @@ impl EClient {
             Record::OrderBound((perm_id, client_id, order_id)) => {
                 wrapper.order_bound(perm_id, client_id, order_id);
             }
+            // Written in the form its request asked for.
             Record::HeadTimestamp((req_id, response)) => {
-                // Returned in the form `format_date` asked for. The wire
-                // carries one form; `bar_time_for` converts it.
-                let stated = crate::protocol::datetime::bar_date_as_asked(
-                    &response.head_timestamp, self.core.head_timestamp_ended(req_id as i64), "",
-                );
-                wrapper.head_timestamp(req_id as i64, &stated);
+                wrapper.head_timestamp(req_id as i64, &response.head_timestamp);
             }
             Record::ContractDetails((req_id, def)) => {
                 let details = ContractDetails::from_definition(&def);

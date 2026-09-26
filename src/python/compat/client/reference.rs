@@ -116,16 +116,13 @@ impl EClient {
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
-        // Noted before the request goes out, as on the other surface: an
-        // answer dispatched between the send and the note was written in the
-        // wrong form.
-        self.core.note_date_format(req_id, format_date);
         if let Err(why) = self.send_control(&tx, ControlCommand::FetchHeadTimestamp {
                 contract: contract.into(),
                 req_id: wire_req_id(req_id)?,
                 what_to_show: what_to_show.to_string(),
                 use_rth: use_rth != 0,
                 include_expired: contract.include_expired,
+                format_date,
                 filters: contract.lookup_filters(),
             }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
@@ -136,7 +133,6 @@ impl EClient {
     /// Cancel head timestamp request.
     fn cancel_head_time_stamp(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
-        self.core.head_timestamp_ended(req_id);
         if let Err(why) = self.send_control(&tx, ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? }) {
             return self.report_refusal(py, req_id, Refusal::not_connected(why.to_string()));
         }
@@ -398,9 +394,9 @@ impl EClient {
     ///
     /// The TWS API has no call for this; the venue has a message for it. One
     /// message carrying the number the query went out under, sent for a query
-    /// still waiting on its answer. A query answered is over, as a gateway
-    /// holds it over: withdrawn after its answer, it is refused as naming
-    /// nothing.
+    /// still waiting on its answer. Nothing of a query is kept once it is
+    /// answered, as a gateway keeps nothing of one: withdrawn after its
+    /// answer, it is refused as naming nothing.
     fn cancel_historical_news(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         if let Err(why) = self.send_control(&tx, ControlCommand::CancelHistoricalNews {
@@ -516,6 +512,10 @@ impl EClient {
     }
 
     /// Request fundamental data.
+    ///
+    /// The report is asked about the stock the venue's id names: a contract
+    /// given by its description is looked up first, as a gateway looks it up.
+    /// A contract not stated as a stock is refused, as a gateway refuses it.
     ///
     /// `fundamental_data_options` is taken and nothing in it is checked or
     /// applied, as through a gateway: a gateway reads no option list on this

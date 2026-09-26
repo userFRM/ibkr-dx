@@ -153,7 +153,6 @@ impl EClient {
         // A contract given by id alone is named by the engine before the
         // request goes: a request states the contract's type and its
         // exchange, and both are the venue's to say.
-        self.core.note_date_format(req_id, format_date);
         self.send(ControlCommand::FetchHeadTimestamp {
             contract: contract.into(),
             req_id: wire_req_id(req_id)?,
@@ -161,6 +160,7 @@ impl EClient {
             what_to_show: what_to_show.into(),
             use_rth,
             include_expired: contract.include_expired,
+            format_date,
         })
     }
 
@@ -331,7 +331,6 @@ impl EClient {
     /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
     pub fn cancel_head_time_stamp(&self, req_id: i64) {
         if let Err(why) = (|| -> Result<(), Refusal> {
-            self.core.head_timestamp_ended(req_id);
             self.send(ControlCommand::CancelHeadTimestamp { req_id: wire_req_id(req_id)? })
         })() {
             self.refuse_request(req_id, &why);
@@ -601,10 +600,9 @@ impl EClient {
     /// `RESC` for what analysts expect, and `CalendarReport` for what the
     /// issuer has coming.
     ///
-    /// The report is asked about a stock as the venue names it, as a gateway
-    /// asks it: a contract given by its description, or by its id with no
-    /// currency beside it, is looked up first. A contract not stated as a
-    /// stock is refused, as a gateway refuses it.
+    /// The report is asked about the stock the venue's id names: a contract
+    /// given by its description is looked up first, as a gateway looks it up.
+    /// A contract not stated as a stock is refused, as a gateway refuses it.
     pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) {
         if let Err(why) = self.try_req_fundamental_data(req_id, contract, report_type) {
             self.refuse_request(req_id, &why);
@@ -638,8 +636,9 @@ impl EClient {
     /// The TWS API has no call for this; the venue has a message for it. One
     /// message carrying the id the query went out under, which is the whole
     /// of what a withdrawal states, sent for a query still waiting on its
-    /// answer. A query answered is over, as a gateway holds it over:
-    /// withdrawn after its answer, it is refused as naming nothing.
+    /// answer. Nothing of a query is kept once it is answered, as a gateway
+    /// keeps nothing of one: withdrawn after its answer, it is refused as
+    /// naming nothing.
     pub fn cancel_historical_news(&self, req_id: i64) {
         if let Err(why) = (|| -> Result<(), Refusal> {
             self.send(ControlCommand::CancelHistoricalNews { req_id: wire_req_id(req_id)? })

@@ -20,7 +20,9 @@ hours.
 
 One `historical_data` callback per bar, in time order, then one
 `historical_data_end` carrying the first and last timestamps of the range that
-was served.
+was served. A request whose bars are refused once it has been handed over is
+told why on `error`, and a `historical_data_end` follows, where a gateway
+states no end after a refusal.
 
 With `keep_up_to_date=True` the bar still forming goes on from the history's
 last bar, as a gateway's does: the live five-second bars inside it are folded

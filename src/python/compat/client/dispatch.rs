@@ -649,7 +649,6 @@ impl EClient {
 
             // What the venue refused under a request, in its place.
             Record::HistoricalError((origin, code, msg)) => {
-                self.core.head_timestamp_ended(origin.id());
                 say_error!(self, py, shared, origin, i64::from(code), &msg);
             }
             Record::HistoricalTaken(taken) => self.core.historical_taken(&taken),
@@ -684,14 +683,9 @@ impl EClient {
             Record::OrderBound((perm_id, client_id, order_id)) => {
                 call_wrapper!(self, py, shared, "order_bound", (perm_id, client_id, order_id));
             }
+            // Written in the form its request asked for.
             Record::HeadTimestamp((req_id, response)) => {
-                // Seconds since the epoch where the caller asked for them.
-                let stated = if self.core.head_timestamp_ended(req_id as i64) == 2 {
-                    crate::protocol::datetime::bar_date_as_asked(&response.head_timestamp, 2, "")
-                } else {
-                    response.head_timestamp.clone()
-                };
-                call_wrapper!(self, py, shared, "head_timestamp", (req_id as i64, stated.as_str()));
+                call_wrapper!(self, py, shared, "head_timestamp", (req_id as i64, response.head_timestamp.as_str()));
             }
             Record::ContractDetails((req_id, def)) => {
                 let details = ContractDetails::from_definition(py, &def);

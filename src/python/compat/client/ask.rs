@@ -443,8 +443,6 @@ impl EClient {
         let r = wait_for(py, &shared, req_id, &what, |sh| {
             sh.reference.take_head_timestamp_for(req_id as u32)
         });
-        // Its answer, or the reason there is none, ends the request.
-        self.core.head_timestamp_ended(req_id);
         Ok(r?.head_timestamp)
     }
 

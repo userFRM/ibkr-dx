@@ -78,7 +78,10 @@ pub(crate) struct HmdsState {
     /// what the reference client does; one whose connection goes away is
     /// failed where that is stated.
     pub(crate) pending_historical: Vec<(String, u32)>,
-    pub(crate) pending_head_ts: Vec<(String, u32)>,
+    /// Each head timestamp awaited: the name it went out under, the caller's
+    /// number, and the form its answer is written in, which belongs to the
+    /// request, as a gateway keeps it with the request.
+    pub(crate) pending_head_ts: Vec<(String, u32, i32)>,
     pub(crate) pending_scanner_params: bool,
     /// Questions for the scanner's parameters asked while one is on the wire.
     ///
@@ -258,11 +261,13 @@ impl FormingBar {
             }
             self.daily_session.map_or(0, |(start, _)| start)
         } else {
-            let opened_at = opening(self.seconds, five.timestamp);
-            if opened_at < self.opened_at {
+            // Against where the bar in hand opened, which the history can
+            // state after the clock's own boundary: a session opening at the
+            // half hour opens its first hour there.
+            if five.timestamp < self.bar.timestamp {
                 return None;
             }
-            opened_at
+            opening(self.seconds, five.timestamp)
         };
         if opened_at != self.opened_at {
             self.opened_at = opened_at;
@@ -526,7 +531,7 @@ impl HmdsState {
         // request kinds use the error channel alone.
         stranded.extend(self.pending_historical.drain(..)
             .filter(|(_, rid)| !held_ids.contains(rid)).map(|(_, rid)| (rid, true)));
-        stranded.extend(self.pending_head_ts.drain(..).map(|(_, rid)| (rid, false)));
+        stranded.extend(self.pending_head_ts.drain(..).map(|(_, rid, _)| (rid, false)));
         stranded.extend(self.pending_scanner.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_news.drain(..).map(|(_, rid)| (rid, false)));
         stranded.extend(self.pending_articles.drain(..).map(|(_, rid)| (rid, false)));
@@ -961,9 +966,16 @@ impl HmdsState {
                         // echoes. Two head-timestamp requests can be in flight
                         // at once.
                         if let Some(pos) = self.pending_head_ts.iter()
-                            .position(|(qid, _)| answers(xml_tag, qid))
+                            .position(|(qid, ..)| answers(xml_tag, qid))
                         {
-                            let (_, req_id) = self.pending_head_ts.remove(pos);
+                            let (_, req_id, format_date) = self.pending_head_ts.remove(pos);
+                            // Written as its own request asked for it.
+                            let resp = crate::control::historical::HeadTimestampResponse {
+                                head_timestamp: crate::protocol::datetime::bar_date_as_asked(
+                                    &resp.head_timestamp, format_date, "",
+                                ),
+                                ..resp
+                            };
                             let for_event = clone_for_event(event_tx, &resp);
                             shared.reference.push_head_timestamp(req_id, resp);
                             if let Some(data) = for_event {
@@ -1187,8 +1199,8 @@ impl HmdsState {
                                     }
                                 }
                                 released_req_id = Some(req_id);
-                            } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, _)| states(qid, q)) {
-                                let (_, req_id) = self.pending_head_ts.remove(pos);
+                            } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, ..)| states(qid, q)) {
+                                let (_, req_id, _) = self.pending_head_ts.remove(pos);
                                 released_req_id = Some(req_id);
                             } else if let Some(pos) = self.pending_histogram.iter().position(|(q, _)| states(qid, q)) {
                                 let (_, req_id) = self.pending_histogram.remove(pos);
@@ -1336,7 +1348,7 @@ impl HmdsState {
                                     from_historical = true;
                                 }
                             } else if let Some(pos) = self.pending_head_ts.iter()
-                                .position(|(q, _)| states(stated, q.as_str()))
+                                .position(|(q, ..)| states(stated, q.as_str()))
                             {
                                 released_req_id = Some(self.pending_head_ts.remove(pos).1);
                             } else if let Some(pos) = self.pending_histogram.iter()
@@ -2714,7 +2726,7 @@ fn build_tbt_query(
         true
     }
 
-    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, contract: &crate::types::ContractRef, what_to_show: &str, use_rth: bool, include_expired: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, contract: &crate::types::ContractRef, what_to_show: &str, use_rth: bool, include_expired: bool, format_date: i32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         let con_id = contract.con_id;
         // The head-timestamp table, which is the bar one and the rate: this
         // was a third divergent copy with a silent TRADES fallback.
@@ -2748,6 +2760,13 @@ fn build_tbt_query(
             super::push_hmds_refusal(shared, req_id, crate::error_codes::Refusal::NO_DEFINITION, told, false);
             return;
         };
+        // In the forms a gateway states the contract it looked up in, however
+        // the caller spelled it: a stock is STK, given as CS or in lower case,
+        // and a Nasdaq listing is NASDAQ, given under its older name.
+        let sec_type = crate::control::contracts::SecurityType::from_fix(
+            &hist_sec_type(&sec_type.to_ascii_uppercase()),
+        ).to_api_str().to_string();
+        let exchange = hist_exchange(&exchange);
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let req = crate::control::historical::HeadTimestampRequest {
@@ -2784,7 +2803,7 @@ fn build_tbt_query(
             Ok(()) => {
                 log::info!("Sent head timestamp request: req_id={req_id} con_id={con_id}");
                 hb.last_hmds_sent = Instant::now();
-                self.pending_head_ts.push((query_id, req_id));
+                self.pending_head_ts.push((query_id, req_id, format_date));
             }
             Err(e) => {
                 log::warn!("head timestamp did not go out: req_id={req_id} con_id={con_id}: {e}");
@@ -3142,8 +3161,7 @@ fn build_tbt_query(
         }
     }
 
-    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, contract: &crate::types::ContractRef, report_type: &str, shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        let con_id = contract.con_id as u32;
+    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str, shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         use crate::control::fundamental::ReportType;
         let rt = match report_type {
             "ReportSnapshot" | "snapshot" => ReportType::Snapshot,
@@ -3161,24 +3179,6 @@ fn build_tbt_query(
                 return;
             }
         };
-        // As with the head timestamp: the contract's own type and currency, as
-        // the request states them once the venue has named it, and the cached
-        // definition only where it states neither.
-        let stated = (!contract.sec_type.is_empty() && !contract.currency.is_empty())
-            .then(|| (contract.sec_type.clone(), contract.currency.clone()));
-        let Some((sec_type, currency)) = stated.or_else(|| {
-            shared.reference.get_contract(i64::from(con_id))
-                .filter(|c| !c.sec_type.is_empty() && !c.currency.is_empty())
-                .map(|c| (c.sec_type, c.currency))
-        }) else {
-            let told = format!(
-                "contract {con_id} has no definition here yet, and a fundamentals \
-                 request states the contract's own type and currency"
-            );
-            log::warn!("{told}");
-            super::push_hmds_refusal(shared, req_id, crate::error_codes::Refusal::NO_DEFINITION, told, false);
-            return;
-        };
         // Its own name, which the venue echoes on the answer. The name was
         // worked out here and then not sent: every request went out under one
         // constant, so two in flight could only be told apart by which had
@@ -3187,8 +3187,6 @@ fn build_tbt_query(
         self.next_hmds_query_id += 1;
         let req = crate::control::fundamental::FundamentalRequest {
             con_id,
-            sec_type,
-            currency,
             report_type: rt,
             query_id: query_id.clone(),
         };

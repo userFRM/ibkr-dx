@@ -6801,32 +6801,6 @@ fn process_msgs_dispatches_head_timestamp() {
     assert!(w.events.iter().any(|e| e == "head_timestamp:10:20200101"));
 }
 
-/// A head timestamp is returned in the form `format_date` asked for, as bars
-/// are. 2 = seconds since the epoch.
-#[test]
-fn a_head_timestamp_is_written_the_way_it_was_asked_for() {
-    let (client, _rx, shared) = test_client();
-    client.try_req_head_time_stamp(11, &spy(), "TRADES", true, 2).expect("the request is sent");
-    shared.reference.push_head_timestamp(11, HeadTimestampResponse {
-        head_timestamp: "20200101-00:00:00".into(), timezone: String::new(),
-    });
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(
-        w.events.iter().any(|e| e == "head_timestamp:11:1577836800"),
-        "asked for in seconds since the epoch: {:?}",
-        w.events,
-    );
-
-    // A request asking for format 1 keeps the wire's own spelling.
-    client.try_req_head_time_stamp(12, &spy(), "TRADES", true, 1).expect("the request is sent");
-    shared.reference.push_head_timestamp(12, HeadTimestampResponse {
-        head_timestamp: "20200101-00:00:00".into(), timezone: String::new(),
-    });
-    client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e == "head_timestamp:12:20200101-00:00:00"));
-}
-
 /// A reused request id starts a new request: one that has ended leaves
 /// nothing behind, so the next request's bars arrive as its history and
 /// `historical_data_end` fires again.
@@ -9539,15 +9513,13 @@ fn an_answering_call_does_not_wait_on_itself_to_name_a_contract_given_by_id() {
     }
 }
 
-/// A request for bars, a head timestamp, a histogram, ticks, a schedule or a
-/// fundamental report that gives its contract by id alone — a report's, a
-/// stock's with no currency — goes to the engine as it stands, and the engine
-/// asks the venue to name it by that id before the request goes. Named at the
-/// call, the caller's thread waited out the lookup's round trip. A histogram
-/// or a fundamental report describing its contract is named by that
-/// description, as a gateway names it: refused at the call, and a report given
-/// by id refused for want of a definition this session had not looked up, a
-/// program that kept its contracts was answered by neither.
+/// A request for bars, a head timestamp, a histogram, ticks or a schedule that
+/// gives its contract by id alone goes to the engine as it stands, and the
+/// engine asks the venue to name it by that id before the request goes. Named
+/// at the call, the caller's thread waited out the lookup's round trip. A
+/// histogram or a fundamental report describing its contract is named by that
+/// description, as a gateway names it: refused at the call, a program that
+/// kept its contracts was answered by neither.
 #[test]
 fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
     let by_id_alone = Contract { con_id: 495_512_563, ..Default::default() };
@@ -9562,12 +9534,10 @@ fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
     crate::api::client::tests::reported(&client, || client.req_historical_ticks(4, &by_id_alone, "20250101 00:00:00", "", 10, "TRADES", true, false))
         .expect("handed over");
     client.try_req_historical_schedule(5, &by_id_alone, "", "1 D", true).expect("handed over");
-    let a_stock_by_id = Contract { con_id: 265_598, sec_type: "STK".into(), ..Default::default() };
-    client.try_req_fundamental_data(6, &a_stock_by_id, "ReportSnapshot").expect("handed over");
     client.try_req_fundamental_data(7, &described, "ReportSnapshot").expect("handed over");
     client.try_req_histogram_data(8, &described, true, "1 week").expect("handed over");
     let sent: Vec<ControlCommand> = rx.try_iter().collect();
-    assert_eq!(sent.len(), 8, "each is handed over as it stands: {sent:?}");
+    assert_eq!(sent.len(), 7, "each is handed over as it stands: {sent:?}");
 
     let mut engine = rx.engine();
     for cmd in sent {
@@ -9579,7 +9549,7 @@ fn a_request_given_by_id_alone_is_named_by_the_engine_not_the_call() {
     }
     assert!(shared.reference.drain_historical_errors().is_empty(), "and nothing was refused");
     assert!(engine.ccp.withdraw_named(3, |_| true), "a held request is withdrawn by its own cancel");
-    assert_eq!(engine.ccp.pending_named.len(), 7);
+    assert_eq!(engine.ccp.pending_named.len(), 6);
 }
 
 /// A spread scan's text rides its own request, so two scans of one contract

@@ -1516,9 +1516,6 @@ pub struct ClientCore {
     /// bar is the request's own, so the request is what has to be kept — for
     /// as long as it answers, as a gateway keeps it.
     historical_asks: Mutex<HashMap<i64, HistoricalAsk>>,
-    /// The form each head timestamp asked for its answer in, until it is
-    /// answered, refused or withdrawn.
-    head_timestamp_formats: Mutex<HashMap<i64, i32>>,
 
     // News subscription state
     /// Every provider this account may read.
@@ -1736,7 +1733,6 @@ impl ClientCore {
             models_as_they_stand: Mutex::new(HashMap::new()),
             mdt_by_instrument: Mutex::new(HashMap::new()),
             historical_asks: Mutex::new(HashMap::new()),
-            head_timestamp_formats: Mutex::new(HashMap::new()),
             // Empty until something states them. Which providers an account
             // may read is the venue's answer, given at logon; a pair of codes
             // standing in for it asked for news from providers the account
@@ -1822,7 +1818,6 @@ impl ClientCore {
         self.models_as_they_stand.lock().unwrap().clear();
         self.mdt_by_instrument.lock().unwrap().clear();
         self.historical_asks.lock().unwrap().clear();
-        self.head_timestamp_formats.lock().unwrap().clear();
         self.news_providers.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();
         // What the venue named for a description belongs to the session that
@@ -5712,22 +5707,6 @@ impl ClientCore {
         sent.firm_quote_only = false;
         sent.nbbo_price_cap = f64::MAX;
         std::borrow::Cow::Owned(sent)
-    }
-
-    /// Remember how a head timestamp asked for its answer to be written.
-    ///
-    /// The reference client numbers the two forms: 1 for the venue's
-    /// spelling, 2 for seconds since the epoch. Anything else is 1, which is
-    /// what that client does with a number it does not know.
-    pub fn note_date_format(&self, req_id: i64, format_date: i32) {
-        self.head_timestamp_formats.lock().unwrap().insert(req_id, format_date);
-    }
-
-    /// The form a head timestamp asked for, which its answer, refusal or
-    /// withdrawal ends: 1 where none was asked, as the reference client takes
-    /// it.
-    pub fn head_timestamp_ended(&self, req_id: i64) -> i32 {
-        self.head_timestamp_formats.lock().unwrap().remove(&req_id).unwrap_or(1)
     }
 
     /// Write down what a bar request the engine has taken asked for, in place

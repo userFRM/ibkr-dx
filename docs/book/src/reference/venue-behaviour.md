@@ -147,12 +147,21 @@ with every one of them, as a gateway does.
 - Only a details request looks a contract up by identifier or issuer. Market
   data, depth, bars, head timestamps, histograms, fundamental reports, ticks
   and the rest carry neither to a gateway, which looks their contract up by its
-  description; so does this client, whatever else the contract holds. A
-  request stating the contract's id, its type and its exchange goes out as it
-  stands.
+  description, whatever else the contract holds. This client looks a contract
+  given without the venue's id up by its description too, and one given by the
+  id with no type or no exchange beside it by that id. One stating the id, its
+  type and its exchange goes out as it stands, and so does a fundamental
+  report stating the id, which states nothing else of the contract. One stating
+  neither the id nor a symbol names nothing to look up, and is refused as a
+  contract not found (200), as a gateway's lookup refuses it.
+- A head timestamp states the contract's type and exchange as a gateway states
+  them, however they were spelled: a stock is `STK`, given as `CS` or in lower
+  case, and a Nasdaq listing is `NASDAQ`, given as `ISLAND`.
 - A fundamental report is asked about a stock alone. A gateway refuses one on
   a contract stated as any other type, or stating none, before looking it up,
   with *Please enter a valid security type* under 321; so does this client.
+  It is asked about a stock in dollars, whatever currency the contract states,
+  as a gateway asks every one.
 - A venue or currency left empty is not stated on the lookup.
 - `includeExpired` is stated on every lookup by description a details request
   makes, and a bars, head-timestamp or ticks request carries it to the venue

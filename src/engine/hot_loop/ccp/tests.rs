@@ -5386,6 +5386,15 @@ fn a_request_naming_a_contract_waits_to_be_given_its_id() {
     let errors = shared.reference.drain_historical_errors();
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].0, 8);
+
+    // One stating neither an id nor a symbol names nothing to look up, and is
+    // refused as one the venue never names, with nothing sent about contract
+    // zero.
+    let nothing = crate::types::ControlCommand::FetchHistorical { contract: crate::types::ContractRef { con_id: 0, sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }, end_date_time: String::new(), req_id: 9, duration: "1 D".into(), bar_size: "1 hour".into(), what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, format_date: 1, include_expired: false, filters: Default::default() };
+    assert!(ccp.hold_until_named(nothing, &mut None, &mut HeartbeatState::new(), &shared).is_none());
+    assert!(ccp.pending_named.is_empty());
+    let errors = shared.reference.drain_historical_errors();
+    assert_eq!((errors[0].0, errors[0].1), (9, 200), "{errors:?}");
 }
 
 /// A request giving its contract by the venue's id alone waits for the venue
@@ -10192,6 +10201,7 @@ fn head_timestamp_by_symbol(req_id: u32) -> crate::types::ControlCommand {
     crate::types::ControlCommand::FetchHeadTimestamp {
         req_id,
         include_expired: false,
+        format_date: 1,
         contract: crate::types::ContractRef {
             symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
             ..Default::default()
@@ -11461,7 +11471,7 @@ fn a_held_request_is_named_by_what_a_gateway_reads_of_it() {
     let expired = |include_expired: bool| match head_timestamp_by_symbol(7) {
         crate::types::ControlCommand::FetchHeadTimestamp { req_id, contract, what_to_show, use_rth, .. } => {
             crate::types::ControlCommand::FetchHeadTimestamp {
-                req_id, contract, what_to_show, use_rth, include_expired, filters: named.clone(),
+                req_id, contract, what_to_show, use_rth, include_expired, format_date: 1, filters: named.clone(),
             }
         }
         _ => unreachable!(),
