@@ -153,8 +153,7 @@ fn unanswered_after(req_id: u32) -> std::time::Duration {
 
 /// Number of most-recent ExecIDs retained for fill deduplication. Bounds the
 /// memory of `seen_exec_ids` while staying large enough that a server replay
-/// after a reconnect burst still hits the window. The charges already told
-/// are held to the same window, for the same replay.
+/// after a reconnect burst still hits the window.
 const EXEC_ID_WINDOW: usize = 1024;
 
 /// How many of the venue's own names for recovered orders are held at once.
@@ -206,25 +205,27 @@ impl CcpState {
         let Some(exec_id) = parsed.get(&fix::TAG_EXEC_ID).filter(|s| !s.is_empty()) else {
             return;
         };
-        // Absent is not nothing: a charge the venue did not state is unstated,
-        // and reporting a zero for it is the number this was written to stop.
-        let Some(charged) = parsed.get(&fix::TAG_TRADE_CHARGE)
-            .and_then(|s| s.parse::<f64>().ok())
-        else {
-            return;
-        };
-        // What the fill realised (6099) and a bond's yield (236), where the record
-        // states them. One it does not state is unset, and so is one it states as
-        // "nan"; a figure it states and this cannot read leaves the record
-        // unreported, as a charge it cannot read does.
+        // Every figure on the record is read as a gateway reads it: one the
+        // record does not state is unset, and so is one it states as "nan"; a
+        // figure it states and this cannot read leaves the record unreported.
         let figure = |tag| match parsed.get(&tag).map(String::as_str) {
             None => Some(f64::MAX),
             Some(stated) if stated.eq_ignore_ascii_case("nan") => Some(f64::MAX),
             Some(stated) => stated.parse::<f64>().ok(),
         };
-        let (Some(mut realized), Some(yield_amount)) = (figure(6099), figure(236)) else {
+        // The charge, the other amount the record states beside it (8189), what
+        // the fill realised (6099) and a bond's yield (236).
+        let (Some(charged), Some(beside), Some(mut realized), Some(yield_amount)) =
+            (figure(fix::TAG_TRADE_CHARGE), figure(8189), figure(6099), figure(236))
+        else {
             return;
         };
+        // Absent is not nothing: a record stating neither amount says nothing,
+        // and reporting a zero for it is the number this was written to stop.
+        // One stating only the second is reported with its charge unset.
+        if charged == f64::MAX && beside == f64::MAX {
+            return;
+        }
         // An execution named this way is charged to no caller: a gateway tells
         // nobody of it.
         if exec_id.starts_with("F-") || exec_id.starts_with("A-") {
@@ -247,14 +248,7 @@ impl CcpState {
         // Nothing realised is unset, as a gateway reports it: an opening fill
         // states 0 here.
         let realized_pnl = if realized == 0.0 { f64::MAX } else { realized };
-        if self.charges_told.insert(execution.to_string(), (exec_id.clone(), realized_pnl)).is_none() {
-            self.charges_told_order.push_back(execution.to_string());
-            while self.charges_told_order.len() > EXEC_ID_WINDOW {
-                if let Some(old) = self.charges_told_order.pop_front() {
-                    self.charges_told.remove(&old);
-                }
-            }
-        }
+        self.charges_told.insert(execution.to_string(), (exec_id.clone(), realized_pnl));
         shared.orders.push_charge(crate::types::model::CommissionAndFeesReport {
             realized_pnl,
             yield_amount,
@@ -820,10 +814,10 @@ pub(crate) struct CcpState {
     pub(crate) exec_id_order: VecDeque<String>,
     /// The charges told this session, by the execution they are for without
     /// its revision: the revision told and what it realised. Kept across
-    /// reconnects, because every logon states the day's charges again.
+    /// reconnects, because every logon states the day's charges again, and
+    /// held whole: a gateway sets no bound on it, and a charge let go would be
+    /// told again at the next logon.
     charges_told: HashMap<String, (String, f64)>,
-    /// Insertion order for `charges_told`, oldest at the front.
-    charges_told_order: VecDeque<String>,
     pub(crate) disconnected: bool,
     /// When to account for orders the reconnect did not explain.
     ///
@@ -1192,7 +1186,6 @@ impl CcpState {
             seen_exec_ids: HashSet::with_capacity(256),
             exec_id_order: VecDeque::with_capacity(256),
             charges_told: HashMap::new(),
-            charges_told_order: VecDeque::new(),
             disconnected: false,
             recovery_sweep_at: None,
             hydrated_any: false,

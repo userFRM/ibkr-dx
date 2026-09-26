@@ -26,10 +26,13 @@ record arriving during a read waits for the next read. A fill and its status
 from one report are delivered as `order_status`, then `exec_details`; the
 commission report follows where the venue states it. It carries the realized
 P&L and a bond's yield where the venue states them beside the charge, and the
-unset value where it states none or, for the P&L, zero. Each charge is
-delivered once for the session: the venue states the day's charges again at
-every reconnect, and only a later revision of one is delivered again, with the
-P&L the one before it realized added to its own.
+unset value where it states none, states `nan` or, for the P&L, zero. The
+commission is unset in the same way. A record stating neither the charge nor
+the other amount beside it is not delivered, and neither is one stating a figure
+that cannot be read. Each charge is delivered once for the session: the venue
+states the day's charges again at every reconnect, and only a later revision of
+one is delivered again, with the P&L the one before it realized added to its
+own.
 
 Python request refusals also wait for `poll()` or `run()`. A 504 about a feed or
 trading connection that ended within an admitted session follows the earlier

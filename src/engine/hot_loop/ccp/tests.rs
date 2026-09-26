@@ -8221,13 +8221,21 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
     assert!(shared.orders.drain_charges().is_empty(), "read once");
 
     // What the fill realised and a bond's yield, beside the charge: stated,
-    // unstated, and stated as nothing, which is how an opening fill reads.
-    for (exec_id, stated, (realized_pnl, yield_amount, yield_redemption_date)) in [
+    // unstated, and stated as nothing, which is how an opening fill reads. A
+    // tag stated as None is one the record leaves out.
+    const MAX: f64 = f64::MAX;
+    for (exec_id, stated, (commission, realized_pnl, yield_amount, yield_redemption_date)) in [
         // From a captured session, a fill that closed a position.
-        ("00025b49.6ab28ffe.01.01", &[(6099, "90.482015"), (8189, "8.780597")][..], (90.482015, f64::MAX, 0)),
-        ("00025b49.6ab28ffe.02.01", &[], (f64::MAX, f64::MAX, 0)),
-        ("00025b49.6ab28ffe.03.01", &[(6099, "0")], (f64::MAX, f64::MAX, 0)),
-        ("00025b49.6ab28ffe.04.01", &[(6099, "0"), (236, "4.25"), (696, "20301215")], (f64::MAX, 4.25, 20301215)),
+        ("00025b49.6ab28ffe.01.01", &[(6099, Some("90.482015")), (8189, Some("8.780597"))][..], (13.022195, 90.482015, MAX, 0)),
+        ("00025b49.6ab28ffe.02.01", &[], (13.022195, MAX, MAX, 0)),
+        ("00025b49.6ab28ffe.03.01", &[(6099, Some("0"))], (13.022195, MAX, MAX, 0)),
+        ("00025b49.6ab28ffe.04.01", &[(6099, Some("0")), (236, Some("4.25")), (696, Some("20301215"))], (13.022195, MAX, 4.25, 20301215)),
+        // A redemption stated as anything but a date of eight is not passed on.
+        ("00025b49.6ab28ffe.05.01", &[(236, Some("4.25")), (696, Some("203012"))], (13.022195, MAX, 4.25, 0)),
+        // "nan" is unset, never the number it would parse to. And a record
+        // leaving the charge out but stating the other amount beside it is
+        // reported, its charge unset.
+        ("00025b49.6ab28ffe.06.01", &[(6378, None), (8189, Some("8.780597")), (6099, Some("NaN"))], (MAX, MAX, MAX, 0)),
     ] {
         let shared = SharedState::new();
         let mut parsed = std::collections::HashMap::from([
@@ -8235,13 +8243,18 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
             (crate::protocol::fix::TAG_TRADE_CHARGE, "13.022195".to_string()),
             (crate::protocol::fix::TAG_TRADE_CHARGE_CURRENCY, "USD".to_string()),
         ]);
-        parsed.extend(stated.iter().map(|(tag, value)| (*tag, value.to_string())));
+        for (tag, value) in stated {
+            match value {
+                Some(value) => parsed.insert(*tag, value.to_string()),
+                None => parsed.remove(tag),
+            };
+        }
         CcpState::new().handle_trade_charge(&parsed, &shared);
         let charged = shared.orders.drain_charges();
         assert_eq!(charged.len(), 1, "{exec_id}");
         assert_eq!(
-            (charged[0].realized_pnl, charged[0].yield_amount, charged[0].yield_redemption_date),
-            (realized_pnl, yield_amount, yield_redemption_date),
+            (charged[0].commission_and_fees, charged[0].realized_pnl, charged[0].yield_amount, charged[0].yield_redemption_date),
+            (commission, realized_pnl, yield_amount, yield_redemption_date),
             "{exec_id}",
         );
     }
@@ -8249,17 +8262,27 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
 
 /// A record naming no execution, or stating no charge, says nothing — and
 /// nothing is what is reported, rather than a zero against some other fill.
+/// Nor is one stating a figure that cannot be read: a gateway loses it whole.
 #[test]
 fn a_record_that_states_no_charge_reports_none() {
+    let named = |stated: &[(u32, &str)]| {
+        let mut parsed = std::collections::HashMap::from([
+            (crate::protocol::fix::TAG_EXEC_ID, "abc.def.01.01".to_string()),
+        ]);
+        parsed.extend(stated.iter().map(|(tag, value)| (*tag, value.to_string())));
+        parsed
+    };
     for parsed in [
         // No execution named.
         std::collections::HashMap::from([
             (crate::protocol::fix::TAG_TRADE_CHARGE, "1.5".to_string()),
         ]),
         // Named, and no charge stated.
-        std::collections::HashMap::from([
-            (crate::protocol::fix::TAG_EXEC_ID, "abc.def.01.01".to_string()),
-        ]),
+        named(&[]),
+        // Stated as "nan", which is no charge either.
+        named(&[(6378, "nan")]),
+        // A charge, beside a realised figure that cannot be read.
+        named(&[(6378, "1.5"), (6099, "x")]),
     ] {
         let shared = SharedState::new();
         CcpState::new().handle_trade_charge(&parsed, &shared);
@@ -8304,6 +8327,19 @@ fn a_charge_is_told_once_across_a_reconnect_and_a_later_revision_again() {
     assert!(
         told(&mut ccp, &first).is_empty(),
         "and the revision before it is not told again",
+    );
+
+    // A name in five parts carries its revision in the last two.
+    assert_eq!(told(&mut ccp, &charge("00025b49.6ab30000.01.01.01", "2")).len(), 1);
+    let revised = told(&mut ccp, &charge("00025b49.6ab30000.01.02.01", "3"));
+    assert!(
+        revised.len() == 1 && revised[0].realized_pnl == 5.0,
+        "the same execution, revised: {revised:?}",
+    );
+
+    assert!(
+        told(&mut ccp, &charge("F-00025b49.6ab28ffe.07.01", "1.5")).is_empty(),
+        "an execution named F-... is told to nobody",
     );
 }
 
