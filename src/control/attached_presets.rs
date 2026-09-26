@@ -81,6 +81,12 @@ pub struct AttachedPreset {
     pub primary_outside_rth: bool,
     pub primary_use_price_mgmt_algo: bool,
     pub primary_auto_cancel_parent: bool,
+    /// The price the preset gives an order of a type that takes no limit as
+    /// the order is created: by default the ask, plus nought.
+    pub primary_limit: PriceSpec,
+    /// Whether a sale takes the other side of that price and the other sign
+    /// of its offset.
+    pub primary_reverse_bid_ask: bool,
     /// A stated fractional share default selects the parent's exact quantity.
     pub profit_uses_exact_parent_quantity: bool,
 }
@@ -111,6 +117,13 @@ impl Default for AttachedPreset {
             primary_outside_rth: false,
             primary_use_price_mgmt_algo: false,
             primary_auto_cancel_parent: false,
+            primary_limit: PriceSpec {
+                price_type: 1,
+                offset: 0.0,
+                unit: PriceUnit::Amount,
+                use_parent_trade_price: false,
+            },
+            primary_reverse_bid_ask: true,
             profit_uses_exact_parent_quantity: false,
         }
     }
@@ -181,28 +194,7 @@ impl AttachedPreset {
                 4084 => {
                     let identity = value.parse::<i32>().unwrap_or_default();
                     let mut spec = PriceSpec::for_tag(identity);
-                    while let Some((member, value)) = fields.get(index + 1).copied() {
-                        if !(4085..=4088).contains(member) {
-                            break;
-                        }
-                        index += 1;
-                        if value.is_empty() || value.contains('=') {
-                            continue;
-                        }
-                        if let Some(spec) = &mut spec {
-                            match member {
-                                4085 => spec.offset = read_double(value),
-                                4086 => spec.unit = PriceUnit::from_wire(value),
-                                4087 => spec.use_parent_trade_price = value == "1",
-                                4088 => {
-                                    let value = read_integer(value);
-                                    spec.price_type =
-                                        if (0..=38).contains(&value) { value } else { 3 };
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                    }
+                    index = read_members(&fields, index, &mut spec);
                     if let Some(spec) = spec {
                         match identity {
                             4077 => preset.limit = spec,
@@ -216,6 +208,29 @@ impl AttachedPreset {
                     }
                 }
                 _ => {}
+            }
+            index += 1;
+        }
+        // The primary order's fields, read apart from the attached ones: its
+        // reversal flag and its own price specifications, of which the limit
+        // is the one read here.
+        let primary: Vec<_> = values
+            .fields
+            .iter()
+            .filter(|(tag, _)| (4050..=4065).contains(tag) || (4084..=4088).contains(tag))
+            .collect();
+        let mut index = 0;
+        while let Some((tag, value)) = primary.get(index).copied() {
+            if !value.is_empty() && !value.contains('=') {
+                match tag {
+                    4050 => preset.primary_reverse_bid_ask = value == "1",
+                    4084 if value.parse::<i32>() == Ok(4058) => {
+                        let mut spec = Some(Self::default().primary_limit);
+                        index = read_members(&primary, index, &mut spec);
+                        preset.primary_limit = spec.unwrap_or(preset.primary_limit);
+                    }
+                    _ => {}
+                }
             }
             index += 1;
         }
@@ -242,6 +257,34 @@ fn read_double(value: &str) -> f64 {
 
 fn read_integer(value: &str) -> i32 {
     value.parse().unwrap_or(i32::MAX)
+}
+
+/// Read the members that follow a price specification's selector at `index`
+/// into `spec`, and return the index of the last one read. A specification
+/// this reader keeps no field for has its members passed over.
+fn read_members(fields: &[&(u32, String)], mut index: usize, spec: &mut Option<PriceSpec>) -> usize {
+    while let Some((member, value)) = fields.get(index + 1).copied() {
+        if !(4085..=4088).contains(member) {
+            break;
+        }
+        index += 1;
+        if value.is_empty() || value.contains('=') {
+            continue;
+        }
+        if let Some(spec) = spec {
+            match member {
+                4085 => spec.offset = read_double(value),
+                4086 => spec.unit = PriceUnit::from_wire(value),
+                4087 => spec.use_parent_trade_price = value == "1",
+                4088 => {
+                    let value = read_integer(value);
+                    spec.price_type = if (0..=38).contains(&value) { value } else { 3 };
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    index
 }
 
 /// The selectors encoded in a preset key.

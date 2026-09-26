@@ -104,9 +104,6 @@ pub const COMBINATION_LEG_INVALID: i32 = 313;
 /// under.
 pub const SECURITY_NOT_PERMITTED: i32 = 203;
 
-/// The code an order missing the price that triggers it is refused under.
-pub const TRIGGER_PRICE_MISSING: i32 = 403;
-
 /// The code an order stating a trigger method the venue does not carry is
 /// refused under.
 pub const TRIGGER_METHOD_INVALID: i32 = 146;

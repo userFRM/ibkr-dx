@@ -506,20 +506,6 @@ impl Clone for Order {
     }
 }
 
-/// A figure the reference client's `Order` starts unset, as the engine's order
-/// holds it: nought. That client starts these at its unset double or integer,
-/// and so does this class, so a program comparing against them reads what it
-/// would there; the engine's order carries nought for the same thing, so an
-/// order sends the same either way.
-fn unset_as_nought(value: f64) -> f64 {
-    if value == f64::MAX { 0.0 } else { value }
-}
-
-/// [`unset_as_nought`], for a count.
-fn unset_as_nought_int(value: i32) -> i32 {
-    if value == i32::MAX { 0 } else { value }
-}
-
 impl Default for Order {
     fn default() -> Self {
         Self {
@@ -1123,24 +1109,24 @@ impl Order {
             action: self.action.clone(),
             total_quantity: self.total_quantity,
             order_type: self.order_type.clone(),
-            lmt_price: unset_as_nought(self.lmt_price),
-            aux_price: unset_as_nought(self.aux_price),
+            lmt_price: self.lmt_price,
+            aux_price: self.aux_price,
             tif: self.tif.clone(),
             outside_rth: self.outside_rth,
             display_size: self.display_size,
-            min_qty: unset_as_nought_int(self.min_qty),
+            min_qty: self.min_qty,
             hidden: self.hidden,
             good_after_time: self.good_after_time.clone(),
             good_till_date: self.good_till_date.clone(),
             oca_group: self.oca_group.clone(),
-            trailing_percent: unset_as_nought(self.trailing_percent),
+            trailing_percent: self.trailing_percent,
             algo_strategy: self.algo_strategy.clone(),
             // A Python list, so reading it needs the interpreter this does
             // not hold. Filled at the call site from `convert_algo_params`,
             // beside the conditions.
             algo_params: Vec::new(),
             what_if: self.what_if,
-            cash_qty: unset_as_nought(self.cash_qty),
+            cash_qty: self.cash_qty,
             parent_id: self.parent_id,
             transmit: self.transmit,
             discretionary_amt: self.discretionary_amt,
@@ -1151,9 +1137,9 @@ impl Order {
             all_or_none: self.all_or_none,
             trigger_method: self.trigger_method,
             adjusted_order_type: self.adjusted_order_type.clone(),
-            trigger_price: unset_as_nought(self.trigger_price),
-            adjusted_stop_price: unset_as_nought(self.adjusted_stop_price),
-            adjusted_stop_limit_price: unset_as_nought(self.adjusted_stop_limit_price),
+            trigger_price: self.trigger_price,
+            adjusted_stop_price: self.adjusted_stop_price,
+            adjusted_stop_limit_price: self.adjusted_stop_limit_price,
             conditions: Vec::new(), // Use convert_conditions(py) + to_api() at call sites that need conditions
             conditions_ignore_rth: self.conditions_ignore_rth,
             conditions_cancel_order: self.conditions_cancel_order,
@@ -1202,7 +1188,7 @@ impl Order {
             fa_group: self.fa_group.clone(),
             fa_method: self.fa_method.clone(),
             fa_percentage: self.fa_percentage.clone(),
-            filled_quantity: unset_as_nought(self.filled_quantity),
+            filled_quantity: self.filled_quantity,
             hedge_max_size: self.hedge_max_size,
             hedge_param: self.hedge_param.clone(),
             hedge_type: self.hedge_type.clone(),
@@ -1255,7 +1241,7 @@ impl Order {
             reference_change_amount: self.reference_change_amount,
             reference_contract_id: self.reference_contract_id,
             reference_exchange_id: self.reference_exchange_id.clone(),
-            reference_price_type: unset_as_nought_int(self.reference_price_type),
+            reference_price_type: self.reference_price_type,
             route_marketable_to_bbo: self.route_marketable_to_bbo,
             rule80a: self.rule80a.clone(),
             scale_auto_reset: self.scale_auto_reset,
@@ -1290,7 +1276,7 @@ impl Order {
             trail_stop_price: self.trail_stop_price,
             use_price_mgmt_algo: self.use_price_mgmt_algo,
             volatility: self.volatility,
-            volatility_type: unset_as_nought_int(self.volatility_type),
+            volatility_type: self.volatility_type,
             what_if_type: self.what_if_type,
         }
     }

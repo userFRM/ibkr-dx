@@ -24,7 +24,7 @@ def trail_limit(order_id, trail, offset):
     o = Order()
     o.order_id = order_id
     o.action, o.total_quantity, o.order_type = "SELL", 1.0, "TRAIL LIMIT"
-    o.aux_price, o.lmt_price_offset = trail, offset
+    o.aux_price, o.lmt_price_offset, o.trail_stop_price = trail, offset, 99.0
     o.tif, o.transmit = "DAY", True
     return o
 

@@ -62,7 +62,7 @@ impl ChildPrices {
             stop: pricing.stop,
             offset: parent.aux_price,
             trailing_amount: if matches!(parent.order_type_named(), Some("TRAIL" | "TRAIL LIMIT")) {
-                if parent.trailing_percent != 0.0 && parent.trailing_percent != UNSET_PRICE {
+                if parent.trailing_percent != UNSET_PRICE {
                     parent.trailing_percent
                 } else {
                     parent.aux_price
@@ -70,9 +70,7 @@ impl ChildPrices {
             } else {
                 UNSET_PRICE
             },
-            trailing_unit: if parent.trailing_percent != 0.0
-                && parent.trailing_percent != UNSET_PRICE
-            {
+            trailing_unit: if parent.trailing_percent != UNSET_PRICE {
                 PriceUnit::Percent
             } else {
                 PriceUnit::Amount

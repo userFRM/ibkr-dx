@@ -147,13 +147,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::thread::sleep(Duration::from_millis(500));
 
-    // 2) TRAIL LIMIT — Sell 1 AAPL @ trail $2.00, lmt offset $0.50
+    // 2) TRAIL LIMIT — Sell 1 AAPL @ trail $2.00, lmt offset $0.50, starting
+    //    from a stop well below the market, which a trailing stop limit states
     let trail_lmt = Order {
         action: "SELL".into(),
         order_type: "TRAIL LIMIT".into(),
         total_quantity: 1.0,
         aux_price: 2.0,
         lmt_price_offset: 0.50,
+        trail_stop_price: 1.00,
         tif: "DAY".into(),
         ..Order::default()
     };

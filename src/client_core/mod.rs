@@ -27,7 +27,7 @@ use crate::error_codes::{
     MISC_OPTION_KEY_INVALID, MISC_OPTION_VALUE_INVALID, NO_SUCH_BOOK, OCA_GROUP_REVISION,
     OCA_TYPE_REVISION, OPT_OUT_SMART_ROUTING_DROPPED, OPT_OUT_SMART_ROUTING_WITHDRAWN,
     MANUAL_CANCEL_TIME_INVALID, ORDER_TYPE_UNSUPPORTED, INVALID_ORDER_TYPE, PER_LEG_PRICES_UNSUPPORTED,
-    REQUEST_NOT_PROCESSED, Refusal, SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID, TRIGGER_PRICE_MISSING,
+    REQUEST_NOT_PROCESSED, Refusal, SECURITY_NOT_PERMITTED, REQUEST_NOT_READ, TRIGGER_METHOD_INVALID,
 };
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -5184,9 +5184,13 @@ impl ClientCore {
 
         // Reject non-finite and out-of-range numerics up front, before any
         // caller-visible order gets built from a NaN, an Infinity, or a
-        // magnitude the wire's fixed-point i64 can't hold.
-        require_finite_price("lmt_price", order.lmt_price)?;
-        require_finite_price("aux_price", order.aux_price)?;
+        // magnitude the wire's fixed-point i64 can't hold. `f64::MAX` is the
+        // reference client's unset value and states none.
+        for (field, value) in [("lmt_price", order.lmt_price), ("aux_price", order.aux_price)] {
+            if value != f64::MAX {
+                require_finite_price(field, value)?;
+            }
+        }
         require_finite_price("discretionary_amt", order.discretionary_amt)?;
         // Nought is no discretion; below it is no amount a gateway takes.
         if order.discretionary_amt < 0.0 {
@@ -5196,27 +5200,19 @@ impl ClientCore {
                  this contract",
             ));
         }
-        require_finite_price("cash_qty", order.cash_qty)?;
-        require_finite_price("trigger_price", order.trigger_price)?;
-        require_finite_price("adjusted_stop_price", order.adjusted_stop_price)?;
-        require_finite_price("adjusted_stop_limit_price", order.adjusted_stop_limit_price)?;
-        // f64::MAX is the sentinel for "not set" on these three; any other
-        // value must be finite and representable.
-        if order.trail_stop_price != f64::MAX {
-            require_finite_price("trail_stop_price", order.trail_stop_price)?;
-        }
-        if order.lmt_price_offset != f64::MAX {
-            require_finite_price("lmt_price_offset", order.lmt_price_offset)?;
-        }
-        if order.adjusted_trailing_amount != f64::MAX {
-            require_finite_price("adjusted_trailing_amount", order.adjusted_trailing_amount)?;
-        }
         // Every other field a saturating cast turns into a different,
         // valid-looking number on its way to the wire. Guarding only the
         // handful above lets a NaN ladder step reach the venue as an increment
         // of zero, and a benchmark reference or hedging leg stated as an
         // infinity reach it as the largest price there is.
         for (field, value) in [
+            ("cash_qty", order.cash_qty),
+            ("trigger_price", order.trigger_price),
+            ("adjusted_stop_price", order.adjusted_stop_price),
+            ("adjusted_stop_limit_price", order.adjusted_stop_limit_price),
+            ("trail_stop_price", order.trail_stop_price),
+            ("lmt_price_offset", order.lmt_price_offset),
+            ("adjusted_trailing_amount", order.adjusted_trailing_amount),
             ("scale_price_increment", order.scale_price_increment),
             ("scale_profit_offset", order.scale_profit_offset),
             ("scale_price_adjust_value", order.scale_price_adjust_value),
@@ -5242,11 +5238,12 @@ impl ClientCore {
         }
         // A trail is an amount or a percentage, and a trailing order naming
         // both is refused as a gateway refuses it, while it reads the order.
-        // Nought is no trail, and so is the reference client's value for one
-        // left unset.
+        // An amount of nought beside a percentage is no amount, and the
+        // reference client's unset value is neither.
         let named = |v: f64| v != 0.0 && v != f64::MAX;
         let trailing = matches!(order.order_type_named(), Some("TRAIL" | "TRAIL LIMIT"));
-        if trailing && named(order.aux_price) && named(order.trailing_percent) {
+        let by_percent = order.trailing_percent != f64::MAX;
+        if trailing && named(order.aux_price) && by_percent {
             return Err(Refusal::stated(
                 REQUEST_NOT_READ,
                 "Error reading request: Cannot specify Trailing Amount and Trailing Percent \
@@ -5255,7 +5252,7 @@ impl ClientCore {
         }
         // A trail by percentage, outside what a percentage can be.
         if trailing
-            && named(order.trailing_percent)
+            && by_percent
             && (order.trailing_percent < 0.0 || order.trailing_percent > 100.0)
         {
             return Err(Refusal::validation(
@@ -5265,7 +5262,7 @@ impl ClientCore {
         // A trailing stop limit by percentage, which a gateway takes. What it
         // states for one on the trigger is not established here, and a guess
         // would put a price the caller did not ask for on the order.
-        if order.order_type_named() == Some("TRAIL LIMIT") && named(order.trailing_percent) {
+        if order.order_type_named() == Some("TRAIL LIMIT") && by_percent {
             return Err(Refusal::validation(
                 "trailing_percent on a TRAIL LIMIT order is not carried by this client: what \
                  the order states as its trigger then is not established here. State the trail \
@@ -5453,8 +5450,9 @@ impl ClientCore {
         }
         // These two go out in a single byte, so a value above it is not a
         // larger one — it arrives as whatever fits.
+        // The volatility kind's unset value states none.
         for (what, stated) in [
-            ("volatility_type", order.volatility_type),
+            ("volatility_type", Some(order.volatility_type).filter(|&v| v != i32::MAX).unwrap_or(0)),
             ("short_sale_slot", order.short_sale_slot),
         ] {
             if !(0..=255).contains(&stated) {
@@ -5588,51 +5586,49 @@ impl ClientCore {
         if order.order_type_named().is_none() {
             return Err(Self::not_an_order_type(order));
         }
-        if order.what_if {
-            if let (_, Some(why)) = Self::retired_instructions(order, session) {
-                return Err(why);
-            }
-            return Ok(());
+        // The prices an order's type cannot go without, asked as a gateway
+        // asks for them while it validates an order, preview or not, and in
+        // its order. A stop's stop and a touched order's trigger are the
+        // auxiliary price; a trailing stop limit's stop is where it starts.
+        // Nought is a price like any other; the unset value states none.
+        let stop = if trailing { order.trail_stop_price } else { order.aux_price };
+        let needed = match order_type {
+            "STP" | "STP LMT" | "STP PRT" => Some("stop price"),
+            "TRAIL LIMIT" => Some("trailing stop price"),
+            "MIT" | "LIT" => Some("trigger price"),
+            _ => None,
+        };
+        if let Some(price) = needed.filter(|_| stop == f64::MAX) {
+            return Err(Refusal::validation(format!("Please enter a {price}")));
         }
-
-        // Reject orders that require aux_price when it is zero — prevents silent no-
-        // trigger bugs.
-        match order_type {
-            "STP" | "STP PRT" | "MIT" if order.aux_price == 0.0 => {
-                return Err(Refusal::stated(TRIGGER_PRICE_MISSING, format!(
-                    "{} order requires aux_price (stop/trigger price) but got 0.0 — \
-                     set aux_price to the desired trigger price, not lmt_price",
-                    order.order_type
+        // Then, of a stop or a touched order: what an adjustable one becomes
+        // needs its stop, and its limit where it becomes a stop limit; and a
+        // trail stated as an amount needs one, not none and not one below
+        // nought. Nought beside a percentage is no amount: the percentage is
+        // the trail.
+        if needed.is_some() || order_type == "TRAIL" {
+            let becomes = order.adjusted_order_type.to_uppercase();
+            if matches!(becomes.as_str(), "STP" | "STP PRT" | "TRAIL LIMIT")
+                && order.adjusted_stop_price == f64::MAX
+            {
+                return Err(Refusal::validation("Invalid Adjusted Stop Price"));
+            }
+            if matches!(becomes.as_str(), "STP LMT" | "TRAIL LIMIT")
+                && order.adjusted_stop_limit_price == f64::MAX
+            {
+                return Err(Refusal::validation("Invalid Adjusted Stop Limit Price"));
+            }
+            if trailing && ((order.aux_price == f64::MAX && !by_percent) || order.aux_price < 0.0) {
+                return Err(Refusal::validation(format!(
+                    "You must enter a Trailing Amount for {order_type} Order.",
                 )));
             }
-            "STP LMT" | "LIT" if order.aux_price == 0.0 => {
-                return Err(Refusal::stated(TRIGGER_PRICE_MISSING, format!(
-                    "{} order requires aux_price (stop/trigger price) but got 0.0",
-                    order.order_type
-                )));
+            if matches!(order_type, "STP" | "STP PRT" | "TRAIL LIMIT")
+                && !becomes.is_empty()
+                && order.adjusted_stop_price == f64::MAX
+            {
+                return Err(Refusal::validation("Invalid Adjusted Stop Price"));
             }
-            "TRAIL" if !named(order.trailing_percent) && !named(order.aux_price) => {
-                return Err(Refusal::stated(
-                    TRIGGER_PRICE_MISSING,
-                    "TRAIL order requires either trailing_percent or aux_price (trail amount) \
-                     but both are 0.0",
-                ));
-            }
-            "TRAIL LIMIT" if order.aux_price == 0.0 => {
-                return Err(Refusal::stated(
-                    TRIGGER_PRICE_MISSING,
-                    "TRAIL LIMIT order requires aux_price (trail amount) but got 0.0",
-                ));
-            }
-            // This type's wire shape has one price and no second tag for it
-            // to move to, so an order sent without one is malformed rather
-            // than refused by the venue under a code a caller could expect.
-            "PEG BEST" if order.lmt_price == 0.0 => {
-                return Err(Refusal::validation(
-                    "PEG BEST order requires lmt_price (the order's price) but got 0.0",
-                ));
-            }
-            _ => {}
         }
 
         // Retired instructions are processed after all the order fields.
@@ -6178,6 +6174,20 @@ impl ClientCore {
         if v == f64::MAX { 0 } else { crate::types::price_from_f64(v) }
     }
 
+    /// The limit as a gateway reads it off a placement: `f64::MAX` where the
+    /// order states none, and where it states nought on a type that takes a
+    /// limit, but for a combination that is not a relative order, where
+    /// nought is a price. Scaled, `f64::MAX` is `Price::MAX`, which states no
+    /// price to the encoder.
+    pub(crate) fn stated_limit(order: &ApiOrder, contract: Option<&crate::types::model::Contract>) -> f64 {
+        let combination = contract.is_some_and(|c| c.sec_type.trim().eq_ignore_ascii_case("BAG"));
+        if order.lmt_price == 0.0 && (order.order_type_named() == Some("REL") || !combination) {
+            f64::MAX
+        } else {
+            order.lmt_price
+        }
+    }
+
     /// Turn what a caller set into the request the engine sends.
     pub fn build_order_request(
         order: &ApiOrder,
@@ -6198,6 +6208,7 @@ impl ClientCore {
         let side = order.side()?;
         let qty = crate::types::qty_from_f64(order.total_quantity);
         let order_type = order.order_type_named();
+        let limit = Self::stated_limit(order, contract);
 
         // Every order type carries its extended attributes and its time-in-force
         // through one encoder. Choosing per type between an attribute-carrying
@@ -6259,7 +6270,7 @@ impl ClientCore {
                 )));
             }
             if priced.first() == Some(&true) {
-                return Err(if order.lmt_price != 0.0 {
+                return Err(if order.lmt_price != 0.0 && order.lmt_price != f64::MAX {
                     Refusal::stated(COMBO_AND_LEG_PRICES, "Can't specify combo price when using per-leg prices.")
                 } else {
                     Refusal::stated(
@@ -6300,7 +6311,7 @@ impl ClientCore {
 
         // Adaptive orders (special-cased before generic algo)
         if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
-            let price = crate::types::price_from_f64(order.lmt_price);
+            let price = crate::types::price_from_f64(limit);
             let priority = adaptive_priority(&order.algo_params)?;
             return Ok(ControlCommand::Order(ex(OrderKind::Adaptive { price, priority })));
         }
@@ -6308,7 +6319,7 @@ impl ClientCore {
         // Algo orders
         if !order.algo_strategy.is_empty() {
             let algo = crate::client_core::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
-            let price = crate::types::price_from_f64(order.lmt_price);
+            let price = crate::types::price_from_f64(limit);
             return Ok(ControlCommand::Order(ex(OrderKind::Algo { price, algo })));
         }
 
@@ -6359,7 +6370,7 @@ impl ClientCore {
                 ex(OrderKind::Market)
             }
             "LMT" => {
-                let price = crate::types::price_from_f64(order.lmt_price);
+                let price = crate::types::price_from_f64(limit);
                 ex(OrderKind::Limit { price })
             }
             "STP" => {
@@ -6367,15 +6378,16 @@ impl ClientCore {
                 ex(OrderKind::Stop { stop_price: stop })
             }
             "STP LMT" => {
-                let price = crate::types::price_from_f64(order.lmt_price);
+                let price = crate::types::price_from_f64(limit);
                 let stop = crate::types::price_from_f64(order.aux_price);
                 ex(OrderKind::StopLimit { price, stop_price: stop })
             }
             "TRAIL" => {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = (order.trail_stop_price != f64::MAX).then(|| crate::types::price_from_f64(order.trail_stop_price));
-                // The reference client's unset value is not a percentage.
-                if order.trailing_percent > 0.0 && order.trailing_percent != f64::MAX {
+                // The reference client's unset value is not a percentage;
+                // nought is one.
+                if order.trailing_percent != f64::MAX {
                     // Wire granularity is basis points, so a percentage
                     // stated finer than that is put on the nearest one.
                     // Rounded rather than cut: a hundredth of a per cent is
@@ -6401,7 +6413,7 @@ impl ClientCore {
                 let offset_f = if order.lmt_price_offset != f64::MAX {
                     order.lmt_price_offset
                 } else {
-                    order.lmt_price
+                    limit
                 };
                 let lmt_offset = crate::types::price_from_f64(offset_f);
                 let trail = crate::types::price_from_f64(order.aux_price);
@@ -6412,7 +6424,7 @@ impl ClientCore {
                 ex(OrderKind::Moc)
             }
             "LOC" => {
-                let price = crate::types::price_from_f64(order.lmt_price);
+                let price = crate::types::price_from_f64(limit);
                 ex(OrderKind::Loc { price })
             }
             "MIT" => {
@@ -6420,7 +6432,7 @@ impl ClientCore {
                 ex(OrderKind::Mit { stop_price: stop })
             }
             "LIT" => {
-                let price = crate::types::price_from_f64(order.lmt_price);
+                let price = crate::types::price_from_f64(limit);
                 let stop = crate::types::price_from_f64(order.aux_price);
                 ex(OrderKind::Lit { price, stop_price: stop })
             }
@@ -6439,7 +6451,7 @@ impl ClientCore {
             "REL" => {
                 ex(OrderKind::Rel {
                     offset: crate::types::price_from_f64(order.aux_price),
-                    price_cap: Self::price_or_unset(order.lmt_price),
+                    price_cap: Self::price_or_unset(limit),
                 })
             }
             // Sits away from the best price and follows it, no further than
@@ -6448,7 +6460,7 @@ impl ClientCore {
             "PASSV REL" => {
                 ex(OrderKind::PassiveRel {
                     offset: crate::types::price_from_f64(order.aux_price),
-                    price_cap: Self::price_or_unset(order.lmt_price),
+                    price_cap: Self::price_or_unset(limit),
                 })
             }
             // Sits at the best bid or offer, filling no worse than the price
@@ -6456,7 +6468,7 @@ impl ClientCore {
             // go towards the midpoint, are stated on the order's attributes.
             "PEG BEST" => {
                 ex(OrderKind::PegBest {
-                    price: crate::types::price_from_f64(order.lmt_price),
+                    price: crate::types::price_from_f64(limit),
                 })
             }
             // Every reference field was already carried here and then read by
@@ -6476,16 +6488,16 @@ impl ClientCore {
             }
             "PEG MKT" => {
                 let offset = crate::types::price_from_f64(order.aux_price);
-                let price_cap = crate::types::price_from_f64(order.lmt_price);
+                let price_cap = Self::price_or_unset(limit);
                 ex(OrderKind::PegMkt { offset, price_cap })
             }
             "PEG MID" => {
                 let offset = crate::types::price_from_f64(order.aux_price);
-                let price_cap = crate::types::price_from_f64(order.lmt_price);
+                let price_cap = Self::price_or_unset(limit);
                 ex(OrderKind::PegMid { offset, price_cap })
             }
             "MIDPRICE" => {
-                let cap = crate::types::price_from_f64(order.lmt_price);
+                let cap = Self::price_or_unset(limit);
                 ex(OrderKind::MidPrice { price_cap: cap })
             }
             "SNAP MKT" => {

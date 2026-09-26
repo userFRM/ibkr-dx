@@ -483,6 +483,23 @@ pub(crate) fn resolve_adjusted_price(
     )
 }
 
+/// An order's own price from its preset's primary specification, resolved as
+/// the order is created on its own side: a sale takes the other side of the
+/// quote and the other sign of the offset where the preset reverses them.
+pub(crate) fn resolve_order_price(
+    spec: &PriceSpec,
+    reverse_bid_ask: bool,
+    context: &PriceContext<'_>,
+) -> f64 {
+    let force_regular = !primary_default(spec);
+    let spec = if reverse_bid_ask && context.side == PriceSide::Sell && relative(spec.price_type) {
+        reversed(*spec)
+    } else {
+        *spec
+    };
+    resolve_price(&spec, &PriceContext { force_regular, ..*context })
+}
+
 pub(crate) fn resolve_profit_price(
     spec: &PriceSpec,
     parent: OrderPrice,

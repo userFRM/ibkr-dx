@@ -7,6 +7,7 @@ use super::attached_children::{
 use super::attached_combos::attached_combo;
 use super::attached_prices::{
     IndicativePrices, OrderPrice, PriceContext, PriceSide, cached_quote_views,
+    resolve_order_price,
 };
 use super::{
     ApiContract, ApiOrder, ClientCore, ControlCommand, InstrumentId, OrderKind, OrderRequest,
@@ -249,8 +250,8 @@ impl AttachedState {
             let instrument = shared.market.attached_quote_instrument(proxy.con_id, &proxy.exchange);
             price_context(shared, proxy, proxy_definition.as_ref(), instrument, proxy_rule.as_ref())
         });
-        let parent_price = order_price(order);
-        let prices = PriceContext {
+        let mut parent_price = order_price(order, contract);
+        let mut prices = PriceContext {
             side: parent_price.side,
             pricing_order: parent_price,
             loan_fee_sides: (contract.sec_type == "SLB")
@@ -263,6 +264,14 @@ impl AttachedState {
             },
             ..price_context(shared, contract, Some(&definition), Some(instrument), rule.as_ref())
         };
+        // A gateway reads no limit off an order of a type that takes none. It
+        // prices one as it creates it, from the preset's primary limit, and a
+        // market parent's children are priced from that.
+        if !parent_price.uses_limit {
+            parent_price.limit =
+                resolve_order_price(&preset.primary_limit, preset.primary_reverse_bid_ask, &prices);
+            prices.pricing_order = parent_price;
+        }
         let underlying = shared.reference.contract_definition(definition.under_con_id, "");
         let numeric_parent = parent.to_string();
         let parent_execution = shared.orders.get_order_info(parent);
@@ -467,35 +476,42 @@ fn price_context<'a>(
     }
 }
 
-fn order_price(order: &ApiOrder) -> OrderPrice {
+/// A parent's prices as a gateway reads them off the placement. The limit of
+/// a type that takes none is not read, and is priced once the prices are.
+fn order_price(order: &ApiOrder, contract: &ApiContract) -> OrderPrice {
     let kind = order.order_type_named().unwrap_or_default();
+    let uses_limit = matches!(
+        kind,
+        "LMT"
+            | "STP LMT"
+            | "TRAIL LIMIT"
+            | "LIT"
+            | "LOC"
+            | "REL"
+            | "PASSV REL"
+            | "PEG MKT"
+            | "PEG MID"
+            | "PEG BEST"
+            | "MIDPRICE"
+    );
     OrderPrice {
         side: if order.side() == Ok(crate::types::Side::Buy) {
             PriceSide::Buy
         } else {
             PriceSide::Sell
         },
-        limit: order.lmt_price,
+        limit: if uses_limit {
+            ClientCore::stated_limit(order, Some(contract))
+        } else {
+            super::attached_prices::UNSET_PRICE
+        },
         stop: if matches!(kind, "TRAIL" | "TRAIL LIMIT") {
             order.trail_stop_price
         } else {
             order.aux_price
         },
         touched_trigger: order.aux_price,
-        uses_limit: matches!(
-            kind,
-            "LMT"
-                | "STP LMT"
-                | "TRAIL LIMIT"
-                | "LIT"
-                | "LOC"
-                | "REL"
-                | "PASSV REL"
-                | "PEG MKT"
-                | "PEG MID"
-                | "PEG BEST"
-                | "MIDPRICE"
-        ),
+        uses_limit,
         uses_stop: matches!(kind, "STP" | "STP LMT" | "TRAIL LIMIT" | "STP PRT"),
         is_market: kind == "MKT",
         is_touched: matches!(kind, "MIT" | "LIT"),
@@ -742,25 +758,61 @@ mod tests {
         assert_eq!(ClientCore::attached_creation_quantity(&shared, &contract, &order, true), 2.5);
     }
 
+    /// Children relative to their parent's price take the price a gateway
+    /// reads off the parent: its own limit where its type takes one, nought
+    /// being none but on a combination that is not a relative order, and
+    /// where its type takes none, as a market order's does not, the preset's
+    /// primary limit on the parent's side of the quote, the other side for a
+    /// sale unless the preset says otherwise. A trailing parent has no fixed
+    /// price, and a parent with no price leaves its children unpriced.
     #[test]
-    fn a_trailing_parent_has_no_fixed_price_for_parent_relative_children() {
-        let (mut state, shared, contract, mut order) = prepared();
-        order.order_type = "TRAIL".into();
-        order.lmt_price = f64::MAX;
-        order.trail_stop_price = 98.0;
-        order.aux_price = 2.0;
-        let family = {
-            let preset = crate::control::attached_presets::AttachedPreset::read(
-                &shared.reference.current_order_preset_values("s=STK").unwrap(),
-            )
-            .unwrap();
-            state
+    fn children_are_priced_from_the_price_a_gateway_reads_off_the_parent() {
+        let unset = f64::MAX;
+        let quoted = crate::types::Quote {
+            bid: crate::types::price_from_f64(99.0),
+            ask: crate::types::price_from_f64(100.5),
+            bid_size: crate::types::QTY_SCALE,
+            ask_size: crate::types::QTY_SCALE,
+            ..Default::default()
+        };
+        // The parent's type, what else it and its contract state, what its
+        // preset states beside the defaults, whether there is a quote, and
+        // the children's stop and limit.
+        type Row =
+            (&'static str, fn(&mut ApiOrder, &mut ApiContract), &'static [(u32, &'static str)], bool, (f64, f64));
+        // The bid, a quarter above it, and a sale left on that side.
+        let bid_for_both = &[(4050, "0"), (4084, "4058"), (4085, "0.25"), (4088, "0")];
+        let rows: [Row; 9] = [
+            ("TRAIL", |o, _| { o.trail_stop_price = 98.0; o.aux_price = 2.0 }, &[], true, (unset, unset)),
+            ("MKT", |_, _| {}, &[], true, (99.5, 101.5)),
+            ("MKT", |o, _| o.action = "SELL".into(), &[], true, (100.0, 98.0)),
+            ("MKT", |o, _| o.action = "SELL".into(), bid_for_both, true, (100.25, 98.25)),
+            ("MKT", |_, _| {}, &[], false, (unset, unset)),
+            ("MKT", |o, _| o.lmt_price = 50.0, &[], false, (unset, unset)),
+            ("LMT", |o, _| o.lmt_price = 0.0, &[], true, (unset, unset)),
+            ("REL", |o, c| { o.lmt_price = 0.0; c.sec_type = "BAG".into() }, &[], false, (unset, unset)),
+            ("LMT", |_, _| {}, &[], true, (99.0, 101.0)),
+        ];
+        for (order_type, set, stated, quotes, (stop, limit)) in rows {
+            let (mut state, shared, mut contract, mut order) = prepared();
+            order.order_type = order_type.into();
+            set(&mut order, &mut contract);
+            if quotes {
+                use crate::bridge::{PRICING_ASK, PRICING_ASK_SIZE, PRICING_BID, PRICING_BID_SIZE};
+                shared.market.push_pricing_quote(
+                    0, 0, &quoted, PRICING_BID | PRICING_ASK | PRICING_BID_SIZE | PRICING_ASK_SIZE, 0,
+                );
+            }
+            let mut values = shared.reference.current_order_preset_values("s=STK").unwrap();
+            values.fields.extend(stated.iter().map(|(tag, value)| (*tag, value.to_string())));
+            let preset = crate::control::attached_presets::AttachedPreset::read(&values).unwrap();
+            let family = state
                 .build(&shared, &preset, 10, &contract, &order, 0, &AtomicU64::new(1), false, false)
                 .unwrap()
-                .unwrap()
-        };
-        assert_eq!(family.children[0].order.aux_price, f64::MAX);
-        assert_eq!(family.children[1].order.lmt_price, f64::MAX);
+                .unwrap();
+            let priced = (family.children[0].order.aux_price, family.children[1].order.lmt_price);
+            assert_eq!(priced, (stop, limit), "{order_type} {} {:?}", order.action, order.lmt_price);
+        }
     }
 
     #[test]

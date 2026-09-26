@@ -2435,8 +2435,7 @@ fn a_passive_relative_order_is_built_from_the_prices_it_states() {
 }
 
 /// A pegged-to-best order is taken as the caller states it: one price, on
-/// the limit-price field. Stated without one there is nothing to send, and
-/// the order is refused rather than sent malformed.
+/// the limit-price field.
 #[test]
 fn a_peg_best_order_is_built_from_the_price_it_states() {
     let scale = crate::types::PRICE_SCALE;
@@ -2457,10 +2456,6 @@ fn a_peg_best_order_is_built_from_the_price_it_states() {
         panic!("built as the wrong kind: {kind:?}");
     };
     assert_eq!(price, 150 * scale, "the price the caller stated");
-
-    let unpriced = ApiOrder { lmt_price: 0.0, ..order };
-    let err = ClientCore::validate_order(&unpriced, &crate::client_core::OrderSession::single("DU123")).unwrap_err();
-    assert!(err.message.contains("lmt_price"), "a pegged-to-best order with no price is refused: {err}");
 }
 
 /// A snapshot ends on the venue having stated what one is made of, or on the
@@ -3113,28 +3108,68 @@ fn a_time_bound_reads_only_what_the_venue_timed() {
     );
 }
 
+/// A price an order's type cannot go without is asked for as a gateway asks
+/// for it while it validates the order, preview or not, under 321 and in its
+/// words; a price of nought is a price, and goes.
+#[test]
+fn a_price_an_order_cannot_go_without_is_asked_for_as_a_gateway_asks() {
+    let stated = |order_type: &str, set: fn(&mut ApiOrder)| {
+        let mut order = ApiOrder {
+            action: "BUY".into(), total_quantity: 1.0, order_type: order_type.into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        set(&mut order);
+        ClientCore::validate_order(&order, &crate::client_core::OrderSession::single(""))
+            .map_err(|why| (why.code, why.message))
+    };
+    type Set = fn(&mut ApiOrder);
+    // What each is answered with under 321, or `None` where it goes.
+    let rows: [(&str, Set, Option<&str>); 16] = [
+        ("STP", |_| {}, Some("Please enter a stop price")),
+        ("STP", |o| o.what_if = true, Some("Please enter a stop price")),
+        ("STP LMT", |_| {}, Some("Please enter a stop price")),
+        ("STP PRT", |_| {}, Some("Please enter a stop price")),
+        ("TRAIL LIMIT", |o| o.aux_price = 1.0, Some("Please enter a trailing stop price")),
+        ("MIT", |_| {}, Some("Please enter a trigger price")),
+        ("LIT", |_| {}, Some("Please enter a trigger price")),
+        ("TRAIL", |_| {}, Some("You must enter a Trailing Amount for TRAIL Order.")),
+        ("TRAIL", |o| o.aux_price = -1.0, Some("You must enter a Trailing Amount for TRAIL Order.")),
+        ("TRAIL LIMIT", |o| o.trail_stop_price = 99.0,
+            Some("You must enter a Trailing Amount for TRAIL LIMIT Order.")),
+        ("STP", |o| { o.aux_price = 99.0; o.adjusted_order_type = "TRAIL".into() },
+            Some("Invalid Adjusted Stop Price")),
+        ("STP", |o| {
+            o.aux_price = 99.0;
+            o.adjusted_order_type = "STP LMT".into();
+            o.adjusted_stop_price = 98.0;
+        }, Some("Invalid Adjusted Stop Limit Price")),
+        ("STP LMT", |o| { o.aux_price = 99.0; o.adjusted_order_type = "STP PRT".into() },
+            Some("Invalid Adjusted Stop Price")),
+        ("STP", |o| o.aux_price = 0.0, None),
+        ("TRAIL", |o| o.aux_price = 0.0, None),
+        ("TRAIL", |o| { o.aux_price = 0.0; o.trailing_percent = 1.0 }, None),
+    ];
+    for (order_type, set, answer) in rows {
+        let answer = answer.map_or(Ok(()), |text| Err((321, text.to_string())));
+        assert_eq!(stated(order_type, set), answer, "{order_type}");
+    }
+}
+
 /// Each refusal the catalogue names carries its own number, not the general
 /// one for a malformed request.
 ///
 /// Every shared validator answered in prose, and prose is stamped with the
 /// general validation number on the way out — so a caller branching on the
-/// number for an unset stop price, an unpermitted security type or a
-/// combination with no legs took the same branch it takes for a typo in a
-/// field name, and could not tell them apart. One row per number, so the
-/// numbers cannot drift back one validator at a time.
+/// number for an unpermitted security type or a combination with no legs took
+/// the same branch it takes for a typo in a field name, and could not tell
+/// them apart. One row per number, so the numbers cannot drift back one
+/// validator at a time.
 #[test]
 fn a_refusal_the_catalogue_names_carries_its_own_number() {
     let priced = |order_type: &str| ApiOrder {
         action: "BUY".into(), total_quantity: 1.0, order_type: order_type.into(),
         lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
     };
-
-    // A stop with nothing to trigger on.
-    for order_type in ["STP", "STP LMT", "TRAIL", "TRAIL LIMIT", "MIT", "LIT"] {
-        let why = ClientCore::validate_order(&priced(order_type), &crate::client_core::OrderSession::single(""))
-            .expect_err("a stop with no trigger price is refused");
-        assert_eq!(why.code, 403, "{order_type}: {why}");
-    }
 
     // A combination that names no legs, and a leg this client cannot state.
     assert_eq!(
@@ -4071,24 +4106,21 @@ mod as_a_gateway_checks_it {
         assert_eq!(refused(&retired, &enabled).0, 321, "preview checks precede retired instructions");
     }
 
-    /// Field errors precede retired instructions, including a missing trigger.
+    /// Field errors precede retired instructions, including a missing stop.
     #[test]
     fn retired_order_instructions_follow_the_trigger_price_check() {
         let mut stopped = ApiOrder {
-            order_type: "STP".into(), aux_price: 0.0, e_trade_only: true, ..order()
+            order_type: "STP".into(), aux_price: f64::MAX, e_trade_only: true, ..order()
         };
         let enabled = session(&["DEPRETFQNC"]);
-        assert_eq!(refused(&stopped, &enabled).0, 403);
+        assert_eq!(refused(&stopped, &enabled), (321, "Please enter a stop price".into()));
         stopped.aux_price = 10.0;
         assert_eq!(refused(&stopped, &enabled).0, 10268);
     }
 
-    /// A preview is not held to the trigger price the order it previews
-    /// needs, and an algorithm's order may leave its type unnamed.
+    /// An algorithm's order may leave its type unnamed.
     #[test]
-    fn previews_and_algorithms_skip_the_trigger_and_type_checks() {
-        let preview = ApiOrder { what_if: true, order_type: "STP".into(), aux_price: 0.0, ..order() };
-        ClientCore::validate_order(&preview, &session(&[])).expect("a preview of a stop without its trigger");
+    fn an_algorithms_order_may_leave_its_type_unnamed() {
         let algorithm = ApiOrder { algo_strategy: "Adaptive".into(), order_type: String::new(), ..order() };
         ClientCore::validate_order(&algorithm, &session(&[])).expect("an algorithm's order with its type unnamed");
     }
@@ -4283,7 +4315,7 @@ mod as_a_gateway_checks_it {
     #[test]
     fn an_order_type_answers_to_every_name_a_gateway_gives_it() {
         let kind_of = |name: &str| {
-            let named = ApiOrder { order_type: name.into(), aux_price: 1.0, ..order() };
+            let named = ApiOrder { order_type: name.into(), aux_price: 1.0, trail_stop_price: 99.0, ..order() };
             ClientCore::validate_order(&named, &session(&[]))
                 .unwrap_or_else(|e| panic!("{name}: {e:?}"));
             match ClientCore::build_order_request(&named, 1, 0, None).unwrap() {

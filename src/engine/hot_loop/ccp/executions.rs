@@ -1545,6 +1545,8 @@ impl CcpState {
                     // read as one, a report naming a person left the order
                     // under client nought and lost the name as well.
                     submitter: parsed.get(&109).cloned().unwrap_or_default(),
+                    // What has filled is stated by the reports that follow.
+                    filled_quantity: 0.0,
                     ..Default::default()
                 },
                 order_state: api::OrderState {

@@ -521,12 +521,16 @@ links carry the parent's current venue revision.
 
 Initial child prices use the available order, quote and portfolio information
 with the contract's price rules. There is no extra snapshot wait to choose
-those prices. Transmission can subsequently wait for an ordinary quote or
-mark data without recalculating the children. Changes and cancellation apply
-to the held family; releasing its market-data observer leaves caller
-subscriptions active. Price and trailing units accept `0` (amount), `1`
-(ticks), `100` (percent), or the labels `amt`, `ticks`, `%`. Other numeric units
-are unavailable.
+those prices. A parent's limit is read as a gateway reads it off the order: a
+type that takes a limit is priced from its own, and one that takes none, a
+market parent among them, from the preset's primary limit as the parent is
+created, which unless the preset states otherwise is the ask to buy and the bid
+to sell. A limit the program states on a market order prices nothing.
+Transmission can subsequently wait for an ordinary quote or mark data without
+recalculating the children. Changes and cancellation apply to the held family;
+releasing its market-data observer leaves caller subscriptions active. Price
+and trailing units accept `0` (amount), `1` (ticks), `100` (percent), or the
+labels `amt`, `ticks`, `%`. Other numeric units are unavailable.
 
 Combination attachments use confirmed contracts, normalized legs and their
 price rules. Distinct combinations retain distinct quote slots. Fresh
@@ -595,8 +599,8 @@ under 10268, 10269 or 10270, in that order. Otherwise each produces warning
 object keeps its values. Preview and algorithm orders follow the same rule.
 
 The option list is read first, then the order fields are validated, then the
-retired instructions are checked. A stop order with no trigger price and
-`e_trade_only=true` therefore receives 403 before 10268. `NOAPIMISCVLD`
+retired instructions are checked. A stop order with no stop price and
+`e_trade_only=true` therefore receives 321 before 10268. `NOAPIMISCVLD`
 lifts option key and value checks while reading, but the later numeric check
 on `manual` remains after preview and trailing-percent validation.
 
@@ -611,15 +615,40 @@ the earlier warnings under the order id for `Wrapper::error` on the next
 A gateway reads some prices of nought as no price and carries others as
 stated, and so does this client:
 
+- A limit of nought on a type that takes a limit is no limit, except on a
+  combination that is not a relative order, where it is a price and is sent.
+- A trailing order's amount of nought beside a percentage is no amount, and
+  the percentage is the trail; stated alone, it is a trail of nought.
 - A trailing stop's starting trigger is carried wherever it is stated, nought
   and below included.
 - A stock range of nought is no bound, and is not sent.
 - A discretionary amount below nought is refused under 168, *Discretionary
   amount does not conform to the minimum price variation for this contract*.
 
-A limit of nought, on a single contract or on a combination whose legs carry
-no price, is sent as stated: what a gateway answers for one is not
-established here.
+## A price the order does not state
+
+Both `Order` surfaces start each figure the reference client starts unset at
+its unset value: the limit and auxiliary prices, the trailing percentage, the
+cash quantity, the trigger and adjusted prices and the filled quantity at
+`f64::MAX` (`UNSET_DOUBLE` in Python), and the minimum quantity and the
+volatility and reference price kinds at `i32::MAX` (`UNSET_INTEGER`). A price
+left there reaches the wire as none: the order goes without its tag, as a
+gateway sends it, and the venue answers it. An order whose type cannot go
+without the price is refused as a gateway refuses it, under 321, previews
+included:
+
+- a stop, a stop limit or a protected stop with no `aux_price`: *Please enter
+  a stop price*;
+- a trailing stop limit with no `trail_stop_price`: *Please enter a trailing
+  stop price*;
+- a market-if-touched or limit-if-touched order with no `aux_price`: *Please
+  enter a trigger price*;
+- a trailing stop or trailing stop limit with neither an amount nor a
+  percentage, or with an amount below nought: *You must enter a Trailing Amount
+  for TRAIL Order.* (or `TRAIL LIMIT Order.`);
+- an adjustable stop with no `adjusted_stop_price`: *Invalid Adjusted Stop
+  Price*, and one becoming a stop limit with no `adjusted_stop_limit_price`:
+  *Invalid Adjusted Stop Limit Price*.
 
 ## Prices on a combination's legs
 

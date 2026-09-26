@@ -1796,7 +1796,10 @@ fn restate_with(kind: &crate::types::OrderKind, price: i64, stop_price: i64) -> 
 /// what a tracked order is.
 fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
     use crate::types::OrderKind as K;
-    match kind {
+    // A price the order does not state is held as none, which the record
+    // writes nought for.
+    let held = |price: i64| if price == crate::types::Price::MAX { 0 } else { price };
+    let (ord_type, price, stop) = match kind {
         K::Attached { ord_type, exec_inst, prices } => {
             let price = |tag| prices.iter().find(|(key, _)| *key == tag)
                 .and_then(|(_, value)| value.parse::<f64>().ok())
@@ -1834,7 +1837,8 @@ fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
         K::Adaptive { price, .. } | K::Algo { price, .. } => (b'2', *price, 0),
             // Tracked under the what-if marker so the response is recognised as a
             // preview; it never becomes a live order.
-    }
+    };
+    (ord_type, held(price), held(stop))
 }
 
 /// The order type on tag 40, its price tags and the companions that type
@@ -1864,31 +1868,30 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
         K::Market => fields.push((40, "1".to_string())),
         K::Limit { price } => {
             fields.push((40, "2".to_string()));
-            fields.push((44, format_price(*price).to_string()));
+            push_price(fields, 44, *price);
         }
         K::Stop { stop_price } => {
             fields.push((40, "3".to_string()));
-            fields.push((99, format_price(*stop_price).to_string()));
+            push_price(fields, 99, *stop_price);
         }
         K::StopLimit { price, stop_price } => {
             fields.push((40, "4".to_string()));
-            fields.push((44, format_price(*price).to_string()));
-            fields.push((99, format_price(*stop_price).to_string()));
+            push_price(fields, 44, *price);
+            push_price(fields, 99, *stop_price);
         }
         K::AdjustableStop { stop_price, .. } => {
             // Base order type only. The 6257+ adjustable tags are appended after
             // the attribute block below, where the dedicated encoder this path
             // replaced put them.
             fields.push((40, "3".to_string())); // OrdType = Stop
-            fields.push((99, format_price(*stop_price).to_string())); // StopPx
+            push_price(fields, 99, *stop_price); // StopPx
         }
         K::TrailingStop { trail_amt, .. } => {
             // capture: amount-based trailing stop carries
             // the trail amount in both 99 and 211 and requires 18=a.
-            let t = format_price(*trail_amt).to_string();
             fields.push((40, trailing.to_string()));
-            fields.push((99, t.clone()));
-            fields.push((211, t));
+            push_price(fields, 99, *trail_amt);
+            push_price(fields, 211, *trail_amt);
             // The unit the trail is stated in, on every trailing order and
             // every replacement of one: an amount is nought. Left off, a
             // replace moving a percentage trail to an amount said nothing
@@ -1899,11 +1902,10 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
             // capture: TRAIL LIMIT uses OrdType=TSL, no
             // tag 44, no tag 18; trail amount in both 99 and 211; 6370 is
             // the limit-vs-trail offset.
-            let t = format_price(*trail_amt).to_string();
             fields.push((40, "TSL".to_string()));
-            fields.push((99, t.clone()));
-            fields.push((6370, format_price(*lmt_offset).to_string()));
-            fields.push((211, t));
+            push_price(fields, 99, *trail_amt);
+            push_price(fields, 6370, *lmt_offset);
+            push_price(fields, 211, *trail_amt);
             fields.push((6268, TRAIL_UNIT_AMOUNT.to_string()));
         }
         K::TrailPct { trail_pct, .. } => {
@@ -1923,22 +1925,22 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
         K::Moc => fields.push((40, "5".to_string())),
         K::Loc { price } => {
             fields.push((40, "B".to_string()));
-            fields.push((44, format_price(*price).to_string()));
+            push_price(fields, 44, *price);
         }
         K::Mit { stop_price } => {
             fields.push((40, "J".to_string()));
-            fields.push((99, format_price(*stop_price).to_string()));
+            push_price(fields, 99, *stop_price);
         }
         K::Lit { price, stop_price } => {
             fields.push((40, "LT".to_string()));
-            fields.push((44, format_price(*price).to_string()));
-            fields.push((99, format_price(*stop_price).to_string()));
+            push_price(fields, 44, *price);
+            push_price(fields, 99, *stop_price);
         }
         K::Mtl => fields.push((40, "K".to_string())),
         K::MktPrt => fields.push((40, "U".to_string())),
         K::StpPrt { stop_price } => {
             fields.push((40, "SP".to_string()));
-            fields.push((99, format_price(*stop_price).to_string()));
+            push_price(fields, 99, *stop_price);
         }
         K::MidPrice { .. } => fields.push((40, "MIDPX".to_string())),
         // Tag 211 carries the offset and is required: without it the order is
@@ -1946,15 +1948,15 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
         // paper account for all three snap types.
         K::SnapMkt { offset } => {
             fields.push((40, "SMKT".to_string()));
-            fields.push((211, format_price(*offset).to_string()));
+            push_price(fields, 211, *offset);
         }
         K::SnapMid { offset } => {
             fields.push((40, "SMID".to_string()));
-            fields.push((211, format_price(*offset).to_string()));
+            push_price(fields, 211, *offset);
         }
         K::SnapPri { offset } => {
             fields.push((40, "SREL".to_string()));
-            fields.push((211, format_price(*offset).to_string()));
+            push_price(fields, 211, *offset);
         }
         // Both are OrdType "E" and are separated by ExecInst, which is what
         // ORD_PEG_MKT and ORD_PEG_MID state in types.rs. Emitting only the
@@ -1998,7 +2000,7 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
             // disambiguated by 18=R; peg offset on 211. It states no trigger
             // on 99, and the cap — where the caller set one — on 44.
             fields.push((40, "P".to_string()));
-            fields.push((211, format_price(*offset).to_string()));
+            push_price(fields, 211, *offset);
             if *price_cap != 0 {
                 fields.push((44, format_price(*price_cap).to_string()));
             }
@@ -2012,7 +2014,7 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
         }
         K::PegBest { price } => {
             fields.push((40, "E2M".to_string()));
-            fields.push((44, format_price(*price).to_string()));
+            push_price(fields, 44, *price);
         }
         K::Adaptive { price, .. } => {
             // Adaptive requires `18=e`. Without it the order is rejected with
@@ -2020,16 +2022,25 @@ fn push_type_and_prices(fields: &mut Vec<(u32, String)>, kind: &crate::types::Or
             // The strategy and its parameter are appended after the attribute
             // block.
             fields.push((40, "2".to_string()));
-            fields.push((44, format_price(*price).to_string()));
+            push_price(fields, 44, *price);
         }
         K::Algo { price, .. } => {
             fields.push((40, "2".to_string()));
-            fields.push((44, format_price(*price).to_string()));
+            push_price(fields, 44, *price);
             // Same `18=e` marker the adaptive wrapper carries. An algo order
             // without it is rejected with "Invalid value in field # 18", which
             // is also the answer to a wrong value, so the six algo types
             // were refused identically whether the field was absent or wrong.
         }
+    }
+}
+
+/// A price tag, where the order states the price. A price nobody stated is
+/// `Price::MAX`, which is what the reference client's unset value scales to,
+/// and no tag is written for it, as a gateway writes none.
+fn push_price(fields: &mut Vec<(u32, String)>, tag: u32, price: crate::types::Price) {
+    if price != crate::types::Price::MAX {
+        fields.push((tag, format_price(price).to_string()));
     }
 }
 
@@ -2697,10 +2708,10 @@ fn push_order_attrs(
     {
         fields.push((6257, "1".to_string())); // has adjustable params
         fields.push((6261, adjusted_order_type.fix_code().to_string()));
-        fields.push((6258, format_price(*trigger_price).to_string()));
-        fields.push((6259, format_price(*adjusted_stop_price).to_string()));
+        push_price(fields, 6258, *trigger_price);
+        push_price(fields, 6259, *adjusted_stop_price);
         if *adjusted_stop_limit_price > 0 {
-            fields.push((6262, format_price(*adjusted_stop_limit_price).to_string()));
+            push_price(fields, 6262, *adjusted_stop_limit_price);
         }
         // Trailing amount + unit for a Trail/TrailLimit conversion.
         if matches!(
@@ -2725,9 +2736,8 @@ fn push_order_attrs(
         // The offset rides the peg tag and the trigger tag both, as a gateway
         // states it for this type.
         K::PegMkt { offset, price_cap } => {
-            let offset = format_price(*offset).to_string();
-            fields.push((211, offset.clone()));
-            fields.push((99, offset));
+            push_price(fields, 211, *offset);
+            push_price(fields, 99, *offset);
             if *price_cap != 0 {
                 fields.push((44, format_price(*price_cap).to_string()));
             }
@@ -2736,9 +2746,8 @@ fn push_order_attrs(
         // the trigger tag beside it, as a gateway states it for this type; the
         // cap rides the limit-price tag, and a zero cap is no cap.
         K::PassiveRel { offset, price_cap } => {
-            let offset = format_price(*offset).to_string();
-            fields.push((211, offset.clone()));
-            fields.push((99, offset));
+            push_price(fields, 211, *offset);
+            push_price(fields, 99, *offset);
             if *price_cap != 0 {
                 fields.push((44, format_price(*price_cap).to_string()));
             }
@@ -2768,7 +2777,7 @@ fn push_order_attrs(
                 // names the peg was left off above — the type carries it.
                 order_type = Some("PMID2");
             }
-            fields.push((211, format_price(*offset).to_string()));
+            push_price(fields, 211, *offset);
             // The worst price the peg may reach, which IBKR documents as the
             // limit-price field for these types. A zero cap is no cap, and zero
             // is not a price, so it is left off rather than stated as one.

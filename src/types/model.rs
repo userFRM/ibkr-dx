@@ -133,10 +133,20 @@ pub struct Order {
     /// `MIT`, `LIT`, `REL`, `VWAP` and the rest the venue takes.
     pub order_type: String,
     /// The limit. What a limit order will not pay above, or accept below.
+    ///
+    /// `f64::MAX`, the reference client's unset value, states none, and so
+    /// does nought on a type that takes a limit, except on a combination that
+    /// is not a relative order: a gateway reads both that way. An order that
+    /// states none goes out without one, as a gateway sends it, and the venue
+    /// answers it.
     pub lmt_price: f64,
     /// The order's other price, which differs by kind: a stop's trigger,
     /// a trailing order's amount, a relative order's offset. A stop read from
     /// `lmt_price` becomes a limit at zero.
+    ///
+    /// `f64::MAX` states none. A stop or a touched order that states none is
+    /// refused as a gateway refuses it: *Please enter a stop price*, or
+    /// *Please enter a trigger price*.
     pub aux_price: f64,
     /// How long it lives: `DAY`, `GTC`, `IOC`, `FOK`, `GTD`, `OPG`, `AUC`.
     pub tif: String,
@@ -144,7 +154,7 @@ pub struct Order {
     pub outside_rth: bool,
     /// How much of an iceberg is shown at once.
     pub display_size: i32,
-    /// The smallest fill that will be accepted.
+    /// The smallest fill that will be accepted. `i32::MAX` states none.
     pub min_qty: i32,
     /// Whether the order is kept off the book entirely.
     pub hidden: bool,
@@ -162,7 +172,7 @@ pub struct Order {
     /// withdraws the rest.
     pub oca_group: String,
     /// How far a trailing stop follows, as a percentage rather than
-    /// an amount.
+    /// an amount. `f64::MAX` states none.
     pub trailing_percent: f64,
     /// Which algorithm runs the order, as the venue names it.
     pub algo_strategy: String,
@@ -172,7 +182,8 @@ pub struct Order {
     /// `open_order` with the margin and commission it would take, and no status,
     /// because a preview is not an order.
     pub what_if: bool,
-    /// Size the order by money rather than by quantity.
+    /// Size the order by money rather than by quantity. `f64::MAX` states
+    /// none.
     pub cash_qty: f64,
     /// The order this one is a child of. A bracket's children name their
     /// parent, and the venue holds them until it fills.
@@ -227,7 +238,8 @@ pub struct Order {
     pub trigger_method: i32,
     /// What this order becomes once its trigger is reached.
     pub adjusted_order_type: String,
-    /// The price at which that change happens.
+    /// The price at which that change happens. `f64::MAX` states none, and
+    /// so do the two below.
     pub trigger_price: f64,
     /// The stop the order takes on when it changes.
     pub adjusted_stop_price: f64,
@@ -606,7 +618,7 @@ pub struct Order {
     /// Which venue's price of it to use.
     pub reference_exchange_id: String,
     /// Which of that venue's prices: 1 the midpoint, 2 the bid
-    /// or ask.
+    /// or ask. `i32::MAX` states none.
     pub reference_price_type: i32,
     /// Send a marketable order to the best bid or offer
     /// rather than working it. `None` until stated; written
@@ -736,7 +748,7 @@ pub struct Order {
     /// percent: 25 is a quarter. Carried to the wire as it stands.
     pub volatility: f64,
     /// Whether that volatility is daily or annual: 1 daily, 2
-    /// annual.
+    /// annual. `i32::MAX` states none.
     pub volatility_type: i32,
     /// Which kind of preview is being asked for.
     ///
@@ -757,21 +769,21 @@ impl Default for Order {
             action: String::new(),
             total_quantity: 0.0,
             order_type: String::new(),
-            lmt_price: 0.0,
-            aux_price: 0.0,
+            lmt_price: f64::MAX,
+            aux_price: f64::MAX,
             tif: String::new(),
             outside_rth: false,
             display_size: 0,
-            min_qty: 0,
+            min_qty: i32::MAX,
             hidden: false,
             good_after_time: String::new(),
             good_till_date: String::new(),
             oca_group: String::new(),
-            trailing_percent: 0.0,
+            trailing_percent: f64::MAX,
             algo_strategy: String::new(),
             algo_params: Vec::new(),
             what_if: false,
-            cash_qty: 0.0,
+            cash_qty: f64::MAX,
             parent_id: 0,
             transmit: true,
             discretionary_amt: 0.0,
@@ -782,9 +794,9 @@ impl Default for Order {
             all_or_none: false,
             trigger_method: 0,
             adjusted_order_type: String::new(),
-            trigger_price: 0.0,
-            adjusted_stop_price: 0.0,
-            adjusted_stop_limit_price: 0.0,
+            trigger_price: f64::MAX,
+            adjusted_stop_price: f64::MAX,
+            adjusted_stop_limit_price: f64::MAX,
             conditions: Vec::new(),
             conditions_ignore_rth: false,
             conditions_cancel_order: false,
@@ -833,7 +845,7 @@ impl Default for Order {
             fa_group: String::new(),
             fa_method: String::new(),
             fa_percentage: String::new(),
-            filled_quantity: 0.0,
+            filled_quantity: f64::MAX,
             hedge_max_size: i32::MAX,
             hedge_param: String::new(),
             hedge_type: String::new(),
@@ -878,7 +890,7 @@ impl Default for Order {
             reference_change_amount: 0.0,
             reference_contract_id: 0,
             reference_exchange_id: String::new(),
-            reference_price_type: 0,
+            reference_price_type: i32::MAX,
             route_marketable_to_bbo: None,
             rule80a: String::new(),
             scale_auto_reset: false,
@@ -911,7 +923,7 @@ impl Default for Order {
             trail_stop_price: f64::MAX,
             use_price_mgmt_algo: None,
             volatility: f64::MAX,
-            volatility_type: 0,
+            volatility_type: i32::MAX,
             what_if_type: i32::MAX,
         }
     }
@@ -1109,7 +1121,7 @@ impl Order {
             settling_firm: self.settling_firm.clone(),
             discretionary_up_to_limit: self.discretionary_up_to_limit_price,
             display_size: self.display_size.max(0) as u32,
-            min_qty: self.min_qty.max(0) as u32,
+            min_qty: if self.min_qty == i32::MAX { 0 } else { self.min_qty.max(0) as u32 },
             hidden: self.hidden,
             outside_rth: self.outside_rth,
             good_after,
@@ -1129,7 +1141,7 @@ impl Order {
             // `f64::MAX` is this API's "not set" for a price-like field, and
             // it is not a volatility or an offset.
             volatility: if self.volatility == f64::MAX { 0.0 } else { self.volatility },
-            volatility_type: self.volatility_type.clamp(0, 255) as u8,
+            volatility_type: if self.volatility_type == i32::MAX { 0 } else { self.volatility_type.clamp(0, 255) as u8 },
             // Stated by a caller and carried nowhere until now: an order that
             // asked to be re-priced as the underlying moved, or to stay inside
             // a band of underlying prices, was accepted and sent without either.
@@ -1168,7 +1180,7 @@ impl Order {
             min_compete_size: if self.min_compete_size == i32::MAX { 0 } else { self.min_compete_size },
             compete_against_best_offset: self.compete_against_best_offset,
             continuous_update: self.continuous_update,
-            reference_price_type: self.reference_price_type,
+            reference_price_type: if self.reference_price_type == i32::MAX { 0 } else { self.reference_price_type },
             stock_range_lower: self.stock_range_lower,
             stock_range_upper: self.stock_range_upper,
             percent_offset: self.percent_offset,
@@ -1213,7 +1225,7 @@ impl Order {
                 0..=4 | 7 | 8 => self.trigger_method as u8,
                 _ => 0,
             },
-            cash_qty: crate::types::price_from_f64(self.cash_qty),
+            cash_qty: if self.cash_qty == f64::MAX { 0 } else { crate::types::price_from_f64(self.cash_qty) },
             conditions: self.conditions.clone(),
             conditions_cancel_order: self.conditions_cancel_order,
             conditions_ignore_rth: self.conditions_ignore_rth,
@@ -1300,105 +1312,6 @@ impl Order {
                        else { crate::types::price_from_f64(self.delta_neutral_aux_price) },
             con_id: self.delta_neutral_con_id as i64,
         }))
-    }
-    /// Whether this order states anything beyond a plain one.
-    ///
-    /// Every order routes through the encoder now, so nothing branches on
-    /// this: it is kept because it answers a question worth asking of an
-    /// order, and its own tests are what check the attribute block stays
-    /// complete as fields are added.
-    pub fn has_extended_attrs(&self) -> bool {
-        !self.settling_firm.is_empty()
-            || self.discretionary_up_to_limit_price
-            || self.randomize_size
-            || !self.soft_dollar_tier_name.is_empty()
-            || !self.soft_dollar_tier_val.is_empty()
-            || !self.algo_id.is_empty()
-            || self.display_size > 0
-            || self.min_qty > 0
-            || self.hidden
-            || self.outside_rth
-            || !self.good_after_time.is_empty()
-            || !self.good_till_date.is_empty()
-            || !self.oca_group.is_empty()
-            || self.parent_id > 0
-            || self.discretionary_amt > 0.0
-            || self.sweep_to_fill
-            || self.all_or_none
-            || self.trigger_method > 0
-            || self.cash_qty > 0.0
-            // Everything `attrs()` carries has to be named here, or the order
-            // takes the plain encoder and the attribute is dropped without a
-            // word. Conditions are the costly one: the order goes out
-            // unconditional and routes immediately.
-            || !self.conditions.is_empty()
-            || self.conditions_cancel_order
-            || self.conditions_ignore_rth
-            || self.conditions_include_overnight
-            || self.oca_type > 0
-            || (self.volatility != f64::MAX && self.volatility > 0.0)
-            || self.volatility_type > 0
-            || self.seek_price_improvement == Some(true)
-            || !self.manual_order_time.is_empty()
-            || !self.advanced_error_override.is_empty()
-            || !self.active_start_time.is_empty()
-            || !self.active_stop_time.is_empty()
-            || self.post_only
-            || self.solicited
-            || (self.manual_order_indicator != i32::MAX && self.manual_order_indicator > 0)
-            || self.route_marketable_to_bbo == Some(true)
-            || self.imbalance_only
-            || self.allow_pre_open
-            || self.ignore_open_auction
-            || self.is_oms_container
-            || !self.ext_operator.is_empty()
-            || !self.customer_account.is_empty()
-            || !self.model_code.is_empty()
-            || self.professional_customer
-            || !self.fa_group.is_empty()
-            || !self.fa_method.is_empty()
-            || !self.fa_percentage.is_empty()
-            || self.ref_futures_con_id > 0
-            || !self.mifid2_decision_maker.is_empty()
-            || !self.mifid2_decision_algo.is_empty()
-            || !self.mifid2_execution_trader.is_empty()
-            || !self.mifid2_execution_algo.is_empty()
-            || self.mid_offset_at_whole != f64::MAX
-            || self.mid_offset_at_half != f64::MAX
-            || self.use_price_mgmt_algo.unwrap_or(0) > 0
-            || self.duration != i32::MAX
-            || (self.min_compete_size != i32::MAX && self.min_compete_size > 0)
-            || self.compete_against_best_offset != f64::MAX
-            || self.continuous_update
-            || self.reference_price_type > 0
-            || self.stock_range_lower != f64::MAX
-            || self.stock_range_upper != f64::MAX
-            || self.percent_offset != f64::MAX
-            || self.not_held
-            || !self.order_ref.is_empty()
-            || !self.open_close.is_empty()
-            || self.scale_attrs().is_some()
-            || !self.delta_neutral_order_type.is_empty()
-            || self.short_sale_slot != 0
-            || !self.designated_location.is_empty()
-            || self.exempt_code != -1
-            || !self.hedge_type.is_empty()
-            || !self.rule80a.is_empty()
-            || self.post_to_ats != i32::MAX
-            || self.deactivate
-            || self.tif == "DTC"
-            || self.deactivate_on_disconnect
-            || self.include_overnight
-            || self.auto_cancel_parent
-            || self.min_trade_qty != i32::MAX
-            || self.block_order
-            || !self.auto_cancel_date.is_empty()
-            || !self.clearing_account.is_empty()
-            || !self.clearing_intent.is_empty()
-            || self.origin != 0
-            || !self.account.is_empty()
-            || self.dont_use_auto_price_for_hedge
-            || self.hedge_max_size != i32::MAX
     }
 }
 
@@ -2318,18 +2231,6 @@ mod tests {
     }
 
     #[test]
-    fn order_has_extended_attrs() {
-        let o = Order::default();
-        assert!(!o.has_extended_attrs());
-
-        let o2 = Order { hidden: true, ..Default::default() };
-        assert!(o2.has_extended_attrs());
-
-        let o3 = Order { display_size: 50, ..Default::default() };
-        assert!(o3.has_extended_attrs());
-    }
-
-    #[test]
     fn order_attrs_conversion() {
         let o = Order {
             display_size: 50,
@@ -2454,169 +2355,6 @@ mod tests {
         let pi = PriceIncrement { low_edge: 0.0, increment: 0.01 };
         assert_eq!(pi.low_edge, 0.0);
         assert_eq!(pi.increment, 0.01);
-    }
-
-    /// `has_extended_attrs` decides whether an order routes through the encoder
-    /// that emits the attribute block. Anything `attrs()` carries but this does
-    /// not name is copied into `OrderAttrs` and then thrown away, with no error
-    /// and nothing on the wire — so the two have to agree field for field.
-    ///
-    /// One entry per attribute `attrs()` carries. Adding a field there without
-    /// adding it here is the bug this guards.
-    #[test]
-    fn every_carried_attribute_routes_through_the_extended_encoder() {
-        /// Attribute name paired with the setter that turns it on.
-        type Case = (&'static str, fn(&mut Order));
-
-        let cases: Vec<Case> = vec![
-            ("display_size", |o| o.display_size = 100),
-            ("min_qty", |o| o.min_qty = 50),
-            ("hidden", |o| o.hidden = true),
-            ("outside_rth", |o| o.outside_rth = true),
-            ("good_after_time", |o| o.good_after_time = "20260311 09:30:00".into()),
-            ("good_till_date", |o| o.good_till_date = "20260311 16:00:00".into()),
-            ("oca_group", |o| o.oca_group = "G1".into()),
-            ("oca_type", |o| o.oca_type = 2),
-            ("parent_id", |o| o.parent_id = 7),
-            ("discretionary_amt", |o| o.discretionary_amt = 0.05),
-            ("sweep_to_fill", |o| o.sweep_to_fill = true),
-            ("all_or_none", |o| o.all_or_none = true),
-            ("trigger_method", |o| o.trigger_method = 2),
-            ("cash_qty", |o| o.cash_qty = 1000.0),
-            ("conditions", |o| o.conditions.push(
-                OrderCondition::Time { time: "20260311-09:30:00".into(), is_more: true, is_conjunction_connection: true },
-            )),
-            ("conditions_cancel_order", |o| o.conditions_cancel_order = true),
-            ("conditions_ignore_rth", |o| o.conditions_ignore_rth = true),
-            ("conditions_include_overnight", |o| o.conditions_include_overnight = true),
-            ("volatility", |o| o.volatility = 0.25),
-            ("volatility_type", |o| o.volatility_type = 2),
-            ("percent_offset", |o| o.percent_offset = 0.5),
-            ("not_held", |o| o.not_held = true),
-            ("order_ref", |o| o.order_ref = "ref-1".into()),
-            ("open_close", |o| o.open_close = "O".into()),
-            ("scale", |o| o.scale_init_level_size = 100),
-            ("delta_neutral", |o| o.delta_neutral_order_type = "MKT".into()),
-            ("short_sale_slot", |o| o.short_sale_slot = 2),
-            ("designated_location", |o| o.designated_location = "IBKR".into()),
-            ("exempt_code", |o| o.exempt_code = 3),
-            ("hedge_type", |o| o.hedge_type = "B".into()),
-            ("rule80a", |o| o.rule80a = "I".into()),
-            ("post_to_ats", |o| o.post_to_ats = 30),
-            ("deactivate", |o| o.deactivate = true),
-            ("deactivate_at_close", |o| o.tif = "DTC".into()),
-            ("deactivate_on_disconnect", |o| o.deactivate_on_disconnect = true),
-            ("include_overnight", |o| o.include_overnight = true),
-            ("auto_cancel_parent", |o| o.auto_cancel_parent = true),
-            ("min_trade_qty", |o| o.min_trade_qty = 50),
-            ("block_order", |o| o.block_order = true),
-            ("auto_cancel_date", |o| o.auto_cancel_date = "20261231".into()),
-            ("clearing_account", |o| o.clearing_account = "U123".into()),
-            ("clearing_intent", |o| o.clearing_intent = "IB".into()),
-            ("seek_price_improvement", |o| o.seek_price_improvement = Some(true)),
-            ("manual_order_time", |o| o.manual_order_time = "20260101-09:30:00".into()),
-            ("advanced_error_override", |o| o.advanced_error_override = "1".into()),
-            ("active_start_time", |o| o.active_start_time = "20260101-09:30:00".into()),
-            ("active_stop_time", |o| o.active_stop_time = "20260101-16:00:00".into()),
-            ("post_only", |o| o.post_only = true),
-            ("solicited", |o| o.solicited = true),
-            ("manual_order_indicator", |o| o.manual_order_indicator = 1),
-            ("route_marketable_to_bbo", |o| o.route_marketable_to_bbo = Some(true)),
-            ("imbalance_only", |o| o.imbalance_only = true),
-            ("allow_pre_open", |o| o.allow_pre_open = true),
-            ("ignore_open_auction", |o| o.ignore_open_auction = true),
-            ("is_oms_container", |o| o.is_oms_container = true),
-            ("ext_operator", |o| o.ext_operator = "OP1".into()),
-            ("customer_account", |o| o.customer_account = "CUST".into()),
-            ("model_code", |o| o.model_code = "MODEL-1".into()),
-            ("professional_customer", |o| o.professional_customer = true),
-            ("fa_group", |o| o.fa_group = "AllAccounts".into()),
-            ("fa_method", |o| o.fa_method = "EqualQuantity".into()),
-            ("fa_percentage", |o| o.fa_percentage = "50".into()),
-            ("ref_futures_con_id", |o| o.ref_futures_con_id = 12345),
-            ("mifid2_decision_maker", |o| o.mifid2_decision_maker = "DM".into()),
-            ("mifid2_decision_algo", |o| o.mifid2_decision_algo = "DA".into()),
-            ("mifid2_execution_trader", |o| o.mifid2_execution_trader = "ET".into()),
-            ("mifid2_execution_algo", |o| o.mifid2_execution_algo = "EA".into()),
-            ("mid_offset_at_whole", |o| o.mid_offset_at_whole = 0.01),
-            ("mid_offset_at_half", |o| o.mid_offset_at_half = 0.005),
-            ("use_price_mgmt_algo", |o| o.use_price_mgmt_algo = Some(1)),
-            ("duration", |o| o.duration = 60),
-            ("min_compete_size", |o| o.min_compete_size = 100),
-            ("compete_against_best_offset", |o| o.compete_against_best_offset = 0.02),
-            ("continuous_update", |o| o.continuous_update = true),
-            ("reference_price_type", |o| o.reference_price_type = 2),
-            ("stock_range_lower", |o| o.stock_range_lower = 100.0),
-            ("stock_range_upper", |o| o.stock_range_upper = 200.0),
-            ("soft_dollar_tier_name", |o| o.soft_dollar_tier_name = "Tier A".into()),
-            ("soft_dollar_tier_val", |o| o.soft_dollar_tier_val = "45.5".into()),
-            ("settling_firm", |o| o.settling_firm = "FIRM".into()),
-            ("discretionary_up_to_limit_price", |o| o.discretionary_up_to_limit_price = true),
-            ("randomize_size", |o| o.randomize_size = true),
-            ("origin", |o| o.origin = 1),
-            ("account", |o| o.account = "U2".into()),
-            ("dont_use_auto_price_for_hedge", |o| o.dont_use_auto_price_for_hedge = true),
-            ("hedge_max_size", |o| o.hedge_max_size = 50),
-        ];
-
-        // Structural link to `attrs()`: destructured without `..`, so adding a
-        // field to `OrderAttrs` stops compiling here until it is accounted for
-        // both in the predicate and in the list above.
-        let crate::types::OrderAttrs {
-            attached: _,
-            display_size: _, min_qty: _, hidden: _, outside_rth: _,
-            good_after: _, good_till: _, good_till_date_ymd: _, oca_group: _, oca_group_str: _,
-            oca_type: _, parent_id: _, discretionary_amt: _, sweep_to_fill: _,
-            all_or_none: _, trigger_method: _, cash_qty: _, conditions: _,
-            conditions_cancel_order: _, conditions_ignore_rth: _, conditions_include_overnight: _,
-            volatility: _, volatility_type: _, use_price_mgmt_algo: _, duration: _,
-            seek_price_improvement: _, manual_order_time: _,
-            advanced_error_override: _,
-            active_start_time: _, active_stop_time: _, post_only: _, solicited: _,
-            manual_order_indicator: _, route_marketable_to_bbo: _, imbalance_only: _,
-            allow_pre_open: _, ignore_open_auction: _, is_oms_container: _,
-            ext_operator: _, customer_account: _, professional_customer: _,
-            model_code: _,
-            fa_group: _, fa_method: _, fa_percentage: _,
-            ref_futures_con_id: _, mifid2_decision_maker: _, mifid2_decision_algo: _,
-            mifid2_execution_trader: _, mifid2_execution_algo: _,
-            mid_offset_at_whole: _, mid_offset_at_half: _,
-            min_compete_size: _, compete_against_best_offset: _,
-            continuous_update: _, reference_price_type: _,
-            stock_range_lower: _, stock_range_upper: _,
-            percent_offset: _, not_held: _, order_ref: _, open_close: _,
-            scale: _, delta_neutral: _, short_sale_slot: _, designated_location: _,
-            exempt_code: _, hedge_type: _, hedge_beta: _, hedge_ratio: _,
-            combo_legs: _, rule80a: _, post_to_ats: _, deactivate: _,
-            deactivate_at_close: _,
-            deactivate_on_disconnect: _,
-            include_overnight: _, auto_cancel_parent: _, min_trade_qty: _,
-            block_order: _, auto_cancel_date: _, clearing_account: _, clearing_intent: _,
-            primary_exchange: _, delta_neutral_contract: _,
-            soft_dollar_tier_name: _, soft_dollar_tier_val: _, algo_id: _,
-            settling_firm: _, discretionary_up_to_limit: _,
-            // Reached by `exercise_options` rather than by an order, so there is
-            // no setter to list above and nothing for the predicate to name.
-            exercise_action: _,
-            // Asks the venue what the order would cost instead of placing it.
-            // It changes the question the message asks rather than what the
-            // order carries, so it is not one of the attributes above.
-            what_if: _,
-            origin: _, account: _, dont_use_auto_price_for_hedge: _, hedge_max_size: _,
-        } = Order::default().attrs();
-
-        assert!(
-            !Order::default().has_extended_attrs(),
-            "a default order carries nothing extended",
-        );
-        for (name, set) in cases {
-            let mut order = Order::default();
-            set(&mut order);
-            assert!(
-                order.has_extended_attrs(),
-                "{name} is carried by attrs() but does not route through the extended encoder",
-            );
-        }
     }
 }
 

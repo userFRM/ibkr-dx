@@ -2,8 +2,8 @@
 
 Every shared validator answered in prose, and prose is stamped with the general
 validation number on the way out -- so a caller branching on the number for an
-unset stop price, an unpermitted security type or a combination with no legs
-took the same branch it takes for a typo in a field name.
+unpermitted security type or a combination with no legs took the same branch it
+takes for a typo in a field name.
 """
 
 import ibkr_dx
@@ -36,21 +36,6 @@ def order(order_type):
     o.lmtPrice = 100.0
     o.tif = "DAY"
     return o
-
-
-def test_a_stop_with_no_trigger_price_is_refused_under_403():
-    w = Errors()
-    c = ibkr_dx.EClient(w)
-    c._test_connect("T")
-    c._test_map_con_id(756733, 0)
-
-    for n, order_type in enumerate(["STP", "STP LMT", "TRAIL", "TRAIL LIMIT"], start=1):
-        w.seen.clear()
-        c.placeOrder(n, spy(), order(order_type))
-        c.poll()
-        assert [code for code, _ in w.seen] == [403], (
-            f"{order_type}: a stop with nothing to trigger on: {w.seen}"
-        )
 
 
 def test_a_combination_with_no_legs_is_refused_under_314():

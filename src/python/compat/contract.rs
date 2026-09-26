@@ -371,15 +371,6 @@ mod tests {
     }
 
     #[test]
-    fn order_has_extended_attrs() {
-        let o = Order::default();
-        assert!(!o.to_api().has_extended_attrs());
-
-        let o2 = Order { hidden: true, ..Default::default() };
-        assert!(o2.to_api().has_extended_attrs());
-    }
-
-    #[test]
     fn order_attrs_conversion() {
         let o = Order {
             display_size: 50,

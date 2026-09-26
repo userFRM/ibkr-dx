@@ -28,8 +28,9 @@ the limit and auxiliary prices, the trailing percentage, the cash quantity, the
 trigger and adjusted prices, the filled quantity, the minimum quantity, the
 volatility and reference price kinds — at `UNSET_DOUBLE` or `UNSET_INTEGER`, as
 that client's does, so a program comparing with them reads what it would
-there. An order is sent the same whether such a figure holds that value or
-nought.
+there, and the Rust `Order` starts them at the same values. A price left there
+is sent as none, as a gateway sends it; see
+[a price the order does not state](../reference/limits.md#a-price-the-order-does-not-state).
 
 `ibkr_dx.configure()` carries what a gateway would hold in a configuration file:
 the session time zone, the build announced at logon, which executions arrive

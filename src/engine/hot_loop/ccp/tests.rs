@@ -1103,7 +1103,8 @@ fn ord_status_test_state() -> (CcpState, Context, SharedState) {
 /// every later unrouted echo of it, so nothing could put it right.
 ///
 /// A change on its way, which a gateway restores as the order acknowledged,
-/// is named PreSubmitted too.
+/// is named PreSubmitted too. What has filled is what the reports state:
+/// nought where they state none, not the unset value an order starts with.
 #[test]
 fn a_replayed_order_is_published_under_the_state_its_report_states() {
     for (what, codes) in [
@@ -1130,6 +1131,7 @@ fn a_replayed_order_is_published_under_the_state_its_report_states() {
             row.order_state.status, "PreSubmitted",
             "{what}: what the report says, not what this client would like it to be",
         );
+        assert_eq!(row.order.filled_quantity, 0.0, "{what}: a report stating no fill has filled nothing");
         assert_eq!(
             context.order(88).map(|o| o.status),
             Some(crate::types::OrderStatus::PreSubmitted),
@@ -1201,7 +1203,7 @@ fn a_trail_the_venue_states_as_a_percentage_is_read_back_as_one() {
     stated.insert(99u32, "1".to_string());
     super::executions::read_stated_attributes(&mut amount, &stated);
     assert_eq!(amount.aux_price, 1.0, "a dollar is a dollar");
-    assert_eq!(amount.trailing_percent, 0.0, "and no percentage");
+    assert_eq!(amount.trailing_percent, f64::MAX, "and no percentage");
 }
 
 /// A recovery record arriving with more contracts live than the tables were

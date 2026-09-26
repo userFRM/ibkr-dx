@@ -3718,6 +3718,11 @@ fn a_replace_naming_a_new_offset_or_cap_puts_it_where_the_submit_does() {
     // how a caller moves the quantity alone.
     let msg = replace_frame(K::TrailingStopLimit { lmt_offset: 10 * P / 100, trail_amt: P, trail_stop_price: None }, 0, 0);
     assert_eq!((one("211=", &msg).as_deref(), one("6370=", &msg).as_deref()), (Some("1"), Some("0.1")), "{msg}");
+
+    // And a number the placement did not state, it states no more than the
+    // placement did.
+    let msg = replace_frame(K::PegMid { offset: crate::types::Price::MAX, price_cap: 100 * P }, 0, 0);
+    assert_eq!((one("211=", &msg), one("99=", &msg)), (None, None), "{msg}");
 }
 
 /// What a second replace restates is what the first one moved to, not what
@@ -5597,6 +5602,46 @@ mod a_price_of_nought {
                 let msg = placed(kind.clone(), OrderAttrs::default());
                 assert_eq!(all(&msg, 6117), wanted, "{kind:?}: {msg}");
             }
+        }
+    }
+
+    /// A price the order does not state goes out as none, as a gateway sends
+    /// it, and so does a limit of nought on a type that takes one, but for a
+    /// combination; a price the order states goes as stated.
+    #[test]
+    fn a_price_the_order_does_not_state_goes_out_as_none() {
+        type Set = fn(&mut crate::types::model::Order);
+        let stock = crate::types::model::Contract { sec_type: "STK".into(), ..Default::default() };
+        let combination = crate::types::model::Contract { sec_type: "BAG".into(), ..Default::default() };
+        let rows: [(&str, Set, &crate::types::model::Contract, u32, &[&str]); 11] = [
+            ("LMT", |_| {}, &stock, 44, &[]),
+            ("LMT", |o| o.lmt_price = 0.0, &stock, 44, &[]),
+            ("LMT", |o| o.lmt_price = 0.0, &combination, 44, &["0"]),
+            ("LMT", |o| o.lmt_price = 100.0, &stock, 44, &["100"]),
+            ("STP LMT", |o| o.aux_price = 99.0, &stock, 44, &[]),
+            ("STP LMT", |o| o.aux_price = 99.0, &stock, 99, &["99"]),
+            ("PEG BEST", |_| {}, &stock, 44, &[]),
+            ("SNAP MKT", |_| {}, &stock, 211, &[]),
+            ("SNAP MKT", |o| o.aux_price = 0.0, &stock, 211, &["0"]),
+            ("TRAIL LIMIT", |o| { o.aux_price = 1.0; o.trail_stop_price = 99.0 }, &stock, 6370, &[]),
+            ("STP", |o| {
+                o.aux_price = 99.0;
+                o.adjusted_order_type = "STP".into();
+                o.adjusted_stop_price = 98.0;
+            }, &stock, 6258, &[]),
+        ];
+        for (order_type, set, contract, tag, wanted) in rows {
+            let mut order = crate::types::model::Order {
+                action: "BUY".into(), total_quantity: 1.0, order_type: order_type.into(),
+                tif: "DAY".into(), ..Default::default()
+            };
+            set(&mut order);
+            let built = crate::client_core::ClientCore::build_order_request(&order, 7, 0, Some(contract)).unwrap();
+            let crate::types::ControlCommand::Order(OrderRequest::SubmitEx { kind, attrs, .. }) = built else {
+                panic!("a placement");
+            };
+            let msg = placed(kind, attrs);
+            assert_eq!(all(&msg, tag), wanted, "{order_type} on {}: {msg}", contract.sec_type);
         }
     }
 

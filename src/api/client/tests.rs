@@ -370,7 +370,8 @@ fn modifying_a_trailing_stop_limit_carries_its_offset_and_trail() {
     let (client, rx, _shared) = test_client();
     let placed = Order {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL LIMIT".into(),
-        aux_price: 1.0, lmt_price_offset: 0.1, tif: "DAY".into(), ..Default::default()
+        aux_price: 1.0, lmt_price_offset: 0.1, trail_stop_price: 99.0, tif: "DAY".into(),
+        ..Default::default()
     };
     client.try_place_order(9202, &spy(), &placed).unwrap();
     rx.try_recv().expect("the submit");
@@ -1206,7 +1207,7 @@ fn a_trailing_stop_limit_changed_into_a_limit_goes_out_as_the_limit() {
     let (client, rx, _shared) = test_client();
     let trail = Order {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL LIMIT".into(),
-        aux_price: 1.0, tif: "DAY".into(), ..Default::default()
+        aux_price: 1.0, trail_stop_price: 99.0, tif: "DAY".into(), ..Default::default()
     };
     client.try_place_order(9702, &spy(), &trail).expect("the trailing stop limit submits");
     while rx.try_recv().is_ok() {}
@@ -2597,6 +2598,7 @@ fn place_order_adjustable_trail_percent_unit_passes_through() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
         aux_price: 11.00,
         adjusted_order_type: "TRAIL".into(),
+        adjusted_stop_price: 10.00,
         adjusted_trailing_amount: 1.00,            // 1.00%
         adjustable_trailing_unit: 100,             // percent
         ..Default::default()
@@ -2913,7 +2915,7 @@ fn place_order_trailing_stop_limit() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL LIMIT".into(),
-        lmt_price: 148.0, aux_price: 2.0, ..Default::default()
+        lmt_price: 148.0, aux_price: 2.0, trail_stop_price: 150.0, ..Default::default()
     };
     client.try_place_order(1, &spy(), &order).unwrap();
 
@@ -3957,20 +3959,6 @@ fn open_orders_say_when_the_snapshot_is_not_known_to_be_whole() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-fn stp_order_with_zero_aux_price_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
-        lmt_price: 145.0, // common mistake: setting lmt_price instead of aux_price
-        ..Default::default()
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("aux_price"));
-}
-
-#[test]
 fn stp_order_with_valid_aux_price_succeeds() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
@@ -3984,32 +3972,6 @@ fn stp_order_with_valid_aux_price_succeeds() {
 }
 
 #[test]
-fn stp_lmt_order_with_zero_aux_price_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 100.0, order_type: "STP LMT".into(),
-        lmt_price: 144.0, ..Default::default() // aux_price missing
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("aux_price"));
-}
-
-#[test]
-fn trail_order_with_zero_amount_and_zero_percent_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
-        ..Default::default() // neither trailing_percent nor aux_price
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("trailing_percent"));
-}
-
-#[test]
 fn trail_order_with_trailing_percent_succeeds() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
@@ -4020,58 +3982,6 @@ fn trail_order_with_trailing_percent_succeeds() {
     client.try_place_order(1, &spy(), &order).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailPct { .. }, .. })));
-}
-
-#[test]
-fn trail_limit_order_with_zero_aux_price_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL LIMIT".into(),
-        lmt_price: 148.0, ..Default::default() // aux_price missing
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("aux_price"));
-}
-
-#[test]
-fn mit_order_with_zero_aux_price_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 100.0, order_type: "MIT".into(),
-        ..Default::default()
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("aux_price"));
-}
-
-#[test]
-fn stp_prt_order_with_zero_aux_price_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 100.0, order_type: "STP PRT".into(),
-        ..Default::default()
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("aux_price"));
-}
-
-#[test]
-fn lit_order_with_zero_aux_price_is_rejected() {
-    let (client, _rx, shared) = test_client();
-    shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 100.0, order_type: "LIT".into(),
-        lmt_price: 150.0, ..Default::default() // aux_price missing
-    };
-    let result = client.try_place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("aux_price"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -8834,10 +8744,11 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
 fn the_shorthand_states_the_order_and_nothing_more() {
     use crate::types::model::Order;
     let plain = Order::default();
+    let unset = f64::MAX;
     for (what, order, kind, lmt, aux) in [
-        ("market", Order::market("BUY", 100.0), "MKT", 0.0, 0.0),
-        ("limit", Order::limit("BUY", 100.0, 42.5), "LMT", 42.5, 0.0),
-        ("stop", Order::stop("SELL", 100.0, 41.0), "STP", 0.0, 41.0),
+        ("market", Order::market("BUY", 100.0), "MKT", unset, unset),
+        ("limit", Order::limit("BUY", 100.0, 42.5), "LMT", 42.5, unset),
+        ("stop", Order::stop("SELL", 100.0, 41.0), "STP", unset, 41.0),
         ("stop limit", Order::stop_limit("SELL", 100.0, 41.0, 40.5), "STP LMT", 40.5, 41.0),
     ] {
         assert_eq!(order.order_type, kind, "{what}");
