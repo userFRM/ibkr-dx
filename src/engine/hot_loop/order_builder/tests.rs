@@ -902,7 +902,7 @@ fn a_cancel_going_out_is_held_and_told_to_nobody() {
             core.keep_the_book(&shared, entry);
         }
     }
-    let mut open: Vec<_> = core.collect_open_orders(&shared).into_iter()
+    let mut open: Vec<_> = core.collect_open_orders(&shared, false).into_iter()
         .map(|(id, o)| (id, o.status, o.filled, o.remaining)).collect();
     open.sort_by_key(|(id, ..)| *id);
     assert_eq!(open, [(7, "PendingCancel".to_string(), 3.0, 7.0), (9, "PendingCancel".to_string(), 0.0, 10.0)]);

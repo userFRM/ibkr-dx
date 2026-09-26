@@ -248,7 +248,7 @@ impl Held {
                 if !whole {
                     notice(ErrorOrigin::Question { q: *q, ends: false }, NOT_WHOLE_ORDERS);
                 }
-                Answer::OpenOrders
+                Answer::OpenOrders(*q)
             }
             Ask::NextValidId => {
                 // No error travels with an id, so this is said where it can be

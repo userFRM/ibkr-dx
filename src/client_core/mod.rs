@@ -3787,7 +3787,13 @@ impl ClientCore {
     /// Collect open orders: merge local tracking with shared state.
     /// Returns (order_id, contract, order, status, filled, remaining) for non-terminal
     /// orders.
-    pub fn collect_open_orders(&self, shared: &SharedState) -> Vec<(u64, TrackedOrder)> {
+    ///
+    /// Where `scoped`, only the orders of the asking client: a gateway
+    /// answers `reqOpenOrders` with the orders whose client is the client
+    /// asking, and `reqAllOpenOrders` with every client's. An order this
+    /// client placed is its own whatever the venue has echoed of it yet.
+    pub fn collect_open_orders(&self, shared: &SharedState, scoped: bool) -> Vec<(u64, TrackedOrder)> {
+        let asking = shared.orders.api_client_id();
         let mut result: Vec<(u64, TrackedOrder)> = Vec::new();
 
         // Drain shared order cache first to enrich local tracking
@@ -3873,6 +3879,9 @@ impl ClientCore {
                     if order.client_id == 0 {
                         order.client_id = named_client.get(&oid).copied().unwrap_or(0);
                     }
+                    if scoped && !o.placed_here && order.client_id != asking {
+                        continue;
+                    }
                     let (avg_fill_price, last_fill_price) =
                         stated_fills.get(&oid).copied().unwrap_or((0.0, 0.0));
                     result.push((oid, TrackedOrder {
@@ -3897,6 +3906,9 @@ impl ClientCore {
                 continue;
             }
             if status_withdrawn.contains(&oid) {
+                continue;
+            }
+            if scoped && info.order.client_id != asking {
                 continue;
             }
             if !result.iter().any(|(id, _)| *id == oid) {

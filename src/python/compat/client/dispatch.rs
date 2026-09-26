@@ -1196,8 +1196,8 @@ impl EClient {
                     self.deliver_account_batch(py, shared, batch, portfolio)?;
                 }
             }
-            Answer::OpenOrders => {
-                let orders = self.core.collect_open_orders(shared);
+            Answer::OpenOrders(question) => {
+                let orders = self.core.collect_open_orders(shared, question == crate::types::model::Question::OpenOrders);
                 for (order_id, tracked) in &orders {
                     let c_py = Py::new(py, Contract::from_api(py, &tracked.contract)?)?.into_any();
                     let o_py = Py::new(py, Order::from_api(py, &tracked.order)?)?.into_any();

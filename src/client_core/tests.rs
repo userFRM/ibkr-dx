@@ -373,7 +373,7 @@ fn collect_open_orders_admits_an_inactive_order_placed_here_alone_and_no_rejecte
     core.update_order_status(&shared, 81, OrderStatus::Rejected, 0.0, 100.0, 0);
     core.update_order_status(&shared, 82, OrderStatus::Inactive, 0.0, 100.0, 0);
 
-    let result = core.collect_open_orders(&shared);
+    let result = core.collect_open_orders(&shared, false);
     assert!(result.iter().any(|(id, _)| *id == 80),
         "an inactive order this client placed must remain in the open-order snapshot");
     assert!(!result.iter().any(|(id, _)| *id == 81),
@@ -404,11 +404,48 @@ fn collect_open_orders_shared_only_leaves_out_inactive_and_rejected() {
         last_exec: Default::default(),
     });
 
-    let result = core.collect_open_orders(&shared);
+    let result = core.collect_open_orders(&shared, false);
     assert!(!result.iter().any(|(id, _)| *id == 90),
         "a shared-only order the venue states held is not among the open orders");
     assert!(!result.iter().any(|(id, _)| *id == 91),
         "rejected shared-only order must not resurrect into the open-order snapshot");
+}
+
+/// A gateway answers reqOpenOrders with the orders of the asking API client
+/// alone, and reqAllOpenOrders with every client's. An order this client
+/// placed is its own whatever the venue has echoed of it yet.
+#[test]
+fn open_orders_are_scoped_to_the_asking_client_alone() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    shared.orders.set_api_client_id(1);
+    core.track_order(70, ApiContract::default(), ApiOrder { order_id: 70, ..Default::default() }, 0);
+    core.update_order_status(&shared, 70, OrderStatus::Submitted, 0.0, 100.0, 0);
+    let others = || {
+        // Another session's order on the account, and this client's own from
+        // an earlier session, as the venue's book states them.
+        shared.orders.push_order_info(71, RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder { order_id: 71, client_id: 2, ..Default::default() },
+            order_state: ApiOrderState { status: "Submitted".into(), ..Default::default() },
+            last_exec: Default::default(),
+        });
+        shared.orders.push_order_info(72, RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder { order_id: 72, client_id: 1, ..Default::default() },
+            order_state: ApiOrderState { status: "Submitted".into(), ..Default::default() },
+            last_exec: Default::default(),
+        });
+    };
+    let ids = |scoped: bool| {
+        others();
+        let mut ids: Vec<u64> =
+            core.collect_open_orders(&shared, scoped).into_iter().map(|(id, _)| id).collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(ids(true), [70, 72], "the asking client's orders alone");
+    assert_eq!(ids(false), [70, 71, 72], "and every client's where all are asked for");
 }
 
 /// An order this client did not place still arrives through the shared
@@ -435,7 +472,7 @@ fn a_shared_order_reports_its_filled_quantity() {
         last_exec: crate::types::model::Execution::default(),
     });
 
-    let open = core.collect_open_orders(&shared);
+    let open = core.collect_open_orders(&shared, false);
     let (_, tracked) = open.iter().find(|(id, _)| *id == 55).expect("the shared order");
         assert_eq!(tracked.filled, 4.0, "the filled quantity it carries");
     assert_eq!(tracked.remaining, 6.0, "and what is left of the order");
@@ -4370,7 +4407,7 @@ mod as_a_gateway_checks_it {
             order_state: ApiOrderState { status: "Submitted".into(), ..Default::default() },
             last_exec: Default::default(),
         });
-        let read = core.collect_open_orders(&shared).into_iter().find(|(id, _)| *id == 42).unwrap();
+        let read = core.collect_open_orders(&shared, false).into_iter().find(|(id, _)| *id == 42).unwrap();
         assert_eq!(read.1.order.account, "DU1");
     }
 }

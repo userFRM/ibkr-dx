@@ -955,7 +955,7 @@ def next_shared_id()
 
 #### `req_open_orders`
 
-Request all open orders for this client.  An order the venue states held is among them only where this session placed it: a gateway holds an order it sent working whatever the venue states of it later, and leaves out one it first learns of held.
+Request the open orders of this client.  The answer is this client's own orders alone, as a gateway narrows it. An order the venue states held is among them only where this session placed it: a gateway holds an order it sent working whatever the venue states of it later, and leaves out one it first learns of held.
 
 ```python
 def req_open_orders()
@@ -965,7 +965,7 @@ def req_open_orders()
 
 #### `req_all_open_orders`
 
-Request all open orders across all clients.  The same answer as `req_open_orders`. A gateway narrows that one to the orders of the client asking, and this client does not.
+Request all open orders across all clients.  Every client's orders on the account, where `req_open_orders` answers with this client's own, as a gateway narrows that one.
 
 ```python
 def req_all_open_orders()

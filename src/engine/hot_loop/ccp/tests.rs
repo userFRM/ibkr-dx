@@ -4757,7 +4757,7 @@ fn an_execution_rejection_with_empty_text_stays_out_of_open_orders() {
     ccp.handle_exec_report(&refusal, b"", &mut context, &shared, &None, "");
 
     assert!(context.order(42).is_none(), "the engine retires the refused order");
-    assert!(core.collect_open_orders(&shared).is_empty(), "the cache must not import it again");
+    assert!(core.collect_open_orders(&shared, false).is_empty(), "the cache must not import it again");
     let info = shared.orders.get_order_info(42).expect("the refusal is kept for completed orders");
     assert_eq!(info.order_state.status, "Inactive");
     assert_eq!(info.order_state.completed_status, "Rejected");

@@ -1316,7 +1316,7 @@ fn cancel_by_perm_id_phase_live() {
     // collect_open_orders merges shared.orders.order_cache (populated by 35=8 ack)
     // with ClientCore.open_orders.
     let core = ibkr_dx::client_core::ClientCore::new();
-    let open = core.collect_open_orders(&shared);
+    let open = core.collect_open_orders(&shared, false);
     let found = open.iter().find(|(_, t)| t.order.perm_id == perm_id).map(|(oid, _)| *oid);
     let resolved_order_id = match found {
         Some(oid) => oid,

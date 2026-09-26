@@ -937,10 +937,11 @@ impl EClient {
                     self.deliver_account_batch(batch, portfolio, wrapper);
                 }
             }
-            Answer::OpenOrders => {
+            Answer::OpenOrders(question) => {
                 // Each order, then its status, as a gateway answers the
                 // question.
-                for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
+                let scoped = question == crate::types::model::Question::OpenOrders;
+                for (order_id, tracked) in self.core.collect_open_orders(&self.shared, scoped) {
                     let api_id = self.core.api_order_id(order_id);
                     let state = OrderState { status: tracked.status.clone(), ..Default::default() };
                     wrapper.open_order(api_id, &tracked.contract, &tracked.order, &state);

@@ -6617,7 +6617,7 @@ fn a_preview_is_never_reported_as_a_working_order() {
 
     // Still unanswered: nothing reads it as working.
     assert!(
-        client.core.collect_open_orders(&client.shared).iter().all(|(id, _)| *id != 6101),
+        client.core.collect_open_orders(&client.shared, false).iter().all(|(id, _)| *id != 6101),
         "a preview awaiting its answer is not an open order",
     );
 
@@ -6632,7 +6632,7 @@ fn a_preview_is_never_reported_as_a_working_order() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(
-        client.core.collect_open_orders(&client.shared).iter().all(|(id, _)| *id != 6101),
+        client.core.collect_open_orders(&client.shared, false).iter().all(|(id, _)| *id != 6101),
         "an answered preview leaves nothing on the book",
     );
 }
@@ -6660,7 +6660,7 @@ fn a_refused_preview_is_reported_and_leaves_nothing() {
         "the refusal reaches the caller: {:?}", w.events,
     );
     assert!(!client.core.is_order_tracked(6102), "the record went with the refusal");
-    assert!(client.core.collect_open_orders(&client.shared).is_empty());
+    assert!(client.core.collect_open_orders(&client.shared, false).is_empty());
 }
 
 /// A preview asked as a question answers with the venue's refusal and
@@ -10316,7 +10316,7 @@ fn the_open_order_read_leaves_the_record_alone() {
         order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
         last_exec: Default::default(),
     });
-    let named = client.core.collect_open_orders(&shared).into_iter()
+    let named = client.core.collect_open_orders(&shared, false).into_iter()
         .find(|(id, _)| *id == tp as u64).map(|(_, o)| o.order.client_id);
     assert_eq!(named, Some(7), "the read names the venue's client");
     assert_eq!(client.core.tracked_order(tp as u64).map(|o| o.client_id), Some(0), "and the record still names none");
@@ -10336,7 +10336,7 @@ fn the_open_order_read_names_the_client_the_venue_names_where_the_record_names_n
         order_state: crate::types::model::OrderState { status: "Submitted".into(), ..Default::default() },
         last_exec: Default::default(),
     });
-    let named = client.core.collect_open_orders(&shared).into_iter()
+    let named = client.core.collect_open_orders(&shared, false).into_iter()
         .find(|(id, _)| *id == tp as u64).map(|(_, o)| o.order.client_id);
     assert_eq!(named, Some(7));
 }

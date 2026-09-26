@@ -406,7 +406,7 @@ pub enum Answer {
     },
     /// `req_open_orders` and `req_all_open_orders`: every working order, then
     /// `open_order_end`.
-    OpenOrders,
+    OpenOrders(crate::types::model::Question),
     /// `req_completed_orders`: every finished order, then its end.
     CompletedOrders {
         /// Whether only the orders an API placed were asked for.
