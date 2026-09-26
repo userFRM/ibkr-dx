@@ -1253,11 +1253,20 @@ impl EClient {
         done: &mut Vec<(i64, Option<u64>)>,
     ) {
         for id in std::iter::once(req_id).chain(watchers.iter().copied()) {
-            if self.core.check_snapshot_done(id) {
+            if let Some(owed) = self.core.check_snapshot_done(id) {
                 // What it was watching when the snapshot finished, so the
                 // withdrawal can tell this subscription from whatever the
                 // callback leaves under the same number.
                 let was_watching = self.core.registration_of(id);
+                // The option computations it had not been sent, then its end.
+                for (tick_type, figures, price_based) in owed {
+                    let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                        figures;
+                    wrapper.tick_option_computation(
+                        id, tick_type, i32::from(price_based),
+                        implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price,
+                    );
+                }
                 wrapper.tick_snapshot_end(id);
                 done.push((id, was_watching));
             }
@@ -1331,17 +1340,26 @@ mod delivered_size_tests {
     use crate::types::{PRICE_SCALE, QTY_SCALE, TbtQuote, TbtTrade};
 
     /// A snapshot of an option ends, as a gateway ends one, only once the
-    /// venue's model has been delivered as well as the five kinds; and one on
-    /// a delayed feed only once the last trade's time, 88, has been. Both
-    /// reach the snapshot's check from where they are delivered: the model as
-    /// its record, the time as a string tick.
+    /// venue's model and the bid's, ask's and last's computations have been
+    /// delivered as well as the five kinds; and one on a delayed feed only once
+    /// the last trade's time, 88, has been. Both reach the snapshot's check
+    /// from where they are delivered: the computations as their records, the
+    /// time as a string tick. An option's snapshot that runs out is sent the
+    /// computations it is owed ahead of its end.
     #[test]
     fn a_snapshot_waits_for_the_model_on_an_option_and_the_time_on_a_delayed_feed() {
         #[derive(Default)]
-        struct Heard { ended: Vec<i64>, times: Vec<(i64, i32)> }
+        struct Heard { ended: Vec<i64>, times: Vec<(i64, i32)>, said: Vec<(i64, i32)> }
         impl Wrapper for Heard {
             fn tick_snapshot_end(&mut self, req_id: i64) {
                 self.ended.push(req_id);
+                self.said.push((req_id, -1));
+            }
+            fn tick_option_computation(
+                &mut self, req_id: i64, tick_type: i32, _: i32, _: f64, _: f64, _: f64, _: f64, _: f64,
+                _: f64, _: f64, _: f64,
+            ) {
+                self.said.push((req_id, tick_type));
             }
             fn tick_string(&mut self, req_id: i64, tick_type: i32, _: &str) {
                 if matches!(tick_type, 45 | 88) {
@@ -1370,11 +1388,39 @@ mod delivered_size_tests {
         let mut heard = Heard::default();
         client.process_msgs(&mut heard);
         assert!(heard.ended.is_empty(), "an option's snapshot ended without its model");
+        use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
+        for kind in [Model, Bid, Ask] {
+            shared.market.push_option_tick(crate::bridge::OptionTick {
+                instrument: slot, kind, figures: [0.2; 8], price_based: false,
+            });
+        }
+        client.process_msgs(&mut heard);
+        assert!(heard.ended.is_empty(), "an option's snapshot ended without its last's computation");
         shared.market.push_option_tick(crate::bridge::OptionTick {
-            instrument: slot, kind: crate::bridge::OptionTickKind::Model, figures: [0.2; 8], price_based: false,
+            instrument: slot, kind: Last, figures: [0.2; 8], price_based: false,
         });
         client.process_msgs(&mut heard);
-        assert_eq!(heard.ended, [1], "the model was the last of it");
+        assert_eq!(heard.ended, [1], "the last's was the last of it");
+
+        // Run out with a last's computation short of a figure: sent then,
+        // ahead of the end (-1).
+        let (client, rx, shared) = crate::api::client::tests::test_client();
+        client.try_req_mkt_data(3, &option, "", true, false).expect("taken");
+        crate::api::client::tests::settled(&client, &rx);
+        let slot = client.core.watching(3).expect("the engine took it");
+        shared.market.push_quote(slot, &five);
+        let mut short = [0.2; 8];
+        short[3] = f64::MAX;
+        shared.market.push_option_tick(crate::bridge::OptionTick {
+            instrument: slot, kind: Last, figures: short, price_based: false,
+        });
+        let mut heard = Heard::default();
+        client.process_msgs(&mut heard);
+        assert!(heard.said.is_empty(), "short of a figure, not sent while it runs: {:?}", heard.said);
+        client.core.snapshot_reqs.lock().unwrap().get_mut(&3).expect("waiting").asked_at -=
+            std::time::Duration::from_secs(11);
+        client.process_msgs(&mut heard);
+        assert_eq!(heard.said, [(3, 12), (3, -1)]);
 
         let (client, rx, shared) = crate::api::client::tests::test_client();
         client.try_req_mkt_data(2, &crate::api::client::tests::spy(), "", true, false)

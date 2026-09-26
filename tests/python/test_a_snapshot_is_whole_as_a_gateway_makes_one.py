@@ -2,8 +2,9 @@
 
 A gateway holds a snapshot until the bid, the ask, the last, the open and the
 close have each been stated; on a contract it marks as an option also the
-venue's option model (13, or 83 delayed); on a delayed feed also the last
-trade's time (88). Ended on the five alone, an option's snapshot reached
+venue's option model (13, or 83 delayed) and the bid's, ask's and last's
+computations (10 to 12, or 80 to 82); on a delayed feed also the last trade's
+time (88). Ended on the five alone, an option's snapshot reached
 `tickSnapshotEnd` before its model, and a program reading the ticker when it
 ended read an option with no model.
 """
@@ -35,7 +36,7 @@ def _session():
     return client, heard
 
 
-def test_an_options_snapshot_waits_for_the_model():
+def test_an_options_snapshot_waits_for_its_computations():
     client, heard = _session()
     option = Contract(
         conId=700001, symbol="SPY", secType="OPT", exchange="SMART", currency="USD",
@@ -52,7 +53,7 @@ def test_an_options_snapshot_waits_for_the_model():
 
     client._test_push_option_model(slot, 0.2, 5.0, 500.0)
     client._test_dispatch_once()
-    assert heard.ended == [1], heard.ended
+    assert heard.ended == [], "an option's snapshot ended without the bid's, ask's and last's computations"
 
 
 def test_a_delayed_snapshot_waits_for_the_time():

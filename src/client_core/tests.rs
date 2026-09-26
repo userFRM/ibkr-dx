@@ -1332,7 +1332,7 @@ fn a_chargeable_snapshot_is_answered_to_itself_and_ends_there() {
     core.snapshot_reqs.lock().unwrap().insert(5, crate::client_core::SnapshotWait::new(0, false));
 
     core.poll_instrument_ticks(&shared, 0, 4);
-    assert!(!core.check_snapshot_done(5), "nothing answered yet");
+    assert!(core.check_snapshot_done(5).is_none(), "nothing answered yet");
 
     shared.market.push_snapshot_answer(0, vec![
         SeriesTick { instrument: 0, tick_type: 1, value: SeriesValue::Price(150.25) },
@@ -1349,7 +1349,7 @@ fn a_chargeable_snapshot_is_answered_to_itself_and_ends_there() {
         .collect();
     assert_eq!(stamped, [(5, 85, "1790000000000")]);
     assert!(polled.ticks.is_empty() && polled.string_ticks.is_empty(), "the stream hears none of it");
-    assert!(core.check_snapshot_done(5), "the answer is the whole of it");
+    assert!(core.check_snapshot_done(5).is_some(), "the answer is the whole of it");
 }
 
 /// A bond's yields on a delayed feed go out under the delayed numbers.
@@ -2495,11 +2495,11 @@ fn a_snapshot_ends_on_the_venue_or_on_the_wait_from_asking() {
     // Bid, ask, last, open — four of the five.
     for kind in [1, 2, 4, 14] {
         core.note_snapshot_tick(1, kind);
-        assert!(!core.check_snapshot_done(1), "kind {kind} still leaves one to come");
+        assert!(core.check_snapshot_done(1).is_none(), "kind {kind} still leaves one to come");
     }
     core.note_snapshot_tick(1, 9);
-    assert!(core.check_snapshot_done(1), "the close was the last of them");
-    assert!(!core.check_snapshot_done(1), "and it is only said once");
+    assert!(core.check_snapshot_done(1).is_some(), "the close was the last of them");
+    assert!(core.check_snapshot_done(1).is_none(), "and it is only said once");
 
     // What a kind CARRIED does not matter, only that it came: a pair states
     // its last as minus one and a contract yet to open states its open as
@@ -2508,7 +2508,7 @@ fn a_snapshot_ends_on_the_venue_or_on_the_wait_from_asking() {
     for kind in [1, 2, 4, 14, 9] {
         core.note_snapshot_tick(3, kind);
     }
-    assert!(core.check_snapshot_done(3), "every kind was stated, whatever it said");
+    assert!(core.check_snapshot_done(3).is_some(), "every kind was stated, whatever it said");
 
     // A contract the venue says nothing about is let go of on the wait, and
     // the wait is measured from asking — so one that never heard anything is
@@ -2517,7 +2517,7 @@ fn a_snapshot_ends_on_the_venue_or_on_the_wait_from_asking() {
     core.snapshot_reqs.lock().unwrap().insert(
         2, crate::client_core::SnapshotWait { asked_at: long_ago, ..crate::client_core::SnapshotWait::new(0, false) },
     );
-    assert!(core.check_snapshot_done(2), "nothing was ever stated, and the wait is up");
+    assert!(core.check_snapshot_done(2).is_some(), "nothing was ever stated, and the wait is up");
     assert!(core.snapshot_reqs.lock().unwrap().is_empty(), "and nothing is left waiting");
 }
 
@@ -2538,21 +2538,26 @@ fn a_delayed_snapshot_ends_on_the_venue_too() {
     // The delayed numbering: bid, ask, last, open, close, then the time.
     for kind in [66, 67, 68, 76, 75] {
         core.note_snapshot_tick(2, kind);
-        assert!(!core.check_snapshot_done(2), "delayed kind {kind} leaves one to come");
+        assert!(core.check_snapshot_done(2).is_none(), "delayed kind {kind} leaves one to come");
     }
     core.note_snapshot_tick(2, 88);
     assert!(
-        core.check_snapshot_done(2),
+        core.check_snapshot_done(2).is_some(),
         "the delayed time was the last of them, and the venue had said everything",
     );
 }
 
 /// A snapshot of a contract a gateway marks as an option also waits for the
-/// venue's option model, 13, or 83 on a delayed feed; one of any other type
-/// does not. The bid's, ask's and last's greeks a gateway computes itself are
-/// not produced here, so nothing waits for them.
+/// option model (13, or 83 on a delayed feed) and the bid's, ask's and last's
+/// computations (10 to 12, or 80 to 82); one of any other type does not. It is
+/// sent each of them once, and only stating all eight figures, whether or not
+/// it moved; what it was not sent by its end is sent then, where any figure is
+/// stated, bid's, ask's and last's before the model's. On a frozen feed it is
+/// also sent the model once whatever it states, which does not complete it,
+/// and at its end a side only stating every figure.
 #[test]
-fn an_options_snapshot_waits_for_the_model() {
+fn an_options_snapshot_is_sent_each_computation_once_and_whole() {
+    use crate::bridge::{OptionTick, OptionTickKind::{self, Ask, Bid, Last, Model}};
     for sec_type in ["OPT", "FOP", "IOPT", "WAR", "EC"] {
         assert!(crate::client_core::marked_as_option(sec_type), "{sec_type}");
     }
@@ -2560,32 +2565,85 @@ fn an_options_snapshot_waits_for_the_model() {
         assert!(!crate::client_core::marked_as_option(sec_type), "{sec_type}");
     }
 
+    let shared = SharedState::new();
     let core = ClientCore::new();
-    core.snapshot_reqs.lock().unwrap().insert(1, crate::client_core::SnapshotWait::new(0, true));
+    for slot in [0, 5, 7, 11] {
+        core.note_slot_taken(slot, 1);
+    }
+    let ask_for = |req_id: i64, slot, snapshot| core.note_mkt_data_taken(&shared, &crate::bridge::MarketDataTaken {
+        asked_at: std::time::Instant::now(),
+        req_id, slot, generation: 1, con_id: 0, series: Vec::new(),
+        snapshot, one_shot: false, data_type: data_type_for_mode(0), marked: true,
+    });
+    let unstated = f64::MAX;
+    let whole = [0.2, 0.55, 5.0, 0.0, 0.02, 0.3, -0.1, 765.0];
+    let partial = [0.2, 0.55, 5.0, unstated, 0.02, 0.3, -0.1, 765.0];
+    let owed = |kind: OptionTickKind, figures: [f64; 8], slot| {
+        core.option_tick_owed(1, &OptionTick { instrument: slot, kind, figures, price_based: true })
+    };
+
+    // A stream beside it is sent every change; the snapshot only what is
+    // whole, once.
+    assert!(ask_for(1, 0, true).is_none());
+    assert!(ask_for(2, 0, false).is_none());
+    assert_eq!(owed(Model, partial, 0), (13, vec![(2, partial)]), "not whole, so not to the snapshot");
+    assert_eq!(owed(Model, whole, 0), (13, vec![(1, whole), (2, whole)]));
+    let moved = [0.21, 0.55, 5.0, 0.0, 0.02, 0.3, -0.1, 765.0];
+    assert_eq!(owed(Model, moved, 0), (13, vec![(2, moved)]), "the snapshot had its model");
+    assert_eq!(owed(Bid, whole, 0), (10, vec![(1, whole), (2, whole)]));
+    assert_eq!(owed(Bid, moved, 0), (10, vec![(2, moved)]), "and its bid's");
+    assert_eq!(owed(Ask, partial, 0), (11, vec![(2, partial)]), "an ask's short of a figure");
     for kind in [1, 2, 4, 14, 9] {
         core.note_snapshot_tick(1, kind);
     }
-    for greek in [10, 11, 12] {
-        core.note_snapshot_tick(1, greek);
-    }
-    assert!(!core.check_snapshot_done(1), "an option's snapshot waits for its model");
-    core.note_snapshot_tick(1, 13);
-    assert!(core.check_snapshot_done(1), "the model was the last of them");
+    assert!(core.check_snapshot_done(1).is_none(), "the ask's and the last's are still to come");
+    // Completed from what it last stood at for the snapshot: whole now.
+    let dividend_only = [unstated, unstated, unstated, 0.0, unstated, unstated, unstated, unstated];
+    assert_eq!(owed(Ask, dividend_only, 0), (11, vec![(1, whole), (2, whole)]));
+    assert_eq!(owed(Ask, whole, 0), (11, Vec::new()), "sent once, and moved nowhere");
+    assert_eq!(owed(Last, whole, 0), (12, vec![(1, whole), (2, whole)]));
+    assert_eq!(core.check_snapshot_done(1), Some(Vec::new()), "the last's was the last of them");
+    assert_eq!(core.check_snapshot_done(1), None, "and it is only said once");
 
+    // At the end of the wait, what it has not been sent, where any figure is
+    // stated: the bid's, the ask's and the last's, then the model's, on the
+    // delayed numbers on a delayed feed.
     core.mark_feed_delayed_for_test(5);
-    core.snapshot_reqs.lock().unwrap().insert(2, crate::client_core::SnapshotWait::new(5, true));
-    for kind in [66, 67, 68, 76, 75, 88] {
-        core.note_snapshot_tick(2, kind);
-    }
-    assert!(!core.check_snapshot_done(2), "a delayed option's snapshot waits for its model");
-    core.note_snapshot_tick(2, 83);
-    assert!(core.check_snapshot_done(2), "stated on the delayed number");
+    assert!(ask_for(3, 5, true).is_none());
+    assert_eq!(owed(Model, partial, 5), (83, Vec::new()));
+    assert_eq!(owed(Last, partial, 5), (82, Vec::new()));
+    core.snapshot_reqs.lock().unwrap().get_mut(&3).unwrap().asked_at -= std::time::Duration::from_secs(11);
+    assert_eq!(core.check_snapshot_done(3), Some(vec![(82, partial, false), (83, partial, true)]));
 
-    core.snapshot_reqs.lock().unwrap().insert(3, crate::client_core::SnapshotWait::new(0, false));
+    // On a frozen feed: the model once whatever it states, and again at the
+    // end where it was not sent whole; a side at the end only whole.
+    let expire = |req_id| {
+        core.snapshot_reqs.lock().unwrap().get_mut(&req_id).unwrap().asked_at -= std::time::Duration::from_secs(11);
+    };
+    core.note_mkt_data_type(7, 2);
+    assert!(ask_for(6, 7, true).is_none());
+    assert_eq!(owed(Model, partial, 7), (13, vec![(6, partial)]), "once, whatever it states");
+    assert_eq!(owed(Model, moved, 7), (13, vec![(6, moved)]), "and whole");
+    let moved_again = [0.22, 0.55, 5.0, 0.0, 0.02, 0.3, -0.1, 765.0];
+    assert_eq!(owed(Model, moved_again, 7), (13, Vec::new()), "and no more");
+    assert_eq!(owed(Bid, partial, 7), (10, Vec::new()));
+    expire(6);
+    assert_eq!(core.check_snapshot_done(6), Some(Vec::new()), "a side short of a figure is not sent at the end");
+    // A whole model does not stand for the frozen one: sent again at the end.
+    core.note_mkt_data_type(11, 2);
+    assert!(ask_for(8, 11, true).is_none());
+    assert_eq!(owed(Model, whole, 11), (13, vec![(8, whole)]));
+    expire(8);
+    assert_eq!(core.check_snapshot_done(8), Some(vec![(13, whole, true)]));
+
+    // A stock's snapshot waits for none of them, and is sent none, on a frozen
+    // feed too.
+    core.note_mkt_data_type(9, 2);
+    core.snapshot_reqs.lock().unwrap().insert(4, crate::client_core::SnapshotWait::new(9, false));
     for kind in [1, 2, 4, 14, 9] {
-        core.note_snapshot_tick(3, kind);
+        core.note_snapshot_tick(4, kind);
     }
-    assert!(core.check_snapshot_done(3), "a stock's snapshot waits for no model");
+    assert_eq!(core.check_snapshot_done(4), Some(Vec::new()), "a stock's snapshot waits for no model");
 }
 
 
@@ -4502,7 +4560,7 @@ fn a_snapshot_keeps_its_deadline_while_its_registration_waits_to_be_read() {
         snapshot: true, one_shot: false, data_type: data_type_for_mode(0), marked: false,
         asked_at: std::time::Instant::now() - std::time::Duration::from_secs(12),
     });
-    assert!(core.check_snapshot_done(5), "a late read does not restart the wait");
+    assert!(core.check_snapshot_done(5).is_some(), "a late read does not restart the wait");
 }
 
 #[test]

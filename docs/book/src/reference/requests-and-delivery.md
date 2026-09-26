@@ -160,9 +160,16 @@ transport is not implemented.
 Snapshot registration follows contract naming, including options given only
 by contract id. Its eleven-second bound starts when the engine takes the named
 subscription. The snapshot waits for bid, ask, last, open and close; OPT, FOP,
-IOPT, WAR and EC also wait for model computation 13, or 83 for delayed data.
-Delayed snapshots also wait for tick string 88. Bid, ask and last option
-greeks are left unset; this completion mask does not wait for them.
+IOPT, WAR and EC also wait for model computation 13 and the bid's, ask's and
+last's computations 10 to 12, or 83 and 80 to 82 for delayed data. Delayed
+snapshots also wait for tick string 88. Each computation is sent to a snapshot
+once and only with all eight figures stated; at the end it is sent each one it
+has not been sent where any figure is stated. On a frozen or delayed-frozen
+feed the model is also sent once whatever it states, and at the end a side only
+with all eight figures stated and the model again where it was not sent that
+way. A snapshot of an option on an index or a future, or of one whose definition
+the venue has not answered, is sent no 10 to 12 here and so runs the full
+eleven seconds.
 
 ## Lower-level Rust users
 

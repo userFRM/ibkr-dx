@@ -200,7 +200,10 @@ it:
   warrant or a structured product (`WAR`, `IOPT`) is multiplied by its
   multiplier.
 - The implied volatility is the first of the venue's model, mid and last
-  volatilities that stands, carried from a trading day to a year of 252.
+  volatilities that stands, carried from a trading day to a year of 252. Until
+  one stands none is stated: a gateway falls back to the volatility curve of
+  the option's expiry at its strike, and with no analytics settings saved, as
+  on a gateway, that curve states no volatility.
 - `tickAttrib` is 1 where the mid's volatility was worked from prices.
 - The underlying's price is the one the chain parameters on the underlying
   (687, asked for once per underlying on each connection) state for the
@@ -265,6 +268,17 @@ gateway takes, as [Limits](./limits.md) says.
   quote. Each figure a side does not state is the last one of that side the
   request was sent, and a request is sent a side when that differs from the
   last.
+
+A snapshot of an option is held, as a gateway holds it, until it has been sent
+the model and the bid's, the ask's and the last's computations as well as the
+five kinds a snapshot is made of, or until eleven seconds after it was asked
+for. It is sent each computation once, and only one stating all eight figures,
+whether or not it moved; at its end it is sent each one it has not been sent,
+as it last stood for it, where any figure is stated: the bid's, the ask's and
+the last's, then the model. On a frozen or a delayed-frozen feed it is also
+sent the model once whatever it states, the first time it changes, which does
+not complete it; at its end a side is sent only stating every figure, and the
+model again where it was not sent that way, whatever it states.
 
 What is not carried yet is on [Limits](./limits.md).
 

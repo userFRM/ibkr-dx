@@ -192,15 +192,86 @@ fn as_delayed(tick_type: i32) -> i32 {
 }
 
 /// Every kind a snapshot is made of: bid, ask, last, open, close.
-const SNAPSHOT_WHOLE: u8 = 1 | 2 | 4 | 8 | 16;
+const SNAPSHOT_WHOLE: u16 = 1 | 2 | 4 | 8 | 16;
 
 /// The venue's option model, 13, or 83 on a delayed feed: what a snapshot of a
 /// contract a gateway marks as an option also waits for.
-const SNAPSHOT_MODEL: u8 = 32;
+const SNAPSHOT_MODEL: u16 = 32;
 
 /// The last trade's time on a delayed feed, 88: what a snapshot on a delayed
 /// feed also waits for.
-const SNAPSHOT_DELAYED_TIME: u8 = 64;
+const SNAPSHOT_DELAYED_TIME: u16 = 64;
+
+/// The bid's, the ask's and the last's computations, 10 to 12, or 80 to 82 on
+/// a delayed feed: what a snapshot of a contract a gateway marks as an option
+/// waits for beside the model.
+const SNAPSHOT_SIDES: u16 = 128 | 256 | 512;
+
+/// Where a snapshot on a frozen feed notes it has been sent the model on the
+/// terms a gateway sends it there, and on a delayed-frozen one.
+const SNAPSHOT_FROZEN_MODEL: u16 = 1024;
+const SNAPSHOT_DELAYED_FROZEN_MODEL: u16 = 2048;
+
+/// Where a snapshot notes that it has been sent an option computation of a
+/// kind, which it is sent once.
+fn snapshot_bit(kind: crate::bridge::OptionTickKind) -> u16 {
+    use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
+    match kind {
+        Model => SNAPSHOT_MODEL,
+        Bid => 128,
+        Ask => 256,
+        Last => 512,
+    }
+}
+
+/// The number an option computation of a kind goes out under.
+fn option_tick_type(kind: crate::bridge::OptionTickKind, delayed: bool) -> i32 {
+    use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
+    match (kind, delayed) {
+        (Model, false) => MODEL_OPTION_COMPUTATION,
+        (Model, true) => DELAYED_MODEL_OPTION_COMPUTATION,
+        (Bid, false) => 10,
+        (Bid, true) => 80,
+        (Ask, false) => 11,
+        (Ask, true) => 81,
+        (Last, false) => 12,
+        (Last, true) => 82,
+    }
+}
+
+/// Whether every one of a computation's eight figures is stated.
+fn every_figure_stated(figures: &[f64; 8]) -> bool {
+    figures.iter().all(|figure| *figure != f64::MAX)
+}
+
+/// Whether a snapshot is owed an option computation of a kind: one stating
+/// every figure, of a kind it has not been sent; and, on a frozen or a
+/// delayed-frozen feed (`feed`), the model once whatever it states. Noted as
+/// sent where it is.
+fn owed_to_snapshot(
+    wait: &mut SnapshotWait, kind: crate::bridge::OptionTickKind, figures: &[f64; 8], feed: i32,
+) -> bool {
+    let bit = snapshot_bit(kind);
+    if wait.stated & bit == 0 && every_figure_stated(figures) {
+        wait.stated |= bit;
+        return true;
+    }
+    kind == crate::bridge::OptionTickKind::Model && frozen_model_owed(wait, feed)
+}
+
+/// Whether a snapshot on a frozen or a delayed-frozen feed is owed the model
+/// on the terms a gateway sends it there: once, whatever it states. Sent so,
+/// it does not complete the snapshot. Noted as sent where it is.
+fn frozen_model_owed(wait: &mut SnapshotWait, feed: i32) -> bool {
+    let bit = match feed {
+        MDT_FROZEN => SNAPSHOT_FROZEN_MODEL,
+        MDT_DELAYED_FROZEN => SNAPSHOT_DELAYED_FROZEN_MODEL,
+        _ => return false,
+    };
+    let owed = wait.stated & bit == 0;
+    wait.stated |= bit;
+    owed
+}
 
 /// Whether a gateway marks a contract of this type as an option, and so holds
 /// its snapshot for the option model too: options, futures options and index
@@ -214,8 +285,8 @@ pub fn marked_as_option(sec_type: &str) -> bool {
 pub struct SnapshotWait {
     /// When it was asked for, which its bound runs from.
     pub asked_at: std::time::Instant,
-    /// Which of the kinds it waits for the venue has stated so far.
-    pub stated: u8,
+    /// Which of the kinds it waits for it has been sent so far.
+    pub stated: u16,
     /// The slot it is served on, whose feed says whether it is delayed.
     pub slot: InstrumentId,
     /// Whether its contract is of a type a gateway marks as an option.
@@ -253,6 +324,12 @@ impl ClientCore {
         )
     }
 
+    /// The feed a contract is served on as the venue accepted it: 1 live, 2
+    /// frozen, 3 delayed, 4 delayed-frozen; live until it states one.
+    fn feed_of(&self, instrument: InstrumentId) -> i32 {
+        self.mdt_by_instrument.lock().unwrap().get(&instrument).copied().unwrap_or(MDT_REALTIME)
+    }
+
     /// The tick an option computation goes out under, and each request it
     /// goes to with the figures that request is sent.
     ///
@@ -265,20 +342,16 @@ impl ClientCore {
     /// was sent, and are sent, and kept as the last, when that differs from
     /// it. A request joining a contract already modelled is sent the model as
     /// it stands when it joins, and the next tick of each other kind.
+    ///
+    /// A snapshot is sent each kind once, and only a computation stating all
+    /// eight figures, and on a frozen feed the model once more whatever it
+    /// states; what it has not been sent by its end is sent then
+    /// (`check_snapshot_done`).
     pub fn option_tick_owed(
         &self, generation: u64, tick: &crate::bridge::OptionTick,
     ) -> (i32, Vec<(i64, [f64; 8])>) {
-        use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
-        let tick_type = match (tick.kind, self.feed_is_delayed(tick.instrument)) {
-            (Model, false) => MODEL_OPTION_COMPUTATION,
-            (Model, true) => DELAYED_MODEL_OPTION_COMPUTATION,
-            (Bid, false) => 10,
-            (Bid, true) => 80,
-            (Ask, false) => 11,
-            (Ask, true) => 81,
-            (Last, false) => 12,
-            (Last, true) => 82,
-        };
+        use crate::bridge::OptionTickKind::Model;
+        let tick_type = option_tick_type(tick.kind, self.feed_is_delayed(tick.instrument));
         if generation != self.generation_held(tick.instrument) {
             return (tick_type, Vec::new());
         }
@@ -288,16 +361,25 @@ impl ClientCore {
         // Marked under the map a withdrawal clears, so a withdrawal lands
         // wholly before or wholly after: marked after it, a number reused on
         // the same option was never sent a tick it had not been sent.
+        let feed = self.feed_of(tick.instrument);
         let own = self.ownership();
         let mut sent = self.option_ticks_sent.lock().unwrap();
+        let mut snapshots = self.snapshot_reqs.lock().unwrap();
         let owed: Vec<(i64, [f64; 8])> = own.holders.get(&tick.instrument).copied().into_iter()
             .chain(own.following.get(&tick.instrument).into_iter().flatten().copied())
             .filter_map(|req_id| {
                 let key = (req_id, tick.kind);
+                let snapshot = snapshots.get_mut(&req_id);
                 if tick.kind == Model {
-                    let stated = tick.figures.iter().any(|figure| *figure != f64::MAX);
-                    return (sent.insert(key, tick.figures) != Some(tick.figures) && stated)
-                        .then_some((req_id, tick.figures));
+                    let changed = sent.insert(key, tick.figures) != Some(tick.figures);
+                    let owed = match snapshot {
+                        // A snapshot is sent the model once, stating every
+                        // figure, and on a frozen feed once whatever it
+                        // states.
+                        Some(wait) => changed && owed_to_snapshot(wait, tick.kind, &tick.figures, feed),
+                        None => changed && tick.figures.iter().any(|figure| *figure != f64::MAX),
+                    };
+                    return owed.then_some((req_id, tick.figures));
                 }
                 let last = sent.get(&key).copied().unwrap_or([f64::MAX; 8]);
                 let mut figures = tick.figures;
@@ -306,18 +388,19 @@ impl ClientCore {
                         *figure = before;
                     }
                 }
-                (figures != last).then(|| {
+                let changed = figures != last;
+                if changed {
                     sent.insert(key, figures);
-                    (req_id, figures)
-                })
+                }
+                let owed = match snapshot {
+                    // And each side once, stating every figure, whether or
+                    // not it moved.
+                    Some(wait) => owed_to_snapshot(wait, tick.kind, &figures, feed),
+                    None => changed,
+                };
+                owed.then_some((req_id, figures))
             })
             .collect();
-        drop(sent);
-        drop(own);
-        // The model is one of the kinds an option's snapshot waits for.
-        for (req_id, _) in &owed {
-            self.note_snapshot_tick(*req_id, tick_type);
-        }
         (tick_type, owed)
     }
 }
@@ -2172,16 +2255,14 @@ impl ClientCore {
             let stated = tick.figures.iter().any(|figure| *figure != f64::MAX);
             let fresh = self.option_ticks_sent.lock().unwrap()
                 .insert((req_id, crate::bridge::OptionTickKind::Model), tick.figures) != Some(tick.figures);
-            if !(fresh && stated) {
+            let owed = match self.snapshot_reqs.lock().unwrap().get_mut(&req_id) {
+                Some(wait) => fresh && owed_to_snapshot(wait, tick.kind, &tick.figures, self.feed_of(slot)),
+                None => fresh && stated,
+            };
+            if !owed {
                 return None;
             }
-            let tick_type = if self.feed_is_delayed(slot) {
-                DELAYED_MODEL_OPTION_COMPUTATION
-            } else {
-                MODEL_OPTION_COMPUTATION
-            };
-            self.note_snapshot_tick(req_id, tick_type);
-            return Some((tick_type, req_id, tick));
+            return Some((option_tick_type(tick.kind, self.feed_is_delayed(slot)), req_id, tick));
         }
         let _ = self.take_or_follow(slot, req_id, series, generation, con_id);
         self.stamp_registration(req_id);
@@ -4089,7 +4170,7 @@ impl ClientCore {
                 }
                 // Its answer is the whole of it.
                 if let Some(wait) = waiting.get_mut(&id) {
-                    wait.stated = u8::MAX;
+                    wait.stated = u16::MAX;
                 }
             }
         }
@@ -4122,12 +4203,11 @@ impl ClientCore {
         // feeds could never be completed by anything the venue said — it ran to
         // the sweep every time, however promptly the venue answered.
         let bit = match tick_type {
-            1 | 66 => 1u8,   // bid
+            1 | 66 => 1u16,  // bid
             2 | 67 => 2,     // ask
             4 | 68 => 4,     // last
             14 | 76 => 8,    // open
             9 | 75 => 16,    // close
-            13 | 83 => SNAPSHOT_MODEL,
             88 => SNAPSHOT_DELAYED_TIME,
             _ => return,
         };
@@ -4136,46 +4216,77 @@ impl ClientCore {
         }
     }
 
-    /// A snapshot ends when the venue has stated every kind one is made of, or
-    /// when long enough has passed since it was asked for.
+    /// A snapshot ends when it has been sent every kind one is made of, or
+    /// when long enough has passed since it was asked for: `None` while it
+    /// runs, and at its end the option computations it is sent then.
     ///
     /// Both are a gateway's: it holds a snapshot until the bid, the ask, the
     /// last, the open and the close have each been delivered, and sweeps
     /// anything still waiting eleven seconds after the REQUEST — not eleven
     /// since the last thing heard. On a contract it marks as an option it also
-    /// waits for the option model (13, or 83 on a delayed feed), and on a
+    /// waits for the option model (13, or 83 on a delayed feed) and the bid's,
+    /// the ask's and the last's computations (10 to 12, or 80 to 82), and on a
     /// delayed feed for the last trade's time (88).
     ///
-    /// A gateway also waits, on an option, for the bid's, the ask's and the
-    /// last's computations (10 to 12, or 80 to 82), which it works out with an
-    /// option model of its own. This client works them out only where the
-    /// option's inputs are in hand, and holds no snapshot for them.
+    /// At the end it sends a snapshot each option computation it has not been
+    /// sent, as it last stood for that request, where any figure is stated:
+    /// the bid's, the ask's, the last's, then the model's, each with its
+    /// number and whether it was worked from prices. On a frozen or a
+    /// delayed-frozen feed a side is sent then only stating every figure, and
+    /// the model also where it was not sent on the terms of such a feed,
+    /// whatever it states.
     ///
     /// Waiting on the quiet instead, as this did, ends a snapshot on a pause
     /// rather than on an answer, and a contract the venue never says anything
     /// about was never swept at all: the clock only started on the first
     /// delivery, so one that got none waited for ever.
-    pub fn check_snapshot_done(&self, req_id: i64) -> bool {
+    pub fn check_snapshot_done(&self, req_id: i64) -> Option<Vec<(i32, [f64; 8], bool)>> {
+        use crate::bridge::OptionTickKind::{Ask, Bid, Last, Model};
         /// How long after asking the reference client gives up waiting for the
         /// rest of a snapshot.
         const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(11);
 
-        let mut waiting = self.snapshot_reqs.lock().unwrap();
-        let Some(wait) = waiting.get(&req_id).copied() else {
-            return false;
-        };
-        let mut whole = SNAPSHOT_WHOLE;
-        if wait.marked {
-            whole |= SNAPSHOT_MODEL;
-        }
-        if self.feed_is_delayed(wait.slot) {
-            whole |= SNAPSHOT_DELAYED_TIME;
-        }
-        if wait.stated & whole == whole || wait.asked_at.elapsed() >= GIVE_UP_AFTER {
+        let delayed;
+        let mut wait = {
+            let mut waiting = self.snapshot_reqs.lock().unwrap();
+            let wait = waiting.get(&req_id).copied()?;
+            delayed = self.feed_is_delayed(wait.slot);
+            let mut whole = SNAPSHOT_WHOLE;
+            if wait.marked {
+                whole |= SNAPSHOT_MODEL | SNAPSHOT_SIDES;
+            }
+            if delayed {
+                whole |= SNAPSHOT_DELAYED_TIME;
+            }
+            if wait.stated & whole != whole && wait.asked_at.elapsed() < GIVE_UP_AFTER {
+                return None;
+            }
             waiting.remove(&req_id);
-            return true;
+            wait
+        };
+        if !wait.marked {
+            return Some(Vec::new());
         }
-        false
+        let price_based = self.models_as_they_stand.lock().unwrap()
+            .get(&wait.slot)
+            .is_some_and(|(_, model)| model.price_based);
+        let feed = self.feed_of(wait.slot);
+        let frozen = matches!(feed, MDT_FROZEN | MDT_DELAYED_FROZEN);
+        let sent = self.option_ticks_sent.lock().unwrap();
+        let any_stated = |figures: &[f64; 8]| figures.iter().any(|figure| *figure != f64::MAX);
+        let mut owed: Vec<(i32, [f64; 8], bool)> = [Bid, Ask, Last].into_iter()
+            .filter(|kind| wait.stated & snapshot_bit(*kind) == 0)
+            .filter_map(|kind| {
+                let figures = sent.get(&(req_id, kind))
+                    .filter(|figures| if frozen { every_figure_stated(figures) } else { any_stated(figures) })?;
+                Some((option_tick_type(kind, delayed), *figures, false))
+            })
+            .collect();
+        let model = sent.get(&(req_id, Model)).copied().unwrap_or([f64::MAX; 8]);
+        if (wait.stated & SNAPSHOT_MODEL == 0 && any_stated(&model)) || frozen_model_owed(&mut wait, feed) {
+            owed.push((option_tick_type(Model, delayed), model, price_based));
+        }
+        Some(owed)
     }
 
     /// Snapshot the current instrument→req_id mapping, each with every other

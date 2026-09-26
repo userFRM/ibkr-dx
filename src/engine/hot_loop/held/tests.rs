@@ -1411,9 +1411,7 @@ fn a_snapshot_is_registered_after_its_option_is_named() {
         for tick in [1, 2, 4, 9, 14] {
             core.note_snapshot_tick(17, tick);
         }
-        assert!(!core.check_snapshot_done(17), "the option still needs its model");
-        core.note_snapshot_tick(17, 13);
-        assert!(core.check_snapshot_done(17));
+        assert!(core.check_snapshot_done(17).is_none(), "the option still needs its computations");
         assert_eq!(shared.backlog(), 0);
     }
 }

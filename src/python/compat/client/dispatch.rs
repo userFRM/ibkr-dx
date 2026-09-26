@@ -1551,12 +1551,23 @@ impl EClient {
         done: &mut Vec<(i64, Option<u64>)>,
     ) -> PyResult<()> {
         for id in std::iter::once(req_id).chain(watchers.iter().copied()) {
-            if self.core.check_snapshot_done(id) {
+            if let Some(owed) = self.core.check_snapshot_done(id) {
                 // What it was watching when the snapshot finished, so the
                 // withdrawal can tell this subscription from whatever the
                 // callback leaves under the same number.
                 let was_watching = self.core.registration_of(id);
                 done.push((id, was_watching));
+                // The option computations it had not been sent, then its end.
+                for (tick_type, figures, price_based) in owed {
+                    let [implied_vol, delta, opt_price, pv_dividend, gamma, vega, theta, und_price] =
+                        figures;
+                    call_wrapper!(self, py, shared, "tick_option_computation",
+                        (id, tick_type, i32::from(price_based),
+                         or_unstated_price(implied_vol).filter(|v| *v >= 0.0), or_unstated_greek(delta),
+                         or_unstated_price(opt_price), or_unstated_price(pv_dividend),
+                         or_unstated_greek(gamma), or_unstated_greek(vega),
+                         or_unstated_greek(theta), or_unstated_price(und_price)));
+                }
                 call_wrapper!(self, py, shared, "tick_snapshot_end", (id,));
             }
         }
@@ -1638,6 +1649,53 @@ mod withdrawal_tests {
             );
 
             client.dispatch_once(py, &shared).expect("the pass ends, saying nothing of the withdrawal");
+        });
+    }
+}
+
+#[cfg(test)]
+mod snapshot_end_tests {
+    use super::*;
+
+    /// An option's snapshot that runs out is sent the computations it is owed,
+    /// then its end.
+    #[test]
+    fn an_options_snapshot_that_runs_out_is_sent_what_it_is_owed_then_its_end() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = EClient::__new__(&pyo3::types::PyTuple::empty(py), None);
+            let wrapper = py
+                .eval(
+                    c"type('W', (), {'said': [], '__getattr__': lambda s, n: (lambda *a: s.said.append(n) \
+                      if n in ('tickOptionComputation', 'tickSnapshotEnd') else None)})()",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unbind();
+            client.__init__(wrapper.clone_ref(py)).unwrap();
+            let shared = Arc::new(SharedState::new());
+            shared.market.set_instrument_count(1);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            *client.shared.lock().unwrap() = Some(shared.clone());
+            *client.control_tx.lock().unwrap() = Some(tx);
+            client.connected.store(true, Ordering::Release);
+            client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+            client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+            client.core.snapshot_reqs.lock().unwrap().insert(1, crate::client_core::SnapshotWait::new(0, true));
+            // The last's computation short of a figure: not sent while it runs.
+            let mut short = [0.2; 8];
+            short[3] = f64::MAX;
+            shared.market.push_option_tick(crate::bridge::OptionTick {
+                instrument: 0, kind: crate::bridge::OptionTickKind::Last, figures: short, price_based: false,
+            });
+            client.dispatch_once(py, &shared).unwrap();
+            let said = || wrapper.getattr(py, "said").unwrap().extract::<Vec<String>>(py).unwrap();
+            assert!(said().is_empty(), "{:?}", said());
+            client.core.snapshot_reqs.lock().unwrap().get_mut(&1).unwrap().asked_at -=
+                std::time::Duration::from_secs(12);
+            client.dispatch_once(py, &shared).unwrap();
+            assert_eq!(said(), ["tickOptionComputation", "tickSnapshotEnd"]);
         });
     }
 }
