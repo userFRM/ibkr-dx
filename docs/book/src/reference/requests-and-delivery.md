@@ -29,10 +29,13 @@ P&L and a bond's yield where the venue states them beside the charge, and the
 unset value where it states none, states `nan` or, for the P&L, zero. The
 commission is unset in the same way. A record stating neither the charge nor
 the other amount beside it is not delivered, and neither is one stating a figure
-that cannot be read. Each charge is delivered once for the session: the venue
-states the day's charges again at every reconnect, and only a later revision of
-one is delivered again, with the P&L the one before it realized added to its
-own.
+or a sending time that cannot be read. The venue states the day's executions and their charges
+again at every reconnect. An execution is delivered once for the session,
+however many the day has. A charge is delivered once for the day its record was
+sent on, counted on the session's time zone, as a gateway keeps it: only a
+later revision of one is delivered again, with the P&L the one before it
+realized added to its own, and one stated again after midnight there is
+delivered again.
 
 Python request refusals also wait for `poll()` or `run()`. A 504 about a feed or
 trading connection that ended within an admitted session follows the earlier

@@ -258,46 +258,20 @@ fn marks_only_frame_for_an_unknown_contract_creates_no_row() {
         "no position row may be fabricated from a marks-only frame");
 }
 
-// The fill-dedup set is not wiped wholesale when it reaches its cap: a
-// recently-seen ExecID stays deduplicated, so a post-reconnect replay
-// cannot double-count the fill.
+/// An execution is recognised for the session however many came after it.
+///
+/// Every logon states the day's executions again. Held to the last 1024, the
+/// oldest of a busier day read as new at the next logon, where a gateway, which
+/// sets no bound on what it recognises, reads every one as seen.
 #[test]
-fn record_exec_id_dedupes_within_window() {
+fn an_execution_is_recognised_however_many_came_after_it() {
     let mut ccp = CcpState::new();
-    assert!(ccp.record_exec_id("exec-A"), "first sighting is new");
-    assert!(!ccp.record_exec_id("exec-A"), "immediate replay is a duplicate");
-}
-
-#[test]
-fn record_exec_id_evicts_oldest_not_whole_set() {
-    let mut ccp = CcpState::new();
-    // The very first ExecID — the one a reconnect is most likely to replay.
-    assert!(ccp.record_exec_id("exec-first"));
-    // Push the window exactly to its cap. Together with "exec-first" this is
-    // EXEC_ID_WINDOW + 1 inserts, which evicts exactly one entry: the oldest
-    // ("exec-first"). Every other recent ID must remain deduplicated.
-    for i in 0..EXEC_ID_WINDOW {
+    assert!(ccp.record_exec_id("exec-first"), "first sighting is new");
+    assert!(!ccp.record_exec_id("exec-first"), "immediate replay is a duplicate");
+    for i in 0..2048 {
         assert!(ccp.record_exec_id(&format!("exec-{i}")));
     }
-    assert_eq!(ccp.seen_exec_ids.len(), EXEC_ID_WINDOW);
-    // Oldest was evicted, so a replay now reads as new (unavoidable past the
-    // window) — but the most recent IDs are still caught as duplicates.
-    assert!(!ccp.record_exec_id("exec-0"), "recent ID still deduped");
-    assert!(!ccp.record_exec_id(&format!("exec-{}", EXEC_ID_WINDOW - 1)),
-        "newest ID still deduped");
-}
-
-// A wholesale clear() would have made "exec-first" re-insertable as new
-// after just one extra fill past the cap; assert the rolling window keeps
-// the bound without that cliff.
-#[test]
-fn record_exec_id_window_is_bounded() {
-    let mut ccp = CcpState::new();
-    for i in 0..(EXEC_ID_WINDOW * 3) {
-        ccp.record_exec_id(&format!("exec-{i}"));
-    }
-    assert_eq!(ccp.seen_exec_ids.len(), EXEC_ID_WINDOW);
-    assert_eq!(ccp.exec_id_order.len(), EXEC_ID_WINDOW);
+    assert!(!ccp.record_exec_id("exec-first"), "the first of the day is still seen");
 }
 
 // Build a what-if (6091=1) ExecReport map for order 42. `margin_fields`
@@ -8227,6 +8201,7 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
     // The record as the venue sent it, from a captured session: the execution
     // it belongs to, what it cost, and the currency that is charged in.
     let parsed = std::collections::HashMap::from([
+        (crate::protocol::fix::TAG_SENDING_TIME, "20260925-17:11:24".to_string()),
         (crate::protocol::fix::TAG_EXEC_ID, "00025b49.6a8880e4.01.01".to_string()),
         (crate::protocol::fix::TAG_TRADE_CHARGE, "1.000003".to_string()),
         (crate::protocol::fix::TAG_TRADE_CHARGE_CURRENCY, "USD".to_string()),
@@ -8259,6 +8234,7 @@ fn what_a_fill_cost_is_read_off_the_record_that_states_it() {
     ] {
         let shared = SharedState::new();
         let mut parsed = std::collections::HashMap::from([
+            (crate::protocol::fix::TAG_SENDING_TIME, "20260925-17:11:24".to_string()),
             (crate::protocol::fix::TAG_EXEC_ID, exec_id.to_string()),
             (crate::protocol::fix::TAG_TRADE_CHARGE, "13.022195".to_string()),
             (crate::protocol::fix::TAG_TRADE_CHARGE_CURRENCY, "USD".to_string()),
@@ -8322,11 +8298,17 @@ fn a_charge_is_told_once_across_a_reconnect_and_a_later_revision_again() {
     let mut context = Context::new();
     let shared = SharedState::new();
     let mut hb = HeartbeatState::new();
-    let charge = |exec_id: &str, realized: &str| fix::fix_build(&[
-        (35, "U"), (43, "N"), (97, "Y"), (6040, "60"), (17, exec_id),
+    // On a session whose clock is New York's: 03:30 UTC is still the day
+    // before there.
+    let mut settings = (*shared.settings()).clone();
+    settings.timezone = "America/New_York".into();
+    shared.set_settings(std::sync::Arc::new(settings));
+    let sent_at = |exec_id: &str, realized: &str, sent: &str| fix::fix_build(&[
+        (35, "U"), (43, "N"), (52, sent), (97, "Y"), (6040, "60"), (17, exec_id),
         (37, "0256d0f1.0001417e.6ab20600.0001"), (6381, "USD"), (6378, "13.022195"),
         (6099, realized), (8189, "8.780597"),
     ], 1);
+    let charge = |exec_id: &str, realized: &str| sent_at(exec_id, realized, "20260925-03:30:00");
     let mut told = |ccp: &mut CcpState, frame: &[u8]| {
         ccp.process_ccp_message(frame, &mut None, &mut context, &shared, &None, &mut hb, "DU1");
         shared.orders.drain_charges()
@@ -8361,6 +8343,13 @@ fn a_charge_is_told_once_across_a_reconnect_and_a_later_revision_again() {
         told(&mut ccp, &charge("F-00025b49.6ab28ffe.07.01", "1.5")).is_empty(),
         "an execution named F-... is told to nobody",
     );
+
+    // Kept by the day the record was sent on the session's clock: stated again
+    // later the same day there it is not told, and stated on the next day it
+    // is, as a gateway keys it. One whose sending time does not read is lost.
+    assert!(told(&mut ccp, &sent_at("00025b49.6ab28ffe.01.02", "1.5", "20260925-03:59:59")).is_empty());
+    assert_eq!(told(&mut ccp, &sent_at("00025b49.6ab28ffe.01.02", "1.5", "20260925-04:00:00")).len(), 1);
+    assert!(told(&mut ccp, &sent_at("00025b49.6ab31111.01.01", "1.5", "20260925")).is_empty());
 }
 
 /// A trade cancel stated on the report type alone reverses what it undoes.

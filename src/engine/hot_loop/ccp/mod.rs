@@ -151,11 +151,6 @@ fn unanswered_after(req_id: u32) -> std::time::Duration {
     if req_id >= crate::bridge::ENGINE_ID_BASE { SECDEF_TIMEOUT } else { LOOKUP_TIMEOUT }
 }
 
-/// Number of most-recent ExecIDs retained for fill deduplication. Bounds the
-/// memory of `seen_exec_ids` while staying large enough that a server replay
-/// after a reconnect burst still hits the window.
-const EXEC_ID_WINDOW: usize = 1024;
-
 /// How many of the venue's own names for recovered orders are held at once.
 ///
 /// One is learned per order the venue replays, and a caller may ask for what
@@ -175,6 +170,13 @@ fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// The session's clock: the zone it announced at logon, which is the zone a
+/// gateway runs in, or UTC where no database answers to that name.
+fn session_clock(shared: &SharedState) -> jiff::tz::TimeZone {
+    let zone = shared.settings().timezone.clone();
+    crate::protocol::datetime::clock_named(&zone).unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
 /// An execution's name without its revision, as a gateway reads it: the last
@@ -233,12 +235,22 @@ impl CcpState {
         }
         // Told once for the session. Every logon states the day's executions
         // and their charges again, so a reconnect told the caller every charge
-        // of the day a second time. As a gateway keys it: the revision already
-        // told, or an earlier one, is not told again, and a later one is, with
-        // what the one before it realised added to its own.
-        let execution = without_revision(exec_id);
+        // of the day a second time. As a gateway keys it: by the day the record
+        // was sent on the session's clock, and the execution without its
+        // revision. The revision already told, or an earlier one, is not told
+        // again, and a later one is, with what the one before it realised
+        // added to its own. A record whose sending time does not read is not
+        // told, as a gateway loses it.
+        let Some(day) = parsed.get(&fix::TAG_SENDING_TIME)
+            .and_then(|sent| crate::protocol::datetime::ib_datetime_to_unix(sent))
+            .and_then(|sent| jiff::Timestamp::from_second(sent).ok())
+            .map(|sent| sent.to_zoned(session_clock(shared)).date())
+        else {
+            return;
+        };
+        let execution = (day, without_revision(exec_id).to_string());
         let stated = |figure: f64| figure != f64::MAX && figure != 0.0;
-        match self.charges_told.get(execution) {
+        match self.charges_told.get(&execution) {
             Some((told, _)) if told.as_str() >= exec_id.as_str() => return,
             Some((_, before)) if stated(*before) => {
                 realized = if stated(realized) { realized + before } else { *before };
@@ -248,7 +260,7 @@ impl CcpState {
         // Nothing realised is unset, as a gateway reports it: an opening fill
         // states 0 here.
         let realized_pnl = if realized == 0.0 { f64::MAX } else { realized };
-        self.charges_told.insert(execution.to_string(), (exec_id.clone(), realized_pnl));
+        self.charges_told.insert(execution, (exec_id.clone(), realized_pnl));
         shared.orders.push_charge(crate::types::model::CommissionAndFeesReport {
             realized_pnl,
             yield_amount,
@@ -808,18 +820,17 @@ const RECOVERY_PUSH_GRACE: Duration = Duration::from_secs(30);
 const RECOVERY_TERMINATOR_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) struct CcpState {
+    /// Every execution this session has booked, kept for the session. Every
+    /// logon states the day's executions again, and a gateway sets no bound on
+    /// what it recognises: an execution let go would be booked again there.
     pub(crate) seen_exec_ids: HashSet<String>,
-    /// Insertion order for `seen_exec_ids`, oldest at the front. Used to evict
-    /// one entry at a time once the dedup window is full, instead of clearing
-    /// the whole set — a wholesale clear would let a post-reconnect server
-    /// replay of a recently-seen ExecID double-count a fill.
-    pub(crate) exec_id_order: VecDeque<String>,
-    /// The charges told this session, by the execution they are for without
-    /// its revision: the revision told and what it realised. Kept across
-    /// reconnects, because every logon states the day's charges again, and
-    /// held whole: a gateway sets no bound on it, and a charge let go would be
-    /// told again at the next logon.
-    charges_told: HashMap<String, (String, f64)>,
+    /// The charges told this session, by the day each record was sent on the
+    /// session's clock and the execution it is for without its revision: the
+    /// revision told and what it realised. Kept across reconnects, because
+    /// every logon states the day's charges again, and held whole: a gateway
+    /// sets no bound on it, and a charge let go would be told again at the
+    /// next logon.
+    charges_told: HashMap<(jiff::civil::Date, String), (String, f64)>,
     pub(crate) disconnected: bool,
     /// When to account for orders the reconnect did not explain.
     ///
@@ -1186,7 +1197,6 @@ impl CcpState {
     pub(crate) fn new() -> Self {
         Self {
             seen_exec_ids: HashSet::with_capacity(256),
-            exec_id_order: VecDeque::with_capacity(256),
             charges_told: HashMap::new(),
             disconnected: false,
             recovery_sweep_at: None,
@@ -1243,26 +1253,10 @@ impl CcpState {
         }
     }
 
-    /// Record `exec_id` in the fill-dedup window. Returns `true` if it is new
-    /// (the fill should be processed) and `false` if it was already seen (a
-    /// duplicate to skip).
-    ///
-    /// Backed by a bounded rolling window: once `EXEC_ID_WINDOW` IDs are held,
-    /// the oldest is evicted one at a time. This replaces a previous wholesale
-    /// `clear()` that dropped the entire history at the cap, which let a
-    /// post-reconnect server replay of a recently-seen ExecID double-count the
-    /// fill and corrupt the position.
+    /// Record `exec_id` as booked. Returns `true` if it is new (the fill should
+    /// be processed) and `false` if it was already seen (a duplicate to skip).
     pub(crate) fn record_exec_id(&mut self, exec_id: &str) -> bool {
-        if !self.seen_exec_ids.insert(exec_id.to_string()) {
-            return false;
-        }
-        self.exec_id_order.push_back(exec_id.to_string());
-        while self.exec_id_order.len() > EXEC_ID_WINDOW {
-            if let Some(old) = self.exec_id_order.pop_front() {
-                self.seen_exec_ids.remove(&old);
-            }
-        }
-        true
+        self.seen_exec_ids.insert(exec_id.to_string())
     }
 
     /// Learn the venue's own name for an order this session numbers itself.
@@ -1334,7 +1328,7 @@ impl CcpState {
         });
     }
 
-    /// Whether the window has already seen this execution, asked without
+    /// Whether this session has already booked this execution, asked without
     /// spending its key: the booking that spends it runs further along the
     /// same report, and the readers before it need the same answer.
     pub(crate) fn already_recorded_exec_id(&self, exec_id: &str) -> bool {
