@@ -1244,7 +1244,6 @@ fn reconnect_ccp_attempt(
         // out with the connection rather than holding `auth` by reference.
         post_auth_unread = run_second_factor(&mut tls, SecondFactor {
             paper: auth.paper,
-            username: &auth.username,
             token_type,
             token_sub_type,
             code_provider: auth.code_provider.as_ref(),
@@ -1625,7 +1624,6 @@ impl Drop for LogonConnection<'_> {
 /// reconnect that the server bumped back to SRP.
 pub(crate) struct SecondFactor<'a> {
     pub paper: bool,
-    pub username: &'a str,
     /// Token type and per-session subtype as AUTH_START stated them.
     pub token_type: String,
     pub token_sub_type: Option<String>,
@@ -2059,7 +2057,7 @@ fn authenticate(
 
     let key = match (resume_key, auth_mode) {
         (Some(key), 2) => {
-            log::info!("Resuming the session for {} — no handshake", crate::logging::redacted(&config.username));
+            log::info!("Resuming the session — no handshake");
             do_ccp_soft_token(tls, &key)?;
             // AUTH_FINISH follows the challenge exactly as it follows a
             // handshake, and it says whether the session exists. What it reads
@@ -2077,7 +2075,7 @@ fn authenticate(
                     "The session offered was not accepted (mode {auth_mode}) — logging on with the password",
                 );
             }
-            log::info!("Starting auth for {}", crate::logging::redacted(&config.username));
+            log::info!("Starting auth");
             let session_key = do_srp(tls, &config.username, &config.password)?;
             log::info!("Auth complete");
 
@@ -2089,7 +2087,6 @@ fn authenticate(
             // live paths and the farm logon falls back to the SRP session key.
             let gate = run_second_factor(tls, SecondFactor {
                 paper: config.paper,
-                username: &config.username,
                 token_type: server_token_type,
                 token_sub_type: server_token_sub_type,
                 code_provider: config.code_provider.as_ref(),

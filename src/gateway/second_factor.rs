@@ -189,8 +189,7 @@ pub(super) fn run_second_factor(
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(sf.timeout_secs);
         log::info!(
-            "Live login for {}: second factor is an authenticator code; awaiting code_provider",
-            sf.username,
+            "Live login: second factor is an authenticator code; awaiting code_provider",
         );
         // The code is written raw, with no DH encryption — the same
         // transport the IBKey gate uses. The encrypted variant gets the
@@ -213,8 +212,8 @@ pub(super) fn run_second_factor(
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "second-factor token type {:?} is not supported; AUTH_START advertised it for {}",
-                sf.token_type, sf.username,
+                "second-factor token type {:?} is not supported; AUTH_START advertised it",
+                sf.token_type,
             ),
         ));
     }
@@ -228,16 +227,16 @@ pub(super) fn run_second_factor(
         // Accounts with no second factor fall straight through (Skipped).
         if sf.code_provider.is_none() {
             log::info!(
-                "Live login for {}: waiting for second-factor approval (mobile push); \
+                "Live login: waiting for second-factor approval (mobile push); \
                  connect() blocks up to {}s. Use paper=true, a lower ib_key_timeout_secs, \
                  or a code_provider to avoid this.",
-                sf.username, sf.timeout_secs,
+                sf.timeout_secs,
             );
         } else {
             log::info!(
-                "Live login for {}: second-factor via code_provider (Challenge/Response); \
+                "Live login: second-factor via code_provider (Challenge/Response); \
                  connect() blocks up to {}s awaiting the challenge.",
-                sf.username, sf.timeout_secs,
+                sf.timeout_secs,
             );
         }
         // The server's per-session value wins. `ib_key_token_sub_type` is
