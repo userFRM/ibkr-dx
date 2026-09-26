@@ -317,6 +317,16 @@ pub struct Gateway {
     pub executions_held_from: String,
     /// White branding ID from CCP logon (empty for standard accounts).
     pub white_branding_id: String,
+    /// Whether the logon asks for the venue's refusal of an order stated on a
+    /// status report to be told to the program that placed it.
+    pub refusals_told: bool,
+    /// The broker the login is with where the logon names one.
+    pub broker: String,
+    /// What the logon states about orders for an amount of money.
+    pub money_orders: crate::bridge::MoneyOrderTerms,
+    /// The part of a unit a size is shown to on a contract that states no
+    /// least size of its own.
+    pub size_fraction: String,
     /// Logical-name → host URL map pushed by the server during logon. Empty when no
     /// URL set was pushed (callers should then fall back to a documented literal,
     /// e.g. `api.ibkr.com` for `region_dam`).
@@ -2364,6 +2374,10 @@ impl Gateway {
             raw_enabled_features,
             all_non_prop_leaves_out,
             white_branding_id,
+            refusals_told,
+            broker,
+            money_orders,
+            size_fraction,
             raw_misc_urls,
             trading_route,
             mktdata_route,
@@ -2547,6 +2561,10 @@ impl Gateway {
             all_non_prop_leaves_out,
             executions_held_from,
             white_branding_id,
+            refusals_told,
+            broker,
+            money_orders,
+            size_fraction,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             hmds_host: hmds_host_for_gw,
             hmds_farm: hmds_farm_for_gw,
@@ -2705,6 +2723,10 @@ impl Gateway {
 
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
+        shared.reference.set_refusals_told(self.refusals_told);
+        shared.reference.set_broker(self.broker.clone());
+        shared.reference.set_money_orders(self.money_orders.clone());
+        shared.reference.set_size_fraction(self.size_fraction.clone());
 
         // Webapp-REST-facing fields from the FIX logon roundtrip.
         shared.reference.set_ccp_session_id(self.server_session_id.clone());

@@ -143,6 +143,23 @@ pub(crate) struct AttachedCombo {
     pub native: Option<bool>,
 }
 
+/// What the logon states about orders for an amount of money rather than a
+/// quantity, as it states it.
+#[derive(Clone, Debug, Default)]
+pub struct MoneyOrderTerms {
+    /// The security types it takes them on, tag 8334: a list separated by
+    /// commas.
+    pub types: String,
+    /// The order types it takes them on, tag 8351, listed the same way.
+    pub order_types: String,
+    /// Whether the account takes them, tag 8335.
+    pub account: bool,
+    /// Each product's default size and the precision of its currency, tag
+    /// 6052: `type,product,size,most,precision` entries separated by
+    /// semicolons.
+    pub product_defaults: String,
+}
+
 /// Historical data, contract definitions, scanners, news archives, market rules,
 /// contract cache.
 pub struct ReferenceState {
@@ -284,6 +301,16 @@ pub struct ReferenceState {
     login: Mutex<(Vec<String>, bool)>,
     /// Whether the logon named accounts `AllNonProp` leaves out.
     all_non_prop_leaves_out: AtomicBool,
+    /// Whether the logon asks for the venue's refusal of an order stated on a
+    /// status report to be told (tag 6130).
+    refusals_told: AtomicBool,
+    /// The broker the logon names the login as being with (tag 6053).
+    broker: Mutex<String>,
+    /// What the logon states about orders for an amount of money.
+    money_orders: Mutex<MoneyOrderTerms>,
+    /// The part of a unit a size is shown to on a contract that states no
+    /// least size of its own (tag 8079).
+    size_fraction: Mutex<String>,
     /// Where the executions the session opened with start, in unix seconds.
     executions_held_from: Mutex<Option<i64>>,
     /// Whether the venue granted the older spelling of Nasdaq. Settled when
@@ -400,6 +427,10 @@ impl ReferenceState {
             enabled_features: Mutex::new(Vec::new()),
             login: Mutex::new((Vec::new(), false)),
             all_non_prop_leaves_out: AtomicBool::new(false),
+            refusals_told: AtomicBool::new(false),
+            broker: Mutex::new(String::new()),
+            money_orders: Mutex::new(MoneyOrderTerms::default()),
+            size_fraction: Mutex::new(String::new()),
             executions_held_from: Mutex::new(None),
             island_granted: AtomicBool::new(false),
             algorithms: Mutex::new(HashMap::new()),
@@ -1536,6 +1567,46 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_all_non_prop_leaves_out(&self, named: bool) {
         self.all_non_prop_leaves_out.store(named, Ordering::Relaxed);
+    }
+
+    /// Whether the logon asks for the venue's refusal of an order stated on a
+    /// status report to be told to the program that placed it.
+    pub(crate) fn refusals_told(&self) -> bool {
+        self.refusals_told.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)] pub fn set_refusals_told(&self, told: bool) {
+        self.refusals_told.store(told, Ordering::Relaxed);
+    }
+
+    /// The broker the logon names the login as being with, empty where it
+    /// names none.
+    pub(crate) fn broker(&self) -> String {
+        self.broker.lock().unwrap().clone()
+    }
+
+    #[doc(hidden)] pub fn set_broker(&self, broker: String) {
+        *self.broker.lock().unwrap() = broker;
+    }
+
+    /// What the logon states about orders for an amount of money.
+    pub(crate) fn money_orders(&self) -> MoneyOrderTerms {
+        self.money_orders.lock().unwrap().clone()
+    }
+
+    #[doc(hidden)] pub fn set_money_orders(&self, terms: MoneyOrderTerms) {
+        *self.money_orders.lock().unwrap() = terms;
+    }
+
+    /// The part of a unit a size is shown to on a contract that states no
+    /// least size of its own, as the logon states it; empty where it states
+    /// none.
+    pub(crate) fn size_fraction(&self) -> String {
+        self.size_fraction.lock().unwrap().clone()
+    }
+
+    #[doc(hidden)] pub fn set_size_fraction(&self, fraction: String) {
+        *self.size_fraction.lock().unwrap() = fraction;
     }
 
     /// Where the executions the session opened with start, in unix seconds:

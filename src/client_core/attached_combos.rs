@@ -1497,6 +1497,7 @@ mod tests {
             price_magnifier: 1,
             price_increments: vec![PriceIncrement { low_edge: 0.0, increment: 1.0 }],
             size_increments: Vec::new(),
+            price_places: None,
         }]);
         let mut session = OrderSession::single("U1");
         session.features.extend(["NATGCOMB".into(), "CMAG".into()]);
@@ -1632,6 +1633,7 @@ mod tests {
             price_magnifier: 100,
             price_increments: vec![PriceIncrement { low_edge: 0.0, increment: 1.0 }],
             size_increments: Vec::new(),
+            price_places: None,
         }]);
         let (control, receive) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {

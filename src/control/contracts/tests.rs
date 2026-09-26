@@ -2011,6 +2011,16 @@ mod size_table_tests {
         let def = parse_secdef_response(data, true).expect("the definition parses");
         assert_eq!(def.min_tick, 0.01, "the price table gives the tick");
         assert_eq!(def.suggested_size_increment, 40.0, "the size table gives the size");
+
+        // Each table opens with the places its bands are shown to, as the
+        // venue states them: the price display's first band is the one kept.
+        let shown = b"35=d\x01320=R1\x016008=756733\x0155=SPY\x01\
+                      6019=1\x016031=26\x016022=1\x016023=0\x016024=4\x016025=2\x01\
+                      6026=1\x016023=0\x016027=0.01\x016028=0\x016029=1\x016023=0\x016024=6\x016025=0\x01\
+                      6030=1\x016023=1\x016027=1\x01";
+        let rules = parse_market_rules(shown);
+        assert_eq!(rules[0].price_places, Some(2));
+        assert_eq!((rules[0].price_increments[0].increment, rules[0].size_increments[0].increment), (0.01, 1.0));
     }
 
     /// A rule stating only price bands leaves the size unset rather than
@@ -2155,8 +2165,8 @@ fn a_bond_definition_states_its_maturity_and_no_expiry() {
 #[test]
 fn attached_combo_underlying_distinguishes_a_missing_multiplier_from_one() {
     let missing = super::parse_secdef_response(b"35=d\x0155=ABC\x01167=CS\x016008=42\x01", false).unwrap();
-    let stated = super::parse_secdef_response(b"35=d\x0155=ABC\x01167=CS\x016008=42\x01231=1\x01", false).unwrap();
+    let stated = super::parse_secdef_response(b"35=d\x0155=ABC\x01167=CS\x016008=42\x01231=1.0\x01", false).unwrap();
     assert!(!missing.multiplier_stated);
     assert!(stated.multiplier_stated);
-    assert_eq!(stated.multiplier, 1.0);
+    assert_eq!((stated.multiplier, stated.multiplier_text.as_str()), (1.0, "1.0"), "kept as written too");
 }

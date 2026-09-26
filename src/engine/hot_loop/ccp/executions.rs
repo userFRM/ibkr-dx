@@ -694,6 +694,102 @@ fn take_what_if(
     parsed.get(&39).map(|s| s.as_str()) != Some("8")
 }
 
+/// Tell the program that placed an order what the venue states beside the
+/// order's status, where a gateway tells it: the venue's message on the order
+/// (tag 6361, under its code on 6360), or, where the venue states none, its
+/// refusal of the order (tag 58) where a gateway tells refusals.
+///
+/// Told only the program the order is the program's own: a gateway tells the
+/// connection of the order's client and no other.
+fn tell_the_venues_message(
+    parsed: &std::collections::HashMap<u32, String>,
+    clord_id: u64,
+    context: &Context,
+    shared: &SharedState,
+) {
+    use super::order_message::{self as message, Described, Faq};
+    let text = parsed.get(&6361).map(String::as_str).unwrap_or("");
+    let code = parsed.get(&6360).map(String::as_str).unwrap_or("");
+    let refused = if text.is_empty() { told_refusal(parsed, shared) } else { None };
+    if text.is_empty() && refused.is_none() {
+        return;
+    }
+    let Some(order) = context.order(clord_id) else { return };
+    let Some(info) = shared.orders.get_order_info(clord_id) else { return };
+    if info.order.client_id != shared.orders.api_client_id() {
+        return;
+    }
+    let Some(contract) = u32::try_from(info.contract.con_id).ok()
+        .and_then(|con_id| shared.reference.contract_definition(con_id, &info.contract.exchange))
+    else {
+        return;
+    };
+    let rule = contract.market_rule_id
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(|id| shared.reference.market_rule(id));
+    let quantity = message::quantity(order.qty);
+    let terms = shared.reference.money_orders();
+    let size_fraction = shared.reference.size_fraction();
+    let described = Described {
+        side: order.side,
+        quantity: &quantity,
+        ladder: context.ladder_sizes.get(&clord_id).copied(),
+        cash: Some(info.order.cash_qty).filter(|cash| cash.is_finite() && *cash > 0.0 && *cash != f64::MAX),
+        contract: &contract,
+        rule: rule.as_ref(),
+        whole_listing: shared.reference.enables("SEPLSTDIV"),
+        isin_with_cusip: shared.reference.enables("CUSIPD"),
+        order_type: crate::types::ord_type_fix_str(order.ord_type),
+        algo: !info.order.algo_strategy.is_empty(),
+        money: message::Money {
+            types: &terms.types,
+            order_types: &terms.order_types,
+            account: terms.account,
+            refusals_told: shared.reference.refusals_told(),
+            crypto: shared.reference.order_permissions().contains_key("CRYPTO"),
+            precise: !shared.reference.enables("NOCASHQTYPRECISION"),
+            product_defaults: &terms.product_defaults,
+        },
+        size_fraction: &size_fraction,
+    };
+    let base = shared.reference.misc_url("faq_base_url");
+    let broker = shared.reference.broker();
+    let faq = Faq { base: base.as_deref(), own_brand: broker.is_empty() || broker.contains("Interactive Brokers") };
+    let told = match refused {
+        None => message::for_the_venues_message(code, text, &described, faq),
+        Some(refused) => message::for_the_venues_refusal(code, &refused, &described, faq),
+    };
+    if let Some((code, text)) = told {
+        shared.orders.push_order_notice(clord_id, api::OrderOp::Venue, code, text);
+    }
+}
+
+/// The venue's refusal of an order stated on a status report, where a gateway
+/// tells the program of it: the logon asks for such refusals (tag 6130) and
+/// does not ask for them not to be (NOORDERSTATUSREJECT), and the refusal is
+/// not the venue's pattern-day-trader notice, which a gateway shows in a
+/// window of its own.
+fn told_refusal(parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) -> Option<String> {
+    let stated = parsed.get(&58).filter(|text| !text.is_empty())?;
+    // A refusal the venue files under 901 is stated as a negative yield.
+    let text = if parsed.get(&103).map(String::as_str) == Some("901") {
+        format!("Negative yield to worst: {stated}")
+    } else {
+        stated.clone()
+    };
+    let upper = text.to_uppercase();
+    if text.contains("DayTrading&")
+        || upper.contains("BECAUSE YOU FALL WITHIN THE DEFINITION OF A \"PATTERN DAY TRADER\" UNDER NYSE AND NASD RULES")
+        || upper.contains("BECAUSE YOUR ACCOUNT FALLS WITHIN THE DEFINITION OF A PATTERN DAY TRADER")
+        || shared.reference.enables("NOORDERSTATUSREJECT")
+        || !shared.reference.refusals_told()
+        || parsed.get(&39).map(String::as_str) != Some("8")
+    {
+        return None;
+    }
+    Some(text)
+}
+
 /// What a report says the order's state now is.
 ///
 /// The tag 39 code is not always the status a caller is given: 39=0 is New on
@@ -1971,6 +2067,20 @@ impl CcpState {
                         && !context.placed_at.contains_key(&clord_id))) => held.status,
             _ => status_of(ord_status, clord_id, parsed),
         };
+        // What the venue states beside the status of an order this session
+        // holds, told the program that placed the order ahead of the status,
+        // as a gateway tells it: on a status report at the order's revision
+        // or a later one, other than one stating the order cancelled.
+        if status_report
+            && !another_order
+            && !below_the_cancel
+            && !matches!(ord_status, "4" | "C")
+            && context.order(clord_id).is_some()
+            && parsed.get(&11).map(|named| revision_of(named))
+                .is_none_or(|named| named >= context.modify_versions.get(&clord_id).copied().unwrap_or(0))
+        {
+            tell_the_venues_message(parsed, clord_id, context, shared);
+        }
         // The sentinel is dropped further down, but this recovery insert runs
         // first — without the guard, a `11='*'` terminator registers a conId
         // and inserts the reserved order id 0 before being "discarded".

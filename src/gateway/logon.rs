@@ -72,6 +72,19 @@ pub(super) struct LogonAck {
     /// names some.
     pub all_non_prop_leaves_out: bool,
     pub white_branding_id: String,
+    /// Whether the logon asks for the venue's refusal of an order stated on a
+    /// status report to be told to the program that placed it, tag 6130.
+    pub refusals_told: bool,
+    /// The broker the login is with where the logon names one, tag 6053.
+    pub broker: String,
+    /// What the logon states about orders for an amount of money: the
+    /// security types and order types it takes them on (tags 8334 and 8351),
+    /// whether the account takes them (tag 8335), and each product's default
+    /// size and precision (tag 6052).
+    pub money_orders: crate::bridge::MoneyOrderTerms,
+    /// The part of a unit a size is shown to on a contract that states no
+    /// least size of its own, tag 8079.
+    pub size_fraction: String,
     pub raw_misc_urls: String,
     /// Which farms this account is routed to. `usfarm`/`ushmds` are US names;
     /// an EU account is routed to eufarm/euhmds/secdefeu, and so on for every
@@ -349,6 +362,13 @@ impl LogonAck {
             if let Some(v) = fields.get(&6542) { keep_first(&mut ack.raw_enabled_features, v, "6542"); }
             if let Some(v) = fields.get(&8056) { ack.all_non_prop_leaves_out |= v.split(',').any(|a| !a.is_empty()); }
             if let Some(v) = fields.get(&6571) { keep_first(&mut ack.white_branding_id, v, "6571"); }
+            if let Some(v) = fields.get(&6130) { ack.refusals_told |= v.starts_with('1'); }
+            if let Some(v) = fields.get(&6053) { keep_first(&mut ack.broker, v, "6053"); }
+            if let Some(v) = fields.get(&8334) { keep_first(&mut ack.money_orders.types, v, "8334"); }
+            if let Some(v) = fields.get(&8351) { keep_first(&mut ack.money_orders.order_types, v, "8351"); }
+            if let Some(v) = fields.get(&8335) { ack.money_orders.account |= v.contains('1'); }
+            if let Some(v) = fields.get(&6052) { keep_first(&mut ack.money_orders.product_defaults, v, "6052"); }
+            if let Some(v) = fields.get(&8079) { keep_first(&mut ack.size_fraction, v, "8079"); }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte
             // search.
             // Mirrors the 8035 defensive scan because the value can carry `|`
@@ -1621,7 +1641,10 @@ mod tests {
 
     /// Whether the logon names accounts `AllNonProp` leaves out is read off
     /// it: a list with an account in it. A gateway takes `AllNonProp` for the
-    /// account figures only where it does.
+    /// account figures only where it does. So are whether it asks for the
+    /// venue's refusals on status reports to be told, the login's broker, what
+    /// it states about orders for an amount of money, and the part of a unit
+    /// it has sizes shown to.
     #[test]
     fn the_logon_says_whether_it_names_accounts_all_non_prop_leaves_out() {
         for (stated, named) in [(Some("DU2,DU3"), true), (Some(","), false), (Some(""), false), (None, false)] {
@@ -1633,6 +1656,35 @@ mod tests {
             let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
             assert_eq!(ack.all_non_prop_leaves_out, named, "8056 stated as {stated:?}");
         }
+        // And whether it asks for the venue's refusals on status reports to be
+        // told, by a leading 1, and who the login's broker is; and what it
+        // states about orders for an amount of money, the account taking them
+        // where its field holds a 1.
+        for (stated, told, broker, money) in [
+            (&[(6130, "1"), (6053, "A Partner")][..], true, "A Partner", ("", "", false, "")),
+            (&[(6130, "0")][..], false, "", ("", "", false, "")),
+            (&[][..], false, "", ("", "", false, "")),
+            (
+                &[(8334, "CASHQTY,2"), (8351, "1,2/4"), (8335, "0,1"), (6052, "CASH,USD,25000,1000000,0.01")][..],
+                false, "", ("CASHQTY,2", "1,2/4", true, "CASH,USD,25000,1000000,0.01"),
+            ),
+            (&[(8335, "0")][..], false, "", ("", "", false, "")),
+        ] {
+            let mut ack_fields: Vec<(u32, &str)> = vec![(35, "A"), (1, "DU111111")];
+            ack_fields.extend_from_slice(stated);
+            let mut wire = answered_with(&[&ack_fields]);
+            let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
+            assert_eq!((ack.refusals_told, ack.broker.as_str()), (told, broker), "{stated:?}");
+            let terms = &ack.money_orders;
+            assert_eq!(
+                (terms.types.as_str(), terms.order_types.as_str(), terms.account, terms.product_defaults.as_str()),
+                money, "{stated:?}",
+            );
+        }
+        // And the part of a unit it has sizes shown to.
+        let mut wire = answered_with(&[&[(35, "A"), (1, "DU111111"), (8079, "0.000001")]]);
+        let ack = LogonAck::read(&mut wire, &mut Vec::new(), a_minute_from_now()).unwrap();
+        assert_eq!(ack.size_fraction, "0.000001");
     }
 
     /// The ACK is not always the first message the venue sends, and what it

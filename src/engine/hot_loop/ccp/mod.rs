@@ -4620,6 +4620,7 @@ mod venue_clock_tests {
 }
 
 pub(crate) mod executions;
+mod order_message;
 pub(crate) mod positions;
 
 #[cfg(test)]

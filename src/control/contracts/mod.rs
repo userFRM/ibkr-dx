@@ -393,6 +393,9 @@ pub struct ContractDefinition {
     pub multiplier: f64,
     /// Whether the contract definition explicitly supplied its multiplier.
     pub multiplier_stated: bool,
+    /// The multiplier as the venue wrote it, which is how a gateway's display
+    /// names it.
+    pub multiplier_text: String,
     /// Every venue it can be routed to.
     pub valid_exchanges: Vec<String>,
     /// Which order types the venue takes for it.
@@ -429,6 +432,9 @@ pub struct ContractDefinition {
     /// What a bond is: its terms, its ratings, and the option on it. A caller
     /// asking about a bond received a contract with none of what makes it one.
     pub coupon: f64,
+    /// The coupon as the venue wrote it, which is how a gateway's display
+    /// names it.
+    pub coupon_text: String,
     /// A future's delivery month.
     pub contract_month: String,
     /// What kind of contract the underlying is.
@@ -565,6 +571,10 @@ pub struct ContractDefinition {
     pub unnamed_fields: Vec<(u32, String)>,
     /// The smallest amount of it that can be traded.
     pub min_size: f64,
+    /// Whether the venue states a least size behind its flag (tag 8193).
+    pub min_size_stated: bool,
+    /// The least size behind that flag as the venue wrote it (tag 8175).
+    pub min_size_text: String,
     /// Trading session string. Populated by merging the paired schedule reply.
     pub trading_hours: Option<String>,
     /// Liquid (regular-session) hours string. Same source as trading_hours.
@@ -601,6 +611,7 @@ impl Default for ContractDefinition {
             min_tick: 0.0,
             multiplier: 1.0,
             multiplier_stated: false,
+            multiplier_text: String::new(),
             valid_exchanges: Vec::new(),
             order_types: Vec::new(),
             order_type_key: String::new(),
@@ -613,6 +624,7 @@ impl Default for ContractDefinition {
             right: None,
             stock_type: String::new(),
             coupon: 0.0,
+            coupon_text: String::new(),
             contract_month: String::new(),
             under_sec_type: String::new(),
             ev_rule: String::new(),
@@ -669,6 +681,8 @@ impl Default for ContractDefinition {
             smart_venues: Vec::new(),
             unnamed_fields: Vec::new(),
             min_size: 0.0,
+            min_size_stated: false,
+            min_size_text: String::new(),
             trading_hours: None,
             liquid_hours: None,
             time_zone_id: None,
@@ -1168,6 +1182,7 @@ fn parse_secdef_record(
         };
         def.multiplier = m;
         def.multiplier_stated = true;
+        def.multiplier_text = v.clone();
     }
     if let Some(v) = tags.get(&TAG_IB_VALID_EXCHANGES) {
         def.valid_exchanges = v.split(',').map(|s| exchange_from_fix(s).to_string()).collect();
@@ -1357,10 +1372,14 @@ fn parse_secdef_record(
         }
     };
     let bond = matches!(def.sec_type, SecurityType::Bond | SecurityType::Bill | SecurityType::FixedIncome);
+    // The flag is a number, set where it is not nought.
+    def.min_size_stated = tags.get(&TAG_MIN_SIZE_STATED)
+        .is_some_and(|v| v.parse::<i32>().is_ok_and(|flag| flag != 0));
+    def.min_size_text = tags.get(&TAG_MIN_SIZE).cloned().unwrap_or_default();
     let least = if def.size_increment > 0.0 && def.size_increment < 1.0 {
         Some(def.size_increment)
-    } else if tags.get(&TAG_MIN_SIZE_STATED).map(|v| v.as_str()) == Some("1") {
-        Some(tags.get(&TAG_MIN_SIZE).and_then(|v| v.parse().ok()).unwrap_or(0.0001))
+    } else if def.min_size_stated {
+        Some(def.min_size_text.parse().unwrap_or(0.0001))
     } else {
         None
     };
@@ -1412,7 +1431,10 @@ fn parse_secdef_record(
     if let Some(v) = tags.get(&6477) { def.fund_closed = v == "1" || v.eq_ignore_ascii_case("true"); }
     if let Some(v) = tags.get(&6511) { def.fund_closed_for_new_investors = v == "1" || v.eq_ignore_ascii_case("true"); }
     if let Some(v) = tags.get(&6512) { def.fund_closed_for_new_money = v == "1" || v.eq_ignore_ascii_case("true"); }
-    if let Some(v) = tags.get(&223) && let Ok(x) = v.trim().parse() { def.coupon = x; }
+    if let Some(v) = tags.get(&223) {
+        def.coupon_text = v.clone();
+        if let Ok(x) = v.trim().parse() { def.coupon = x; }
+    }
     if let Some(v) = tags.get(&6178) && let Ok(x) = v.trim().parse() { def.agg_group = x; }
     if let Some(v) = tags.get(&6021)
         && let Ok(n) = v.trim().parse::<i32>()
@@ -1571,6 +1593,9 @@ pub struct MarketRule {
     /// count that opens a second table. Reading stopped at that count, so this
     /// was empty for every contract.
     pub size_increments: Vec<PriceIncrement>,
+    /// How many places the rule's first price band is displayed to (6025),
+    /// where it states one.
+    pub price_places: Option<i32>,
 }
 
 fn parse_market_classifications(data: &[u8]) -> HashMap<u32, String> {
@@ -1649,6 +1674,7 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
     let mut pending_low_edge: Option<f64> = None;
     let mut filling = Table::Price;
     let mut in_rules = false;
+    let mut display_places = false;
 
     for (tag, val) in &tags {
         match *tag {
@@ -1663,6 +1689,7 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
                     price_magnifier: 0,
                     price_increments: Vec::new(),
                     size_increments: Vec::new(),
+                    price_places: None,
                 });
                 if let Some(rule) = current.take() {
                     rules.push(rule);
@@ -1686,6 +1713,18 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
             6021 => {
                 if let Some(ref mut rule) = current {
                     rule.price_magnifier = val.parse().unwrap_or(0);
+                }
+            }
+            // The price display table opens the rule and names, per band, the
+            // places a price is shown to: the first band's is the one a
+            // gateway rounds a strike to.
+            6022 => display_places = true,
+            6025 => {
+                if let Some(ref mut rule) = current
+                    && display_places
+                {
+                    display_places = false;
+                    rule.price_places = val.parse().ok();
                 }
             }
             TAG_LOW_EDGE => {

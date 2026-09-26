@@ -119,9 +119,9 @@ withdrawal, and a gateway takes an acknowledgement only from an order not yet
 withdrawn, so it states the order as being withdrawn, and so does this client.
 
 Placed before the open, the same order is acknowledged at once with the
-venue's warning that it will not reach the exchange until the open; what a
-gateway makes of that warning is under
-[an order's warning](#an-orders-warning) below.
+venue's warning that it will not reach the exchange until the open, which
+reaches the program as error 399, as it does from a gateway; see [a message
+beside an order's status](venue-behaviour.md#a-message-beside-an-orders-status).
 
 ## A trailing stop limit by percentage
 
@@ -223,17 +223,22 @@ them:
 Not a gap in what it can ask for. A program written against the other
 behaviour will still be wrong, which is why they are here.
 
-## An order's warning
+## An order's warning on some contracts
 
-The venue can acknowledge an order with a warning beside it: a market-on-close
-order placed before the open is acknowledged with the warning that it will not
-reach the exchange until the open. A gateway sends the program that placed the
-order error 399 under the order's number, *Order Message:* followed on a line
-of its own by a description of the order — its side, its quantity and its
-contract, as a gateway's display writes them — and on the next line the
-warning. This client does not: the description is a gateway's display text,
-which is not reproduced here. A gateway's 399 for such an order, placed before
-the open on a paper login, would give the text to reproduce.
+A message the venue states beside an order's status reaches the program as a
+gateway words it, with the order described as a gateway's display describes
+it (see [a message beside an order's
+status](venue-behaviour.md#a-message-beside-an-orders-status)). For some orders
+that description is not written here, and the message is not sent: a fund, a
+combination whose definition this session has not been answered, a
+structured product of a kind the venue names, and an order for an amount of
+money that carries an algorithm, which a gateway describes by
+the amount where the algorithm's definition takes one. A gateway sends each of
+them. A hedge the venue holds until its parent fills
+is described without its size by a gateway; here its size is written. A
+gateway follows the strike of a derivative whose underlying trades in another
+currency with that currency, once it has looked the underlying up; here the
+strike is written alone.
 
 ## Callbacks nothing fires
 

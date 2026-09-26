@@ -458,6 +458,81 @@ working again on any of them. A status report stating the order working at
 its own revision, after a withdrawal this session did not send, states it
 working again.
 
+## A message beside an order's status
+
+The venue can state a message beside an order's status: an order that will not
+reach the exchange before the open is acknowledged with a warning saying so. On
+a status report at the order's revision or a later one, other than one stating
+the order cancelled, the message reaches the program that placed the order as
+error 399 under the order's ID, ahead of the status, the way a gateway words
+it: *Order Message:*, the order as a gateway's display describes it, and the
+message.
+
+```text
+Order Message: BUY 100 AAPL NASDAQ.NMS Warning: your order will not be placed at the exchange until 2026-09-25 09:30:00 US/Eastern
+```
+
+The error's three parts are on lines of their own, and a gateway writes each
+line break of an error's text as a space. The description is the side (`BUY`,
+`SELL`, `SSHORT`), the size, and the contract, which reads by kind:
+
+| Kind | Reads as |
+| --- | --- |
+| Share | `AAPL NASDAQ.NMS`: where it is listed, under the venue's name for the market (`NASDAQ` where a program is handed `ISLAND`), and the segment of that market |
+| Option | `SPY OCT 16 '26 765 Call`; a trading class other than the underlying's in brackets after the symbol, `SPX (SPXW) OCT 16 '26 6000 Put`; where the month the option is for is not its last day's, the month, `DEC26` |
+| Future | `MES DEC'26`, and `(DP)` after a dividend-protected one |
+| Future's option | `ES DEC'26 6000 Call Fut. Option`, and a trading class other than the symbol in brackets |
+| Currency pair | `EUR.USD Forex` |
+| Crypto currency, commodity | `BTC Crypto (BTC)`, `XAUUSD Commodity (XAUUSD)`: the trading class in brackets |
+| Contract for difference | `AAPL CFD (AAPL)`, or `EUR.USD CFD` on a currency pair |
+| Warrant, structured product | `DAX DEC'26 18000 Call (FWB,DB,0.010)`: where it is listed, its issuer, its multiplier as the venue writes it, each where stated |
+| Event contract | `FF DEC'26 4.5 NO Event (FFE)`: as a future's option, its right as `YES` or `NO`; where the venue files it as an event, its strike as the text the venue states for it, and none for a strike of nought |
+| Combination | `SPY Combo`: its symbol and `Combo` |
+| Bond, bill | `US-T GOVT Notes 4.250 Nov05'35 91282CKX0 AA+/Aaa`: its class, its kind, its coupon as stated, its maturity (`Perpetual` for one with none), its CUSIP or else its ISIN, and its ratings, each where stated |
+
+Where the venue's own name for the contract is not its symbol, it follows in
+brackets and a space, `(SPY   261016C00765000) `, except for a currency pair,
+a bond and a combination. Sizes are whole units grouped by thousands
+(`1,500`); parts of a unit written out in full on a contract dealt in them
+(`0.5`), and on any other rounded to the places of the least size the venue
+states for it, or, where it states none, to four places, or to the logon's
+part of a unit where that is finer (tag 8079); a currency pair's in thousands
+and millions (`25K`, `1.5M`, `1,250K`); and a bond's as the face value it
+comes to in thousands of its currency (`$5K`), or as the number of bonds where
+the venue states no face value. A ladder sized by its components is described
+by the most it holds, written as the contract writes a size.
+
+An order for an amount of money is described by the amount and the currency
+where a gateway takes it by amount: a crypto currency's; a currency pair's
+where the venue takes an amount for it, to three places and from the side of
+the currency it is priced in; and a share's where the logon lists the order's
+type among those it takes amounts on (tag 8351) and the share is one it takes
+an amount for: the venue takes an amount on it (`CASHQTY`) and either the logon
+lists a market, limit or stop type there or the share's rule deals in parts of
+a share, or the venue states a least size for it and the logon takes amounts on
+shares (tag 8334) for the account (tag 8335, 6130 or a crypto permission). An
+amount other than a currency pair's
+is written to the cent where the logon's product defaults (tag 6052) list its
+currency at a precision below a unit, and in whole units otherwise or where the
+logon states `NOCASHQTYPRECISION`. Any other order for an amount is described
+by its quantity.
+
+The message is laid out as a gateway lays it out: broken before the word that
+would carry a line past 110 characters, the space ahead of the break kept, so
+a program reads two spaces there. A reference to one of the venue's answers
+(`FAQ` and eight digits) is made a link where the logon names where the answers
+are. Characters beyond seven-bit ASCII are written as `\uXXXX`. A closed fund
+is stated in the venue's words for a closed fund rather than as an order
+message, and a price-cap message on an order a program placed is not sent: a
+gateway shows it in its own window.
+
+Where the logon asks for them (tag 6130), and does not ask for them not to be
+(`NOORDERSTATUSREJECT`), a rejection the venue states on a status report
+reaches the program the same way, with the venue's reason as the message, and
+under 10212 with the venue's price-management question where the rejection is
+a price cap. A pattern-day-trader rejection is not: a gateway shows it in its
+own window.
+
 ## What the account may trade
 
 The venue states at logon which security types this account may trade, and

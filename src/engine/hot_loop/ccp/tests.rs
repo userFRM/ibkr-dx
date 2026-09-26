@@ -4465,6 +4465,305 @@ fn ord_status_inactive_reason_reaches_inactive_queue() {
     assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::Submitted);
 }
 
+/// The venue's message beside an order's status reaches the program that
+/// placed the order as a gateway words it: error 399, *Order Message:*, the
+/// order as a gateway's display describes it, and the message, each line break
+/// a space.
+#[test]
+fn a_message_beside_an_orders_status_reaches_the_program_as_a_gateway_words_it() {
+    use crate::control::contracts::{ContractDefinition, MarketRule, OptionRight, PriceIncrement, SecurityType};
+    const TIME: &str = "Warning: your order will not be placed at the exchange until 2026-09-25 09:30:00 US/Eastern";
+    let rule = |id: i32, size: f64| MarketRule {
+        rule_id: id, negative_prices: false, price_magnifier: 0, price_places: Some(2),
+        price_increments: vec![PriceIncrement { low_edge: 0.0, increment: 0.01 }],
+        size_increments: vec![PriceIncrement { low_edge: 0.0, increment: size }],
+    };
+    let def = |sec_type, symbol: &str, local: &str| ContractDefinition {
+        con_id: 756733, sec_type, symbol: symbol.into(), local_symbol: local.into(), exchange: "SMART".into(),
+        currency: "USD".into(), market_rule_id: Some(26), ..Default::default()
+    };
+    let share = ContractDefinition {
+        primary_exchange: "NASDAQ".into(), unnamed_fields: vec![(8224, "NMS".into())],
+        ..def(SecurityType::Stock, "AAPL", "AAPL")
+    };
+    let option = |symbol: &str, class: &str, local: &str, strike: f64, right| ContractDefinition {
+        trading_class: class.into(), under_symbol: "SPX".replace("SPX", if symbol == "SPY" { "SPY" } else { "SPX" }),
+        contract_month: "202610".into(), last_trade_date: "20261016".into(), strike, right: Some(right),
+        ..def(SecurityType::Option, symbol, local)
+    };
+    let future = ContractDefinition {
+        contract_month: "202612".into(), last_trade_date: "20261218".into(),
+        ..def(SecurityType::Future, "MES", "MESZ6")
+    };
+    let protected = ContractDefinition { unnamed_fields: vec![(6808, "1".into())], ..future.clone() };
+    let future_option = ContractDefinition {
+        trading_class: "EW3".into(), contract_month: "202612".into(), last_trade_date: "20261218".into(),
+        strike: 6000.0, right: Some(OptionRight::Call),
+        ..def(SecurityType::FutureOption, "ES", "EW3Z6 C6000")
+    };
+    let pair = |order_types: &[&str]| ContractDefinition {
+        order_types: order_types.iter().map(|t| t.to_string()).collect(),
+        ..def(SecurityType::Forex, "EUR", "EUR.USD")
+    };
+    let crypto = ContractDefinition { trading_class: "BTC".into(), ..def(SecurityType::Crypto, "BTC", "BTC.USD") };
+    let cfd = ContractDefinition { trading_class: "AAPL".into(), ..def(SecurityType::Cfd, "AAPL", "AAPL") };
+    let metal = ContractDefinition { trading_class: "XAUUSD".into(), ..def(SecurityType::Commodity, "XAUUSD", "XAUUSD") };
+    let warrant = ContractDefinition {
+        contract_month: "202612".into(), last_trade_date: "20261218".into(), strike: 18000.0,
+        right: Some(OptionRight::Call), primary_exchange: "FWB".into(),
+        valid_exchanges: vec!["SMART".into(), "FWB".into()], multiplier: 0.01, multiplier_stated: true,
+        multiplier_text: "0.010".into(), unnamed_fields: vec![(106, "DB".into())],
+        ..def(SecurityType::Warrant, "DAX", "DE000DB1234")
+    };
+    let knock_out = ContractDefinition { unnamed_fields: vec![(6832, "K".into())], ..warrant.clone() };
+    let bond = def(SecurityType::Bond, "IBM", "IBM 4 1/2 02/19/29");
+    // A bond names its class, kind, coupon, maturity, CUSIP or ISIN and
+    // ratings; its size is the face value it comes to.
+    let note = ContractDefinition {
+        bond_type: "BOND Notes".into(), coupon_text: "4.250".into(), last_trade_date: "20351105".into(),
+        cusip: "91282CKX0".into(), isin: "US91282CKX09".into(), ratings: "AA+/Aaa".into(),
+        unnamed_fields: vec![(6503, "GOVT".into()), (6504, "1000".into())],
+        ..def(SecurityType::Bond, "US-T", "")
+    };
+    let perpetual = ContractDefinition {
+        currency: "EUR".into(), bond_type: "Bond TIPSs".into(), coupon_text: "7.5".into(),
+        isin: "XS1234567890".into(),
+        unnamed_fields: vec![(6503, "CORP".into()), (6504, "1000".into()), (6757, "1".into())],
+        ..def(SecurityType::Bond, "DB", "")
+    };
+    let unvalued = ContractDefinition {
+        bond_type: "Bond".into(), coupon_text: "4.5".into(), last_trade_date: "202902".into(),
+        cusip: "IBCID12345".into(), unnamed_fields: vec![(6503, "CORP".into())],
+        ..def(SecurityType::Bond, "IBM", "")
+    };
+    let municipal = ContractDefinition {
+        bond_type: "BOND Revenue".into(), coupon_text: "5".into(), last_trade_date: "00000000".into(),
+        cusip: "12345".into(), isin: "US0000123450".into(),
+        unnamed_fields: vec![(6503, "MUNI".into()), (6504, "5000".into())],
+        ..def(SecurityType::Bond, "NYC", "")
+    };
+    let long_text = "The venue states a message that runs past the width a gateway lays a message out to, and it is \
+        broken there onto a line of its own";
+    let at_the_width = format!("{} abcdefghij and on", "x".repeat(100));
+    // A share as the venue defines it, on a session handed Nasdaq under its
+    // older name: a least size stated behind its flag.
+    let fractional = crate::control::contracts::parse_secdef_response(
+        b"35=d\x0155=AAPL\x01167=CS\x016008=756733\x01207=SMART\x016470=NASDAQ\x018224=NMS\x0115=USD\x01\
+          8193=1\x018175=0.01\x01",
+        true,
+    ).expect("the definition parses");
+    let event = |strike: f64, stated: &[(u32, &str)]| ContractDefinition {
+        trading_class: "FFE".into(), contract_month: "202612".into(), last_trade_date: "20261216".into(),
+        strike, right: Some(OptionRight::Call),
+        unnamed_fields: stated.iter().map(|(tag, value)| (*tag, value.to_string())).collect(),
+        ..def(SecurityType::Other("EC".into()), "FF", "FFE 26DEC 4.5 Y")
+    };
+    struct Row<'a> {
+        what: &'a str, contract: ContractDefinition, size: f64, side: Side, qty: f64, cash: f64, client: i32,
+        stated: &'a [(u32, &'a str)], refusals_told: bool, features: &'a [&'a str], faq: Option<&'a str>,
+        money: crate::bridge::MoneyOrderTerms, algo: &'a str, ladder: Option<i64>, size_fraction: &'a str,
+        cancelling: bool, told: Option<(i32, String)>,
+    }
+    let row = |what, contract, side, qty: f64, told: &str| Row {
+        what, contract, size: 1.0, side, qty, cash: 0.0, client: 0, stated: &[(6360, "TIME"), (6361, TIME)],
+        refusals_told: false, features: &[], faq: None, money: Default::default(), algo: "", ladder: None,
+        size_fraction: "", cancelling: false, told: Some((399, format!("Order Message: {told} {TIME}"))),
+    };
+    // A logon that takes shares for an amount on market and limit orders, and
+    // states the dollar to a cent.
+    let by_amount = crate::bridge::MoneyOrderTerms {
+        order_types: "1,2".into(), product_defaults: "CASH,USD,25000,1000000,0.01;STK,AAPL,100,1000".into(),
+        ..Default::default()
+    };
+    let share_by_amount = ContractDefinition { order_types: vec!["CASHQTY".into()], ..share.clone() };
+    let refused = |what, stated, told: Option<(i32, &str)>| Row {
+        stated, refusals_told: true, told: told.map(|(code, text)| (code, text.to_string())),
+        ..row(what, share.clone(), Side::Buy, 100.0, "")
+    };
+    let rows = [
+        row("a share", share.clone(), Side::Buy, 100.0, "BUY 100 AAPL NASDAQ.NMS"),
+        row("a share, short, in thousands", share.clone(), Side::ShortSell, 1500.0, "SSHORT 1,500 AAPL NASDAQ.NMS"),
+        Row { size: 0.0001, ..row("part of a share", share.clone(), Side::Buy, 1234.5, "BUY 1234.5 AAPL NASDAQ.NMS") },
+        row("part of a share dealt in whole ones, to its least size", fractional, Side::Buy, 1234.5678,
+            "BUY 1,234.57 AAPL NASDAQ.NMS"),
+        row("part of a share with no least size, to four places", share.clone(), Side::Buy, 1.123456,
+            "BUY 1.1235 AAPL NASDAQ.NMS"),
+        Row {
+            size_fraction: "0.000001",
+            ..row("part of a share with no least size, to the logon's finer part", share.clone(), Side::Buy, 1.123456,
+                "BUY 1.123456 AAPL NASDAQ.NMS")
+        },
+        row("an option", option("SPY", "SPY", "SPY   261016C00765000", 765.0, OptionRight::Call), Side::Buy, 2.0,
+            "BUY 2 SPY OCT 16 '26 765 Call (SPY   261016C00765000) "),
+        row("an option of another class", option("SPX", "SPXW", "SPXW  261016P06000500", 6000.5, OptionRight::Put),
+            Side::Sell, 1.0, "SELL 1 SPX (SPXW) OCT 16 '26 6000.5 Put (SPXW  261016P06000500) "),
+        row("a future", future, Side::Sell, 1.0, "SELL 1 MES DEC'26 (MESZ6) "),
+        row("a dividend-protected future", protected, Side::Buy, 1.0, "BUY 1 MES DEC'26 (DP) (MESZ6) "),
+        row("a future's option", future_option, Side::Buy, 1.0, "BUY 1 ES DEC'26 6000 Call Fut. Option (EW3) (EW3Z6 C6000) "),
+        row("a currency pair", pair(&[]), Side::Buy, 25000.0, "BUY 25K EUR.USD Forex"),
+        row("a currency pair, in millions", pair(&[]), Side::Sell, 1_250_000.0, "SELL 1,250K EUR.USD Forex"),
+        Row { ladder: Some(250_000), ..row("a ladder on a currency pair", pair(&[]), Side::Buy, 25_000.0, "BUY 250K EUR.USD Forex") },
+        Row { cash: 1000.5, ..row("a currency pair by amount", pair(&["CASHQTY"]), Side::Buy, 0.0, "SELL 1,000.5 USD EUR.USD Forex") },
+        Row { cash: 100.0, ..row("a crypto currency by amount", crypto.clone(), Side::Buy, 0.0, "BUY 100 USD BTC Crypto (BTC) (BTC.USD) ") },
+        Row {
+            cash: 100.5, money: by_amount.clone(),
+            ..row("a crypto currency by an amount in cents", crypto.clone(), Side::Buy, 0.0, "BUY 100.5 USD BTC Crypto (BTC) (BTC.USD) ")
+        },
+        Row {
+            cash: 100.5,
+            money: crate::bridge::MoneyOrderTerms { product_defaults: "CASH,EUR,20000,1000000,0.01".into(), ..by_amount.clone() },
+            ..row("a crypto currency by an amount in a currency the logon does not list", crypto.clone(), Side::Buy, 0.0, "BUY 100 USD BTC Crypto (BTC) (BTC.USD) ")
+        },
+        Row {
+            cash: 100.5, features: &["NOCASHQTYPRECISION"], money: by_amount.clone(),
+            ..row("a crypto currency by an amount, in whole units", crypto, Side::Buy, 0.0, "BUY 100 USD BTC Crypto (BTC) (BTC.USD) ")
+        },
+        Row {
+            cash: 500.25, money: by_amount.clone(),
+            ..row("a share by amount", share_by_amount.clone(), Side::Buy, 0.0, "BUY 500.25 USD AAPL NASDAQ.NMS")
+        },
+        Row { cash: 500.25, ..row("a share by amount the logon does not take", share_by_amount.clone(), Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS") },
+        Row {
+            cash: 500.25,
+            money: crate::bridge::MoneyOrderTerms { order_types: "1,2/4".into(), ..by_amount.clone() },
+            ..row("a share by amount on a type the logon marks off", share_by_amount.clone(), Side::Buy, 0.0, "BUY 0 AAPL NASDAQ.NMS")
+        },
+        Row {
+            cash: 500.25,
+            money: crate::bridge::MoneyOrderTerms { order_types: "1,2/4,2".into(), ..by_amount.clone() },
+            ..row("a share by amount on a type the logon names again unmarked", share_by_amount.clone(), Side::Buy, 0.0, "BUY 500.25 USD AAPL NASDAQ.NMS")
+        },
+        Row {
+            cash: 500.25, money: by_amount.clone(), algo: "Adaptive", told: None,
+            ..row("a share by amount with an algorithm", share_by_amount.clone(), Side::Buy, 0.0, "")
+        },
+        Row {
+            cash: 500.25, money: by_amount.clone(),
+            ..row("a fund trading at settlement by amount", ContractDefinition { stock_type: "ETMF".into(), ..share_by_amount }, Side::Buy, 3.0, "BUY 3 AAPL NASDAQ.NMS")
+        },
+        row("a contract for difference", cfd, Side::Buy, 10.0, "BUY 10 AAPL CFD (AAPL)"),
+        row("a commodity", metal, Side::Buy, 1.0, "BUY 1 XAUUSD Commodity (XAUUSD)"),
+        row("a warrant", warrant, Side::Buy, 100.0, "BUY 100 DAX DEC'26 18000 Call (FWB,DB,0.010) (DE000DB1234) "),
+        Row {
+            stated: &[(6361, long_text)],
+            told: Some((399, "Order Message: BUY 100 AAPL NASDAQ.NMS The venue states a message that runs past the \
+                width a gateway lays a message out to, and it is broken there  onto a line of its own".into())),
+            ..row("a long message, with no code", share.clone(), Side::Buy, 100.0, "")
+        },
+        Row {
+            stated: &[(6361, at_the_width.as_str())],
+            told: Some((399, format!("Order Message: BUY 100 AAPL NASDAQ.NMS {}  abcdefghij and on", "x".repeat(100)))),
+            ..row("a word ending past the width", share.clone(), Side::Buy, 100.0, "")
+        },
+        Row { stated: &[(6360, "PRICECAP"), (6361, "Price capped")], told: None, ..row("a price cap", share.clone(), Side::Buy, 100.0, "") },
+        Row {
+            stated: &[(6360, "CM"), (6361, "Fund_Closed")],
+            told: Some((399, "We are sorry but the mutual fund specified in your order has been closed and is not \
+                accepting purchase orders at this time.  Please note that mutual fund companies may close one or \
+                more mutual funds to new or existing customers. However, the terms of the fund closure may allow for \
+                additional purchases of the fund under certain circumstances. Customers are encouraged to carefully \
+                review the fund prospectus for further details regarding the fund's closure policies. Customers may \
+                also contact the fund company or visit the fund website for further information.".into())),
+            ..row("a closed fund", bond.clone(), Side::Buy, 1.0, "")
+        },
+        Row { client: 7, told: None, ..row("another program's order", share.clone(), Side::Buy, 100.0, "") },
+        Row {
+            stated: &[(39, "4"), (6360, "TIME"), (6361, TIME)], told: None,
+            ..row("a report stating the order cancelled", share.clone(), Side::Buy, 100.0, "")
+        },
+        Row { cancelling: true, told: None, ..row("a report on the order while its cancel is out", share.clone(), Side::Buy, 100.0, "") },
+        Row { stated: &[(11, "42.0"), (6360, "TIME"), (6361, TIME)], told: None, ..row("a revision the order has moved past", share.clone(), Side::Buy, 100.0, "") },
+        Row { told: None, ..row("a structured product of a named kind", knock_out, Side::Buy, 1.0, "") },
+        row("a combination", def(SecurityType::Combo, "SPY", "28812380"), Side::Buy, 2.0, "BUY 2 SPY Combo"),
+        row("an event contract", ContractDefinition {
+            trading_class: "FFE".into(), contract_month: "202612".into(), last_trade_date: "20261216".into(),
+            strike: 4.5, right: Some(OptionRight::Put),
+            ..def(SecurityType::Other("EC".into()), "FF", "FFE 26DEC 4.5 N")
+        }, Side::Buy, 10.0, "BUY 10 FF DEC'26 4.5 NO Event (FFE) (FFE 26DEC 4.5 N) "),
+        row("an event stating its strike as a text", event(4.5, &[(6688, "Event"), (8568, "above 4.5%")]), Side::Buy, 10.0,
+            "BUY 10 FF DEC'26 above 4.5% YES Event (FFE) (FFE 26DEC 4.5 Y) "),
+        row("an event at a strike of nought", event(0.0, &[(6688, "Event")]), Side::Buy, 10.0,
+            "BUY 10 FF DEC'26  YES Event (FFE) (FFE 26DEC 4.5 Y) "),
+        row("a note", note.clone(), Side::Buy, 5.0, "BUY $5K US-T GOVT Notes 4.250 Nov05'35 91282CKX0 AA+/Aaa"),
+        row("part of a bond, sold whole", note, Side::Buy, 2.5, "BUY $2K US-T GOVT Notes 4.250 Nov05'35 91282CKX0 AA+/Aaa"),
+        row("a perpetual bond in euros", perpetual, Side::Sell, 2.0, "SELL \\u20ac2K DB CORP TIPS 7.5 Perpetual XS1234567890"),
+        row("a bond with no face value", unvalued.clone(), Side::Buy, 3.0, "BUY 3 IBM CORP 4.5 Feb'29 IBCID12345"),
+        Row { size: 0.001, ..row("part of a bond with no face value", unvalued, Side::Buy, 2.5, "BUY 2 IBM CORP 4.5 Feb'29 IBCID12345") },
+        row("fixed income", ContractDefinition {
+            bond_type: "Fixed Rate".into(), last_trade_date: "20300101".into(),
+            ..def(SecurityType::FixedIncome, "XYZ", "")
+        }, Side::Sell, 1.0, "SELL 1 XYZ Rate Jan01'30"),
+        Row {
+            features: &["CUSIPD"],
+            ..row("a municipal bond", municipal, Side::Buy, 1.0, "BUY $5K NYC MUNI BOND Revenue 5 NOEXP US0000123450")
+        },
+        Row {
+            stated: &[(6360, "TIME"), (6361, "See FAQ 12345678 for the hours")],
+            faq: Some("https://www.ibkr.com/faq?id="),
+            told: Some((399, "Order Message: BUY 100 AAPL NASDAQ.NMS <html>See <a \
+                href=\"https://www.ibkr.com/faq?id=12345678\">FAQ  12345678</a>  for the hours</html>".into())),
+            ..row("a reference to the venue's answers", share.clone(), Side::Buy, 100.0, "")
+        },
+        refused("a refusal", &[(39, "8"), (58, "Order rejected by the exchange")],
+            Some((399, "Order Message: BUY 100 AAPL NASDAQ.NMS Order rejected by the exchange"))),
+        refused("a refusal filed as a yield", &[(39, "8"), (58, "-0.5"), (103, "901")],
+            Some((399, "Order Message: BUY 100 AAPL NASDAQ.NMS Negative yield to worst: -0.5"))),
+        refused("a price-capped refusal", &[(39, "8"), (6360, "PRICECAP"), (58, "Your order price is capped")],
+            Some((10212, "Please review your Order parameters.  BUY 100 AAPL NASDAQ.NMS <html>Your order price is \
+                capped<br>Use the Price Management Algo?</html>"))),
+        refused("a price-capped refusal past the width", &[(39, "8"), (6360, "PRICECAP"), (58, "Your order price exceeds \
+            the price cap the exchange sets for this contract, and the order will be rejected unless you review it first")],
+            Some((10212, "Please review your Order parameters.  BUY 100 AAPL NASDAQ.NMS <html>Your order price exceeds the \
+                price cap the exchange sets for this contract, and the order will be rejected<br>unless you review it \
+                first<br>Use the Price Management Algo?</html>"))),
+        Row { refusals_told: false, ..refused("a refusal the logon does not ask for", &[(39, "8"), (58, "No")], None) },
+        refused("a pattern-day-trader refusal", &[(39, "8"), (58, "Order rejected because your account falls within \
+            the definition of a pattern day trader")], None),
+        Row { features: &["NOORDERSTATUSREJECT"], ..refused("a refusal the logon asks not to be told", &[(39, "8"), (58, "No")], None) },
+    ];
+    for Row {
+        what, contract, size, side, qty, cash, client, stated, refusals_told, features, faq, money, algo, ladder,
+        size_fraction, cancelling, told,
+    } in rows {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, side, (qty * QTY_SCALE as f64) as i64, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        context.modify_versions.insert(42, 1);
+        if let Some(most) = ladder {
+            context.ladder_sizes.insert(42, most);
+        }
+        if cancelling {
+            context.update_order_status(42, crate::types::OrderStatus::PendingCancel, false);
+            context.before_the_cancel.insert(42, crate::types::OrderStatus::Submitted);
+        }
+        let shared = SharedState::new();
+        shared.reference.set_refusals_told(refusals_told);
+        shared.reference.set_money_orders(money);
+        shared.reference.set_size_fraction(size_fraction.to_string());
+        shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
+        shared.reference.set_misc_urls(faq.map(|base| ("faq_base_url".to_string(), base.to_string())).into_iter().collect());
+        shared.reference.push_market_rules(vec![rule(26, size)]);
+        shared.reference.cache_contract_definition(contract);
+        shared.orders.push_order_info(42, RichOrderInfo {
+            contract: api::Contract { con_id: 756733, exchange: "SMART".into(), ..Default::default() },
+            order: api::Order { client_id: client, cash_qty: cash, algo_strategy: algo.into(), ..Default::default() },
+            order_state: api::OrderState { status: "Submitted".into(), ..Default::default() },
+            last_exec: Default::default(),
+        });
+        let mut pairs = vec![(11u32, "42.1"), (20, "3"), (150, "A"), (39, "A")];
+        pairs.extend_from_slice(stated);
+        let frame = exec_report_frame(&pairs);
+        CcpState::new().handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+        let notices: Vec<_> = shared.orders.drain_order_notices().into_iter().map(|(id, code, text)| {
+            assert_eq!(id, 42, "{what}");
+            (code, text)
+        }).collect();
+        assert_eq!(notices, told.into_iter().collect::<Vec<_>>(), "{what}");
+    }
+}
+
 #[test]
 fn a_refused_order_tells_the_caller_why() {
     let (mut ccp, mut context, shared) = ord_status_test_state();

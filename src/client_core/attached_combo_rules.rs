@@ -142,6 +142,7 @@ mod tests {
                 PriceIncrement { low_edge: 10.0, increment: tick * 2.0 },
             ],
             size_increments: vec![PriceIncrement { low_edge: 0.0, increment: size }],
+            price_places: None,
         }
     }
 

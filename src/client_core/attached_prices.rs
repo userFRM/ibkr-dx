@@ -579,6 +579,7 @@ mod tests {
                 })
                 .collect(),
             size_increments: Vec::new(),
+            price_places: None,
         }))
     }
 
