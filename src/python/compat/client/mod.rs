@@ -2821,13 +2821,35 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
                 };
                 assert!(err.to_string().contains("outside the range"), "{method}: got {err}");
             }
-            // And a market-data request, which carries its number whole.
-            let spy = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
-            let Err(err) = client.call_method1(py, "req_mkt_data", (big, &spy)) else {
-                panic!("req_mkt_data accepted a req_id it cannot carry");
-            };
-            assert!(err.to_string().contains("outside the range"), "req_mkt_data: got {err}");
             assert!(rx.try_recv().is_err(), "a refused req_id must reach no engine command");
+        });
+    }
+
+    /// A market-data request, and its withdrawal, read the number as a gateway
+    /// reads it, four bytes signed: one that does not fit is refused under -1
+    /// in a gateway's words, as on the other surface, and nothing reaches the
+    /// engine.
+    #[test]
+    fn a_market_data_number_past_four_bytes_is_refused_as_a_gateway_refuses_it() {
+        Python::initialize();
+        Python::attach(|py| {
+            let spy = Py::new(py, Contract { con_id: 756733, ..Default::default() }).unwrap();
+            let scan = Py::new(py, crate::python::compat::contract::SpreadScan::default()).unwrap();
+            for bad in [
+                i64::from(i32::MAX) + 1, crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64 + 1,
+                i64::from(i32::MIN) - 1,
+            ] {
+                let (client, rx, shared, _w) = wired_client(py);
+                client.call_method1(py, "req_mkt_data", (bad, &spy)).unwrap();
+                client.call_method1(py, "req_mkt_data_ex", (bad, &spy)).unwrap();
+                client.call_method1(py, "req_spread_scan", (bad, &spy, &scan)).unwrap();
+                client.call_method1(py, "cancel_mkt_data", (bad,)).unwrap();
+                let told = format!(
+                    "Error reading request: Unable to parse field: 'Client Req Id' for input string: '{bad}'",
+                );
+                assert_eq!(shared.drain_refused(), vec![(-1, 320, told); 4], "{bad}");
+                assert!(rx.try_recv().is_err(), "{bad}: and nothing reaches the engine");
+            }
         });
     }
 

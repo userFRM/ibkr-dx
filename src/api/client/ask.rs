@@ -90,11 +90,15 @@ impl Drop for AskId {
 }
 
 pub(crate) fn ask_id(shared: &std::sync::Arc<crate::bridge::SharedState>) -> AskId {
-    hold_id(
-        shared,
-        crate::bridge::RecordKind::Answer,
-        NEXT_ASK_ID.fetch_add(1, Ordering::Relaxed),
-    )
+    ask_id_for(shared, crate::bridge::RecordKind::Answer)
+}
+
+/// A number from the same band, held for `kind`.
+pub(crate) fn ask_id_for(
+    shared: &std::sync::Arc<crate::bridge::SharedState>,
+    kind: crate::bridge::RecordKind,
+) -> AskId {
+    hold_id(shared, kind, NEXT_ASK_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Hold a number as this session's own until the guard is dropped.

@@ -3,7 +3,7 @@
 use crate::types::*;
 use crate::error_codes::Refusal;
 
-use super::{wire_req_id, Contract, EClient};
+use super::{unread_md_number, wire_req_id, Contract, EClient};
 
 impl EClient {
     // ── Market Data ──
@@ -21,6 +21,9 @@ impl EClient {
     pub fn req_spread_scan(
         &self, req_id: i64, contract: &Contract, scan: &crate::types::SpreadScan,
     ) {
+        if self.md_number_unread(req_id) {
+            return;
+        }
         if let Err(why) = (|| -> Result<(), Refusal> {
             let con_id = if scan.under_con_id > 0 { scan.under_con_id } else { contract.con_id };
             if con_id <= 0 {
@@ -127,6 +130,9 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
     ) {
+        if self.md_number_unread(req_id) {
+            return;
+        }
         if let Err(why) = self.try_req_mkt_data(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot) {
             self.refuse_request(req_id, &why);
         }
@@ -180,6 +186,9 @@ impl EClient {
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
         mode_9887: i32, mkt_data_options: &[crate::types::model::TagValue],
     ) {
+        if self.md_number_unread(req_id) {
+            return;
+        }
         if let Err(why) = self.try_req_mkt_data_ex(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, mode_9887, mkt_data_options) {
             self.refuse_request(req_id, &why);
         }
@@ -234,10 +243,36 @@ impl EClient {
     }
 
     /// Cancel market data. Matches `cancelMktData` in C++.
+    ///
+    /// A number a gateway cannot read, past four bytes signed, is refused
+    /// under -1 with 320, as a gateway refuses it, and withdraws nothing; a
+    /// stream [`watch`](Self::watch) opened is withdrawn under the number it
+    /// handed back.
     pub fn cancel_mkt_data(&self, req_id: i64) {
+        // A stream `watch` opened is the program's own, under a number from
+        // the band this client keeps. A call still waiting on its answer in
+        // that band is not, and its number is refused like any other.
+        if !self.shared.reference.is_ours(crate::bridge::RecordKind::Quotes, req_id)
+            && self.md_number_unread(req_id)
+        {
+            return;
+        }
         if let Err(why) = self.try_cancel_mkt_data(req_id) {
             self.refuse_request(req_id, &why);
         }
+    }
+
+    /// Whether a market-data number is one a gateway cannot read, the caller
+    /// told so under no request where it is. A session that is over says that
+    /// first, as EClient does.
+    fn md_number_unread(&self, req_id: i64) -> bool {
+        let Some(why) = unread_md_number(req_id) else { return false };
+        if self.session_over() {
+            self.refuse_request(req_id, &Refusal::not_connected("Not connected"));
+        } else {
+            self.refuse_session(&why);
+        }
+        true
     }
 
     /// [`cancel_mkt_data`](Self::cancel_mkt_data), with its refusal handed back to the
@@ -247,7 +282,7 @@ impl EClient {
         // long as it runs. Withdrawing it is where that ends. An id the caller
         // chose was never held, and releasing one that was not held does
         // nothing.
-        self.shared.reference.forget_ours(crate::bridge::RecordKind::Answer, req_id);
+        self.shared.reference.forget_ours(crate::bridge::RecordKind::Quotes, req_id);
         // Whatever this number was registered as is over from here, whether
         // or not the engine's record of it has been read yet.
         self.core.withdrawing(req_id);

@@ -574,6 +574,20 @@ pub(crate) fn wire_req_id(req_id: i64) -> Result<u32, Refusal> {
     Ok(id)
 }
 
+/// The refusal of a market-data request, or of its withdrawal, whose number a
+/// gateway cannot read: it reads the number as four bytes, signed, and answers
+/// one that does not fit under no request, the number being what it could not
+/// read. Every number this client keeps for its own work lies past that, so a
+/// program cannot reach one of its subscriptions.
+pub(crate) fn unread_md_number(req_id: i64) -> Option<Refusal> {
+    i32::try_from(req_id).is_err().then(|| Refusal::stated(
+        crate::error_codes::REQUEST_NOT_READ,
+        format!(
+            "Error reading request: Unable to parse field: 'Client Req Id' for input string: '{req_id}'",
+        ),
+    ))
+}
+
 /// What [`EClient::next_shared_id`] answers, read off a session's state: both
 /// surfaces answer it from here.
 pub(crate) fn next_shared_id_of(shared: &SharedState) -> Result<i64, Refusal> {

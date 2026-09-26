@@ -46,7 +46,7 @@ impl EClient {
         regulatory_snapshot: bool,
         mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        if self.tx_or_report(req_id)?.is_none() { return Ok(()); }
+        if self.tx_or_report(req_id)?.is_none() || self.md_number_unread(py, req_id)? { return Ok(()); }
         if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
             return self.report_refusal(py, req_id, why);
         }
@@ -83,7 +83,7 @@ impl EClient {
         mode_9887: i32,
         mkt_data_options: Option<Vec<Py<PyAny>>>,
     ) -> PyResult<()> {
-        if self.tx_or_report(req_id)?.is_none() { return Ok(()); }
+        if self.tx_or_report(req_id)?.is_none() || self.md_number_unread(py, req_id)? { return Ok(()); }
         if let Some(why) = self.options_refused(py, &crate::client_core::MKT_DATA_OPTIONS, mkt_data_options)? {
             return self.report_refusal(py, req_id, why);
         }
@@ -94,8 +94,12 @@ impl EClient {
     }
 
     /// Cancel market data.
+    ///
+    /// A number a gateway cannot read, past four bytes signed, is refused
+    /// under -1 with 320, as a gateway refuses it, and withdraws nothing.
     pub fn cancel_mkt_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if self.md_number_unread(py, req_id)? { return Ok(()); }
         // Whatever this number was registered as is over from here, whether
         // or not the engine's record of it has been read yet.
         self.core.withdrawing(req_id);
@@ -590,6 +594,7 @@ impl EClient {
         scan: &SpreadScan,
     ) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(req_id)? else { return Ok(()) };
+        if self.md_number_unread(py, req_id)? { return Ok(()); }
         let mut scan = crate::types::SpreadScan::from(scan);
         let con_id = if scan.under_con_id > 0 { scan.under_con_id } else { contract.con_id };
         if con_id <= 0 {
@@ -862,6 +867,17 @@ impl EClient {
 }
 
 impl EClient {
+    /// Whether a market-data number is one a gateway cannot read, the caller
+    /// told so under no request where it is, as on the other surface.
+    fn md_number_unread(&self, py: Python<'_>, req_id: i64) -> PyResult<bool> {
+        match crate::api::client::unread_md_number(req_id) {
+            Some(why) => self
+                .report_refusal_as(py, crate::types::model::ErrorOrigin::Session, why)
+                .map(|()| true),
+            None => Ok(false),
+        }
+    }
+
     /// Withdraw a request's subscription, saying nothing about it.
     ///
     /// The body of `cancel_mkt_data`, for the withdrawals this client makes on

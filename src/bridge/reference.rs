@@ -59,11 +59,14 @@ pub enum RecordKind {
     Scanner,
     /// The one answer to a question this client asked on its own account.
     Answer,
+    /// The quotes of a stream `watch` opened, which runs until its caller
+    /// withdraws it.
+    Quotes,
 }
 
 impl RecordKind {
     /// Every kind, for the one queue that cannot say which it belongs to.
-    const ALL: [Self; 4] = [Self::Bars, Self::Depth, Self::Scanner, Self::Answer];
+    const ALL: [Self; 5] = [Self::Bars, Self::Depth, Self::Scanner, Self::Answer, Self::Quotes];
 }
 
 /// A BBO exchange id and the code of the security type it is stated for.

@@ -4506,22 +4506,72 @@ fn an_unwireable_req_id_is_refused() {
         assert!(rx.try_recv().is_err(), "{name}: and nothing reaches the wire under it");
     }
 
-    // A market-data request carries its number whole, and a negative one is
-    // read as a gateway reads it; what the others refuse above, it refuses.
-    let market: &[(&str, Call)] = &[
-        ("req_mkt_data", |c, id| c.try_req_mkt_data(id, &spy(), "", false, false)),
-        ("req_mkt_data_ex", |c, id| c.try_req_mkt_data_ex(id, &spy(), "", false, false, 0, &[])),
-        ("req_spread_scan", |c, id| {
-            crate::api::client::tests::reported(c, || c.req_spread_scan(id, &spy(), &Default::default()))
-        }),
+    // A market-data request, and its withdrawal, read the number as a gateway
+    // reads it, four bytes signed: one that does not fit is refused under -1
+    // in a gateway's words, and nothing reaches the engine. That takes in every
+    // number this client keeps for its own subscriptions.
+    type Ask = fn(&EClient, i64);
+    let market: &[(&str, Ask)] = &[
+        ("req_mkt_data", |c, id| c.req_mkt_data(id, &spy(), "", false, false)),
+        ("req_mkt_data_ex", |c, id| c.req_mkt_data_ex(id, &spy(), "", false, false, 0, &[])),
+        ("req_spread_scan", |c, id| c.req_spread_scan(id, &spy(), &Default::default())),
+        ("cancel_mkt_data", |c, id| c.cancel_mkt_data(id)),
     ];
     for (name, call) in market {
-        for bad in [u32::MAX as i64 + 1, crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64] {
+        for bad in [
+            i64::from(i32::MAX) + 1, crate::bridge::ENGINE_ID_BASE as i64, u32::MAX as i64 + 1,
+            i64::from(i32::MIN) - 1,
+        ] {
             let (client, rx, _shared) = test_client();
-            assert!(call(&client, bad).is_err(), "{name}({bad}) is answered to nobody");
-            assert!(rx.try_recv().is_err(), "{name}({bad}): and nothing reaches the wire");
+            call(&client, bad);
+            assert_eq!(
+                client.shared.drain_refused(),
+                [(-1, 320, format!(
+                    "Error reading request: Unable to parse field: 'Client Req Id' for input string: '{bad}'",
+                ))],
+                "{name}({bad})",
+            );
+            assert!(rx.try_recv().is_err(), "{name}({bad}): and nothing reaches the engine");
         }
+        // A session that is over says so first, as EClient does.
+        let (client, rx, shared) = test_client();
+        shared.reference.set_session_over("the session ended");
+        let bad = i64::from(i32::MAX) + 1;
+        call(&client, bad);
+        let refused = client.shared.drain_refused();
+        assert!(
+            matches!(refused.as_slice(), [(id, code, _)] if (*id, *code) == (bad, i64::from(Refusal::NOT_CONNECTED))),
+            "{name}({bad}) on a session that is over: {refused:?}",
+        );
+        assert!(rx.try_recv().is_err(), "{name}({bad}): and nothing reaches the engine");
     }
+    // A number a call that answers is waiting under is not the program's to
+    // withdraw: refused like any other, and the call keeps it.
+    let (client, rx, _shared) = test_client();
+    let asked = super::ask::ask_id(&client.shared);
+    client.cancel_mkt_data(asked.get());
+    assert_eq!(
+        client.shared.drain_refused(),
+        [(-1, 320, format!(
+            "Error reading request: Unable to parse field: 'Client Req Id' for input string: '{}'",
+            asked.get(),
+        ))],
+    );
+    assert!(rx.try_recv().is_err(), "and nothing reaches the engine");
+    assert!(
+        client.shared.reference.is_ours(crate::bridge::RecordKind::Answer, asked.get()),
+        "and the call still holds its number",
+    );
+    // A stream `watch` opened is the program's own, and is withdrawn under the
+    // number it handed back.
+    let (client, rx, _shared) = test_client();
+    let watched = client.watch(&spy()).expect("watched");
+    client.cancel_mkt_data(watched);
+    assert!(client.shared.drain_refused().is_empty(), "the withdrawal is taken");
+    assert!(
+        rx.try_iter().any(|cmd| matches!(cmd, ControlCommand::CancelMktData { req_id } if req_id == watched)),
+        "and reaches the engine",
+    );
 }
 
 #[test]

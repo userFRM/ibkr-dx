@@ -1272,7 +1272,7 @@ pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_li
 
 #### `cancel_mkt_data`
 
-Cancel market data.
+Cancel market data. A number a gateway cannot read, past four bytes signed, is refused under -1 with 320, as a gateway refuses it, and withdraws nothing; a stream `watch` opened is withdrawn under the number it handed back.
 
 ```rust
 pub fn cancel_mkt_data(&self, req_id: i64)

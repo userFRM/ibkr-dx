@@ -408,10 +408,15 @@ Unable to parse field: 'Manual Order Indicator' for input string: '…'*).
 ## Request ids
 
 This client keeps request ids at and above `0xC000_0000` for the questions it
-asks itself, and refuses a request stated under one of them, a market-data
-request included, rather than answering it. It refuses one stated under a
-negative id too, except a market-data request, which carries its number whole,
-as a gateway reads it. The interface this client mirrors
+asks itself, and refuses a request stated under one of them, or under a
+negative id, rather than answering it. A market-data request and its
+withdrawal read the number as a gateway reads it, four bytes signed: a negative
+one is carried whole, and one that does not fit — every id at and above
+`0x8000_0000`, the ones this client keeps among them — is refused under -1
+with 320, *Error reading request: Unable to parse field: 'Client Req Id' for
+input string: '…'*, as a gateway refuses it. A withdrawal refused so withdraws
+nothing; a stream `watch` opened is withdrawn under the number it handed back.
+The interface this client mirrors
 encourages one counter for orders and requests, and a program that keeps one
 meets this once the account's order ids reach `0xC000_0000`: the next valid id
 is then one no request can be stated under.

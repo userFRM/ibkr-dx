@@ -173,7 +173,10 @@ impl EClient {
         // Kept only once the subscription is away. Kept before, a refused
         // request left the id held for the life of the session with no stream
         // to withdraw and nothing to release it.
-        let asked = super::ask::ask_id(&self.shared);
+        //
+        // Held for its quotes rather than as an answer, so a withdrawal can
+        // tell it from a call still waiting on its answer under the same band.
+        let asked = super::ask::ask_id_for(&self.shared, crate::bridge::RecordKind::Quotes);
         let req_id = asked.get();
         self.try_req_mkt_data(req_id, contract, "", false, false)?;
         Ok(asked.keep())

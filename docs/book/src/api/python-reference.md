@@ -1073,7 +1073,7 @@ def req_mkt_data_ex(req_id, contract, generic_tick_list="", snapshot=False, regu
 
 #### `cancel_mkt_data`
 
-Cancel market data.
+Cancel market data.  A number a gateway cannot read, past four bytes signed, is refused under -1 with 320, as a gateway refuses it, and withdraws nothing.
 
 ```python
 def cancel_mkt_data(req_id)
