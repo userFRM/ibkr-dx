@@ -1487,11 +1487,19 @@ impl CcpState {
             // is. Nought for the client that placed it — no session here owns
             // an order to the exclusion of another, so the one it is claimed
             // for is the one the reference claims unowned orders for.
-            shared.reference.push_order_bound(
-                wire_name(parsed).map_or(0, |id| id as i64),
-                0,
-                clord_id as i64,
-            );
+            //
+            // Only for an order this session did not already hold. One it
+            // placed, or held in doubt across a drop, is not bound anew by the
+            // venue naming it again, and a gateway binds no order on a
+            // reconnect: told so, the caller read its own order as bound to
+            // client 0.
+            if prior.is_none() {
+                shared.reference.push_order_bound(
+                    wire_name(parsed).map_or(0, |id| id as i64),
+                    0,
+                    clord_id as i64,
+                );
+            }
             log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                 clord_id, parsed.get(&55), side, qty,
                 limit_price_i64 as f64 / PRICE_SCALE as f64);

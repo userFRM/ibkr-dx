@@ -3161,6 +3161,22 @@ fn a_replayed_order_is_paired_with_the_number_it_is_reachable_under() {
         "one pairing, however many times the venue states it and however many \
          times the connection goes",
     );
+
+    // An order this session placed is not paired at all when the venue names
+    // it again after a drop: it is reachable under the number it was placed
+    // under, and a gateway binds nothing on a reconnect.
+    let instrument = context.register_instrument(756733);
+    context.insert_order(crate::types::Order::new(
+        92, instrument, Side::Buy, 100 * QTY_SCALE, 100 * PRICE_SCALE, b'2', b'0', 0,
+    ));
+    ccp.handle_disconnect(&mut None, &mut context, &shared, &None);
+    frame.insert(11, "92".to_string());
+    frame.insert(37, "1234567891".to_string());
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert!(
+        shared.reference.drain_orders_bound().is_empty(),
+        "its own order is not bound to client 0",
+    );
 }
 
 /// The case the test above cannot reach: an order this session never
