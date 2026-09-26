@@ -6821,10 +6821,10 @@ fn a_message_to_the_account_holder_names_the_account_it_concerns() {
 #[test]
 fn the_account_s_cash_by_currency_is_not_a_figure_of_an_unknown_kind() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
-    // The frame as a session was sent it.
+    // The frame as a session was sent it, with the account replaced.
     let msg = crate::protocol::fix::fix_build(
         &[
-            (35, "U"), (6040, "77"), (1, "DU8571572"), (6566, "3"),
+            (35, "U"), (6040, "77"), (1, "DU1234567"), (6566, "3"),
             (15, "BASE"), (9806, "1492751.1917"),
             (15, "GBP"), (9806, "1105714.0700"),
             (15, "USD"), (9806, "0.0000"),
@@ -6832,7 +6832,7 @@ fn the_account_s_cash_by_currency_is_not_a_figure_of_an_unknown_kind() {
         1,
     );
     ccp.process_ccp_message(
-        &msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU8571572",
+        &msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1234567",
     );
 
     assert!(
