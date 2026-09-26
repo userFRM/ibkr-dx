@@ -221,8 +221,9 @@ client's own allocation; what a gateway answers the same way is on
   opens at midnight UTC of the next five-second bar's day, as a gateway opens
   it, and ends at the next midnight UTC or at the history's close where that
   falls between, dated by its end the same way: on a timezone east of UTC,
-  by the day after its session. A week and a month are folded on the
-  calendar, opening on the Monday and on the 1st at midnight UTC.
+  by the day after its session, as a gateway dates it. A week and a month
+  are folded on the calendar, opening on the Monday and on the 1st at
+  midnight UTC.
 - **The option-exercise interest rate series is not served.**
   `OptExInterestRate` is accepted as a tick query against an option contract
   and rejected by name against the underlying, and every window tested returns

@@ -196,9 +196,14 @@ impl EClient {
     ///
     /// The type is carried on each subscription that follows, and the
     /// `market_data_type` callback reports the type that subscription was
-    /// made under. A type this client does not know is logged and leaves
-    /// subscriptions live. `req_mkt_data_ex` states the type per request,
+    /// made under. A type this client does not know is logged and leaves the
+    /// feeds as they were. `req_mkt_data_ex` states the type per request,
     /// which allows two feeds on one contract at once.
+    ///
+    /// A type turns feeds on, as a gateway takes it: 2 turns frozen data on;
+    /// 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only
+    /// 1 turns frozen data off, and it turns all three off. So 2 after 4 still
+    /// falls back to delayed-frozen.
     fn req_market_data_type(&self, market_data_type: i32) -> PyResult<()> {
         // Answered under 504 with no session, as every request is, and the
         // type is then not kept. It used to be: set before `connect`, it

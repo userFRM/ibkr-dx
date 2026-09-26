@@ -200,7 +200,7 @@ PARAM_DOCS: dict[str, str] = {
     "time_zone": "Timezone string (e.g. `\"US/Eastern\"`).",
     "data": "Raw data string (XML/JSON).",
     "min_tick": "Minimum tick size.",
-    "snapshot_permissions": "What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API.",
+    "snapshot_permissions": "What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. 0 where the venue names no BBO exchange, as for a currency or a crypto, and on a bond, a bill, a fixed-income contract or a combination, whatever the venue stated, as a gateway states it.",
     "tick_type": "Tick type ID or tick-by-tick type string.",
     "error_code": "Error code.",
     "error_string": "Error message.",

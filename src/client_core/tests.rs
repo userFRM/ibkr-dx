@@ -301,7 +301,7 @@ fn a_session_keeps_no_figure_for_a_subscription_it_is_not_holding() {
 
 /// A market-data type nobody recognises does not become the venue's word.
 ///
-/// Subscriptions stay realtime whatever it names, and the callback that
+/// The feeds stay as they were whatever it names, and the callback that
 /// reports a subscription's type reads what was stored — so storing the number
 /// would tell a caller their data is of a type the venue never stated and
 /// their subscription is not on.
@@ -337,14 +337,14 @@ fn an_account_with_no_positions_still_reports_its_pnl() {
 /// delayed data got realtime-shaped subscriptions and no delayed ticks.
 #[test]
 fn the_requested_market_data_type_picks_the_subscription_mode() {
-    let core = ClientCore::new();
-    assert_eq!(core.subscription_mode(), 0, "realtime until asked otherwise");
+    assert_eq!(ClientCore::new().subscription_mode(), 0, "realtime until asked otherwise");
     for (requested, mode) in [
         (MDT_DELAYED, 1),
         (MDT_FROZEN, 2),
         (MDT_DELAYED_FROZEN, 3),
         (MDT_REALTIME, 0),
     ] {
+        let core = ClientCore::new();
         core.set_market_data_type(requested);
         assert_eq!(core.subscription_mode(), mode, "type {requested}");
         assert_eq!(

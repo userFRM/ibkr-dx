@@ -5868,10 +5868,11 @@ mod depth_position_tests {
         }
     }
 
-    /// Dispatch reads the last acknowledgement's permission, in either
-    /// arrival order, once for the request.
+    /// A crypto's two acknowledgements state permissions 3 and 1 and name no
+    /// BBO exchange, so the request is told once, in either arrival order,
+    /// what a gateway tells it: no exchange and no permission.
     #[test]
-    fn tick_req_params_reads_the_latest_btc_acknowledgement() {
+    fn a_crypto_request_is_told_no_exchange_and_no_permission() {
         for reverse in [false, true] {
             let (client, _rx, shared) = crate::api::client::tests::test_client();
             let mut farm = FarmState::new();
@@ -5898,25 +5899,25 @@ mod depth_position_tests {
             client.process_msgs(&mut wrapper);
             let parameters: Vec<_> = wrapper.events.iter()
                 .filter(|e| e.starts_with("tick_req_params:")).collect();
-            let permission = if reverse { 1 } else { 3 };
-            assert_eq!(parameters, [&format!("tick_req_params:1:0.25:ffffffff:{permission}")]);
+            assert_eq!(parameters, ["tick_req_params:1:0.25::0"]);
         }
     }
 
     /// Both are taken as a gateway takes them: a permission that is none of
     /// its five numbers is nothing stated, an exchange longer than four
-    /// characters is handed on alone, and neither is trimmed.
+    /// characters is handed on alone, and neither is trimmed. A bond states
+    /// no permission whatever the venue said.
     #[test]
     fn an_acknowledgement_is_read_as_a_gateway_reads_it() {
-        let read = |fifth: &str, sixth: &str| {
+        let read_as = |sec_type: &str, fifth: &str, sixth: &str| {
             let mut farm = FarmState::new();
             let mut context = Context::new();
             let mut hb = HeartbeatState::new();
             let shared = SharedState::new();
             let instrument = context.market.register(756733);
-            context.market.set_routing(instrument, "STK", "SMART");
+            context.market.set_routing(instrument, sec_type, "SMART");
             farm.send_mktdata_subscribe(
-                756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+                756733, "SPY", "SMART", sec_type, "", 0.0, "", "", instrument, 0,
                 false, &mut None, &mut hb,
             );
             let quote = farm.md_req_to_instrument.iter()
@@ -5928,11 +5929,13 @@ mod depth_position_tests {
             let (_, p) = shared.market.drain_tick_req_params().pop().expect("stated");
             (p.snapshot_permissions, p.bbo_exchange)
         };
+        let read = |fifth: &str, sixth: &str| read_as("STK", fifth, sixth);
         assert_eq!(read("4", "SMART"), (4, "SMART".to_string()));
         assert_eq!(read("7", "9c"), (0, "9c0001".to_string()), "seven is no permission");
         assert_eq!(read("-1", "9c"), (0, "9c0001".to_string()));
         assert_eq!(read(" 3", " 9c"), (0, " 9c0001".to_string()), "as written");
-        assert_eq!(read("3", ""), (3, String::new()), "no exchange, nothing appended");
+        assert_eq!(read("3", ""), (0, String::new()), "no exchange, nothing appended or permitted");
+        assert_eq!(read_as("BOND", "3", "SMART"), (0, "SMART".to_string()), "a bond's is not kept");
     }
 
 }

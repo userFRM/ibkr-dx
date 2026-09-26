@@ -465,7 +465,12 @@ impl EClient {
     /// and the `market_data_type` callback reports the type the subscription
     /// was made under. To state it for one request rather than for the ones
     /// that follow, [`req_mkt_data_ex`](EClient::req_mkt_data_ex) takes it.
-    /// A number naming no type leaves subscriptions realtime, and says so.
+    /// A number naming no type leaves the feeds as they were, and says so.
+    ///
+    /// A type turns feeds on, as a gateway takes it: 2 turns frozen data on;
+    /// 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only
+    /// 1 turns frozen data off, and it turns all three off. So 2 after 4 still
+    /// falls back to delayed-frozen.
     pub fn req_market_data_type(&self, market_data_type: i32) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.core.set_market_data_type(market_data_type);

@@ -40,9 +40,10 @@ before midnight UTC, as a future's evening session does, is dated by the day
 the history closed until midnight UTC, and by the next one after it. On a
 timezone east of UTC the next midnight UTC falls on the following day there,
 so the bar a session there rolls over to is dated by the day after that
-session. Intraday bars open on whole multiples of their length from the epoch;
-a week opens on Monday and a month on its first day at midnight UTC. Updates
-to these calendar bars remain dates under both date-format settings.
+session, as a gateway dates it. Intraday bars open on whole multiples of their
+length from the epoch; a week opens on Monday and a month on its first day at
+midnight UTC. Updates to these calendar bars remain dates under both
+date-format settings.
 
 ## The shorter form
 

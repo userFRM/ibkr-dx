@@ -3036,12 +3036,21 @@ impl FarmState {
         // of venues is stated under, and what `tick_req_params` names. Only
         // the nine-field shape carries these; the shorter one is laid out
         // differently and its fifth field is something else.
-        // Read untrimmed, as a gateway reads them.
+        // Read untrimmed, as a gateway reads them. `ffffffff` names no BBO
+        // exchange, as a currency's, a crypto's or a bond's acknowledgement
+        // states it, and a gateway keeps none for it. Nor does a gateway state
+        // a permission for a bond, a bill, a fixed-income contract or a
+        // combination, whatever the venue stated, so none is kept for one.
         if parts.len() >= 9 {
-            if let Ok(stated) = parts[4].parse::<u32>() {
+            if let Ok(stated) = parts[4].parse::<u32>()
+                && !matches!(
+                    self.asked_sec_type(instrument, context).as_str(),
+                    "BOND" | "BILL" | "FIXED" | "BAG" | "COMB"
+                )
+            {
                 shared.reference.note_snapshot_permission(instrument, stated);
             }
-            if let Some(bbo) = Some(parts[5]).filter(|f| !f.is_empty()) {
+            if let Some(bbo) = Some(parts[5]).filter(|f| !f.is_empty() && *f != "ffffffff") {
                 shared.reference.note_bbo_exchange(
                     instrument, bbo, &self.asked_sec_type(instrument, context),
                 );
@@ -3076,10 +3085,17 @@ impl FarmState {
         }
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
+        // A gateway states the permission only for a contract it holds a BBO
+        // exchange for. A chargeable snapshot reads the permission without
+        // one, so the rule is kept here rather than where it is stored.
+        let bbo_exchange = shared.reference.bbo_exchange_of(instrument);
+        let snapshot_permissions = if bbo_exchange.is_empty() {
+            0
+        } else {
+            i64::from(shared.reference.snapshot_permission_of(instrument))
+        };
         shared.market.push_tick_req_params(instrument, crate::bridge::TickReqParams {
-            min_tick,
-            bbo_exchange: shared.reference.bbo_exchange_of(instrument),
-            snapshot_permissions: i64::from(shared.reference.snapshot_permission_of(instrument)),
+            min_tick, bbo_exchange, snapshot_permissions,
         });
         // The venue has taken it, so whatever it said the last time it would
         // not is no longer what a request joining this contract is owed.

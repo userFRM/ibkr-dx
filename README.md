@@ -791,11 +791,15 @@ list, so nobody has to discover it by finding an empty result.
 > and the permission number the venue gives the request (0 nothing stated, 1 no
 > top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available
 > through the API; any other number is not kept, as a gateway keeps none). The
-> exchange is the name `req_smart_components` answers to.
-> Whether that number differs between a series the account is not entitled to
-> and one with nothing to say has not been seen yet, and a gateway may report 0
-> for some contracts whatever the venue stated; until a capture settles both,
-> the subscription list in account management is what separates them.
+> exchange is the name `req_smart_components` answers to. Where the
+> acknowledgement names no exchange, as a currency's, a crypto's or a bond's
+> does, the exchange is empty. The number is 0 there, and on a bond, a bill, a
+> fixed-income contract or a combination, whatever the venue stated, as a
+> gateway states it. Whether that number differs between a series the account
+> is not entitled to and one with nothing to say has not been seen yet, and a
+> gateway may report 0 for some other contracts whatever the venue stated;
+> until a capture settles both, the subscription list in account management is
+> what separates them.
 
 And two things this client does not read or fire:
 
@@ -963,11 +967,14 @@ request's subscription. It reads the contract's latest stored parameters when
 delivered: the price increment, the exchange the best bid and offer come from,
 and the permission number the venue gives the request (0
 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4
-snapshots not available through the API). Whether that number differs between
-a series the account is not entitled to and one with nothing to say has not
-been seen yet, and a gateway may report 0 for some contracts whatever the venue
-stated; until a capture settles both, the subscription list in account
-management is what separates them. See
+snapshots not available through the API), which is 0 where the venue names no
+such exchange, as for a currency or a crypto, and on a bond, a bill, a
+fixed-income contract or a combination, whatever the venue stated, as a
+gateway states it. Whether that number differs between a series the account is
+not entitled to and one with nothing to say has not been seen yet, and a
+gateway may report 0 for some other contracts whatever the venue stated; until
+a capture settles both, the subscription list in account management is what
+separates them. See
 [What is not covered](#what-is-not-covered).
 </details>
 

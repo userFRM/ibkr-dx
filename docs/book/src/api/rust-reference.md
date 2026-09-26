@@ -1399,7 +1399,7 @@ pub fn last_rtt(&self) -> Option<std::time::Duration>
 
 #### `req_market_data_type`
 
-Which feed the subscriptions after this one ask for: 1 live, 2 frozen, 3 delayed, 4 delayed and frozen. Sent with each subscription, in the field this protocol carries it in, and the `market_data_type` callback reports the type the subscription was made under. To state it for one request rather than for the ones that follow, `req_mkt_data_ex` takes it. A number naming no type leaves subscriptions realtime, and says so.
+Which feed the subscriptions after this one ask for: 1 live, 2 frozen, 3 delayed, 4 delayed and frozen. Sent with each subscription, in the field this protocol carries it in, and the `market_data_type` callback reports the type the subscription was made under. To state it for one request rather than for the ones that follow, `req_mkt_data_ex` takes it. A number naming no type leaves the feeds as they were, and says so. A type turns feeds on, as a gateway takes it: 2 turns frozen data on; 3 and 4 turn delayed data on, 4 with delayed-frozen and 3 without; only 1 turns frozen data off, and it turns all three off. So 2 after 4 still falls back to delayed-frozen.
 
 ```rust
 pub fn req_market_data_type(&self, market_data_type: i32)
@@ -3635,7 +3635,7 @@ What a subscription was given: the increment its prices move in, which venues it
 | `ticker_id` | `i64` | Ticker/request ID. |
 | `min_tick` | `f64` | Minimum tick size. |
 | `bbo_exchange` | `&str` | BBO exchange for smart component lookup (e.g. `"SMART"`). |
-| `snapshot_permissions` | `i64` | What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. |
+| `snapshot_permissions` | `i64` | What the venue says this request may be given: 0 nothing stated, 1 no top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not available through the API. 0 where the venue names no BBO exchange, as for a currency or a crypto, and on a bond, a bill, a fixed-income contract or a combination, whatever the venue stated, as a gateway states it. |
 
 ---
 

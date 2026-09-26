@@ -14,9 +14,13 @@ ask and last.
 
 `tick_req_params` (`tickReqParams` in Python) states the contract's price
 increment, exchange and snapshot permission once per request. It reads the
-latest stored parameters when the callback is delivered. A follower sharing
-the subscription gets its own callback; cancelling and reusing its request id
-starts a new request. A request cancelled before delivery receives no callback.
+latest stored parameters when the callback is delivered. Where the venue names
+no best-bid-and-offer exchange, as for a currency, a crypto or a bond, the
+exchange is empty. The permission is 0 there, and on a bond, a bill, a
+fixed-income contract or a combination whatever the venue stated, as a gateway
+states it. A follower sharing the subscription gets its own callback;
+cancelling and reusing its request id starts a new request. A request cancelled
+before delivery receives no callback.
 
 `tick_price` and `tick_size` for as long as the subscription runs.
 
@@ -82,7 +86,12 @@ Types 3 (delayed) and 4 (delayed-frozen) on `req_market_data_type` enable
 a delayed feed when live data is unavailable. Both start live. A bid/ask
 refusal that states delayed data is available switches to the requested
 delayed feed and reports 10167 without ending the request. `market_data_type`
-reports the feed delivered: 1 while live, then 3 or 4 after the switch.
+reports the feed delivered: 1 while live, then 3 or 4 after the switch. A
+login entitled to live data is served live under type 4 alone, so on a closed
+market its quote states what the live feed states, zero yields included. As a
+gateway takes the types, 2 turns frozen data on, 3 and 4 turn delayed data on
+(4 with delayed-frozen, 3 without), and only 1 turns frozen data off, so a 2
+asked after a 3 or a 4 still leaves the delayed feed to fall back to.
 
 `req_mkt_data_ex` selects a feed directly: `mode_9887` is 0 realtime, 1 delayed,
 2 frozen, or 3 delayed-frozen. Frozen keeps thinly traded names quoting after

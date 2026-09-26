@@ -30,11 +30,15 @@ pub struct TickReqParams {
     pub min_tick: f64,
     /// The exchange the best bid and offer are taken from, with the contract's
     /// security type appended as four hex digits where the name is four
-    /// characters or fewer, as a gateway writes it.
+    /// characters or fewer, as a gateway writes it. Empty where the
+    /// acknowledgement names none, as a currency's, a crypto's or a bond's
+    /// does.
     pub bbo_exchange: String,
     /// What the venue says this request may be given: 0 nothing stated, 1 no
     /// top of book, 2 snapshots, 3 real-time top of book, 4 snapshots not
-    /// available through the API.
+    /// available through the API. 0 where no BBO exchange is named, and on a
+    /// bond, a bill, a fixed-income contract or a combination, whatever the
+    /// venue stated, as a gateway states it.
     pub snapshot_permissions: i64,
 }
 

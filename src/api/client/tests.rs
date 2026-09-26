@@ -12376,16 +12376,28 @@ fn order_fields_are_checked_before_contract_expiry() {
     assert!(next_command(&rx).is_none());
 }
 
+/// The types asked in turn, and the feed a subscription then asks first and
+/// the one a refusal falls back to. A type turns feeds on, as a gateway takes
+/// it: 2 frozen, 3 delayed without delayed-frozen, 4 delayed with it, and only
+/// 1 turns them off. One that may fall back starts live.
 #[test]
-fn delayed_allowed_starts_live_on_the_rust_surface() {
-    for (data_type, fallback) in [(3, 1), (4, 3)] {
+fn the_types_asked_pick_the_first_feed_and_the_fallback() {
+    let rows: [(&[i32], i32, Option<i32>); 5] = [
+        (&[3], 0, Some(1)),
+        (&[4], 0, Some(3)),
+        (&[4, 2], 0, Some(3)),
+        (&[4, 3], 0, Some(1)),
+        (&[2, 1], 0, None),
+    ];
+    for (types, first, fallback) in rows {
         let (client, rx, _shared) = test_client();
-        client.req_market_data_type(data_type);
+        for data_type in types {
+            client.req_market_data_type(*data_type);
+        }
         client.req_mkt_data(1, &spy(), "", false, false);
         match rx.try_recv().unwrap() {
             ControlCommand::Subscribe { mode_9887, delayed_mode, .. } => {
-                assert_eq!(mode_9887, 0);
-                assert_eq!(delayed_mode, Some(fallback));
+                assert_eq!((mode_9887, delayed_mode), (first, fallback), "types {types:?}");
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }

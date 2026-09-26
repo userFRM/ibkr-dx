@@ -50,6 +50,11 @@ const MDT_FROZEN: i32 = 2;
 const MDT_DELAYED: i32 = 3;
 const MDT_DELAYED_FROZEN: i32 = 4;
 
+/// The feeds a session turns on, one bit each, as a gateway keeps them.
+const FEED_FROZEN: i32 = 1;
+const FEED_DELAYED: i32 = 2;
+const FEED_DELAYED_FROZEN: i32 = 4;
+
 /// The callback type for a subscription feed.
 pub(crate) fn data_type_for_mode(mode: i32) -> i32 {
     match mode {
@@ -1401,6 +1406,9 @@ pub struct ClientCore {
     // Market data type callback tracking
     /// Which feed subscriptions default to.
     pub market_data_type: AtomicI32,
+    /// Which feeds the session has turned on: frozen, delayed and
+    /// delayed-frozen.
+    market_data_feeds: AtomicI32,
     /// Which requests have already been told which feed they are on.
     pub mdt_sent: Mutex<HashMap<i64, i32>>,
     /// Requests already told the parameters of their market-data subscription.
@@ -1642,6 +1650,7 @@ impl ClientCore {
             attached_orders: Mutex::new(attached_orders::AttachedState::default()),
             depth_reqs: std::sync::Arc::new(Mutex::new(HashSet::new())),
             market_data_type: AtomicI32::new(1),
+            market_data_feeds: AtomicI32::new(0),
             mdt_sent: Mutex::new(HashMap::new()),
             tick_req_params_sent: Mutex::new(HashSet::new()),
             option_ticks_sent: Mutex::new(HashMap::new()),
@@ -1727,6 +1736,7 @@ impl ClientCore {
         self.attached_orders.lock().unwrap().reset();
         self.depth_reqs.lock().unwrap().clear();
         self.market_data_type.store(1, Ordering::Relaxed);
+        self.market_data_feeds.store(0, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
         self.tick_req_params_sent.lock().unwrap().clear();
         self.option_ticks_sent.lock().unwrap().clear();
@@ -2938,26 +2948,42 @@ impl ClientCore {
     /// The caller names the type once; the wire names it per subscription, on
     /// field 9887. Subscriptions made after this carry the mode it implies, so
     /// a client that asks for delayed data receives delayed data.
+    ///
+    /// A type turns feeds on rather than naming one, as a gateway takes it: 2
+    /// turns frozen data on; 3 and 4 turn delayed data on, 4 with
+    /// delayed-frozen and 3 without; only 1 turns frozen data off, and it
+    /// turns all three off.
     pub fn set_market_data_type(&self, mdt: i32) {
         if !matches!(mdt, MDT_REALTIME | MDT_FROZEN | MDT_DELAYED | MDT_DELAYED_FROZEN) {
-            // Kept out rather than kept: subscriptions stay realtime whatever
+            // Kept out rather than kept: the feeds stay as they were whatever
             // this names, and the callback that reports a subscription's type
             // reads what is stored — so a number nobody recognises, stored,
             // reaches the caller as the venue's word for data that is not on
             // it.
-            log::warn!("req_market_data_type({mdt}) names no known type; subscriptions stay realtime");
+            log::warn!("req_market_data_type({mdt}) names no known type; the feeds stay as they were");
             return;
         }
         self.market_data_type.store(mdt, Ordering::Relaxed);
+        let _ = self.market_data_feeds.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |feeds| {
+            Some(match mdt {
+                MDT_FROZEN => feeds | FEED_FROZEN,
+                MDT_DELAYED => (feeds | FEED_DELAYED) & !FEED_DELAYED_FROZEN,
+                MDT_DELAYED_FROZEN => feeds | FEED_DELAYED | FEED_DELAYED_FROZEN,
+                _ => 0,
+            })
+        });
     }
 
-    /// The per-subscription mode the requested type implies. Zero is realtime,
-    /// which is the shape a subscription has when nothing asked otherwise.
+    /// The per-subscription mode the session's feeds imply: with delayed data
+    /// on, the delayed feed a refusal falls back to (3 with delayed-frozen, 1
+    /// without); else 2 with frozen data on; else 0, realtime, which is the
+    /// shape a subscription has when nothing asked otherwise.
     pub fn subscription_mode(&self) -> i32 {
-        match self.market_data_type.load(Ordering::Relaxed) {
-            MDT_DELAYED => 1,
-            MDT_FROZEN => 2,
-            MDT_DELAYED_FROZEN => 3,
+        let feeds = self.market_data_feeds.load(Ordering::Relaxed);
+        match (feeds & FEED_DELAYED != 0, feeds & FEED_DELAYED_FROZEN != 0, feeds & FEED_FROZEN != 0) {
+            (true, true, _) => 3,
+            (true, false, _) => 1,
+            (false, _, true) => 2,
             _ => 0,
         }
     }
