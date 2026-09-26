@@ -165,7 +165,8 @@ def test_an_exercise_checks_the_named_holding_and_waits_for_its_figure():
     assert [(req_id, code) for req_id, code, _ in heard.errors] == [(1, 322)]
     c.disconnect()
     c, heard = client()
-    c.exerciseOptions(2, contract, 1, 9, "DU2", 1)
+    # The flag under the name the reference client gives it.
+    c.exercise_options(2, contract, 1, 9, "DU2", override=1)
     assert c._test_take_commands() == []
     c._test_push_stated_figures(0, 493, [-0.5, 1.0, 0.2])
     commands = c._test_take_commands()

@@ -13,6 +13,24 @@ builds — `ExecutionFilter`, `ScannerSubscription`, `WshEventData`, `OrderCance
 reference client's spelling alone, as that client's own do; the family codes and
 sessions a callback hands over answer to both.
 
+A wrapper is called with the shape the ibapi release it was written for calls.
+`error` receives `reqId, errorCode, errorString` where it declares three
+parameters (ibapi 9.81), `advancedOrderRejectJson` after them where it declares
+four, and `reqId, errorTime, errorCode, errorString, advancedOrderRejectJson`,
+the current release's shape, otherwise. A wrapper whose class declares
+`commissionReport`, the name before the fees were reported beside the
+commission, and neither `commissionAndFeesReport` nor
+`commission_and_fees_report`, receives each charge on `commissionReport`. Both
+are read once, when `EClient.__init__` binds the wrapper.
+
+A new `Order` starts each figure the reference client's `Order` starts unset —
+the limit and auxiliary prices, the trailing percentage, the cash quantity, the
+trigger and adjusted prices, the filled quantity, the minimum quantity, the
+volatility and reference price kinds — at `UNSET_DOUBLE` or `UNSET_INTEGER`, as
+that client's does, so a program comparing with them reads what it would
+there. An order is sent the same whether such a figure holds that value or
+nought.
+
 `ibkr_dx.configure()` carries what a gateway would hold in a configuration file:
 the session time zone, the build announced at logon, which executions arrive
 when a session opens, and the rest. `ibkr_dx.describe()` lists them, and

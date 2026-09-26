@@ -36,6 +36,8 @@ def problems() -> list[str]:
     for name in ("configure", "settings", "describe", "UNAVAILABLE"):
         if not hasattr(ibkr_dx, name):
             found.append(f"ibkr_dx.{name} is missing")
+    if getattr(ibkr_dx, "__version__", None) != version("ibkr-dx"):
+        found.append("ibkr_dx.__version__ is not the installed release")
     if not callable(getattr(EClient, "req_mkt_data", None)):
         found.append("EClient has no req_mkt_data")
     # The methods that fabricate a session belong to the test build only.

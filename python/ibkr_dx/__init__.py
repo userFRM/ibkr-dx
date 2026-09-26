@@ -7,11 +7,15 @@ gateway's, the Limits page of the documentation says so.
 """
 
 import inspect
+from importlib.metadata import version as _version
 
 from .ibkr_dx import *  # noqa: F401,F403
 from .ibkr_dx import __doc__ as _ext_doc  # noqa: F401
 
 from ._settings import UNAVAILABLE, configure, describe, settings  # noqa: F401
+
+#: The installed release, as the reference client's package states its own.
+__version__ = _version("ibkr-dx")
 
 # The plain objects and constants a program written against the reference
 # client imports on its first line. Read by attribute here, so the shape is the
@@ -87,11 +91,12 @@ from ._reference_shapes import (  # noqa: F401
 
 
 def _reference_name(ours: str) -> str:
-    """What the reference client calls the callback this one calls `ours`.
+    """What the reference client calls the call or callback this one calls `ours`.
 
-    A capital after each underscore, except for the three it spells with the
-    letters run together. The engine keeps the same three, beside the code that
-    delivers a callback under that client's name.
+    A capital after each underscore, except for those it spells with the
+    letters run together, with an acronym in capitals, or with another word.
+    The engine keeps the callbacks among them, beside the code that delivers a
+    callback under that client's name.
     """
     run_together = {
         "real_time_bar": "realtimeBar",
@@ -103,6 +108,10 @@ def _reference_name(ours: str) -> str:
         "cancel_pnl_single": "cancelPnLSingle",
         "request_fa": "requestFA",
         "replace_fa": "replaceFA",
+        "set_connect_options": "setConnectionOptions",
+        "tick_efp": "tickEFP",
+        "verify_message_api": "verifyMessageAPI",
+        "verify_and_auth_message_api": "verifyAndAuthMessageAPI",
     }
     if ours in run_together:
         return run_together[ours]

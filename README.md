@@ -730,7 +730,7 @@ ib_async's transport, has a method by that name.
 | `schedule` / `trading_schedule` | venue | · | · | · | ● | ● |
 | `serverVersion` | this client | ● | ● | ● | ● | ● |
 | `sessionOver` | this client | · | · | · | ● | ● |
-| `setConnectOptions` | this client | ● | · | ● | · | ◐ |
+| `setConnectionOptions` | this client | ● | ● | ● | · | ◐ |
 | `setNewsProviders` | venue | · | · | · | ● | ● |
 | `shortSaleRestricted` | venue | · | · | · | ● | ● |
 | `shortSaleRestrictedByInstrument` | venue | · | · | · | ● | ● |
@@ -818,6 +818,12 @@ on `EClient`, `EWrapper` and the records a call or callback hands over:
 `con_id`; the classes a program only builds, such as `ExecutionFilter`, carry
 the TWS API's spelling alone. The TWS API's module layout resolves under
 `ibkr_dx` (`ibkr_dx.client`, `ibkr_dx.wrapper`, `ibkr_dx.contract`, …).
+
+A wrapper is called as the ibapi release it was written for calls it. An
+`error` declared as `(reqId, errorCode, errorString)` (ibapi 9.81), with
+`advancedOrderRejectJson` after them, or with `errorTime` second as the current
+release has it receives those arguments, and a wrapper that declares
+`commissionReport` and not `commissionAndFeesReport` receives each charge there.
 
 Where this client answers differently from a gateway,
 [Limits](https://userfrm.github.io/ibkr-dx/reference/limits.html) says so, case
@@ -1040,7 +1046,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
 | Rust, unit and integration | 3,218 | No |
-| Python | 1,182 | No |
+| Python | 1,188 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

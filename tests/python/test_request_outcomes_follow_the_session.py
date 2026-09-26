@@ -39,7 +39,7 @@ def test_a_request_never_delivers_ahead_of_the_sessions_earlier_record(name):
         contract=ibkr_dx.Contract(), order=ibkr_dx.Order(),
         subscription=ibkr_dx.ScannerSubscription(), scan=ibkr_dx.SpreadScan(),
         option_price=1.0, under_price=100.0, volatility=0.2,
-        exercise_action=1, exercise_quantity=1, account="DU1", _override=0,
+        exercise_action=1, exercise_quantity=1, account="DU1", override=0,
         fa_data_type=1, cxml="<List/>", group_name="All", tags="NetLiquidation",
         subscribe=True, model_code="", sec_type="STK", exchange="SMART",
         start_date="20260101", end_date="20260201", b_auto_bind=False,

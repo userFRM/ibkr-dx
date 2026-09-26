@@ -80,19 +80,23 @@ def test_the_object_still_lists_what_it_carries():
     assert len(dir(EClient(EWrapper()))) > 50
 
 
-# The callbacks the reference client spells with its letters run together. The
-# table the reference pages are generated from records only this client's names
-# for callbacks, so unlike the calls above these are named here.
+# The callbacks the reference client spells with its letters run together or
+# with an acronym in capitals. The table the reference pages are generated from
+# records only this client's names for callbacks, so unlike the calls above
+# these are named here. Read off the class, which is where `super()` looks.
 RUN_TOGETHER_CALLBACKS = [
     ("real_time_bar", "realtimeBar"),
     ("receive_fa", "receiveFA"),
     ("replace_fa_end", "replaceFAEnd"),
+    ("tick_efp", "tickEFP"),
+    ("verify_message_api", "verifyMessageAPI"),
+    ("verify_and_auth_message_api", "verifyAndAuthMessageAPI"),
 ]
 
 
 @pytest.mark.parametrize("ours,theirs", RUN_TOGETHER_CALLBACKS)
 def test_a_callback_answers_to_the_name_the_other_client_gives_it(ours, theirs):
-    wrapper = EWrapper()
+    wrapper = EWrapper
     assert hasattr(wrapper, ours)
     assert hasattr(wrapper, theirs), (
         f"a wrapper written against the reference client declares {theirs}, "

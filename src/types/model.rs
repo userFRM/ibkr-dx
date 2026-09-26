@@ -2806,7 +2806,7 @@ impl Contract {
 
 /// Stating an order without filling a struct.
 ///
-/// An order has a hundred and fifty-four fields and a caller states four of
+/// An order has a hundred and fifty-nine fields and a caller states four of
 /// them: which way, how much, what kind, and at what price. The rest carry the
 /// defaults the venue assumes. Each of these fills those four and leaves the
 /// rest alone, so what a reader sees is the order and not the form it was

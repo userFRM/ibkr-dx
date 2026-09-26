@@ -399,7 +399,7 @@ def plain_intra_doc_links(doc: str) -> str:
     naming the target for bracketed words, which Markdown reads only at the
     start of a line and which this page joins onto the paragraph above it.
     """
-    path = r"(?:Self|crate|[A-Z][A-Za-z0-9_]*)(?:::[A-Za-z0-9_]+)*"
+    path = r"(?:Self|crate|super|[A-Z][A-Za-z0-9_]*)(?:::[A-Za-z0-9_]+)*"
     doc = re.sub(rf"\s*\[`[^`\]]+`\]:\s*{path}", "", doc)
     doc = re.sub(rf"\[([^\]]+)\]\({path}::[A-Za-z0-9_]+\)", r"\1", doc)
     return re.sub(rf"\[(`{path}(?:\(\))?`)\](?![(\[:])", r"\1", doc)
@@ -621,6 +621,9 @@ def parse_pymethods(path: Path) -> list[dict]:
             impl_body,
         ):
             preamble, name, args_str = fm.group(1), fm.group(2), fm.group(3)
+            # A raw identifier is its name without the `r#`, which is how
+            # Python is given it: `r#override` is `override`.
+            args_str = args_str.replace("r#", "")
             # `__init__` is the constructor a caller reaches as `EClient(wrapper)`.
             if name.startswith("__") and name != "__init__":
                 continue

@@ -1088,7 +1088,7 @@ pub fn next_shared_id(&self) -> Result<i64, Refusal>
 
 #### `next_shared_id_within`
 
-`next_shared_id`, with its wait for the replay also bounded by `timeout` and by the config's [`cancel`](super::EClientConfig::cancel), both read at each 10 ms step of the wait. A gateway gives its client the next valid id once it has read the account's orders. A program bounding that wait, as it bounds the handshake, is answered `Refusal::no_answer` when `timeout` passes first, and the same, saying so, when the connect is taken back. `None` is the replay's own bound alone, as `next_shared_id` waits.
+`next_shared_id`, with its wait for the replay also bounded by `timeout` and by the config's `cancel`, both read at each 10 ms step of the wait. A gateway gives its client the next valid id once it has read the account's orders. A program bounding that wait, as it bounds the handshake, is answered `Refusal::no_answer` when `timeout` passes first, and the same, saying so, when the connect is taken back. `None` is the replay's own bound alone, as `next_shared_id` waits.
 
 ```rust
 pub fn next_shared_id_within( &self, timeout: Option<std::time::Duration>, ) -> Result<i64, Refusal>

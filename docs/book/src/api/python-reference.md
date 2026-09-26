@@ -859,7 +859,7 @@ def place_order(order_id, contract, order)
 Exercise or lapse a long option position.
 
 ```python
-def exercise_options(req_id, contract, exercise_action, exercise_quantity, account, _override, manual_order_time, customer_account, professional_customer)
+def exercise_options(req_id, contract, exercise_action, exercise_quantity, account, override, manual_order_time, customer_account, professional_customer)
 ```
 
 | Parameter | Type | Description |

@@ -278,18 +278,18 @@ impl EClient {
     /// above nothing, or it is refused under 322 ("No unlapsed position exists
     /// in this option in account ..."), and no more than the position goes.
     /// The option's in-the-money figure (generic tick 493) is asked for
-    /// whatever `_override` says: one already held is used, and otherwise the
+    /// whatever `override` says: one already held is used, and otherwise the
     /// engine watches for one, with no bound, as a gateway does. With
-    /// `_override` 0, an exercise of an option not in the money and a lapse of
+    /// `override` 0, an exercise of an option not in the money and a lapse of
     /// one in it are refused under 322, as a gateway refuses them; with 1 they
-    /// go. `_override` itself travels on no tag: it names this check, which is
+    /// go. `override` itself travels on no tag: it names this check, which is
     /// made before the order is built. The position and quantity are checked
     /// in the account named.
-    #[pyo3(signature = (req_id, contract, exercise_action, exercise_quantity, account, _override,
+    #[pyo3(signature = (req_id, contract, exercise_action, exercise_quantity, account, r#override,
                         manual_order_time="", customer_account="", professional_customer=false))]
     fn exercise_options(
         &self, py: Python<'_>, req_id: i64, contract: &Contract, exercise_action: i32,
-        exercise_quantity: i32, account: &str, _override: i32,
+        exercise_quantity: i32, account: &str, r#override: i32,
         manual_order_time: &str, customer_account: &str, professional_customer: bool,
     ) -> PyResult<()> {
         let exercising = crate::types::model::ErrorOrigin::Order { id: req_id, op: crate::types::model::OrderOp::Exercise };
@@ -347,7 +347,7 @@ impl EClient {
                 customer_account: customer_account.to_string(),
                 professional_customer,
             },
-            override_: _override != 0,
+            override_: r#override != 0,
         };
         if let Err(why) = self.send_control(&tx, ControlCommand::Exercise(Box::new(exercise))) {
             return self.report_refusal_as(py, exercising, Refusal::not_connected(why.to_string()));

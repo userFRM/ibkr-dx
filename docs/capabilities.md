@@ -314,7 +314,7 @@ ib_async's transport, has a method by that name.
 | `schedule` / `trading_schedule` | venue | · | · | · | ● | ● |
 | `serverVersion` | this client | ● | ● | ● | ● | ● |
 | `sessionOver` | this client | · | · | · | ● | ● |
-| `setConnectOptions` | this client | ● | · | ● | · | ◐ |
+| `setConnectionOptions` | this client | ● | ● | ● | · | ◐ |
 | `setNewsProviders` | venue | · | · | · | ● | ● |
 | `shortSaleRestricted` | venue | · | · | · | ● | ● |
 | `shortSaleRestrictedByInstrument` | venue | · | · | · | ● | ● |

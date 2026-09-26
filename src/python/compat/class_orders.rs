@@ -506,6 +506,20 @@ impl Clone for Order {
     }
 }
 
+/// A figure the reference client's `Order` starts unset, as the engine's order
+/// holds it: nought. That client starts these at its unset double or integer,
+/// and so does this class, so a program comparing against them reads what it
+/// would there; the engine's order carries nought for the same thing, so an
+/// order sends the same either way.
+fn unset_as_nought(value: f64) -> f64 {
+    if value == f64::MAX { 0.0 } else { value }
+}
+
+/// [`unset_as_nought`], for a count.
+fn unset_as_nought_int(value: i32) -> i32 {
+    if value == i32::MAX { 0 } else { value }
+}
+
 impl Default for Order {
     fn default() -> Self {
         Self {
@@ -514,21 +528,21 @@ impl Default for Order {
             action: String::new(),
             total_quantity: 0.0,
             order_type: String::new(),
-            lmt_price: 0.0,
-            aux_price: 0.0,
+            lmt_price: f64::MAX,
+            aux_price: f64::MAX,
             tif: String::new(),
             outside_rth: false,
             display_size: 0,
-            min_qty: 0,
+            min_qty: i32::MAX,
             hidden: false,
             good_after_time: String::new(),
             good_till_date: String::new(),
             oca_group: String::new(),
-            trailing_percent: 0.0,
+            trailing_percent: f64::MAX,
             algo_strategy: String::new(),
             algo_params: ListField::new(),
             what_if: false,
-            cash_qty: 0.0,
+            cash_qty: f64::MAX,
             parent_id: 0,
             transmit: true,
             discretionary_amt: 0.0,
@@ -539,9 +553,9 @@ impl Default for Order {
             all_or_none: false,
             trigger_method: 0,
             adjusted_order_type: String::new(),
-            trigger_price: 0.0,
-            adjusted_stop_price: 0.0,
-            adjusted_stop_limit_price: 0.0,
+            trigger_price: f64::MAX,
+            adjusted_stop_price: f64::MAX,
+            adjusted_stop_limit_price: f64::MAX,
             conditions: ListField::new(),
             conditions_ignore_rth: false,
             conditions_cancel_order: false,
@@ -590,7 +604,7 @@ impl Default for Order {
             fa_group: String::new(),
             fa_method: String::new(),
             fa_percentage: String::new(),
-            filled_quantity: 0.0,
+            filled_quantity: f64::MAX,
             // The reference client's unset integer.
             hedge_max_size: i32::MAX,
             hedge_param: String::new(),
@@ -636,7 +650,7 @@ impl Default for Order {
             reference_change_amount: 0.0,
             reference_contract_id: 0,
             reference_exchange_id: String::new(),
-            reference_price_type: 0,
+            reference_price_type: i32::MAX,
             route_marketable_to_bbo: None,
             rule80a: String::new(),
             scale_auto_reset: false,
@@ -667,7 +681,7 @@ impl Default for Order {
             trail_stop_price: f64::MAX,
             use_price_mgmt_algo: None,
             volatility: f64::MAX,
-            volatility_type: 0,
+            volatility_type: i32::MAX,
             what_if_type: i32::MAX,
         }
     }
@@ -678,10 +692,10 @@ impl Order {
     #[new]
     #[pyo3(signature = (
         order_id=0, action="".to_string(), total_quantity=0.0, order_type="".to_string(),
-        lmt_price=0.0, aux_price=0.0, tif="".to_string(), outside_rth=false,
-        display_size=0, min_qty=0, hidden=false, good_after_time="".to_string(),
-        good_till_date="".to_string(), oca_group="".to_string(), trailing_percent=0.0,
-        algo_strategy="".to_string(), what_if=false, cash_qty=0.0, parent_id=0,
+        lmt_price=f64::MAX, aux_price=f64::MAX, tif="".to_string(), outside_rth=false,
+        display_size=0, min_qty=i32::MAX, hidden=false, good_after_time="".to_string(),
+        good_till_date="".to_string(), oca_group="".to_string(), trailing_percent=f64::MAX,
+        algo_strategy="".to_string(), what_if=false, cash_qty=f64::MAX, parent_id=0,
         transmit=true, **keywords
     ))]
     fn new(
@@ -1109,24 +1123,24 @@ impl Order {
             action: self.action.clone(),
             total_quantity: self.total_quantity,
             order_type: self.order_type.clone(),
-            lmt_price: self.lmt_price,
-            aux_price: self.aux_price,
+            lmt_price: unset_as_nought(self.lmt_price),
+            aux_price: unset_as_nought(self.aux_price),
             tif: self.tif.clone(),
             outside_rth: self.outside_rth,
             display_size: self.display_size,
-            min_qty: self.min_qty,
+            min_qty: unset_as_nought_int(self.min_qty),
             hidden: self.hidden,
             good_after_time: self.good_after_time.clone(),
             good_till_date: self.good_till_date.clone(),
             oca_group: self.oca_group.clone(),
-            trailing_percent: self.trailing_percent,
+            trailing_percent: unset_as_nought(self.trailing_percent),
             algo_strategy: self.algo_strategy.clone(),
             // A Python list, so reading it needs the interpreter this does
             // not hold. Filled at the call site from `convert_algo_params`,
             // beside the conditions.
             algo_params: Vec::new(),
             what_if: self.what_if,
-            cash_qty: self.cash_qty,
+            cash_qty: unset_as_nought(self.cash_qty),
             parent_id: self.parent_id,
             transmit: self.transmit,
             discretionary_amt: self.discretionary_amt,
@@ -1137,9 +1151,9 @@ impl Order {
             all_or_none: self.all_or_none,
             trigger_method: self.trigger_method,
             adjusted_order_type: self.adjusted_order_type.clone(),
-            trigger_price: self.trigger_price,
-            adjusted_stop_price: self.adjusted_stop_price,
-            adjusted_stop_limit_price: self.adjusted_stop_limit_price,
+            trigger_price: unset_as_nought(self.trigger_price),
+            adjusted_stop_price: unset_as_nought(self.adjusted_stop_price),
+            adjusted_stop_limit_price: unset_as_nought(self.adjusted_stop_limit_price),
             conditions: Vec::new(), // Use convert_conditions(py) + to_api() at call sites that need conditions
             conditions_ignore_rth: self.conditions_ignore_rth,
             conditions_cancel_order: self.conditions_cancel_order,
@@ -1188,7 +1202,7 @@ impl Order {
             fa_group: self.fa_group.clone(),
             fa_method: self.fa_method.clone(),
             fa_percentage: self.fa_percentage.clone(),
-            filled_quantity: self.filled_quantity,
+            filled_quantity: unset_as_nought(self.filled_quantity),
             hedge_max_size: self.hedge_max_size,
             hedge_param: self.hedge_param.clone(),
             hedge_type: self.hedge_type.clone(),
@@ -1241,7 +1255,7 @@ impl Order {
             reference_change_amount: self.reference_change_amount,
             reference_contract_id: self.reference_contract_id,
             reference_exchange_id: self.reference_exchange_id.clone(),
-            reference_price_type: self.reference_price_type,
+            reference_price_type: unset_as_nought_int(self.reference_price_type),
             route_marketable_to_bbo: self.route_marketable_to_bbo,
             rule80a: self.rule80a.clone(),
             scale_auto_reset: self.scale_auto_reset,
@@ -1276,7 +1290,7 @@ impl Order {
             trail_stop_price: self.trail_stop_price,
             use_price_mgmt_algo: self.use_price_mgmt_algo,
             volatility: self.volatility,
-            volatility_type: self.volatility_type,
+            volatility_type: unset_as_nought_int(self.volatility_type),
             what_if_type: self.what_if_type,
         }
     }

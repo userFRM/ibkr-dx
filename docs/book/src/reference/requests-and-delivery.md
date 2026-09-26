@@ -3,7 +3,9 @@
 Requests and cancels return after admission. The engine holds work while it
 waits for contract naming, order replay, account download, an option's model,
 or an earlier exchange to finish. A cancel withdraws its own kind of request,
-including one still waiting. Cancelling a question that is ready follows its
+including one still waiting, except `cancel_contract_data` and
+`cancel_historical_ticks`, which withdraw nothing, as on a gateway (see
+[Venue behaviour](venue-behaviour.md)). Cancelling a question that is ready follows its
 answer; cancelling one still waiting prevents that answer. A request for a
 contract the venue names no single contract for is over, as it is at a gateway:
 its number holds nothing, a cancel under it is refused as one of nothing held,
@@ -50,7 +52,11 @@ so a wrapper that implements only `error` receives every error there. Rust
 Python `ErrorOrigin` exposes `kind`, `id`, `ends`, `op` and `question`.
 `ends` is `None` for origins other than requests and questions; `op` and
 `question` are `None` when inapplicable. Ordinary ibapi wrappers receive
-`error` with the original number and code.
+`error` with the original number and code, with the arguments the wrapper's
+`error` declares: `reqId, errorCode, errorString` as ibapi 9.81 calls it,
+`advancedOrderRejectJson` after them as the releases before `errorTime` did,
+or `errorTime` second as the current release does. An `error` declared with
+three or four is called directly, without `error_from`.
 
 A call that answers asks under a number this client took for that call. What
 answers it after the call has returned — the end of a lookup that was refused,
@@ -117,7 +123,7 @@ Rust `order_id_floor()` reads the ID `next_valid_id` would state, without
 waiting; `next_shared_id()` answers the request-compatible one.
 `next_shared_id_within(timeout)` adds a bound to the replay wait and observes
 `EClientConfig.cancel`.
-`next_order_id()` and `reserve_order_ids()` are answering calls; an exercise
+`next_order_id()` is an answering call; an exercise
 that asks the engine to assign its number returns immediately and is numbered
 after replay.
 

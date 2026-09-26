@@ -36,7 +36,7 @@ under, which the venue names at every connect, from every session. So one taken
 here does not collide with an order placed elsewhere.
 
 `tif` is checked against what the venue carries: `DAY`, `GTC`, `IOC`, `FOK`,
-`OPG`, `GTD`, `GTX`, `DTC`, `AUC`, spelled exactly. An unrecognised value is
+`OPG`, `GTD`, `GTX`, `DTC`, `AUC`, `NMIN`, spelled exactly. An unrecognised value is
 refused here rather than sent as `DAY` and quietly expiring at the close.
 
 Paper account only. The price is set far below market so it will not fill.

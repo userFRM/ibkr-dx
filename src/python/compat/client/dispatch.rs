@@ -56,7 +56,7 @@ fn or_unstated_greek(value: f64) -> Option<f64> { unstated_as(value, -2.0) }
 /// class's do-nothing default instead of on the caller's code.
 macro_rules! call_wrapper {
     ($client:ident, $py:expr, $shared:ident, $method:expr, $args:expr) => {
-        if let Err(e) = crate::python::compat::client::call_named($py, &$client.wrapper, $method, $args) {
+        if let Err(e) = $client.callback($py, $method, $args) {
             if !e.is_instance_of::<pyo3::exceptions::PyException>($py) {
                 return Err(e);
             }

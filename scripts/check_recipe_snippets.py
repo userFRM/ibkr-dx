@@ -1,4 +1,4 @@
-"""Every Python snippet on the docs site names things that exist.
+"""Every Python snippet on the docs site, and every notebook, names things that exist.
 
 A recipe is read and trusted. One that calls a method the library does not
 have, or spells an argument the way an older version spelled it, costs the
@@ -14,6 +14,7 @@ Exits non-zero on its own findings.
 
 import ast
 import importlib
+import json
 import pathlib
 import re
 import sys
@@ -27,6 +28,7 @@ GENERATED = {"python-reference.md", "rust-reference.md", "coverage-data.md"}
 PAGES = sorted(
     p for p in (ROOT / "docs/book/src").rglob("*.md") if p.name not in GENERATED
 )
+NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
 FENCE = re.compile(r"```(?:python|py)\n(.*?)```", re.S)
 INCLUDE = re.compile(r"\{\{#include ([^}]+)\}\}")
 
@@ -46,15 +48,28 @@ def resolved(block: str, page: pathlib.Path) -> str | None:
         return None
     return target.read_text()
 
+
+def notebook_code(path: pathlib.Path) -> str:
+    """A notebook's code cells, as the one program they run as. A line
+    addressed to the notebook itself, such as `%matplotlib inline`, is not
+    Python and is left out."""
+    cells = json.loads(path.read_text())["cells"]
+    return "\n".join(
+        line
+        for cell in cells if cell["cell_type"] == "code"
+        for line in "".join(cell["source"]).splitlines()
+        if not line.lstrip().startswith(("%", "!"))
+    )
+
+
 # What a client is built from, and what to check its methods against.
 BUILDERS = {"EClient": ibkr_dx.EClient}
 
 problems: list[str] = []
-checked = 0
+snippets: list[tuple[str, str]] = []
 
 for page in PAGES:
     for block in FENCE.findall(page.read_text()):
-        checked += 1
         where = page.relative_to(ROOT)
         named = INCLUDE.search(block)
         text = resolved(block, page)
@@ -65,54 +80,59 @@ for page in PAGES:
             continue
         if named:
             where = f"{where} -> {named.group(1).strip().split('/')[-1]}"
-        try:
-            tree = ast.parse(text)
-        except SyntaxError as e:
-            problems.append(f"{where}: a snippet does not parse: {e.msg} (line {e.lineno})")
+        snippets.append((str(where), text))
+snippets += [(str(nb.relative_to(ROOT)), notebook_code(nb)) for nb in NOTEBOOKS]
+checked = len(snippets) + len(problems)
+
+for where, text in snippets:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        problems.append(f"{where}: a snippet does not parse: {e.msg} (line {e.lineno})")
+        continue
+
+    # Names bound to a client, so their method calls can be checked. A name
+    # is only followed where it means one thing in the whole file: these
+    # examples reuse short names, and `c` is a contract in one scope and a
+    # client in another. Followed anyway, every field of the contract reads
+    # as a method the client does not have.
+    bound: dict[str, set] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
             continue
+        made = None
+        if isinstance(node.value, ast.Call):
+            fn = node.value.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            made = BUILDERS.get(name, name or "?")
+        else:
+            made = "?"
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                bound.setdefault(t.id, set()).add(made)
+    clients = {
+        n: list(v)[0] for n, v in bound.items()
+        if len(v) == 1 and list(v)[0] in BUILDERS.values()
+    }
 
-        # Names bound to a client, so their method calls can be checked. A name
-        # is only followed where it means one thing in the whole file: these
-        # examples reuse short names, and `c` is a contract in one scope and a
-        # client in another. Followed anyway, every field of the contract reads
-        # as a method the client does not have.
-        bound: dict[str, set] = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        base = node.value
+        if isinstance(base, ast.Name) and base.id == "ibkr_dx":
+            if hasattr(ibkr_dx, node.attr):
                 continue
-            made = None
-            if isinstance(node.value, ast.Call):
-                fn = node.value.func
-                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-                made = BUILDERS.get(name, name or "?")
-            else:
-                made = "?"
-            for t in node.targets:
-                if isinstance(t, ast.Name):
-                    bound.setdefault(t.id, set()).add(made)
-        clients = {
-            n: list(v)[0] for n, v in bound.items()
-            if len(v) == 1 and list(v)[0] in BUILDERS.values()
-        }
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Attribute):
-                continue
-            base = node.value
-            if isinstance(base, ast.Name) and base.id == "ibkr_dx":
-                if hasattr(ibkr_dx, node.attr):
-                    continue
-                # A submodule is not an attribute until something imports it.
-                try:
-                    importlib.import_module(f"ibkr_dx.{node.attr}")
-                except ImportError:
-                    problems.append(f"{where}: `ibkr_dx.{node.attr}` is not in the library")
-            elif isinstance(base, ast.Name) and base.id in clients:
-                owner = clients[base.id]
-                if not hasattr(owner, node.attr):
-                    problems.append(
-                        f"{where}: `{base.id}.{node.attr}` is not on {owner.__name__}"
-                    )
+            # A submodule is not an attribute until something imports it.
+            try:
+                importlib.import_module(f"ibkr_dx.{node.attr}")
+            except ImportError:
+                problems.append(f"{where}: `ibkr_dx.{node.attr}` is not in the library")
+        elif isinstance(base, ast.Name) and base.id in clients:
+            owner = clients[base.id]
+            if not hasattr(owner, node.attr):
+                problems.append(
+                    f"{where}: `{base.id}.{node.attr}` is not on {owner.__name__}"
+                )
 
 if problems:
     for p in sorted(set(problems)):
@@ -120,4 +140,4 @@ if problems:
     print(f"\n{len(set(problems))} snippet(s) name something that does not exist.")
     sys.exit(1)
 
-print(f"{checked} python snippet(s) across the site name only things that exist")
+print(f"{checked} python snippet(s) and notebook(s) name only things that exist")

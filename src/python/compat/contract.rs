@@ -283,53 +283,19 @@ mod tests {
     use crate::types::{ControlCommand, OrderCondition, OrderKind, OrderRequest, Price, Side};
     use crate::client_core::ClientCore;
 
-    /// The values an order carries when the caller states none, as written in
-    /// the file that states them.
-    fn order_defaults(source: &str) -> Vec<String> {
-        // A line rather than a substring, so this cannot match the search
-        // string in its own source and go on to compare a test against a
-        // struct — which is exactly what it did the day the impl moved.
-        let head = "\nimpl Default for Order {\n";
-        let at = source.find(head).expect("no Order default in this file");
-        let body = &source[at + 1..];
-        let end = body.find("\n}").expect("unterminated impl");
-        let lines: Vec<String> = body[..end]
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with("//"))
-            // The Python class holds a list a program appends to, which has
-            // its own type on that side; empty is empty on both.
-            .map(|l| l.replace("ListField::new()", "Vec::new()"))
-            // And the soft-dollar tier as one object, as the reference client
-            // holds it, where the Rust order holds its three strings flat.
-            .flat_map(|l| match l.as_str() {
-                "soft_dollar_tier: TierField::new()," => vec![
-                    "soft_dollar_tier_name: String::new(),".to_string(),
-                    "soft_dollar_tier_val: String::new(),".to_string(),
-                    "soft_dollar_tier_display_name: String::new(),".to_string(),
-                ],
-                _ => vec![l],
-            })
-            .collect();
-        assert!(
-            lines.iter().any(|l| l == "fn default() -> Self {"),
-            "read something that is not a Default impl: {:?}",
-            &lines[..lines.len().min(3)],
-        );
-        lines
-    }
-
-    /// A hundred and fifty-four defaults, written out on both surfaces because
+    /// A hundred and fifty-nine defaults, written out on both surfaces because
     /// one of them is a Python class and cannot borrow the other's. Written
     /// twice, they can drift, and an order placed through one surface would
     /// then reach the venue stating something an order placed through the
-    /// other does not. So they are compared rather than trusted.
+    /// other does not. So what each hands the engine is compared rather than
+    /// trusted: the Python class starts the figures the reference client
+    /// starts unset at that client's unset values, and reaches the engine as
+    /// the Rust order does.
     #[test]
-    fn both_surfaces_state_the_same_order_defaults() {
-        let rust = order_defaults(include_str!("../../types/model.rs"));
-        let python = order_defaults(include_str!("class_orders.rs"));
-        assert!(rust.len() > 150, "read {} lines, expected the whole block", rust.len());
-        assert_eq!(rust, python);
+    fn both_surfaces_hand_the_engine_the_same_order_defaults() {
+        let python = format!("{:?}", Order::default().to_api());
+        let rust = format!("{:?}", crate::types::model::Order::default());
+        assert_eq!(python, rust);
     }
 
     /// A TRAIL LIMIT states how far its limit sits from the trigger. Unset is

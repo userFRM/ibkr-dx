@@ -374,7 +374,8 @@ They accept no configuration payload.
 
 ## Connect options
 
-`set_connect_options` answers a caller that states options on `error`, under
+Python's `set_connect_options` (also `setConnectOptions`, and ibapi's
+`setConnectionOptions`; the Rust client has no such call) answers a caller that states options on `error`, under
 321. The reference client hands these to its gateway on the greeting for the
 gateway to read, and there is no gateway between this client and the venue.
 Stating none is stating nothing.

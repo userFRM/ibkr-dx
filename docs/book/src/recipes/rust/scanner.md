@@ -5,7 +5,7 @@ and print the top ten.
 
 ## What this shows
 
-- `req_scanner_subscription(req_id, instrument, location_code, scan_code, max_items, filters)`.
+- `req_scanner_subscription(req_id, instrument, location_code, scan_code, max_items, filters, scanner_setting_pairs)`, with `scanner_setting_pairs` `""` when there are none.
 - Filters as `TagValue` pairs. The tag names are the ones
   `req_scanner_parameters` publishes, for example `priceAbove` = `"5"` or
   `stkTypes` = `"inc:ETF"`. They are carried to the venue, not dropped.

@@ -62,6 +62,20 @@ def test_order_defaults():
     assert o.transmit is True
     assert o.what_if is False
 
+    # Where the reference client starts a figure unset, so does this one: a
+    # program written against it compares with its unset values.
+    from ibapi.order import Order as Reference
+    from ibkr_dx import UNSET_DOUBLE, UNSET_INTEGER
+
+    unset = [
+        name for name, value in vars(Reference()).items()
+        if type(value) in (int, float) and value in (UNSET_DOUBLE, UNSET_INTEGER)
+    ]
+    assert unset, "the reference client starts figures unset"
+    assert {name: getattr(o, name) for name in unset} == {
+        name: getattr(Reference(), name) for name in unset
+    }
+
 
 def test_order_kwargs():
     o = Order(action="BUY", total_quantity=100, order_type="LMT", lmt_price=150.50)

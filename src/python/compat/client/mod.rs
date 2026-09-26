@@ -53,6 +53,8 @@ pub struct EClient {
     /// (typically `self` in the `App(EWrapper, EClient)` pattern) until the
     /// cyclic collector clears it, which is how that pattern's cycle is broken.
     pub(crate) wrapper: RwLock<Option<Py<PyAny>>>,
+    /// What that wrapper's methods take, read once as `__init__` binds it.
+    declared: std::sync::OnceLock<Declared>,
     /// The callable belongs to this client so the collector sees its bound
     /// application. Reconnect credentials hold only a weak reference to it.
     code_provider: Mutex<Option<Arc<Py<PyAny>>>>,
@@ -334,6 +336,7 @@ impl EClient {
             auth_host: Mutex::new(None),
             logged_in_at: Mutex::new(None),
             wrapper: RwLock::new(None),
+            declared: std::sync::OnceLock::new(),
             code_provider: Mutex::new(None),
             shared: Mutex::new(None),
             control_tx: Mutex::new(None),
@@ -366,11 +369,16 @@ impl EClient {
     /// different wrapper is refused, since callbacks may already be on their
     /// way to the first.
     fn __init__(&self, wrapper: Py<PyAny>) -> PyResult<()> {
+        // Read before the guard is taken: reading it runs the caller's code.
+        let declared = Python::attach(|py| Declared::read(wrapper.bind(py)))?;
         // A refused `wrapper` is dropped on the way out, after the guard: what
         // its drop runs can reach back here, and would wait on this lock.
         let mut slot = self.wrapper.write().unwrap();
         match &*slot {
-            None => *slot = Some(wrapper),
+            None => {
+                let _ = self.declared.set(declared);
+                *slot = Some(wrapper);
+            }
             Some(bound) if bound.is(&wrapper) => {}
             Some(_) => return Err(pyo3::exceptions::PyTypeError::new_err("EClient already has a wrapper")),
         }
@@ -1190,18 +1198,87 @@ fn answered_by_the_base(py: Python<'_>, f: &Py<PyAny>, alias: &str) -> bool {
         .is_ok_and(|base| func.is(&base))
 }
 
+/// What a wrapper's methods take where that depends on the release of the
+/// reference client its program was written for. Read once, when `__init__`
+/// binds the wrapper.
+#[derive(Clone, Copy)]
+struct Declared {
+    /// How many arguments `error` is called with: five as the current reference
+    /// client calls it (`reqId, errorTime, errorCode, errorString,
+    /// advancedOrderRejectJson`), four as its releases before the time was
+    /// added do (no `errorTime`), three as the ones before the advanced reject
+    /// do (`reqId, errorCode, errorString`). Five for anything else, and for a
+    /// method that takes any number.
+    error_arity: usize,
+    /// Whether a charge goes to `commissionReport`, the reference client's name
+    /// for the callback before the fees were reported beside the commission:
+    /// the wrapper's class declares that name, and states nothing of its own
+    /// under either current one.
+    commission_report: bool,
+}
+
+impl Declared {
+    const CURRENT: Self = Self { error_arity: 5, commission_report: false };
+
+    fn read(wrapper: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = wrapper.py();
+        let error_arity = match wrapper.getattr("error") {
+            Ok(error) => positional_parameters(&error)?
+                .filter(|n| *n == 3 || *n == 4)
+                .unwrap_or(Self::CURRENT.error_arity),
+            Err(_) => Self::CURRENT.error_arity,
+        };
+        let class = wrapper.get_type();
+        let base = py.get_type::<super::wrapper::EWrapper>();
+        let the_callers = |name: &str| {
+            class.getattr(name).is_ok_and(|held| !base.getattr(name).is_ok_and(|ours| ours.is(&held)))
+        };
+        let commission_report = class.hasattr("commissionReport")?
+            && !the_callers("commission_and_fees_report")
+            && !the_callers("commissionAndFeesReport");
+        Ok(Self { error_arity, commission_report })
+    }
+}
+
+/// How many positional parameters a callable declares, `None` where it takes
+/// any number or states none that can be read.
+fn positional_parameters(f: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    let inspect = f.py().import("inspect")?;
+    let Ok(signature) = inspect.call_method1("signature", (f,)) else {
+        return Ok(None);
+    };
+    let kinds = inspect.getattr("Parameter")?;
+    let any_number = kinds.getattr("VAR_POSITIONAL")?;
+    let positional = [kinds.getattr("POSITIONAL_ONLY")?, kinds.getattr("POSITIONAL_OR_KEYWORD")?];
+    let mut n = 0;
+    for parameter in signature.getattr("parameters")?.call_method0("values")?.try_iter()? {
+        let kind = parameter?.getattr("kind")?;
+        if kind.eq(&any_number)? {
+            return Ok(None);
+        }
+        if positional.iter().any(|k| kind.eq(k).unwrap_or(false)) {
+            n += 1;
+        }
+    }
+    Ok(Some(n))
+}
+
 /// The reference client's spelling of a callback name: its words run together
 /// with each after the first capitalised. A field's is built the same way.
 pub(super) fn ibapi_name(snake: &str) -> String {
-    // Three it spells with its letters run together instead. Built the ordinary
-    // way `real_time_bar` is `realTimeBar`, which that client does not declare,
-    // so a wrapper written against it declares `realtimeBar`, nothing answers to
-    // the name built here, and the bar goes to this crate's own do-nothing
-    // rather than to the caller. Nothing is raised and nothing is logged.
+    // Those it spells otherwise: letters run together, or an acronym in
+    // capitals. Built the ordinary way `real_time_bar` is `realTimeBar`, which
+    // that client does not declare, so a wrapper written against it declares
+    // `realtimeBar`, nothing answers to the name built here, and the bar goes
+    // to this crate's own do-nothing rather than to the caller. Nothing is
+    // raised and nothing is logged.
     match snake {
         "real_time_bar" => return "realtimeBar".to_string(),
         "receive_fa" => return "receiveFA".to_string(),
         "replace_fa_end" => return "replaceFAEnd".to_string(),
+        "tick_efp" => return "tickEFP".to_string(),
+        "verify_message_api" => return "verifyMessageAPI".to_string(),
+        "verify_and_auth_message_api" => return "verifyAndAuthMessageAPI".to_string(),
         _ => {}
     }
     let mut out = String::with_capacity(snake.len());
@@ -1658,6 +1735,9 @@ impl EClient {
     ///
     /// The reference name is tried first and this client's name second, so a
     /// wrapper written against either is reached.
+    ///
+    /// A charge goes to `commissionReport` where the wrapper was read at
+    /// `__init__` as declaring that name and neither current one.
     pub(crate) fn callback<'py, A>(
         &self,
         py: Python<'py>,
@@ -1667,6 +1747,11 @@ impl EClient {
     where
         A: pyo3::call::PyCallArgs<'py> + Clone,
     {
+        let name = if name == "commission_and_fees_report" && self.declared.get().is_some_and(|d| d.commission_report) {
+            "commissionReport"
+        } else {
+            name
+        };
         call_named(py, &self.wrapper, name, args)
     }
 
@@ -1762,6 +1847,10 @@ impl EClient {
     /// states it under, as the reference client's wrapper is called. The class
     /// is asked rather than the object, so a wrapper answering any name it is
     /// asked for is called on `error`, as it always was.
+    ///
+    /// An `error` declared as an earlier release of the reference client calls
+    /// it is called that way, on `error` itself: with the advanced reject and
+    /// no time, or with neither.
     pub(crate) fn error_callback(
         &self,
         py: Python<'_>,
@@ -1770,17 +1859,24 @@ impl EClient {
         code: i64,
         msg: &str,
     ) -> PyResult<(&'static str, Py<pyo3::types::PyTuple>)> {
-        let wrapper = self.wrapper.read().unwrap().as_ref().map(|w| w.clone_ref(py));
-        let with_origin = match wrapper {
-            Some(w) => w.bind(py).get_type().hasattr("error_from")?,
-            None => false,
+        let arity = self.declared.get().map_or(Declared::CURRENT.error_arity, |d| d.error_arity);
+        let args = match arity {
+            3 => (origin.id(), code, msg).into_pyobject(py)?.unbind(),
+            4 => (origin.id(), code, msg, "").into_pyobject(py)?.unbind(),
+            _ => {
+                let wrapper = self.wrapper.read().unwrap().as_ref().map(|w| w.clone_ref(py));
+                let with_origin = match wrapper {
+                    Some(w) => w.bind(py).get_type().hasattr("error_from")?,
+                    None => false,
+                };
+                if with_origin {
+                    let origin = Py::new(py, super::class_reports::ErrorOrigin(origin))?;
+                    let args = (origin, error_time, code, msg, "").into_pyobject(py)?.unbind();
+                    return Ok(("error_from", args));
+                }
+                (origin.id(), error_time, code, msg, "").into_pyobject(py)?.unbind()
+            }
         };
-        if with_origin {
-            let origin = Py::new(py, super::class_reports::ErrorOrigin(origin))?;
-            let args = (origin, error_time, code, msg, "").into_pyobject(py)?.unbind();
-            return Ok(("error_from", args));
-        }
-        let args = (origin.id(), error_time, code, msg, "").into_pyobject(py)?.unbind();
         Ok(("error", args))
     }
 
@@ -1863,7 +1959,8 @@ mod tests {
     }
 
     /// A callback reaches the caller under the name the reference client gives
-    /// it, including the three that client spells with its letters run together.
+    /// it, including those that client spells with its letters run together or
+    /// with an acronym in capitals.
     ///
     /// Built by capitalising after each underscore, `real_time_bar` is
     /// `realTimeBar`. That client declares `realtimeBar`, so a wrapper written

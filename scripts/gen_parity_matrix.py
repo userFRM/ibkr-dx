@@ -318,6 +318,12 @@ def in_words(n: int) -> str:
         sys.path.pop(0)
 
 
+#: One call the reference clients name in different words, by the spelling-free
+#: form: ibapi's Python client writes `setConnectionOptions` where the TWS API's
+#: other clients, ib_async and this one write `setConnectOptions`.
+SAME_CALL = {"setconnectionoptions": "setconnectoptions"}
+
+
 def plain(name: str) -> str:
     """A name with its spelling taken off, so two clients can be compared.
 
@@ -325,9 +331,11 @@ def plain(name: str) -> str:
     Compared as written, a client was marked as missing a callback it has —
     which is the one thing a table like this must never do. What is left after
     the letters are lowered and everything else dropped is the same in all
-    three, and differs only where the clients genuinely named different things.
+    three, and differs only where the clients genuinely named different things,
+    or named one thing in different words (`SAME_CALL`).
     """
-    return "".join(ch for ch in name.lower() if ch.isalnum())
+    flat = "".join(ch for ch in name.lower() if ch.isalnum())
+    return SAME_CALL.get(flat, flat)
 
 
 def known(row, names) -> bool:
