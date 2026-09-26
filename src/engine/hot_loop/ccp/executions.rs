@@ -519,48 +519,6 @@ fn stated_execution(
     }
 }
 
-/// The update that says an order's state is no longer known. Emitted when the
-/// connection drops with it working, and again if the recovery does not
-/// account for it.
-pub(crate) fn uncertain_update(
-    order: &crate::types::Order,
-    cached: Option<crate::bridge::RichOrderInfo>,
-) -> crate::types::OrderUpdate {
-    crate::types::OrderUpdate {
-                order_id: order.order_id,
-                instrument: order.instrument,
-                status: crate::types::OrderStatus::Uncertain,
-                filled_qty: qty_to_f64(order.filled),
-                // A fractional order deliberately tracks `qty` as zero — the
-                // decimal it was submitted with lives only in the enriched
-                // record. Both quantity fields are floating point end to
-                // end — the dispatchers already hand them to the callback
-                // as f64 — so the fraction itself survives exactly here
-                // rather than being rounded to a whole unit.
-                remaining_qty: {
-                    let outstanding = |total: f64| (total - qty_to_f64(order.filled)).max(0.0);
-                    if order.qty > 0 {
-                        outstanding(qty_to_f64(order.qty))
-                    } else if let Some(c) = cached.as_ref() {
-                        outstanding(c.order.total_quantity)
-                    } else {
-                        // No exec report has reached this order yet, so
-                        // neither its quantity nor a fill is known — both
-                        // arrive on the same message — and there is no
-                        // honest quantity to give. ibapi's own "value not
-                        // set" sentinel, rather than a guessed number.
-                        f64::MAX
-                    }
-                },
-                // Nothing here states what it paid, and this update exists to
-                // say what is no longer known.
-                avg_price: 0,
-                perm_id: cached.as_ref().map(|c| c.order.perm_id).unwrap_or(0),
-                parent_id: cached.as_ref().map(|c| c.order.parent_id).unwrap_or(0),
-                timestamp_ns: 0,
-    }
-}
-
 /// Every tag the execution-report handler reads.
 ///
 /// Derived from the handler itself so it cannot fall behind as fields are

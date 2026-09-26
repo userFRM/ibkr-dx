@@ -723,10 +723,9 @@ impl Context {
     /// Mark all live open orders as Uncertain (auth disconnect — status may have
     /// changed).
     ///
-    /// The engine stops believing these statuses at this point and the API
-    /// layer went on reporting them, so `req_open_orders` kept asserting a
-    /// status the engine no longer had. Pair with `uncertain_orders`
-    /// to tell the application.
+    /// The engine stops believing these statuses at this point, and what
+    /// names one of these orders waits for the recovery that states it again.
+    /// The caller keeps the status it was last given, as a gateway leaves it.
     pub fn mark_orders_uncertain(&mut self) {
         for order in self.open_orders.values_mut() {
             match order.status {

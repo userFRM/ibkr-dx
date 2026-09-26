@@ -182,7 +182,7 @@ pub(crate) fn drain_and_send_orders(
         // it, and the pre-write guard refuses the rest before they touch the
         // wire. Those are not in doubt the way the failed one is: they were
         // never sent, so they go back to wait for the reconnect rather than
-        // being reported as orders of unknown state.
+        // being marked as orders of unknown state.
         if *left == 0 || conn.write_failed() {
             unsent.push(order_req);
             continue;
@@ -267,7 +267,7 @@ pub(crate) fn drain_and_send_orders(
                     shared.orders.push_order_inactive(
                         order_id, crate::types::model::OrderOp::Place, ORDER_NOT_FOUND_ERROR_CODE, refusal,
                     );
-                    report_uncertain(context, shared, event_tx, order_id);
+                    context.set_order_status_forced(order_id, OrderStatus::Uncertain);
                     continue;
                 }
                 send_order_ex(
@@ -292,7 +292,7 @@ pub(crate) fn drain_and_send_orders(
                         shared.orders.push_order_inactive(
                             id, crate::types::model::OrderOp::Place, ORDER_NOT_FOUND_ERROR_CODE, refusal.clone(),
                         );
-                        report_uncertain(context, shared, event_tx, id);
+                        context.set_order_status_forced(id, OrderStatus::Uncertain);
                     }
                     continue;
                 }
@@ -502,7 +502,7 @@ pub(crate) fn drain_and_send_orders(
                 let mut failed = false;
                 for oid in open_ids {
                     if failed {
-                        report_uncertain(context, shared, event_tx, oid);
+                        context.set_order_status_forced(oid, OrderStatus::Uncertain);
                         continue;
                     }
                     match send_cancel(conn, context, shared, account_id, oid, &stated) {
@@ -511,7 +511,7 @@ pub(crate) fn drain_and_send_orders(
                             log::error!(
                                 "Failed to cancel order {oid}: {e} — its state is not known",
                             );
-                            report_uncertain(context, shared, event_tx, oid);
+                            context.set_order_status_forced(oid, OrderStatus::Uncertain);
                             failed = true;
                         }
                     }
@@ -1053,7 +1053,7 @@ pub(crate) fn drain_and_send_orders(
                 // wire never confirmed — an entry with exits that may not
                 // exist, which is worse than an entry known to be uncertain.
                 for id in written {
-                    report_uncertain(context, shared, event_tx, id);
+                    context.set_order_status_forced(id, OrderStatus::Uncertain);
                 }
             }
         }
@@ -1267,30 +1267,6 @@ pub(crate) fn refuse_what_is_left(
             ),
         );
     }
-}
-
-/// Mark an order's state unknown and announce it.
-///
-/// Reports the order as this session holds it. Instrument 0 is a valid
-/// instrument id, so a zeroed update names another contract's order.
-fn report_uncertain(
-    context: &mut Context,
-    shared: &Arc<SharedState>,
-    event_tx: &Option<crate::engine::hot_loop::EventSink>,
-    order_id: crate::types::OrderId,
-) {
-    if order_id == 0 {
-        return;
-    }
-    context.set_order_status_forced(order_id, OrderStatus::Uncertain);
-    let Some(order) = context.order(order_id).copied() else { return };
-    let update = crate::engine::hot_loop::ccp::executions::uncertain_update(
-        &order,
-        shared.orders.get_order_info(order_id),
-    );
-    shared.orders.push_order_update(update);
-    // Announced on the event channel as well as recorded.
-    crate::engine::hot_loop::emit(event_tx, crate::bridge::Event::OrderUpdate(update));
 }
 
 fn fix_side(side: Side) -> &'static str {

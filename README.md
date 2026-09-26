@@ -1000,6 +1000,11 @@ account — see [Evidence](https://github.com/userFRM/ibkr-dx/blob/main/docs/evi
 It is rebuilt on its own and the subscriptions it was serving are asked for
 again, under the request the caller made. Connections are independent: a quote
 feed reconnecting does not disturb an order in flight.
+
+When the trading connection drops, the caller hears 1100, and 1102 once it is
+back. Working orders keep the status they were last given: as on a gateway,
+nothing is said of them at the drop, and the venue restates each one after the
+reconnect. An order the venue does not restate keeps its last status.
 </details>
 
 <details>

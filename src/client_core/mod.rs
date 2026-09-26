@@ -3836,12 +3836,14 @@ impl ClientCore {
             }
         }
 
-        // The orders whose status this client has withdrawn. A disconnect marks
-        // a tracked order unknown without touching the cached view, so the union
-        // below re-imported it as working for the whole outage, contradicting
-        // the callback the caller had already been given. Scoped to
-        // withdrawn statuses so the cache can still carry a genuinely newer one
-        // — a terminal local status the cache has since superseded still wins.
+        // The orders whose status this client has withdrawn: the venue stated
+        // one this client cannot name, and it was passed on as unknown. The
+        // cached view can still read working, and the union below re-imported
+        // it as such, contradicting the callback the caller had already been
+        // given. Scoped to withdrawn statuses so the cache can still carry a
+        // genuinely newer one — a terminal local status the cache has since
+        // superseded still wins. An order the engine holds in doubt across a
+        // drop is not one of these: it keeps the status it was last given.
         let status_withdrawn: std::collections::HashSet<u64> = self.open_orders.lock().unwrap()
             .iter()
             .filter(|(_, o)| o.status == "Unknown")

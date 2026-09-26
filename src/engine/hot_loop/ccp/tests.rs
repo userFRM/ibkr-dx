@@ -87,11 +87,17 @@ fn the_sweep_is_not_shortened_by_a_record_that_precedes_every_order() {
     );
 }
 
-/// `Uncertain` promises the caller a reconciliation when the reconnect
-/// completes. Nothing completed it, so an order the recovery push left out
-/// waited on a message that was never coming.
+/// A drop says nothing of the orders working across it, and neither does the
+/// recovery that follows.
+///
+/// A gateway restates no working order when its connection to the venue goes:
+/// the caller hears 1100, and the venue's naming after the reconnect restates
+/// each order. Each was announced as unknown here instead — a status no gateway
+/// sends, and one a program keeping its orders by status reads as no longer
+/// active, so every drop read as its working orders having stopped. An order
+/// the recovery did not name was announced so again, and stayed so.
 #[test]
-fn the_recovery_reports_the_orders_it_did_not_account_for() {
+fn a_drop_and_the_recovery_after_it_say_nothing_of_the_working_orders() {
     let mut ccp = CcpState::new();
     let mut context = Context::new();
     let shared = SharedState::new();
@@ -100,25 +106,21 @@ fn the_recovery_reports_the_orders_it_did_not_account_for() {
         7, instrument, crate::types::Side::Buy, 100 * crate::types::QTY_SCALE,
         150 * crate::types::PRICE_SCALE, b'2', b'0', 0,
     ));
-    context.mark_orders_uncertain();
+    context.set_order_status_forced(7, crate::types::OrderStatus::Submitted);
 
-    // Still inside the grace: the push may yet speak for it.
-    ccp.recovery_sweep_at = Some(Instant::now() + Duration::from_secs(30));
-    ccp.sweep_recovery(&mut context, &shared, &None);
-    assert!(shared.orders.drain_order_updates().is_empty(), "nothing is due yet");
-
-    ccp.recovery_sweep_at = Some(Instant::now() - Duration::from_secs(1));
-    ccp.sweep_recovery(&mut context, &shared, &None);
-    let updates = shared.orders.drain_order_updates();
-    assert_eq!(updates.len(), 1, "the stranded order is reported");
-    assert_eq!(updates[0].order_id, 7);
+    ccp.handle_disconnect(&mut None, &mut context, &shared, &None);
+    assert!(shared.orders.drain_order_updates().is_empty(), "nothing is said of it at the drop");
     assert_eq!(
-        updates[0].status, crate::types::OrderStatus::Uncertain,
-        "and reported as what it is — unknown, not a fate the engine invented",
+        context.order(7).map(|o| o.status), Some(crate::types::OrderStatus::Uncertain),
+        "while the engine holds it in doubt until the venue names it again",
     );
 
-    ccp.sweep_recovery(&mut context, &shared, &None);
-    assert!(shared.orders.drain_order_updates().is_empty(), "one report per recovery");
+    ccp.recovery_sweep_at = Some(Instant::now() - Duration::from_secs(1));
+    ccp.sweep_recovery(&context);
+    assert!(
+        shared.orders.drain_order_updates().is_empty(),
+        "nor when the recovery is over without naming it",
+    );
 }
 
 fn position_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {

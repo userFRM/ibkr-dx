@@ -227,10 +227,10 @@ fn disconnect_during_active_subscription() {
 }
 
 #[test]
-fn disconnect_during_pending_order_uncertain_status() {
+fn a_status_this_client_cannot_name_is_reported_as_unknown() {
     let (client, _rx, shared) = test_client();
 
-    // The order was pending at the disconnect
+    // The venue stated a status this client has no name for.
     shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Uncertain,
         filled_qty: 0.0, remaining_qty: 100.0, avg_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,

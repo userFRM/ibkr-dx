@@ -910,7 +910,7 @@ impl HotLoop {
                     }
                 }
             }
-            self.ccp.sweep_recovery(&mut self.context, &self.shared, &self.event_tx);
+            self.ccp.sweep_recovery(&self.context);
             self.ccp.sweep_pending_matching_symbols(&self.shared);
             self.ccp.sweep_pending_advisor(&self.shared);
             self.ccp.sweep_pending_schedule_pairs(&mut self.ccp_conn, &self.shared, &self.event_tx, &mut self.hb);

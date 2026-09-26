@@ -4050,9 +4050,12 @@ impl CcpState {
         }
         // The next connection has a replay of its own to hold behind.
         self.replay_hold_until = None;
-        // The engine stops believing these statuses here, and said so to
-        // nobody — so the API layer went on reporting the pre-disconnect
-        // status and `req_open_orders` kept asserting it.
+        // The engine stops believing these statuses here, and holds back what
+        // names them until the venue has named them again. The caller is told
+        // nothing about them: a gateway restates no working order at a drop,
+        // the caller hears 1100, and the venue's naming restates each one
+        // after the reconnect. Announced as unknown, a status no gateway
+        // sends, every working order stopped reading as active on each drop.
         context.mark_orders_uncertain();
         // And what the account holds, for the same reason and at the same
         // moment. Marked only when the next connection arrived, the flag said
@@ -4061,11 +4064,6 @@ impl CcpState {
         // holds was answered at once from the pre-drop book with nothing to
         // say the venue had not been heard from since.
         for (_, portfolio) in shared.account_portfolios() { portfolio.account_download_is_pending(); }
-        for order in context.uncertain_orders() {
-            let update = executions::uncertain_update(&order, shared.orders.get_order_info(order.order_id));
-            shared.orders.push_order_update(update);
-            emit(event_tx, Event::OrderUpdate(update));
-        }
         self.fail_pending_lookups(shared, event_tx);
         // Don't emit Event::Disconnected — auto-reconnect handles CCP drops
         // transparently.
@@ -4238,20 +4236,15 @@ impl CcpState {
         }
     }
 
-    /// Report the orders the recovery push did not account for.
+    /// Log the orders the recovery push did not account for.
     ///
     /// Their status stays Uncertain: the engine watched the connection die
     /// with them working and has been told nothing since, so it does not know
     /// whether they filled, were pulled, or are still resting. What it does
-    /// know — and what it had no way to say before — is that the recovery is
-    /// over and they were not in it. A caller waiting on the reconciliation
-    /// that `Uncertain` promises was otherwise waiting on nothing.
-    pub(crate) fn sweep_recovery(
-        &mut self,
-        context: &mut Context,
-        shared: &SharedState,
-        event_tx: &Option<EventSink>,
-    ) {
+    /// know is that the recovery is over and they were not in it. The caller
+    /// is told nothing new, as a gateway tells it nothing: the order keeps
+    /// the last status it was given until the venue states another.
+    pub(crate) fn sweep_recovery(&mut self, context: &Context) {
         match self.recovery_sweep_at {
             Some(at) if Instant::now() >= at => self.recovery_sweep_at = None,
             _ => return,
@@ -4267,11 +4260,6 @@ impl CcpState {
             stranded.len(),
             stranded.iter().map(|o| o.order_id).collect::<Vec<_>>(),
         );
-        for order in stranded {
-            let update = executions::uncertain_update(&order, shared.orders.get_order_info(order.order_id));
-            shared.orders.push_order_update(update);
-            emit(event_tx, Event::OrderUpdate(update));
-        }
     }
 
     pub(crate) fn reconnect(

@@ -500,10 +500,11 @@ fn every_leg_a_bracket_writes_is_recorded_as_this_client_s_own() {
 
 /// A bracket is three messages and one outcome. All three are written
 /// whatever any one of them returns, so a failure leaves every leg in a
-/// state the wire never confirmed — and a child still reported as working
-/// is an entry whose exits may not exist.
+/// state the wire never confirmed — and a child still held as working is an
+/// entry whose exits may not exist. The caller is told nothing of it, as a
+/// gateway tells it nothing when its connection goes: the recovery states it.
 #[test]
-fn a_bracket_whose_write_failed_leaves_no_leg_reported_as_working() {
+fn a_bracket_whose_write_failed_leaves_no_leg_held_as_working() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (_peer, _) = listener.accept().unwrap();
@@ -538,24 +539,21 @@ fn a_bracket_whose_write_failed_leaves_no_leg_reported_as_working() {
         );
     }
 
-    let announced: Vec<u64> = rx
+    let announced: Vec<_> = rx
         .try_iter()
-        .filter_map(|e| match e {
-            crate::bridge::Event::OrderUpdate(u)
-                if u.status == OrderStatus::Uncertain => Some(u.order_id),
-            _ => None,
-        })
+        .filter(|e| matches!(e, crate::bridge::Event::OrderUpdate(_)))
         .collect();
-    for id in [10u64, 11, 12] {
-        assert!(announced.contains(&id), "leg {id} was not announced");
-    }
+    assert!(announced.is_empty(), "no leg is announced: {announced:?}");
+    assert!(shared.orders.drain_order_updates().is_empty(), "nor recorded for the caller");
 }
 
 /// A write that fails has not established that the broker has nothing —
 /// the transport says as much of TLS. Calling it a rejection invited a
-/// resubmission of an order that may be working.
+/// resubmission of an order that may be working, and so did calling it
+/// unknown, a status no gateway sends: the order keeps the status it was
+/// last given until the recovery states it.
 #[test]
-fn an_order_whose_write_failed_is_unknown_rather_than_rejected() {
+fn an_order_whose_write_failed_is_neither_rejected_nor_announced() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (_peer, _) = listener.accept().unwrap();
@@ -601,26 +599,16 @@ fn an_order_whose_write_failed_is_unknown_rather_than_rejected() {
         false,
         &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())), &mut 64,);
 
-    // Both deliveries, because the event channel is documented as a second
-    // delivery of everything rather than a lesser one — and an order whose
-    // state is no longer known is the last thing to deliver only once.
-    let events: Vec<_> = rx.try_iter().collect();
-    assert!(
-        events.iter().any(|e| matches!(e, crate::bridge::Event::OrderUpdate(u)
-            if u.order_id == 42 && u.status == crate::types::OrderStatus::Uncertain)),
-        "a caller reading events is told too: {events:?}",
-    );
-
+    // Neither delivery: the event channel is a second delivery of the same
+    // records, not a lesser one.
+    let events: Vec<_> = rx.try_iter()
+        .filter(|e| matches!(e, crate::bridge::Event::OrderUpdate(_)))
+        .collect();
+    assert!(events.is_empty(), "a caller reading events is told nothing: {events:?}");
     let updates = shared.orders.drain_order_updates();
     assert!(
-        updates
-            .iter()
-            .any(|u| u.order_id == 42 && u.status == crate::types::OrderStatus::Uncertain),
-        "the caller is told, and told it is unknown: {updates:?}",
-    );
-    assert!(
-        !updates.iter().any(|u| u.status == crate::types::OrderStatus::Rejected),
-        "not that the broker refused it: {updates:?}",
+        updates.is_empty(),
+        "nor is the caller told it is unknown, or that the broker refused it: {updates:?}",
     );
     assert!(
         context.order(42).is_some(),
@@ -3444,7 +3432,7 @@ fn a_benchmark_peg_states_no_price_on_tag_44() {
     assert_eq!(tag("99=").as_deref(), Some("149"), "the starting price keeps its own tag: {msg}");
 }
 
-/// A cancel-all sends one frame per order and reports one outcome per order.
+/// A cancel-all sends one frame per order and holds one outcome per order.
 /// `CancelAll` carries no order id of its own, so a single result for the set
 /// cannot name the order whose cancel failed.
 #[test]
@@ -3476,15 +3464,6 @@ fn a_cancel_all_names_every_order_whose_cancel_did_not_leave() {
             Some(OrderStatus::Uncertain),
             "order {id} was not cancelled and is not known to be working",
         );
-    }
-    let told = shared.orders.drain_order_updates();
-    for id in [41u64, 42, 43] {
-        let update = told.iter().find(|u| u.order_id == id).expect("every order is reported");
-        assert_eq!(update.status, OrderStatus::Uncertain);
-        // Instrument 0 is a valid instrument id, so a zeroed update names
-        // another contract's order.
-        assert_eq!(update.instrument, instrument, "the contract it is on");
-        assert_eq!(update.remaining_qty, 100.0, "and what is still outstanding on it");
     }
 }
 
