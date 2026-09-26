@@ -765,23 +765,21 @@ impl HotLoop {
             let definition = attached_orders::contract_definition(&self.shared, &p.contract);
             let legs = attached_orders::confirmed_legs(&self.shared, &p.contract);
             let combo = crate::client_core::attached_combos::attached_combo(&self.shared, &p.contract).and_then(|combo| combo.frame);
-            let decorate = |request: &mut OrderRequest, api_id: i64| {
-                if let Some(attrs) = request.attrs_mut() {
-                    if let Some(legs) = &legs { attrs.combo_legs.clone_from(legs); }
-                    let attached = attrs.attached_mut();
-                    attached.contract_id = definition.as_ref().map(|d| i64::from(d.con_id));
-                    attached.combo.clone_from(&combo);
-                    attached.api_identity = Some((api_id, p.order.client_id));
-                }
-            };
-            decorate(&mut command, api_id);
+            if let Some(attrs) = command.attrs_mut() {
+                if let Some(legs) = &legs { attrs.combo_legs.clone_from(legs); }
+                let attached = attrs.attached_mut();
+                attached.contract_id = definition.as_ref().map(|d| i64::from(d.con_id));
+                attached.combo.clone_from(&combo);
+            }
             if let (Some(prepared), Some(attrs)) = (&prepared, command.attrs_mut()) {
                 attrs.attached_mut().family_key.clone_from(&prepared.parent_family_key);
             }
         }
         if let Some(attrs) = command.attrs_mut() {
             attrs.parent_id = self.intake.attached.wire_order_id(p.order.parent_id).unwrap_or(p.order.parent_id as u64);
-            if api_id != order_id as i64 { attrs.attached_mut().api_identity = Some((api_id, p.order.client_id)); }
+            // The program's order and client, which a gateway states on every
+            // order a program places.
+            attrs.attached_mut().api_identity = Some((api_id, p.order.client_id));
         }
         self.remember_attachment(order_id, api_id, p.order.client_id, &command, p.order.what_if);
         // The caller's side records the order before anything the venue says

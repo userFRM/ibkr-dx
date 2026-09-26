@@ -4106,11 +4106,11 @@ fn a_preview_states_everything_the_order_states() {
         K::StpPrt { stop_price: 99 * scale },
         K::SnapMid { offset: scale / 100 },
     ];
-    // The sending time is stamped per message, so the two differ in tag 52 and
-    // 60 whatever else happens; everything the order describes is compared.
+    // The sending time is stamped per message, so the two differ in tag 52
+    // whatever else happens; everything the order describes is compared.
     let described = |msg: &str| -> Vec<String> {
         msg.split('\u{1}')
-            .filter(|f| !f.starts_with("52=") && !f.starts_with("60=")
+            .filter(|f| !f.starts_with("52=")
                 && !f.starts_with("9=") && !f.starts_with("10=") && !f.starts_with("6091="))
             .map(str::to_string)
             .collect()
@@ -5544,7 +5544,7 @@ mod as_a_gateway_sends_it {
             let _ = tif;
             placed(kind, attrs, &[])
                 .split('\u{1}')
-                .filter(|f| !f.starts_with("52=") && !f.starts_with("60=") && !f.starts_with("10=") && !f.starts_with("9="))
+                .filter(|f| !f.starts_with("52=") && !f.starts_with("10=") && !f.starts_with("9="))
                 .collect::<Vec<_>>()
                 .join("|")
         };

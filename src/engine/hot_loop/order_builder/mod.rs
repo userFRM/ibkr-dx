@@ -343,6 +343,11 @@ pub(crate) fn drain_and_send_orders(
                 };
                 let identity: Vec<(u32, &str)> =
                     identity.iter().map(|(t, v)| (*t, v.as_str())).collect();
+                // And the program's order and client on each leg, as a gateway
+                // states them on every order a program places.
+                let client = shared.orders.api_client_id();
+                let [parent_numbers, tp_numbers, sl_numbers] =
+                    [parent_id, tp_id, sl_id].map(|id| program_identity(id as i64, client));
 
                 // 1. Parent order: limit entry
                 context.insert_order(crate::types::Order::new(
@@ -394,7 +399,6 @@ pub(crate) fn drain_and_send_orders(
                     (40, "2"), // Limit
                     (44, &entry_str),
                     (59, "0"), // DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
@@ -403,6 +407,7 @@ pub(crate) fn drain_and_send_orders(
                     (6122, origin_code(0)),
                 ];
                 parent_fields.extend_from_slice(&identity);
+                parent_fields.extend(parent_numbers.iter().map(|(t, v)| (*t, v.as_str())));
                 let parent_sent = conn.send_fix(&parent_fields);
 
                 // 2. Take-profit child: limit exit, linked to parent, in OCA group
@@ -432,7 +437,6 @@ pub(crate) fn drain_and_send_orders(
                     (40, "2"), // Limit
                     (44, &tp_price_str),
                     (59, "1"), // GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
@@ -444,6 +448,7 @@ pub(crate) fn drain_and_send_orders(
                     (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3
                 ];
                 tp_fields.extend_from_slice(&identity);
+                tp_fields.extend(tp_numbers.iter().map(|(t, v)| (*t, v.as_str())));
                 let tp_sent = conn.send_fix(&tp_fields);
 
                 // 3. Stop-loss child: stop exit, linked to parent, in OCA group
@@ -469,7 +474,6 @@ pub(crate) fn drain_and_send_orders(
                     (40, "3"), // Stop
                     (99, &sl_price_str),
                     (59, "1"), // GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
@@ -481,6 +485,7 @@ pub(crate) fn drain_and_send_orders(
                     (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3
                 ];
                 sl_fields.extend_from_slice(&identity);
+                sl_fields.extend(sl_numbers.iter().map(|(t, v)| (*t, v.as_str())));
                 parent_sent.and(tp_sent).and(conn.send_fix(&sl_fields))
             }
             OrderRequest::Cancel { order_id, stated } => {
@@ -1269,6 +1274,17 @@ pub(crate) fn refuse_what_is_left(
     }
 }
 
+/// The program's order and client (6121, 6119), which a gateway states on
+/// every order a program places. A gateway's order number is 32 bits wide, so
+/// a number past that, as this client numbers the previews it asks for on its
+/// own account, is not one it states.
+fn program_identity(order_id: i64, client_id: i32) -> Vec<(u32, String)> {
+    if i32::try_from(order_id).is_err() {
+        return Vec::new();
+    }
+    vec![(6121, order_id.to_string()), (6119, client_id.to_string())]
+}
+
 fn fix_side(side: Side) -> &'static str {
     match side {
         Side::Buy => "1",
@@ -1557,14 +1573,13 @@ fn send_order_ex(
     context
         .order_destination
         .insert(order_id, (sec_type_str.clone(), destination.clone()));
-    let now = chrono_free_timestamp().to_string();
     let tif_byte = [tif];
     let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0");
     let trail_as_t = trail_as_t(shared);
 
     let mut fields: Vec<(u32, String)> = vec![
         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
-        (fix::TAG_SENDING_TIME, now.clone()),
+        (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
         (11, format!("{order_id}.{ver}")),
         (1, account_for(attrs, account_id).to_string()),
         (55, symbol),
@@ -1576,14 +1591,12 @@ fn send_order_ex(
     push_type_and_prices(&mut fields, &kind, trail_as_t);
 
     fields.push((59, tif_str.to_string()));
-    fields.push((60, now));
     fields.push((167, sec_type_str.clone()));
     let attached = attrs.attached.as_deref();
     push_contract_identity(&mut fields, context, instrument, attached.and_then(|held| held.contract_id));
     if attached.is_some_and(|held| held.combo.is_some()) { fields.retain(|(tag, _)| *tag != 231); }
     if let Some((order_id, client_id)) = attached.and_then(|held| held.api_identity) {
-        fields.push((6121, order_id.to_string()));
-        fields.push((6119, client_id.to_string()));
+        fields.extend(program_identity(order_id, client_id));
     }
     // Who placed the order. Every order states it, and a cancel and a market
     // data subscription already did; a new order was the one message that left

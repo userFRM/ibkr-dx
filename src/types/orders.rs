@@ -1389,8 +1389,8 @@ pub struct DeltaNeutralContractSpec {
 #[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AttachedAttrs {
-    /// The member's API order and client (6121, 6119), where they differ
-    /// from its venue number.
+    /// The program's order and client (6121, 6119), which a gateway states on
+    /// every order a program places.
     pub api_identity: Option<(i64, i32)>,
     /// The contract confirmed for the family (6008).
     pub contract_id: Option<i64>,

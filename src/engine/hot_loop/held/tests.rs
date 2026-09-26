@@ -513,6 +513,32 @@ fn an_orders_client_id_does_not_change_the_session_identity() {
     }
 }
 
+/// Every order a program places states the program's order and client, and no
+/// transact time, as a gateway states every order a program places: one placed
+/// alone and each leg of a bracket.
+#[test]
+fn every_order_a_program_places_states_its_order_and_client_and_no_transact_time() {
+    let (mut hl, shared, tx, mut peer) = with_trading();
+    shared.orders.set_replay_done();
+    shared.orders.set_api_client_id(7);
+    tx.send(placement(5, spy(), 0, true)).unwrap();
+    tx.send(ControlCommand::Bracket(Box::new(crate::types::Bracket {
+        contract: spy(), parent_id: 20, side: crate::types::Side::Buy, quantity: 1.0,
+        entry: 100.0, take_profit: 110.0, stop_loss: 90.0,
+    }))).unwrap();
+    hl.poll_once();
+    hl.poll_once();
+    let wire = on_the_wire(&mut peer);
+    let field = |order: &str, tag: &str| {
+        order.split('|').find_map(|f| f.strip_prefix(tag)).map(str::to_string)
+    };
+    let stated: Vec<_> = wire.split("|35=D|").skip(1)
+        .map(|order| (field(order, "6121="), field(order, "6119="), field(order, "60=")))
+        .collect();
+    let program = |id: &str| (Some(id.to_string()), Some("7".to_string()), None);
+    assert_eq!(stated, [program("5"), program("20"), program("21"), program("22")], "{wire}");
+}
+
 /// A scan's text remains on its request while the venue names the contract,
 /// and scans of that contract then take their turns under that name.
 #[test]

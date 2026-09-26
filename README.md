@@ -1064,8 +1064,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,196 | No |
-| Python | 1,191 | No |
+| Rust, unit and integration | 3,202 | No |
+| Python | 1,190 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 124 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

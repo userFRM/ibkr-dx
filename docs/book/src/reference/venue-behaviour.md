@@ -395,6 +395,12 @@ An order the session holds under that ID is modified as usual. Another client's
 working orders raise nothing here. Previews are neither counted nor refused
 against the saved counter.
 
+Every order a program places states the program's order ID and client ID, as a
+gateway states them on every order a program places, and no transact time,
+which a gateway does not state. An order ID past what a gateway carries, a
+signed 32-bit number, is not stated; this client numbers the previews it asks
+for on its own account past it.
+
 `next_valid_id` states a floor; it does not reserve it. Programs sharing an
 account, client ID and file should use `next_order_id()` for each allocation
 rather than incrementing separate counters from that callback. The file does

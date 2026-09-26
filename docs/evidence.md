@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 86. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 159. 128 are sent; 23 are taken and not sent, as a gateway sends nothing for them on the orders this client places; 1 is not carried by this client and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | every canonical call and callback is on both, with the same status on each; `scripts/conformance.py --compare` holds 10 server responses to the same answer on both |
-| Tests | 4,387 offline, and 184 more that live in the suites run against a broker session |
+| Tests | 4,392 offline, and 184 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -72,7 +72,7 @@ reply needs an advisor account to see, and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 3,196 | No |
+| Rust unit and integration | 3,202 | No |
 | Rust, live | 9 | Yes |
 | Python | 1,191 | No |
 | Python, live | 124 | Yes |
@@ -377,4 +377,6 @@ pricing. An order is stated to a program as a gateway states it: nothing while
 the venue has said nothing — a market-on-close order in regular hours draws no
 report until it is withdrawn — nor as a cancel goes out, and, asked for, with
 its status after it, under its type's own name, on the account it went out
-for, with the number it went out under as its permanent id.
+for, with the number it went out under as its permanent id. Every order states
+the program's order and client IDs, as a gateway states them, and no transact
+time.
