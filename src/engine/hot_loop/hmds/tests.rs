@@ -516,21 +516,26 @@ fn folded_and_answered(
         .expect("and the bars once they are in")
 }
 
-/// One complete page of bars, a bar at each stamp given at the close given,
-/// and the step the answer states where it states one.
-fn page_of_bars(query_id: &str, bars: &[(&str, f64)], step: Option<&str>) -> Vec<u8> {
+/// One complete page of bars, a bar at each stamp given at the close given —
+/// a stamp `from/to` states the day a bar ends on as well — the session opens
+/// given by their day, and the step the answer states where it states one.
+fn page_of_bars(query_id: &str, bars: &[(&str, f64)], opens: &[&str], step: Option<&str>) -> Vec<u8> {
+    let opens: String = opens.iter()
+        .map(|day| format!("<Open><time>{day}-13:30:00</time><refDate>{day}</refDate></Open>"))
+        .collect();
     let bars: String = bars.iter().map(|(at, close)| {
         // A bar of a day is dated, and a shorter one timed.
+        let (at, end) = at.split_once('/').map_or((*at, String::new()), |(at, to)| (at, format!("<endDate>{to}</endDate>")));
         let stamp = if at.contains('-') { "time" } else { "date" };
         format!(
-            "<Bar><{stamp}>{at}</{stamp}><open>{close}</open><close>{close}</close>\
+            "<Bar><{stamp}>{at}</{stamp}>{end}<open>{close}</open><close>{close}</close>\
              <high>{close}</high><low>{close}</low><weightedAvg>{close}</weightedAvg>\
              <volume>100</volume><count>5</count></Bar>",
         )
     }).collect();
     let step = step.map_or(String::new(), |s| format!("<approxStep>{s}</approxStep>"));
     let xml = format!(
-        "<ResultSetBar><id>{query_id}</id><eoq>true</eoq><tz>US/Eastern</tz>{step}<Events>{bars}\
+        "<ResultSetBar><id>{query_id}</id><eoq>true</eoq><tz>US/Eastern</tz>{step}<Events>{opens}{bars}\
          </Events></ResultSetBar>",
     );
     let mut msg = Vec::new();
@@ -571,7 +576,33 @@ fn page_of_bars(query_id: &str, bars: &[(&str, f64)], step: Option<&str>) -> Vec
 /// - A request that ends before the only id it could be asked under began is
 ///   answered that nothing is there, and nothing is asked.
 /// - A stretch answered with no bar ends the series all the same.
-/// - Bars of a week are asked whole under the caller's id.
+/// - Eight weeks along two ids and a split on the Wednesday of the second
+///   week: the new id's stretch is split at the split, the newer part asked
+///   from its day and the older to it, and the old id's to the day the new one
+///   began. One week is in once the newest answers, so seven are still wanted,
+///   then five; the last is cut at eight weeks back, the nineteenth of April.
+///   Every week that ends before the split, or that starts in its week and
+///   ends on its day, is halved; and the two parts of the split's week are
+///   joined into one bar, which opens on the Monday at the older part's open
+///   and closes at the newer part's close and end, with the higher high, the
+///   lower low, the volume and the count of both, and the average weighted by
+///   volume: (55 x 200 + 60 x 100) / 300.
+/// - Four weeks and a split on a Friday: a week the venue dates by its day and
+///   the Saturday after it ends on that Friday on the exchange's clock, so the
+///   split's own day, the first on the new scale, is put on the old one with
+///   the rest of its week, as a gateway puts it, before the two parts are
+///   joined.
+/// - Three months and a split on the fifteenth of May: a month is counted as
+///   thirty-one days, so two are in once the newest answers and one is still
+///   wanted, asked as one month and cut at ninety-three days back, the
+///   twenty-seventh of March; the two parts of May are joined on its first.
+/// - Four weeks and a split whose day cannot be read: nothing is split at it,
+///   and the fold refuses it, as it refuses it on a series of days.
+/// - Thirty days along two ids where the newest answer states a session open
+///   with no bar on the fourth of June, and one on the seventh beside a bar:
+///   four days are in, not three, so twenty-six are still wanted, asked as
+///   thirty-seven calendar days. An open the answer states before the day the
+///   stretch began is not counted.
 /// - A request whose end this client cannot read is asked as it was made, and
 ///   what comes back is filed as the venue served it.
 #[test]
@@ -580,6 +611,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
         states: &'static [&'static str],
         omits: &'static [&'static str],
         answered: &'static [(&'static str, f64)],
+        opens: &'static [&'static str],
         step: Option<&'static str>,
     }
     let split_after_the_change = "conc\n222,20240603,-1\n111,-1,20240531\nSS\n20240610,2\n";
@@ -587,7 +619,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
     // What the row is, the caller's id, its end, length and bar, the actions'
     // answer, each stretch as asked, and what is filed or why it is not.
     type Row = (&'static str, u32, &'static str, &'static str, &'static str, &'static str, &'static [Asked], Filed);
-    let rows: [Row; 8] = [
+    let rows: [Row; 12] = [
         ("days along two ids", 222, "20240614-20:00:00", "30 D", "1 day",
          "conc\n222,20240603,-1\n111,-1,20240531\nconexch\n111,VALUE,20240531\nSS\n20240610,2\n", &[
             Asked {
@@ -596,6 +628,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                           "<timeLength>30 d</timeLength>"],
                 omits: &["startTime", "liveContractID", "approxStep"],
                 answered: &[("20240603", 104.0), ("20240607", 106.0), ("20240613", 55.0)],
+                opens: &[],
                 step: None,
             },
             Asked {
@@ -605,6 +638,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                           "<approxStep>1d</approxStep>"],
                 omits: &["startTime", "histListExch"],
                 answered: &[("20240529", 100.0), ("20240531", 102.0)],
+                opens: &[],
                 step: None,
             },
          ], Ok(&[
@@ -620,6 +654,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                           "<cutoffDate>20240603</cutoffDate>", "<timeLength>5 d</timeLength>"],
                 omits: &["startTime", "approxStep", "histUnderlying", "histListExch"],
                 answered: &[("20240603-13:30:00", 50.0), ("20240604-19:55:00", 51.0)],
+                opens: &[],
                 step: Some("300"),
             },
             Asked {
@@ -630,6 +665,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                           "<approxStep>300</approxStep>"],
                 omits: &["liveContractID", "timeLength", "cutoffDate"],
                 answered: &[("20240531-19:55:00", 49.0)],
+                opens: &[],
                 step: None,
             },
          ], Ok(&[
@@ -643,6 +679,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                           "<timeLength>3 d</timeLength>"],
                 omits: &["liveContractID"],
                 answered: &[("20240612", 10.0), ("20240613", 11.0), ("20240614", 12.0)],
+                opens: &[],
                 step: None,
             },
          ], Ok(&[("20240612", 10.0, 100), ("20240613", 11.0, 100), ("20240614", 12.0, 100)])),
@@ -653,6 +690,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                           "<expired>no</expired>", "<timeLength>5 d</timeLength>"],
                 omits: &["cutoffDate", "startTime"],
                 answered: &[("20240613", 20.0), ("20240614", 21.0)],
+                opens: &[],
                 step: None,
             },
          ], Ok(&[("20240613", 20.0, 100), ("20240614", 21.0, 100)])),
@@ -663,23 +701,121 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                 states: &["<contractID>222</contractID>", "<timeLength>5 d</timeLength>"],
                 omits: &["cutoffDate"],
                 answered: &[],
+                opens: &[],
                 step: None,
             },
          ], Ok(&[])),
-        ("weeks", 222, "20240614-20:00:00", "1 Y", "1 week", split_after_the_change, &[
+        ("weeks along two ids and a split", 222, "20240614-20:00:00", "8 W", "1 week",
+         "conc\n222,20240603,-1\n111,-1,20240531\nSS\n20240612,2\n", &[
             Asked {
-                states: &["<contractID>222</contractID>", "<timeLength>1 y</timeLength>"],
-                omits: &["cutoffDate", "liveContractID"],
-                answered: &[("20240614", 60.0)],
+                states: &["<contractID>222</contractID>", "<endTime>20240614-20:00:00</endTime>",
+                          "<cutoffDate>20240612</cutoffDate>", "<timeLength>8 W</timeLength>"],
+                omits: &["startTime", "liveContractID", "approxStep"],
+                answered: &[("20240612/20240615", 60.0)],
+                opens: &[],
+                step: Some("1W"),
+            },
+            Asked {
+                states: &["<contractID>222</contractID>", "<expired>no</expired>",
+                          "<endTime>20240612-00:00:00</endTime>", "<timeLength>7 W</timeLength>",
+                          "<cutoffDate>20240603</cutoffDate>", "<approxStep>1W</approxStep>"],
+                omits: &["startTime", "liveContractID"],
+                answered: &[("20240603/20240608", 100.0), ("20240610/20240612", 110.0)],
+                opens: &[],
                 step: None,
             },
-         ], Ok(&[("20240614", 60.0, 100)])),
+            Asked {
+                states: &["<contractID>111</contractID>", "<liveContractID>222</liveContractID>",
+                          "<expired>yes</expired>", "<endTime>20240603-00:00:00</endTime>",
+                          "<timeLength>5 W</timeLength>", "<cutoffDate>20240419</cutoffDate>",
+                          "<approxStep>1W</approxStep>"],
+                omits: &["startTime"],
+                answered: &[("20240520/20240525", 90.0), ("20240528/20240601", 95.0)],
+                opens: &[],
+                step: None,
+            },
+         ], Ok(&[
+            ("20240520", 45.0, 200), ("20240528", 47.5, 200), ("20240603", 50.0, 200),
+            ("20240610", 60.0, 300),
+         ])),
+        ("weeks and a split on a Friday", 222, "20240621-20:00:00", "4 W", "1 week",
+         "conc\n222,-1,-1\nSS\n20240614,2\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<cutoffDate>20240614</cutoffDate>",
+                          "<timeLength>4 W</timeLength>"],
+                omits: &["startTime", "approxStep"],
+                answered: &[("20240614/20240615", 50.0), ("20240617/20240622", 52.0)],
+                opens: &[],
+                step: Some("1W"),
+            },
+            Asked {
+                states: &["<contractID>222</contractID>", "<endTime>20240614-00:00:00</endTime>",
+                          "<timeLength>2 W</timeLength>", "<cutoffDate>20240524</cutoffDate>"],
+                omits: &["startTime", "liveContractID"],
+                answered: &[("20240603/20240608", 96.0), ("20240610/20240614", 98.0)],
+                opens: &[],
+                step: None,
+            },
+         ], Ok(&[("20240603", 48.0, 200), ("20240610", 25.0, 400), ("20240617", 52.0, 100)])),
+        ("months and a split", 222, "20240628-20:00:00", "3 M", "1 month",
+         "conc\n222,-1,-1\nSS\n20240515,2\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<cutoffDate>20240515</cutoffDate>",
+                          "<timeLength>3 m</timeLength>"],
+                omits: &["startTime", "approxStep"],
+                answered: &[("20240515/20240601", 60.0), ("20240603/20240629", 62.0)],
+                opens: &[],
+                step: Some("1M"),
+            },
+            Asked {
+                states: &["<endTime>20240515-00:00:00</endTime>", "<timeLength>1 m</timeLength>",
+                          "<cutoffDate>20240327</cutoffDate>", "<approxStep>1M</approxStep>"],
+                omits: &["startTime"],
+                answered: &[("20240401/20240501", 90.0), ("20240501/20240515", 100.0)],
+                opens: &[],
+                step: None,
+            },
+         ], Ok(&[("20240401", 45.0, 200), ("20240501", 60.0, 300), ("20240603", 62.0, 100)])),
+        ("weeks and a split nobody can date", 222, "20240621-20:00:00", "4 W", "1 week",
+         "conc\n222,-1,-1\nSS\n2024061,2\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<timeLength>4 W</timeLength>"],
+                omits: &["cutoffDate", "startTime"],
+                answered: &[("20240610/20240615", 50.0)],
+                opens: &[],
+                step: Some("1W"),
+            },
+         ], Err("the SS in this contract's actions is dated \"2024061\", which is not a day a price \
+                 can be placed before or after. Adjusting around it would hand back the price the \
+                 venue served under the name of an adjusted one")),
+        ("days counting a session open", 222, "20240614-20:00:00", "30 D", "1 day",
+         "conc\n222,20240603,-1\n111,-1,20240531\n", &[
+            Asked {
+                states: &["<contractID>222</contractID>", "<cutoffDate>20240603</cutoffDate>"],
+                omits: &["approxStep"],
+                answered: &[("20240603", 52.0), ("20240607", 53.0), ("20240613", 55.0)],
+                opens: &["20240531", "20240604", "20240607"],
+                step: None,
+            },
+            Asked {
+                states: &["<contractID>111</contractID>", "<timeLength>37 d</timeLength>",
+                          "<cutoffDate>20240502</cutoffDate>"],
+                omits: &["startTime"],
+                answered: &[("20240531", 51.0)],
+                opens: &[],
+                step: None,
+            },
+         ], Ok(&[
+            ("20240531", 51.0, 100), ("20240603", 52.0, 100), ("20240607", 53.0, 100),
+            ("20240613", 55.0, 100),
+         ])),
         ("an end this client cannot read", 222, "20240614 16:00:00 Foo/Bar", "30 D", "1 day",
          split_after_the_change, &[
             Asked {
                 states: &["<contractID>222</contractID>", "<timeLength>30 d</timeLength>"],
                 omits: &["cutoffDate", "liveContractID"],
                 answered: &[("20240607", 106.0)],
+                opens: &[],
                 step: None,
             },
          ], Ok(&[("20240607", 106.0, 100)])),
@@ -723,7 +859,7 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
             assert_ne!(before.replace(answering.clone()), Some(answering.clone()), "{what}: a query of its own");
             assert!(shared.reference.drain_historical_data().is_empty(), "{what}: not whole before the last");
             hmds.process_hmds_message(
-                &page_of_bars(&answering, stretch.answered, stretch.step), &mut conn, &shared, &None, &mut hb,
+                &page_of_bars(&answering, stretch.answered, stretch.opens, stretch.step), &mut conn, &shared, &None, &mut hb,
             );
         }
 
@@ -739,6 +875,15 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
                     wanted.iter().map(|(at, close, volume)| (at.to_string(), *close, *volume)).collect();
                 assert_eq!(bars, wanted, "{what}: oldest first across the stretches");
                 assert!(errors.is_empty(), "{what}: {errors:?}");
+                if what == "weeks along two ids and a split" {
+                    let week = series[0].1.bars.last().unwrap();
+                    assert_eq!(
+                        (week.open, week.high, week.low, week.count, week.end.as_str()),
+                        (55.0, 60.0, 55.0, 10, "20240615"),
+                        "{what}: the split's week joined whole: {week:?}",
+                    );
+                    assert!((week.wap - 170.0 / 3.0).abs() < 1e-9, "{what}: its average {}", week.wap);
+                }
             }
             Err(why) => {
                 assert!(bars.is_empty(), "{what}: {bars:?}");
@@ -751,6 +896,50 @@ fn a_series_is_asked_along_the_ids_the_contract_traded_under() {
             "{what}: and nothing more is asked or held",
         );
     }
+}
+
+/// A gateway holds a contract's actions for the session: a request for the
+/// same contract on the day they are held through is asked along them at once,
+/// with no second question, and an answer on a later day adds to what is held
+/// the rows it does not state, rather than replacing it. Here the later answer
+/// no longer states the first split and states a second, and the series is
+/// folded by both — until the day turns on this machine's calendar, which lets
+/// go of what is held.
+#[test]
+fn a_contract_s_actions_are_asked_once_a_day_and_held_for_the_session() {
+    let (conn, mut peer) = Connection::for_test();
+    let mut conn = Some(conn);
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+    let held = "conc\n222,20240603,-1\n111,-1,20240531\nSS\n20240610,2\n";
+    let later = "conc\n222,20240603,-1\nSS\n20240612,2\n";
+    // Each request's first frame on the wire, and its one bar's close once filed.
+    let mut ask = |hmds: &mut HmdsState, req_id: u32, answer: Option<&str>| {
+        hmds.send_historical_request_ex(
+            req_id, 222, "", "1 M", "1 day", "TRADES", true, false, false,
+            "NEWCO", "STK", "SMART", &mut conn, &mut hb, &shared,
+        );
+        let first = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
+        if let Some(answer) = answer {
+            let qid = hmds.pending_adjustments[0].0.clone();
+            hmds.process_hmds_message(&conadj_reply(&qid, answer), &mut conn, &shared, &None, &mut hb);
+            let _ = read_frame(&mut peer);
+        }
+        let asked = hmds.pending_historical[0].0.clone();
+        hmds.process_hmds_message(
+            &adj_bar_msg(&asked, "20240607", 100.0, true), &mut conn, &shared, &None, &mut hb,
+        );
+        let filed = shared.reference.drain_historical_data();
+        (first.contains("10020"), filed[0].1.bars[0].close)
+    };
+    assert_eq!(ask(&mut hmds, 1, Some(held)), (true, 50.0), "the first request asks");
+    assert_eq!(ask(&mut hmds, 2, None), (false, 50.0), "the second, the same day, does not");
+    hmds.actions_held.get_mut(&222).unwrap().0 = "20240101".into();
+    assert_eq!(ask(&mut hmds, 3, Some(later)), (true, 25.0), "a later day asks, keeps the split and adds its own");
+    assert_eq!(ask(&mut hmds, 4, None), (false, 25.0), "and holds that day's answer");
+    hmds.actions_held_on = Some(jiff::civil::date(2024, 1, 1));
+    assert_eq!(ask(&mut hmds, 5, Some(later)), (true, 50.0), "a new day on this machine lets go of it");
 }
 
 /// A series is folded with the actions dated up to the day it is folded on,
@@ -804,10 +993,9 @@ fn a_series_is_folded_with_the_actions_up_to_today_and_none_after() {
 /// query and nothing else, and that answer is the one its bars are asked on.
 ///
 /// The venue states a contract only where it has a record against it, so a
-/// future is answered with an empty reply. Read as naming the wrong contract,
-/// the answer was dropped and the series it was asked for was never filed: a
-/// caller asking a future for its trades got every bar and was never told the
-/// series had ended.
+/// young listing is answered with an empty reply. Read as naming the wrong
+/// contract, the answer was dropped and the series it was asked for was never
+/// filed: a caller got every bar and was never told the series had ended.
 #[test]
 fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
     let (conn, mut peer) = Connection::for_test();
@@ -819,15 +1007,15 @@ fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
 
     hmds.send_historical_request_ex(
         42, 649180671, "", "1 D", "5 mins", "TRADES", true, false, false,
-        "ES", "FUT", "CME", &mut conn, &mut hb, &shared,
+        "NEWCO", "STK", "SMART", &mut conn, &mut hb, &shared,
     );
     let _ = read_frame(&mut peer);
     let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
         .map(|(q, _, _)| q.clone())
         .expect("the actions query is outstanding under this request");
 
-    // The answer a live session was given for a future: the query echoed, and
-    // a body naming no contract and no action.
+    // The answer a live session was given for a contract with no action: the
+    // query echoed, and a body naming no contract and no action.
     let echoed = format!("<ConAdjResponse>\n\t<id>{qid}</id>\n</ConAdjResponse>\n");
     let mut msg = Vec::new();
     msg.extend_from_slice(b"35=U\x016040=10022\x016118=");
@@ -1174,42 +1362,50 @@ fn a_trades_request_with_an_action_nobody_can_name_is_refused() {
     assert!(filed[0].1.bars.is_empty(), "no raw bar is handed back under an adjusted name");
 }
 
-/// A series that is neither TRADES nor asked for adjusted is filed as the
-/// venue served it: the fold belongs to the two series the vendor states as
-/// adjusted, and a midpoint or bid-ask series has no actions to ask for.
+/// A gateway asks every bar query for a stock or a fund along the contract's
+/// id history, whatever series it names, and folds it by what the series is:
+/// a kind priced as the contract trades is put on the scale of its splits,
+/// and any other kind has only the bars before a rights offer multiplied by
+/// it. A query for another kind of contract is asked as it was made, with no
+/// actions asked for, and filed as the venue served it. Every row states a
+/// two-for-one split on 10 June 2024 and a rights offer of 0.9 on the 8th, and
+/// is answered with one daily bar on the 7th, at a close of 100.
 #[test]
-fn a_series_of_another_kind_is_filed_as_the_venue_served_it() {
-    use crate::protocol::connection::Connection;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut peer, _) = listener.accept().unwrap();
-    peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    let mut conn = Some(Connection::new_raw(sock).unwrap());
-
-    let mut hmds = HmdsState::new();
-    let shared = SharedState::new();
-    let mut hb = HeartbeatState::new();
-
-    hmds.send_historical_request_ex(
-        42, 756733, "", "1 D", "1 day", "MIDPOINT", true, false, false,
-        "NVDA", "STK", "SMART", &mut conn, &mut hb, &shared,
-    );
-    let _ = read_frame(&mut peer);
-
-    hmds.process_hmds_message(
-        &adj_bar_msg("hist_1000", "20240607", 1208.88, true), &mut conn, &shared, &None, &mut hb,
-    );
-
-    assert!(
-        hmds.pending_adjustments.is_empty(),
-        "no actions are asked for a series that is not folded",
-    );
-    let filed = shared.reference.drain_historical_data();
-    assert_eq!(filed.len(), 1, "the series is filed as it arrived");
-    let bar = &filed[0].1.bars[0];
-    assert_eq!(bar.close, 1208.88, "and no scale has been applied to it");
-    assert_eq!(bar.volume, 100, "nor to its count");
+fn a_series_is_asked_along_the_ids_and_folded_by_what_it_is() {
+    let actions = "conc\n756733,-1,-1\nRO\n20240608,0.9,,\nSS\n20240610,2\n";
+    for (sec_type, what_to_show, asked_along, close) in [
+        ("STK", "MIDPOINT", true, 45.0),
+        ("STK", "BID_ASK", true, 45.0),
+        ("FUND", "NAV_LAST", true, 45.0),
+        ("STK", "HISTORICAL_VOLATILITY", true, 90.0),
+        ("STK", "OPTION_IMPLIED_VOLATILITY", true, 90.0),
+        ("FUT", "TRADES", false, 100.0),
+        ("CASH", "MIDPOINT", false, 100.0),
+    ] {
+        let (conn, mut peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        hmds.send_historical_request_ex(
+            42, 756733, "", "1 M", "1 day", what_to_show, true, false, false,
+            "NVDA", sec_type, "SMART", &mut conn, &mut hb, &shared,
+        );
+        let first = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
+        assert_eq!(first.contains("10020"), asked_along, "{sec_type} {what_to_show}: {first}");
+        if asked_along {
+            let qid = hmds.pending_adjustments[0].0.clone();
+            hmds.process_hmds_message(&conadj_reply(&qid, actions), &mut conn, &shared, &None, &mut hb);
+            let _ = read_frame(&mut peer);
+        }
+        let asked = hmds.pending_historical[0].0.clone();
+        hmds.process_hmds_message(
+            &adj_bar_msg(&asked, "20240607", 100.0, true), &mut conn, &shared, &None, &mut hb,
+        );
+        let filed = shared.reference.drain_historical_data();
+        let bar = &filed[0].1.bars[0];
+        assert!((bar.close - close).abs() < 1e-9, "{sec_type} {what_to_show}: close {}", bar.close);
+    }
 }
 
 /// One page of a bar reply, stating a zone or, given none, omitting the tag as

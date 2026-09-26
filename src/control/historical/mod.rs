@@ -136,6 +136,19 @@ impl BarDataType {
         })
     }
 
+    /// Whether a gateway puts a series of this kind on the scale of the
+    /// actions that move it: the ones priced as the contract trades — what
+    /// traded, the midpoint, either side or both, a fund's net asset value and
+    /// an auction's indicated price. A volatility, a yield or a rate it leaves
+    /// as the venue served it.
+    pub(crate) fn is_adjusted(&self) -> bool {
+        matches!(
+            self,
+            Self::Trades | Self::Midpoint | Self::Bid | Self::Ask | Self::BidAsk | Self::AggTrades
+                | Self::NavLast | Self::IndicativeAuctionPriceSize,
+        )
+    }
+
     /// The name the venue knows this by.
     ///
     /// Not the name the reference client uses, and not always the obvious
@@ -630,37 +643,49 @@ fn read_length(length: &str) -> Option<(i64, (&'static str, i64))> {
     Some((count, unit))
 }
 
-/// The days a series of days still wants once the newest stretch is in, and
-/// what a later stretch is asked with because of them.
+/// The bars a series of days, weeks or months still wants once the newest
+/// stretch is in, and what a later stretch is asked with because of them.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DaysWanted {
-    /// How many days of bars are still to come.
+pub(crate) struct BarsWanted {
+    /// How many bars are still to come.
     pub(crate) left: i64,
     /// The day the series reaches back to, which the last stretch is cut at.
     pub(crate) from: String,
     /// The unit the request's time length is stated in, for the length a
     /// later stretch is asked with.
     unit: (&'static str, i64),
+    /// How long one bar is counted as, in milliseconds.
+    bar: i64,
 }
 
-impl DaysWanted {
-    /// The length a stretch is asked with for the days still wanted: counted
-    /// in calendar days, seven for every five, and stated in the request's own
-    /// unit, rounded up.
+impl BarsWanted {
+    /// The length a stretch is asked with for the bars still wanted, stated in
+    /// the request's own unit and rounded up: a day's bars counted in calendar
+    /// days, seven for every five.
     pub(crate) fn length(&self) -> String {
         let (suffix, ms) = match self.unit.0 {
             "min" | "h" => LENGTH_UNITS[0],
             "q" => LENGTH_UNITS[5],
             _ => self.unit,
         };
-        let wanted = self.left * 86_400_000 * 7 / 5;
+        let mut wanted = self.left * self.bar;
+        if self.bar == 86_400_000 {
+            wanted = wanted * 7 / 5;
+        }
         format!("{} {suffix}", (wanted + ms - 1) / ms)
     }
 }
 
+/// The stretches a request is asked along, the bars it still wants once the
+/// first is in, and the first days whose week or month is joined.
+pub(crate) type Plan = (Vec<Stretch>, Option<BarsWanted>, Vec<String>);
+
 /// A request asked along its contract's id history: one stretch per id,
-/// ticker or listing the history names within the request, newest first; and,
-/// for a series of days asked along more than one, the days it still wants.
+/// ticker or listing the history names within the request, newest first; for a
+/// series of days, weeks or months asked along more than one, the bars it
+/// still wants; and for weeks or months asked along more than one, the first
+/// days of the stretches, whose weeks or months are one bar joined from both
+/// sides.
 ///
 /// Each is asked under the id it traded as, naming the one the caller asked
 /// under where that is another. The newest is asked as the request is, from
@@ -668,13 +693,12 @@ impl DaysWanted {
 /// request reaches back to or the day it began, whichever is later, to the day
 /// after its last or the request's end, whichever is earlier, and is asked as
 /// expired where its id is not the caller's. One whose days all fall outside
-/// the request is not asked. A series of days asked along
-/// more than one stretch counts its days as they arrive: each later stretch is
-/// asked for the days still wanted, back from where it ends, and none once
-/// they are all in.
+/// the request is not asked. A series asked along more than one stretch counts
+/// its bars as they arrive: each later stretch is asked for the bars still
+/// wanted, back from where it ends, and none once they are all in.
 pub(crate) fn along(
     req: &HistoricalRequest, history: &[crate::control::adjustments::IdStretch],
-) -> Result<(Vec<Stretch>, Option<DaysWanted>), String> {
+) -> Result<Plan, String> {
     let unreadable = || format!(
         "a request ending {:?} and reaching back {:?} cannot be bounded along the \
          contract's id history",
@@ -704,14 +728,27 @@ pub(crate) fn along(
     let day_of = |ms: i64| at(ms).chars().take(8).collect::<String>();
     let day_ms = |day: &str| crate::protocol::datetime::ib_datetime_to_unix_millis(&format!("{day}-00:00:00"));
     let dated = |day: &str| day.len() == 8 && day_ms(day).is_some();
+    // How long one bar is counted as, for a bar of a day or more: a month is
+    // counted as thirty-one days, as a gateway counts it.
+    let bar = match req.bar_size {
+        BarSize::Day1 => Some(ms_day),
+        BarSize::Week1 => Some(7 * ms_day),
+        BarSize::Month1 => Some(31 * ms_day),
+        _ => None,
+    };
+    let joining = bar.is_some_and(|bar| bar > ms_day) && history.len() > 1;
 
     let mut out = Vec::new();
+    let mut joins = Vec::new();
     for (n, stretch) in history.iter().enumerate() {
         if n >= 1 && (stretch.end == "-1" || day_of(end_day()? - back()?) > stretch.end) {
             continue;
         }
         if dated(&stretch.start) && stretch.start > day_of(end_day()?) {
             continue;
+        }
+        if joining && dated(&stretch.start) {
+            joins.push(stretch.start.clone());
         }
         let moved = stretch.con_id != req.con_id;
         let mut s = Stretch {
@@ -738,13 +775,64 @@ pub(crate) fn along(
         }
         out.push(s);
     }
-    let days = match (req.bar_size, length) {
-        (BarSize::Day1, Some((count, unit))) if history.len() > 1 && count * unit.1 / ms_day > 1 => {
-            Some(DaysWanted { left: count * unit.1 / ms_day, from: day_of(end()? - back()?), unit })
+    let wanted = match (bar, length) {
+        (Some(bar), Some((count, unit))) if history.len() > 1 && count * unit.1 / bar > 1 => {
+            Some(BarsWanted { left: count * unit.1 / bar, from: day_of(end()? - back()?), unit, bar })
         }
         _ => None,
     };
-    Ok((out, days))
+    Ok((out, wanted, joins))
+}
+
+/// The week or the month a day falls in, for bars of that size, as a gateway
+/// groups them: a week is named by its Monday, a Sunday by the Monday before
+/// it, and a month by its first day.
+pub(crate) fn period_of(bar_size: BarSize, day: &str) -> Option<String> {
+    let date = jiff::civil::Date::strptime("%Y%m%d", day.get(..8)?).ok()?;
+    let first = match bar_size {
+        BarSize::Week1 => {
+            date.checked_sub(jiff::Span::new().days(i64::from(date.weekday().to_monday_zero_offset()))).ok()?
+        }
+        BarSize::Month1 => date.first_of_month(),
+        _ => return None,
+    };
+    Some(first.strftime("%Y%m%d").to_string())
+}
+
+/// Join the bars of a week or a month that more than one stretch answered for
+/// into one, as a gateway joins them once the series is whole: every run of
+/// bars falling in the week or the month one of `starts` falls in. The joined
+/// bar opens where the first opened and closes where the last closed, spans
+/// both, takes the highest high and the lowest low, and sums the volume and
+/// the count; its average is weighted by volume.
+pub(crate) fn join_periods(
+    bars: Vec<HistoricalBar>, starts: &[String], bar_size: BarSize,
+) -> Vec<HistoricalBar> {
+    let joined: Vec<String> = starts.iter().filter_map(|day| period_of(bar_size, day)).collect();
+    let mut out: Vec<HistoricalBar> = Vec::with_capacity(bars.len());
+    let mut last_period = None;
+    for bar in bars {
+        let period = period_of(bar_size, &bar.time).filter(|p| joined.contains(p));
+        match (out.last_mut(), &period) {
+            (Some(held), Some(period)) if last_period.as_ref() == Some(period) => {
+                let volume = held.volume + bar.volume;
+                // A week or a month with no volume keeps the first part's
+                // average.
+                if volume != 0 {
+                    held.wap = (held.wap * held.volume as f64 + bar.wap * bar.volume as f64) / volume as f64;
+                }
+                held.volume = volume;
+                held.count = held.count.saturating_add(bar.count);
+                held.high = held.high.max(bar.high);
+                held.low = held.low.min(bar.low);
+                held.close = bar.close;
+                held.end = bar.end;
+            }
+            _ => out.push(bar),
+        }
+        last_period = period;
+    }
+    out
 }
 
 /// Build a historical data query message.
@@ -884,6 +972,16 @@ pub fn parse_bar_response(xml: &str) -> Option<HistoricalResponse> {
         bars,
         is_complete,
     })
+}
+
+/// The day each session open in a bar reply states it opens, in the order
+/// stated: an answer below a day marks every session it covers with an open,
+/// its reference day beside it.
+pub(crate) fn session_opens(xml: &str) -> Vec<String> {
+    xml.split("<Open>")
+        .skip(1)
+        .filter_map(|open| tag(open.split("</Open>").next()?, "refDate").map(str::to_string))
+        .collect()
 }
 
 /// Extract the ticker ID from a ResultSetTickerId response (for real-time bar

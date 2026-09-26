@@ -235,13 +235,30 @@ languages. The call-by-call matrix is [generated from the source](./coverage.md)
 ## Bars along a contract's id history
 
 A contract can trade under more than one id, ticker or listing over its life,
-and the venue states which beside the contract's corporate actions. For
-`TRADES` and `ADJUSTED_LAST` bars of a day or less, this client asks the
+and the venue states which beside the contract's corporate actions. For every
+bar request on a stock or a fund, whatever the series, this client asks the
 actions first, as a gateway does, and then the bars one stretch of that history
 at a time, the newest first, each under the id it traded as and for its own
 days; the stretches are one series, folded across the joins with the one set of
-actions. The logon token `NOINEFFECTCONCQUERY` changes where the stretches are
+actions. Weeks and months are asked with the history split at every split,
+stock dividend and spin-off as well, and the two parts of a week or a month
+that two stretches answered for are joined into one bar, as a gateway joins
+them. The logon token `NOINEFFECTCONCQUERY` changes where the stretches are
 cut, as it does on a gateway.
+
+A series of days, weeks or months asked along more than one stretch counts the
+days each answer holds, those of its bars and those of its session opens, and
+asks nothing more once the request's bars are all in. Its last stretch is cut
+at the day the request reaches back to, as a gateway cuts it, and the venue
+answers that day whole: such a series can hold one day more at its far end
+than the same request holds where the contract kept one id.
+
+The actions are held for the session, as a gateway holds them. A request for a
+contract whose actions were answered the same day on UTC's calendar is asked
+along them without asking again, and an answer on a later day adds to what is
+held the rows it states that are not already held. Everything held is let go
+of when the day turns on the machine's own calendar. A gateway lets go of it
+when its own day turns; which clock that turn follows is not established here.
 
 A stretch the venue refuses fails the request: the caller is told why, and the
 bars of the stretches already in are not delivered. A request that cannot be
@@ -252,14 +269,12 @@ was given where it cannot cut the history. Where nothing of the history falls
 within the request, the caller is told the query returned no data; a gateway
 says so where the history is one stretch, and answers nothing where it is more.
 
-A gateway asks every bar query for a stock or a fund this way, whatever series
-it names, and one for another kind of contract where a gateway's lookup
-names that contract; where the venue turns a feature on for the session, it
-asks a request that starts less than a day before now as it was made. It splits a week or a month
-at each split and joins the bars again, and leaves out of a stretch a listing
-the logon names. This client asks every other series, and weeks and months,
-under the id the caller named, and leaves out only the listings a gateway
-leaves out where the logon names none.
+A gateway also asks a request for another kind of contract this way where a
+gateway's lookup names that contract; where the venue turns a feature on for
+the session, it asks a request that starts less than a day before now as it
+was made; and it leaves out of a stretch a listing the logon names. This client
+asks a request for any other kind of contract as it was made, and leaves out
+only the listings a gateway leaves out where the logon names none.
 
 ## Smart depth is one request
 

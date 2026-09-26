@@ -1265,7 +1265,7 @@ impl EClient {
     /// date alone states neither: see `historical_data`.
     ///
     /// Empty until the venue has stated them for the contract, which it does
-    /// once per contract on a historical request.
+    /// on the first historical request for it each day.
     pub fn adjustments(&self, con_id: &str) -> Option<(AdjustedContract, Vec<Adjustment>)> {
         self.shared.reference.adjustments_for(con_id)
     }

@@ -5679,9 +5679,8 @@ impl ClientCore {
     ) -> Result<(), String> {
         let bs = crate::control::historical::BarSize::from_api_str(bar_size)?;
         // The adjusted series is folded here from the raw trades and the
-        // contract's actions, bar by bar and by the bar's date. A gateway
-        // refuses it with an end date, and with a bar longer than a day — a
-        // week straddling a split is not one bar any factor adjusts.
+        // contract's actions. A gateway refuses it with an end date, and with
+        // a bar longer than a day.
         let adjusted = crate::control::historical::what_to_show_is_adjusted(what_to_show);
         if adjusted && !end_date_time.trim().is_empty() {
             return Err("End date not supported with adjusted last".to_string());

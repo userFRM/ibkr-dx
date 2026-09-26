@@ -288,15 +288,13 @@ These are this client's own.
   Offline tests cover preset loading, construction and engine holds; a complete
   preset-values answer and attached family still need venue confirmation.
   See [attached orders](book/src/reference/limits.md#attached-orders).
-- **Bars are asked along a contract's id history for the folded series of a
-  day or less.** A gateway asks every bar query for a stock or a fund along
-  the ids, tickers and listings the contract traded under, and a week or a
-  month split at each split and joined again bar by bar. This client asks
-  TRADES and ADJUSTED_LAST bars of a day or less along them; every other
-  series, and weeks and months, are asked under the id the caller named.
-  Where nothing of the history falls within a request of more than one
-  stretch, a gateway answers nothing and this client says the query returned
-  no data.
+- **Bars of other kinds of contract are asked as they were made.** A gateway
+  asks a bar request for a stock or a fund along the ids, tickers and listings
+  the contract traded under, and this client does too; a gateway also asks one
+  for another kind of contract that way where its lookup names the contract,
+  and this client asks it as it was made. Where nothing of the history falls
+  within a request of more than one stretch, a gateway answers nothing and this
+  client says the query returned no data.
 - **A preview under the number of a working order is refused.** A gateway
   prices it as a new order and leaves the working one alone; this client keys
   both on the number, and does not yet keep the two apart.

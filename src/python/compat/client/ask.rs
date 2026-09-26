@@ -328,16 +328,21 @@ impl EClient {
     /// bar at a time to a callback.
     ///
     /// The venue has no adjusted series to pass through: what it serves is raw
-    /// trades, and the two series the vendor states as adjusted — TRADES and
-    /// ADJUSTED_LAST — are those folded with the contract's own actions. The
-    /// actions are asked for first, as a gateway asks them, and their answer
-    /// states the ids the contract traded under: bars of a day or less are
-    /// asked one id at a time, the newest first, each for the days the
-    /// contract traded as it, and joined into one series. The fold is made
-    /// once the series is whole, before a bar is handed to anyone, with the
-    /// actions dated up to the day it is made, that day on UTC's calendar
-    /// included, as a gateway folds them, and the bars before a rights offer
-    /// are multiplied by the value it states. ADJUSTED_LAST also has each cash
+    /// bars, and the two series the vendor states as adjusted — TRADES and
+    /// ADJUSTED_LAST — are those folded with the contract's own actions. For a
+    /// stock or a fund, whatever the series, the actions are asked for first,
+    /// as a gateway asks them, once a day for each contract, and their answer
+    /// states the ids the contract traded under: the bars are asked one id at
+    /// a time, the newest first, each for the days the contract traded as it —
+    /// a week or a month split at every split as well, and its two parts
+    /// joined into one bar — and joined into one series. The fold is made once
+    /// the series is whole, before a bar is handed to anyone, with the actions
+    /// dated up to the day it is made, that day on UTC's calendar included, as
+    /// a gateway folds them: a series priced as the contract trades is put on
+    /// the scale of its splits, stock dividends and spin-offs, and every series
+    /// has the bars before a rights offer multiplied by the value it states.
+    /// Any other kind of contract is asked as the request was made, and its
+    /// bars handed back as the venue served them. ADJUSTED_LAST also has each cash
     /// dividend taken off the bars before it, as a gateway takes it off: the
     /// amount restated on the scale of the splits, spin-offs and rights offers
     /// listed after it, to four places, taken off the last bar before the one

@@ -150,6 +150,14 @@ pub(crate) struct HmdsState {
     /// series is delivered oldest first and on one zone; one that is to be
     /// folded also waits there for the contract's actions.
     pub(crate) held: Vec<HeldSeries>,
+    /// Each contract's corporate actions as a gateway holds them for the
+    /// session, by the id they were asked about: the day on UTC's calendar
+    /// they are held through, and the answer, every later day's rows it did
+    /// not already state added to it.
+    pub(crate) actions_held: std::collections::HashMap<u32, (String, String)>,
+    /// The day on this machine's calendar the actions are held on. A gateway
+    /// lets go of every one it holds when its day turns.
+    pub(crate) actions_held_on: Option<jiff::civil::Date>,
 }
 
 /// Wire security type for a historical query. Empty falls back to the stock
@@ -347,15 +355,21 @@ impl RtBarRequest {
 ///
 /// The vendor states two of its series as adjusted: TRADES is adjusted for
 /// splits but not dividends, and ADJUSTED_LAST for dividends as well. The
-/// venue serves raw trades either way, so both are put on one scale by one
-/// routine, and ADJUSTED_LAST then has its dividends taken off.
+/// venue serves raw bars, and a gateway folds every series it asks along a
+/// contract's id history once it is whole: each kind it adjusts is put on
+/// one scale by one routine, every one has the bars before a rights offer
+/// multiplied by it, and ADJUSTED_LAST then has its dividends taken off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fold {
-    /// Filed as the venue served it.
+    /// Filed as the venue served it: not asked along an id history.
     None,
+    /// Folded with the rights offers alone, for a kind a gateway does not
+    /// adjust: a volatility, a yield, a rate.
+    Offers,
     /// Folded with the actions that move the scale — a split, a stock
-    /// dividend and a spin-off. A cash dividend is a payment out of the
-    /// price rather than a restatement of it, and stays out.
+    /// dividend and a spin-off — and the rights offers. A cash dividend is a
+    /// payment out of the price rather than a restatement of it, and stays
+    /// out.
     Splits,
     /// Folded as `Splits` is, and then with each cash dividend taken off the
     /// bars before it, as a gateway takes it off.
@@ -373,12 +387,12 @@ pub(crate) enum Fold {
 /// complete series for the dispatch pass to deliver bar by bar. The zone is the
 /// series' own: the first page that states one states it for the rest.
 ///
-/// A request that is to be folded — TRADES and ADJUSTED_LAST alike — also
-/// waits for the contract's corporate actions. The venue serves no adjusted
-/// series — what it sends is raw trades, and an adjusted one is those folded
-/// with the actions — and every bar dated before a split is on the wrong scale
-/// until the split is known, so the actions are asked for before the bars, as a
-/// gateway asks them, and the fold is made before anything is filed.
+/// A request for a stock or a fund also waits for the contract's corporate
+/// actions. The venue serves no adjusted series — what it sends is raw bars,
+/// and an adjusted one is those folded with the actions — and every bar dated
+/// before a split is on the wrong scale until the split is known, so the
+/// actions are asked for before the bars, as a gateway asks them, and the fold
+/// is made before anything is filed.
 pub(crate) struct HeldSeries {
     /// The caller's request, which the series is filed and delivered under.
     pub(crate) req_id: u32,
@@ -416,15 +430,22 @@ pub(crate) struct Along {
     pub(crate) asked: Option<crate::control::historical::HistoricalRequest>,
     /// The stretches still to be asked, newest first.
     pub(crate) stretches: std::collections::VecDeque<crate::control::historical::Stretch>,
-    /// For a series of days asked along more than one stretch, the days it
-    /// still wants.
-    pub(crate) days: Option<crate::control::historical::DaysWanted>,
+    /// For a series of days, weeks or months asked along more than one
+    /// stretch, the bars it still wants.
+    pub(crate) wanted: Option<crate::control::historical::BarsWanted>,
     /// Each day such a series already holds, counted once however many bars
-    /// state it.
+    /// and session opens state it.
     pub(crate) seen: std::collections::HashSet<String>,
+    /// Where a session open the stretch being answered states counts from:
+    /// where the stretch is bounded, the moment it starts, and otherwise the
+    /// day its id began; every open where it states neither.
+    pub(crate) opens_from: Option<String>,
     /// The step the first answer stated, or a day where it stated none, which
     /// every later stretch states.
     pub(crate) step: Option<String>,
+    /// For weeks or months asked along more than one stretch, the first days
+    /// of the stretches, whose week or month is joined into one bar.
+    pub(crate) joins: Vec<String>,
 }
 
 impl HmdsState {
@@ -460,6 +481,8 @@ impl HmdsState {
             schedules_wanted: Vec::new(),
             scanner_batches: Vec::new(),
             held: Vec::new(),
+            actions_held: std::collections::HashMap::new(),
+            actions_held_on: None,
         }
     }
 
@@ -919,7 +942,8 @@ impl HmdsState {
                             // filed as it came.
                             if self.held.iter().any(|a| a.req_id == req_id) {
                                 let step = crate::control::xml::tag(xml_tag, "approxStep");
-                                self.hold_bars(req_id, resp, step, hmds_conn, hb, shared, event_tx);
+                                let opens = crate::control::historical::session_opens(xml_tag);
+                                self.hold_bars(req_id, resp, step, &opens, hmds_conn, hb, shared, event_tx);
                             } else {
                                 log::debug!("bars for req_id={req_id} with no series held; filed as they came");
                                 // Clone only when someone is listening on the event
@@ -1603,9 +1627,24 @@ impl HmdsState {
                                             if let Some(apos) = self.held
                                                 .iter().position(|a| a.actions_query.as_deref() == Some(qid.as_str()))
                                             {
-                                                self.held[apos].actions = Some(actions.clone());
+                                                // Held for the session, as a
+                                                // gateway holds it: a later
+                                                // day's answer adds what the
+                                                // one held does not state, and
+                                                // the series is asked along
+                                                // what is held.
+                                                let today: String = chrono_free_timestamp().chars().take(8).collect();
+                                                self.let_go_of_actions_on_a_new_day();
+                                                let held = self.actions_held.entry(asked_about)
+                                                    .or_insert_with(|| (today.clone(), body.to_string()));
+                                                if held.0 < today {
+                                                    *held = (today, crate::control::adjustments::merge_answers(&held.1, body));
+                                                }
+                                                let body = held.1.clone();
+                                                self.held[apos].actions =
+                                                    Some(crate::control::adjustments::parse_adjustments(&body).1);
                                                 shared.reference.note_adjustments(contract, actions, answers);
-                                                self.ask_along(answers, body, hmds_conn, hb, shared);
+                                                self.ask_along(answers, &body, hmds_conn, hb, shared);
                                             } else {
                                                 shared.reference.note_adjustments(contract, actions, answers);
                                             }
@@ -2169,19 +2208,26 @@ fn build_tbt_query(
                 }
             }
         };
-        // The vendor states two series as adjusted, and both are the raw
-        // trades under the names they go out by: ADJUSTED_LAST is folded with
-        // every kind of action this client can apply, and TRADES with the ones
-        // that move the scale — the vendor documents it as adjusted for
-        // splits, but not dividends. A raw series that crosses a split steps
-        // by the ratio with nothing in it saying so, which is why neither is
-        // filed before the fold. Every other series is what the venue served.
-        let fold = if adjusted {
+        // A gateway asks every bar query for a stock or a fund along the
+        // contract's id history, whatever series it names, and folds it: the
+        // series whose kind it adjusts with the actions that move the scale,
+        // and ADJUSTED_LAST with the dividends as well. A raw series that
+        // crosses a split steps by the ratio with nothing in it saying so,
+        // which is why none of them is filed before the fold. A query for
+        // another kind of contract goes as it was made and is filed as the
+        // venue served it.
+        let along = matches!(
+            crate::control::contracts::SecurityType::from_fix(&hist_sec_type(sec_type)),
+            crate::control::contracts::SecurityType::Stock | crate::control::contracts::SecurityType::Fund,
+        );
+        let fold = if !along {
+            Fold::None
+        } else if adjusted {
             Fold::Adjusted
-        } else if data_type == crate::control::historical::BarDataType::Trades {
+        } else if data_type.is_adjusted() {
             Fold::Splits
         } else {
-            Fold::None
+            Fold::Offers
         };
         let bs = match crate::control::historical::BarSize::from_api_str(bar_size) {
             Ok(bs) => bs,
@@ -2222,12 +2268,25 @@ fn build_tbt_query(
             self.ask_stretch(req_id, &req, &crate::control::historical::Stretch::whole(&req), hmds_conn, hb, shared);
             return true;
         }
-        // One that is to be folded asks for the contract's actions first, as a
-        // gateway does, over the range a gateway asks them over for a request
-        // made through the API: the first of January 1980 to today on UTC's
-        // calendar. Their answer states the ids the contract traded under, and
-        // the bars are asked along them once it is in.
+        // Asked along the id history, it asks for the contract's actions first,
+        // as a gateway does, over the range a gateway asks them over for a
+        // request made through the API: the first of January 1980 to today on
+        // UTC's calendar. Their answer states the ids the contract traded
+        // under, and the bars are asked along them once it is in. A gateway
+        // holds the answer for the session and does not ask again for the
+        // same contract over the same days: a request on the day an answer is
+        // held for is asked along that answer at once.
         let today: String = chrono_free_timestamp().chars().take(8).collect();
+        self.let_go_of_actions_on_a_new_day();
+        if let Some((_, body)) = self.actions_held.get(&(con_id as u32)).filter(|(through, _)| *through == today) {
+            let body = body.clone();
+            if let Some(entry) = self.held.iter_mut().find(|a| a.req_id == req_id) {
+                entry.actions = Some(crate::control::adjustments::parse_adjustments(&body).1);
+                entry.along.asked = Some(req);
+            }
+            self.ask_along(req_id, &body, hmds_conn, hb, shared);
+            return self.held.iter().any(|a| a.req_id == req_id);
+        }
         let sent_under = self.send_adjustments_request(
             req_id, con_id as u32, sec_type, exchange,
             crate::control::adjustments::FOLDED_FROM, &today, shared, hmds_conn, hb,
@@ -2240,6 +2299,15 @@ fn build_tbt_query(
             return true;
         }
         false
+    }
+
+    /// Let go of every contract's actions held once the day on this
+    /// machine's calendar turns, as a gateway does when its day turns.
+    fn let_go_of_actions_on_a_new_day(&mut self) {
+        let day = jiff::Zoned::now().with_time_zone(jiff::tz::TimeZone::system()).date();
+        if self.actions_held_on.replace(day).is_some_and(|held| held != day) {
+            self.actions_held.clear();
+        }
     }
 
     /// Send one stretch of a request's bars, under a name of its own, and
@@ -2283,16 +2351,16 @@ fn build_tbt_query(
         }
     }
 
-    /// Read the contract's id history out of the answer a folded series was
-    /// waiting on, and ask its first stretch.
+    /// Read the contract's id history out of the answer a series asked along
+    /// it was waiting on, and ask its first stretch.
     ///
-    /// Bars of a week or a month are asked whole under the id the caller
-    /// named, as before: a gateway asks those along the history too, split at
-    /// every split and joined again bar by bar, which this client does not.
-    /// A request that cannot be asked along the history — a day in it that
-    /// cannot be read, or an end or a length this client cannot count — is
-    /// asked as it was made and filed as the venue serves it, not folded, as a
-    /// gateway sends the query it was given where it cannot cut the history.
+    /// Bars of a week or a month are asked along the history split at every
+    /// split, stock dividend and spin-off, as a gateway asks them, so no bar is
+    /// asked across one. A request that cannot be asked along the history — a
+    /// day in it that cannot be read, or an end or a length this client cannot
+    /// count — is asked as it was made and filed as the venue serves it, not
+    /// folded, as a gateway sends the query it was given where it cannot cut
+    /// the history.
     fn ask_along(
         &mut self, req_id: u32, body: &str,
         hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState,
@@ -2300,31 +2368,40 @@ fn build_tbt_query(
         use crate::control::historical::{BarSize, Stretch, along};
         let Some(pos) = self.held.iter().position(|a| a.req_id == req_id) else { return };
         let Some(req) = self.held[pos].along.asked.clone() else { return };
-        let plan = if req.bar_size.seconds() > BarSize::Day1.seconds() {
-            Ok((vec![Stretch::whole(&req)], None))
-        } else {
-            let today = jiff::Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC).date();
-            crate::control::adjustments::id_history(body, today, &shared.reference.enabled_features())
-                .and_then(|history| {
-                    // An answer that states no id is about the one asked for,
-                    // over every day there is.
-                    let history = if history.is_empty() {
-                        vec![crate::control::adjustments::IdStretch {
-                            con_id: req.con_id, start: "-1".into(), end: "-1".into(),
-                            symbol: String::new(), exchange: String::new(),
-                        }]
-                    } else {
-                        history
-                    };
+        let today = jiff::Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC).date();
+        let plan = crate::control::adjustments::id_history(body, today, &shared.reference.enabled_features())
+            .and_then(|history| {
+                // An answer that states no id is about the one asked for,
+                // over every day there is.
+                let history = if history.is_empty() {
+                    vec![crate::control::adjustments::IdStretch {
+                        con_id: req.con_id, start: "-1".into(), end: "-1".into(),
+                        symbol: String::new(), exchange: String::new(),
+                    }]
+                } else {
+                    history
+                };
+                if req.bar_size.seconds() > BarSize::Day1.seconds() {
+                    // The actions within the span the history is cut to.
+                    let today = today.strftime("%Y%m%d").to_string();
+                    let (_, actions) = crate::control::adjustments::parse_adjustments(body);
+                    let within: Vec<_> = actions
+                        .into_iter()
+                        .filter(|a| {
+                            a.date.as_str() >= crate::control::adjustments::FOLDED_FROM && a.date <= today
+                        })
+                        .collect();
+                    along(&req, &crate::control::adjustments::split_at_actions(history, &within))
+                } else {
                     along(&req, &history)
-                })
-        };
-        let (stretches, days) = match plan {
+                }
+            });
+        let (stretches, wanted, joins) = match plan {
             Ok(plan) => plan,
             Err(why) => {
                 log::warn!("req_id={req_id} is asked as it was made, and not folded: {why}");
                 self.held[pos].fold = Fold::None;
-                (vec![Stretch::whole(&req)], None)
+                (vec![Stretch::whole(&req)], None, Vec::new())
             }
         };
         if stretches.is_empty() {
@@ -2345,18 +2422,19 @@ fn build_tbt_query(
         }
         let along = &mut self.held[pos].along;
         along.stretches = stretches.into();
-        along.days = days;
+        along.wanted = wanted;
+        along.joins = joins;
         self.ask_next_stretch(req_id, hmds_conn, hb, shared);
     }
 
     /// Ask the next stretch of a held series, where one is still wanted.
     ///
     /// Every stretch after the first states the step the first answer stated.
-    /// A series of days asked along more than one stretch asks each later one
-    /// for the days it still wants, back from where the stretch ends, the last
-    /// of them cut at the day the series reaches back to — and asks nothing
-    /// more once they are all in. Answered false when nothing was asked: the
-    /// series is whole.
+    /// A series of days, weeks or months asked along more than one stretch
+    /// asks each later one for the bars it still wants, back from where the
+    /// stretch ends, the last of them cut at the day the series reaches back to
+    /// — and asks nothing more once they are all in. Answered false when
+    /// nothing was asked: the series is whole.
     fn ask_next_stretch(
         &mut self, req_id: u32,
         hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState,
@@ -2366,16 +2444,20 @@ fn build_tbt_query(
         let (Some(req), Some(mut stretch)) = (along.asked.clone(), along.stretches.pop_front()) else {
             return false;
         };
+        // Where the session opens it states count from, taken before a count
+        // of bars moves the stretch's start: the moment it starts, where it
+        // states one, and the day it is cut at otherwise.
+        along.opens_from = stretch.start_time.clone().or_else(|| stretch.cutoff_date.clone());
         if let Some(step) = &along.step {
-            if let Some(days) = &along.days {
-                if days.left <= 0 {
+            if let Some(wanted) = &along.wanted {
+                if wanted.left <= 0 {
                     along.stretches.clear();
                     return false;
                 }
                 stretch.start_time = None;
-                stretch.time_length = Some(days.length());
+                stretch.time_length = Some(wanted.length());
                 if along.stretches.is_empty() {
-                    stretch.cutoff_date = Some(days.from.clone());
+                    stretch.cutoff_date = Some(wanted.from.clone());
                 }
             }
             stretch.approx_step = Some(step.clone());
@@ -2394,6 +2476,7 @@ fn build_tbt_query(
         req_id: u32,
         resp: crate::control::historical::HistoricalResponse,
         step: Option<&str>,
+        opens: &[String],
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         shared: &SharedState,
@@ -2413,11 +2496,16 @@ fn build_tbt_query(
         if held.along.step.is_none() {
             held.along.step = Some(step.unwrap_or("1d").to_string());
         }
-        // A series of days counts each day it holds against the days wanted.
-        if let Some(days) = &mut held.along.days {
-            for bar in &resp.bars {
-                if held.along.seen.insert(bar.time.chars().take(8).collect()) {
-                    days.left -= 1;
+        // A series of days, weeks or months counts each day it holds against
+        // the bars wanted: each bar's, and each session open's the stretch
+        // states from where it counts from, an open's day taken from its
+        // midnight on UTC's clock, one day counted once.
+        if let Some(wanted) = &mut held.along.wanted {
+            let from = held.along.opens_from.as_deref();
+            let opened = opens.iter().filter(|day| from.is_none_or(|from| format!("{day}-00:00:00").as_str() >= from)).cloned();
+            for day in opened.chain(resp.bars.iter().map(|bar| bar.time.chars().take(8).collect())) {
+                if held.along.seen.insert(day) {
+                    wanted.left -= 1;
                 }
             }
         }
@@ -2492,19 +2580,33 @@ fn build_tbt_query(
                 actions.retain(|a| {
                     crate::control::adjustments::day_of(&a.date, "").is_none_or(|day| day <= today)
                 });
-                // Both series are put on the scale of the kinds that move it,
-                // as a gateway folds them; a kind this client cannot name goes
-                // with them, so the fold refuses it rather than guess.
+                // A series of a kind a gateway adjusts is put on the scale of
+                // the kinds that move it; a kind this client cannot name goes
+                // with them, so the fold refuses it rather than guess. A week
+                // or a month is put on it as a gateway puts one, by where it
+                // ends, and the bars of a week or a month two stretches
+                // answered for are then joined.
                 let scaled: Vec<_> = actions
                     .iter()
-                    .filter(|a| a.kind.is_none_or(|k| k.moves_the_scale()))
+                    .filter(|a| fold != Fold::Offers && a.kind.is_none_or(|k| k.moves_the_scale()))
                     .cloned()
                     .collect();
+                let size = entry.along.asked.as_ref().map(|asked| asked.bar_size);
+                let long = size.filter(|size| size.seconds() > crate::control::historical::BarSize::Day1.seconds());
                 // On the clock the venue named beside the bars: an action is
                 // dated on the exchange's day and a stamp below a day arrives
                 // in UTC. Then the rights offers, and for ADJUSTED_LAST the
                 // cash dividends, as a gateway takes them once a series is whole.
-                crate::control::adjustments::scale_historical_bars(entry.bars, &scaled, &entry.timezone)
+                crate::control::adjustments::scale_historical_bars(
+                    entry.bars, &scaled, &entry.timezone,
+                    long,
+                )
+                    .map(|bars| match size {
+                        Some(size) if !entry.along.joins.is_empty() => {
+                            crate::control::historical::join_periods(bars, &entry.along.joins, size)
+                        }
+                        _ => bars,
+                    })
                     .map(|bars| crate::control::adjustments::fold_rights_offers(bars, &actions))
                     .map(|bars| match fold {
                         Fold::Adjusted => crate::control::adjustments::fold_dividends(

@@ -253,6 +253,38 @@ pub fn parse_adjustments(body: &str) -> (AdjustedContract, Vec<Adjustment>) {
     (contract, out)
 }
 
+/// An answer held with a later one's rows added to it, each under its name,
+/// where it does not already state them, as a gateway adds a later day's
+/// answer to the one it holds for a contract.
+pub(crate) fn merge_answers(held: &str, later: &str) -> String {
+    fn rows(body: &str) -> Vec<(&str, &str)> {
+        let mut under = "";
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| if line.contains(',') { Some((under, line)) } else { under = line; None })
+            .collect()
+    }
+    let mut merged = rows(held);
+    for row in rows(later) {
+        if !merged.contains(&row) {
+            merged.push(row);
+        }
+    }
+    let mut out = String::new();
+    let mut under = None;
+    for (name, row) in merged {
+        if under != Some(name) {
+            out.push_str(name);
+            out.push('\n');
+            under = Some(name);
+        }
+        out.push_str(row);
+        out.push('\n');
+    }
+    out
+}
+
 /// One stretch of a contract's id history: the id it traded under between two
 /// days, and the ticker or the listing it traded under there where the venue
 /// states one.
@@ -562,6 +594,32 @@ pub(crate) fn id_history(
     Ok(out)
 }
 
+/// A contract's id history split at each stock dividend, split and spin-off
+/// that falls inside one of its stretches, as a gateway splits it for bars
+/// longer than a day, so that no bar is asked across one.
+///
+/// An action falls inside the stretch that starts before its day and ends on
+/// or after it, either end left open counting as holding it: that stretch
+/// becomes one from the action's day and, after it, one to the day before.
+/// Every stock dividend is taken first, then every split, then every spin-off.
+/// One whose day cannot be read splits nothing, and the fold refuses it as it
+/// refuses it on a series of days.
+pub(crate) fn split_at_actions(mut history: Vec<IdStretch>, actions: &[Adjustment]) -> Vec<IdStretch> {
+    for kind in [AdjustmentKind::StockDividend, AdjustmentKind::Split, AdjustmentKind::SpinOff] {
+        for day in actions.iter().filter(|a| a.kind == Some(kind)).map(|a| a.date.as_str()) {
+            let Ok(before) = stated_day(day).and_then(|day| step_day(day, -1)) else { continue };
+            let holds = |s: &IdStretch| {
+                (s.start == "-1" || s.start.as_str() < day) && (s.end == "-1" || s.end.as_str() >= day)
+            };
+            let Some(at) = history.iter().position(holds) else { continue };
+            let older = IdStretch { end: write_day(before), ..history[at].clone() };
+            history[at].start = day.to_string();
+            history.insert(at + 1, older);
+        }
+    }
+    history
+}
+
 /// What a price before `date` must be multiplied by to sit on the same scale
 /// as prices after every action in `actions`, or what stopped it stating one.
 ///
@@ -589,8 +647,7 @@ pub(crate) fn id_history(
 ///
 /// Volume runs the other way: the shares that traded before a ten-for-one split
 /// count for ten times as many after it, so a caller scaling volume multiplies
-/// by the reciprocal of this. [`scale_volume_before`] states that, so neither
-/// caller has to remember which way round it goes.
+/// by the reciprocal of this.
 pub fn scale_before(date: &str, actions: &[Adjustment]) -> Result<f64, String> {
     // The day given is compared against the days the actions state, so it has
     // to be one. A stamp in seconds opens with eight digits and compares below
@@ -604,6 +661,32 @@ pub fn scale_before(date: &str, actions: &[Adjustment]) -> Result<f64, String> {
         ));
     };
     let date = date.as_str();
+    scale_where(actions, |acted| acted > date)
+}
+
+/// [`scale_before`] for a bar longer than a day, as a gateway puts one on the
+/// scale: an action moves it where the day the bar ends on is before the
+/// action's day, or where the action's day falls in the week or month the bar
+/// starts in and the bar ends on or before it. `size` says which of the two
+/// the bar is.
+pub(crate) fn scale_of_a_long_bar(
+    starts: &str, ends: &str, size: crate::control::historical::BarSize, actions: &[Adjustment],
+) -> Result<f64, String> {
+    let period = |day: &str| crate::control::historical::period_of(size, day);
+    let (Some(starts), Some(ends)) = (day_of(starts, ""), day_of(ends, "")) else {
+        return Err(format!(
+            "a bar from {starts:?} to {ends:?} does not state the days a price can be \
+             placed before or after, so no scale can be stated for it",
+        ));
+    };
+    scale_where(actions, |acted| {
+        ends.as_str() < acted || (period(acted) == period(&starts) && ends.as_str() <= acted)
+    })
+}
+
+/// The factor the actions that move the scale multiply out to, taking those
+/// `moves` says move the price in hand.
+fn scale_where(actions: &[Adjustment], moves: impl Fn(&str) -> bool) -> Result<f64, String> {
     let mut factor: f64 = 1.0;
     for a in actions {
         let Some(kind) = a.kind else {
@@ -635,7 +718,7 @@ pub fn scale_before(date: &str, actions: &[Adjustment]) -> Result<f64, String> {
         // Compared as the days they are, not as the strings they arrived in. A
         // date carrying anything after its eight digits sorts by that tail, and
         // an action would move the bars either side of the wrong day.
-        if acted.as_str() <= date {
+        if !moves(&acted) {
             continue;
         }
         let stated = a.value.parse::<f64>().ok().and_then(|v| kind.factor(v));
@@ -656,15 +739,6 @@ pub fn scale_before(date: &str, actions: &[Adjustment]) -> Result<f64, String> {
         }
     }
     Ok(factor)
-}
-
-/// What a volume before `date` must be multiplied by to count on the same scale
-/// as volumes after every action in `actions`.
-///
-/// The reciprocal of [`scale_before`]: the same shares are the same shares, so
-/// what a split divides out of the price it multiplies into the count.
-pub fn scale_volume_before(date: &str, actions: &[Adjustment]) -> Result<f64, String> {
-    scale_before(date, actions).map(|f| 1.0 / f)
 }
 
 /// The largest count that survives a trip through a float unchanged.
@@ -742,6 +816,15 @@ fn already_on_a_named_clock(bar_date: &str) -> bool {
 pub fn scale_bars(
     bars: Vec<crate::types::model::BarData>, actions: &[Adjustment],
 ) -> Result<Vec<crate::types::model::BarData>, String> {
+    scale_bars_by(bars, actions, None)
+}
+
+/// [`scale_bars`], with a bar of `long`, a week or a month, put on the scale
+/// as a gateway puts one.
+fn scale_bars_by(
+    bars: Vec<crate::types::model::BarData>, actions: &[Adjustment],
+    long: Option<crate::control::historical::BarSize>,
+) -> Result<Vec<crate::types::model::BarData>, String> {
     bars.into_iter()
         .map(|mut b| {
             let Some(day) = day_of(&b.date, &b.timezone) else {
@@ -750,7 +833,20 @@ pub fn scale_bars(
                      putting it on one scale would be guesswork", b.date,
                 ));
             };
-            let price = scale_before(&day, actions)?;
+            let price = match long {
+                Some(size) => {
+                    // Where it ends, on the exchange's clock: a day the venue
+                    // states for an end is its midnight on UTC's.
+                    let ends = match b.end.as_str() {
+                        "" => b.date.clone(),
+                        day if day.len() == 8 => format!("{day}-00:00:00"),
+                        timed => timed.to_string(),
+                    };
+                    let ends = day_of(&ends, &b.timezone).unwrap_or(ends);
+                    scale_of_a_long_bar(&day, &ends, size, actions)?
+                }
+                None => scale_before(&day, actions)?,
+            };
             b.open *= price;
             b.high *= price;
             b.low *= price;
@@ -775,7 +871,7 @@ pub fn scale_bars(
             // hundred and one shares is a hundred and fifty one and a half.
             // Rounded, because the field is a count and the alternative is
             // refusing a series over half a share.
-            let volume = scale_volume_before(&day, actions)?;
+            let volume = 1.0 / price;
             if volume != 1.0 {
                 // Checked before the conversion as well as after. A count past
                 // what a float holds exactly loses bits on the way in, and a
@@ -814,6 +910,7 @@ pub fn scale_bars(
 /// untouched.
 pub fn scale_historical_bars(
     bars: Vec<crate::control::historical::HistoricalBar>, actions: &[Adjustment], zone: &str,
+    long: Option<crate::control::historical::BarSize>,
 ) -> Result<Vec<crate::control::historical::HistoricalBar>, String> {
     let model = bars
         .into_iter()
@@ -823,7 +920,7 @@ pub fn scale_historical_bars(
             timezone: zone.to_string(), end: b.end,
         })
         .collect();
-    Ok(scale_bars(model, actions)?
+    Ok(scale_bars_by(model, actions, long)?
         .into_iter()
         .map(|b| crate::control::historical::HistoricalBar {
             time: b.date, open: b.open, high: b.high, low: b.low, close: b.close,
@@ -1306,24 +1403,6 @@ mod tests {
         assert_eq!(scale_before("20240607", &actions), Ok(1.0));
     }
 
-    /// Volume goes the other way from price.
-    ///
-    /// The same shares traded either side of a split, so ten times the count at
-    /// a tenth of the price is the same trade. A caller that scaled volume the
-    /// way it scales price would report a tenth of what changed hands.
-    #[test]
-    fn the_same_shares_count_the_same_across_a_split() {
-        let split = vec![Adjustment {
-            kind: Some(AdjustmentKind::Split),
-            date: "20240610".into(),
-            value: "10".into(),
-            ..Default::default()
-        }];
-        assert!((scale_before("20240607", &split).unwrap() - 0.1).abs() < 1e-9);
-        assert!((scale_volume_before("20240607", &split).unwrap() - 10.0).abs() < 1e-9);
-    }
-
-
     /// A series across a split comes back on one scale, volume included.
     ///
     /// The two closes are ones a session was answered with: 1208.88 the day
@@ -1377,7 +1456,7 @@ mod tests {
             volume, count: 7, end: String::new(),
         };
         let out = scale_historical_bars(
-            vec![bar("20240607", 1208.88, 100), bar("20240610", 121.79, 100)], &split, "",
+            vec![bar("20240607", 1208.88, 100), bar("20240610", 121.79, 100)], &split, "", None,
         )
         .expect("both bars state a day");
         assert!((out[0].close - 120.888).abs() < 1e-9, "before: {}", out[0].close);
