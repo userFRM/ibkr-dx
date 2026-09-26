@@ -29,6 +29,37 @@ fn stated_venue_and_type<'a>(sec_type: &'a str, exchange: &'a str) -> (&'a str, 
     )
 }
 
+/// What a quote entry states on tag 9839, as a gateway states it: `2` asks for
+/// the finer price on a last-trade entry where the logon offers
+/// `PRCEXTRAPREC`, and for the odd-lot sides on the chargeable snapshot of a
+/// US share or warrant where it offers `ODDLOTBIDASK`; `1` otherwise. Whether
+/// the contract is a US share or warrant is read from its definition.
+fn quote_precision(
+    shared: &SharedState,
+    request_type: u32,
+    con_id: i64,
+    exchange: &str,
+    sec_type: &str,
+) -> &'static str {
+    let finer = match request_type {
+        REALTIME_LAST_REQUEST_TYPE => shared.reference.enables("PRCEXTRAPREC"),
+        REGULATORY_SNAPSHOT_REQUEST_TYPE => {
+            shared.reference.enables("ODDLOTBIDASK")
+                && u32::try_from(con_id)
+                    .ok()
+                    .and_then(|con_id| shared.reference.contract_definition(con_id, exchange))
+                    .is_some_and(|definition| {
+                        matches!(
+                            (crate::control::contracts::sec_type_to_fix(sec_type), definition.market_classification.as_str()),
+                            ("CS", "USSTK") | ("WAR", "USWAR")
+                        )
+                    })
+        }
+        _ => false,
+    };
+    if finer { "2" } else { "1" }
+}
+
 /// Build the 35=V subscribe tag list for a contract whose conId is known.
 ///
 /// Kept pure so the wire shape stays unit-testable. SecurityType (167) and
@@ -38,6 +69,7 @@ fn stated_venue_and_type<'a>(sec_type: &'a str, exchange: &'a str) -> (&'a str, 
 fn build_conid_subscribe_tags(
     realtime: bool,
     regulatory_snapshot: bool,
+    precision: &str,
     bid_ask_id: u32,
     last_id: u32,
     con_id: i64,
@@ -115,7 +147,10 @@ fn build_conid_subscribe_tags(
         tags.push((264, depth.to_string()));
         tags.push((6088, "Socket".to_string()));
         tags.push((9830, "1".to_string()));
-        tags.push((9839, "1".to_string()));
+        // The last-trade entry, or the snapshot in its place, states what the
+        // caller's precision was worked out as; the others state one.
+        let quote = *req_id == last_id || regulatory_snapshot && *req_id == bid_ask_id;
+        tags.push((9839, if quote { precision } else { "1" }.to_string()));
         // Named only where it selects between the feeds the venue serves a
         // stream from. The chargeable snapshot is served from none of them and
         // is asked for without it.
@@ -928,6 +963,8 @@ pub(crate) struct MdReqEntry {
     pub(crate) req_id: u32,
     pub(crate) request_type: u32,
     pub(crate) venue: String,
+    /// What the entry stated on tag 9839, which its withdrawal states again.
+    pub(crate) precision: &'static str,
 }
 
 /// An instrument's L1 subscriptions as they went out, so each can be
@@ -3647,7 +3684,7 @@ impl FarmState {
                     (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ), (263, "2"), (146, "1"),
                     (262, &entry.req_id.to_string()), (6008, &record.con_id.to_string()),
                     (207, &entry.venue), (167, &record.sec_type), (264, &REALTIME_LAST_REQUEST_TYPE.to_string()),
-                    (6088, "Socket"), (9830, "1"), (9839, "1"),
+                    (6088, "Socket"), (9830, "1"), (9839, entry.precision),
                 ]);
             }
         }
@@ -3658,11 +3695,14 @@ impl FarmState {
         *clock = Default::default();
         shared.market.push_quote(instrument, quote);
         record.entries.retain(|entry| !old.contains(&entry.req_id));
-        for (req_id, request_type) in requests.into_iter().zip([
-            REALTIME_BID_ASK_REQUEST_TYPE, REALTIME_LAST_REQUEST_TYPE,
-        ]) {
+        let precision =
+            quote_precision(shared, REALTIME_LAST_REQUEST_TYPE, record.con_id, &venue, &record.sec_type);
+        for (req_id, request_type, precision) in [
+            (requests[0], REALTIME_BID_ASK_REQUEST_TYPE, "1"),
+            (requests[1], REALTIME_LAST_REQUEST_TYPE, precision),
+        ] {
             self.md_req_to_instrument.push((req_id, instrument));
-            record.entries.push(MdReqEntry { req_id, request_type, venue: venue.clone() });
+            record.entries.push(MdReqEntry { req_id, request_type, venue: venue.clone(), precision });
         }
         state.requests = Some(requests);
         shared.market.push_subscription_notice(instrument, crate::error_codes::Refusal::stated(
@@ -3670,7 +3710,7 @@ impl FarmState {
         ));
         if let Some(conn) = farm_conn.as_mut() {
             let tags = build_conid_subscribe_tags(
-                false, false, requests[0], requests[1], record.con_id, &venue,
+                false, false, precision, requests[0], requests[1], record.con_id, &venue,
                 &record.sec_type, state.mode, &chrono_free_timestamp(), &[],
             );
             let tags: Vec<_> = tags.iter().map(|(tag, value)| (*tag, value.as_str())).collect();
@@ -3693,6 +3733,7 @@ impl FarmState {
         instrument: InstrumentId,
         mode_9887: i32,
         regulatory_snapshot: bool,
+        shared: &SharedState,
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
@@ -3816,24 +3857,38 @@ impl FarmState {
         // being served.
         let (venue, wire_sec_type) = stated_venue_and_type(sec_type, exchange);
         let venue = venue.to_string();
+        let precision = quote_precision(
+            shared,
+            if regulatory_snapshot { REGULATORY_SNAPSHOT_REQUEST_TYPE } else { REALTIME_LAST_REQUEST_TYPE },
+            con_id,
+            exchange,
+            sec_type,
+        );
         let mut entries = if regulatory_snapshot {
-            vec![MdReqEntry { req_id: bid_ask_id, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: venue.clone() }]
+            vec![MdReqEntry {
+                req_id: bid_ask_id,
+                request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE,
+                venue: venue.clone(),
+                precision,
+            }]
         } else {
             vec![
                 MdReqEntry {
                     req_id: bid_ask_id,
                     request_type: REALTIME_BID_ASK_REQUEST_TYPE,
                     venue: venue.clone(),
+                    precision: "1",
                 },
                 MdReqEntry {
                     req_id: last_id,
                     request_type: REALTIME_LAST_REQUEST_TYPE,
                     venue: venue.clone(),
+                    precision,
                 },
             ]
         };
-        entries.push(MdReqEntry { req_id: status_req_id, request_type: TRADING_STATUS_REQUEST_TYPE, venue: venue.clone() });
-        entries.push(MdReqEntry { req_id: venue_map_req_id, request_type: BBO_EXCHANGE_MAP_REQUEST_TYPE, venue: venue.clone() });
+        entries.push(MdReqEntry { req_id: status_req_id, request_type: TRADING_STATUS_REQUEST_TYPE, venue: venue.clone(), precision: "1" });
+        entries.push(MdReqEntry { req_id: venue_map_req_id, request_type: BBO_EXCHANGE_MAP_REQUEST_TYPE, venue: venue.clone(), precision: "1" });
         // Each series the caller named is an entry of the subscription, as the
         // greeks are: the withdrawal is composed from these, and a number left
         // out of them was never withdrawn — the venue went on serving it
@@ -3842,11 +3897,11 @@ impl FarmState {
         // old contract's series onto whatever contract the slot went to next.
         for &(id, tick) in &extra_series {
             entries.push(MdReqEntry {
-                req_id: id, request_type: tick, venue: series_venue(tick, &venue).to_string(),
+                req_id: id, request_type: tick, venue: series_venue(tick, &venue).to_string(), precision: "1",
             });
         }
         for &(id, series) in &model_reqs {
-            entries.push(MdReqEntry { req_id: id, request_type: series, venue: GREEKS_VENUE.to_string() });
+            entries.push(MdReqEntry { req_id: id, request_type: series, venue: GREEKS_VENUE.to_string(), precision: "1" });
         }
         match self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument) {
             Some((_, record)) => {
@@ -3893,7 +3948,7 @@ impl FarmState {
             // as well so the server can resolve by description.
             if con_id > 0 || combo_quote.is_some() {
                 let mut tags = build_conid_subscribe_tags(
-                    realtime, regulatory_snapshot, bid_ask_id, last_id, con_id, exchange, sec_type,
+                    realtime, regulatory_snapshot, precision, bid_ask_id, last_id, con_id, exchange, sec_type,
                     mode_9887, &ts, &extra_series,
                 );
                 if let Some(combo) = &combo_quote { combo.decorate(&mut tags); }
@@ -3969,7 +4024,7 @@ impl FarmState {
                     tags.push((264, depth));
                     tags.push((6088, "Socket"));
                     tags.push((9830, "1"));
-                    tags.push((9839, "1"));
+                    tags.push((9839, if *req_str == &last_str || regulatory_snapshot { precision } else { "1" }));
                     if !realtime && !regulatory_snapshot { tags.push((9887, &mode_str)); }
                 }
                 let _ = conn.send_fixcomp(&tags);
@@ -4152,7 +4207,7 @@ impl FarmState {
                 // carried is not the same entry coming back.
                 (6088, "Socket"),
                 (9830, "1"),
-                (9839, "1"),
+                (9839, entry.precision),
             ];
             // On every entry the subscription carried it on: the quote's two
             // and the extra series a caller named. Written only on the two
@@ -4566,7 +4621,7 @@ impl FarmState {
         {
             for (id, tick) in &rows {
                 record.entries.push(MdReqEntry {
-                    req_id: *id, request_type: *tick, venue: series_venue(*tick, &venue).to_string(),
+                    req_id: *id, request_type: *tick, venue: series_venue(*tick, &venue).to_string(), precision: "1",
                 });
             }
         }
@@ -5397,7 +5452,7 @@ impl FarmState {
         // venue nothing and the engine nothing.
         self.replay_queue = active.into_iter().collect();
         self.replay_not_before = None;
-        self.drive_replay(replay, farm_conn, hb);
+        self.drive_replay(replay, shared, farm_conn, hb);
         self.replay_attached_marks(farm_conn, hb);
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
@@ -5453,6 +5508,7 @@ impl FarmState {
     pub(crate) fn drive_replay(
         &mut self,
         replay: crate::engine::hot_loop::ReplayPacing,
+        shared: &SharedState,
         farm_conn: &mut Option<Connection>,
         hb: &mut crate::engine::hot_loop::HeartbeatState,
     ) {
@@ -5476,7 +5532,7 @@ impl FarmState {
                 con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode,
                 // Nothing replayed here is a snapshot: a one-shot is never
                 // written down for replay in the first place.
-                false, farm_conn, hb,
+                false, shared, farm_conn, hb,
             );
         }
         self.replay_not_before =

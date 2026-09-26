@@ -89,6 +89,18 @@ Ask for `456` in the generic tick list and what a contract pays out arrives on
 `tick_string` 59, which is how the TWS API delivers dividends and how a gateway
 delivers them.
 
+## Finer prices and odd lots
+
+Every entry of a quote request states tag 9839, as a gateway states it: `2`
+on the last-trade entry where the logon offers `PRCEXTRAPREC`, and on the
+chargeable snapshot of a US share or warrant where it offers `ODDLOTBIDASK`;
+`1` on every other entry. Whether a contract is a US share or warrant is read
+from its definition's market classification, and where the logon offers
+odd lots the snapshot of a share or warrant whose definition is not held
+waits while it is looked up. A withdrawal states each entry as it was asked
+for. What the venue sends back is read the same way either way, and its
+prices and sizes reach `tickPrice` and `tickSize` as it states them.
+
 ## Callbacks that never fire on a gateway
 
 The TWS API declares seven callbacks that never fire for a program on a

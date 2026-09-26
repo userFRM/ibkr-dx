@@ -2928,6 +2928,24 @@ impl CcpState {
         hb: &mut HeartbeatState,
         shared: &SharedState,
     ) -> Option<crate::types::ControlCommand> {
+        // A chargeable snapshot of a share or warrant asks for the odd-lot
+        // sides by the contract's market classification, which a gateway holds
+        // for every contract it is asked about. One whose definition is not
+        // held here is looked up first, where the logon offers those sides.
+        if let crate::types::ControlCommand::Subscribe { contract, regulatory_snapshot: true, .. } = &cmd
+            && contract.con_id > 0
+            && !contract.exchange.is_empty()
+            && matches!(crate::control::contracts::sec_type_to_fix(&contract.sec_type), "CS" | "WAR")
+            && shared.reference.enables("ODDLOTBIDASK")
+            && shared.reference.contract_definition(contract.con_id as u32, &contract.exchange).is_none()
+        {
+            let (con_id, exchange) = (contract.con_id, contract.exchange.clone());
+            let req_id = self.next_internal_secdef_id;
+            self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
+            self.send_secdef_request(req_id, con_id, &exchange, ccp_conn, hb, shared, &None);
+            self.pending_named.push((req_id, cmd, Instant::now()));
+            return None;
+        }
         // Given by id alone, it is asked for by that id.
         if let Some((con_id, exchange)) = named_by_id_alone(&cmd) {
             let req_id = self.next_internal_secdef_id;

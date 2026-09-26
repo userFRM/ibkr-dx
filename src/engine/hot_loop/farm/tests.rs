@@ -158,7 +158,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         farm.send_news_subscribe(756733, instrument, "STK", "BRFG", 7, &mut None, &mut hb);
         farm.handle_subscription_ack(b"35=Q\x0133082,7,0.01,0,3", &mut context, &shared);
@@ -195,7 +195,7 @@ mod news_tests {
         farm.asked_generic_ticks.insert(instrument, vec![233, 236]);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
 
         let stated = |msg: &[u8], tag: u32| -> Vec<String> {
@@ -634,7 +634,7 @@ mod news_tests {
         let mut connection = Some(connection);
         farm.asked_generic_ticks.insert(instrument, vec![481]);
         farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "",
-            instrument, 0, false, &mut connection, &mut hb);
+            instrument, 0, false, &crate::bridge::SharedState::new(), &mut connection, &mut hb);
         let first = farm.generic_tick_reqs.iter().find(|(_, kind)| *kind == 481).unwrap().0;
         let ack = |request| format!("35=Q\x017,{request},0.01,0,3");
         farm.handle_subscription_ack(ack(first).as_bytes(), &mut context, &shared);
@@ -1131,7 +1131,7 @@ mod news_tests {
         farm.asked_generic_ticks.insert(instrument, vec![687, 236]);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let stated = |msg: &[u8], tag: u32| -> Vec<String> {
             let prefix = format!("{tag}=");
@@ -1249,7 +1249,7 @@ mod news_tests {
             let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
             farm.send_mktdata_subscribe(
                 700_001, "SPY", "SMART", sec_type, "20261016", 765.0, "C", "100", instrument, 0,
-                false, &mut conn, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             for (tag, series) in [(81, 732), (82, 734), (83, 735), (84, 737)] {
                 farm.generic_tick_tags.push((tag, series, instrument));
@@ -1344,7 +1344,7 @@ mod news_tests {
             farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
             farm.send_mktdata_subscribe(
                 700_001, "SPY", "SMART", sec_type, "20261016", 765.0, "C", "100", instrument, 0,
-                false, &mut conn, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             farm.generic_tick_tags.push((81, 732, instrument));
             farm.handle_generic_tick(
@@ -1562,7 +1562,7 @@ mod news_tests {
             let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
             farm.send_mktdata_subscribe(
                 700_001, "SPY", "SMART", row.sec_type, "20261001", 769.0, "C", "100", instrument, 0,
-                false, &mut conn, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             for (tag, series) in [(81, 732), (83, 735), (84, 737), (85, 736)] {
                 farm.generic_tick_tags.push((tag, series, instrument));
@@ -1889,7 +1889,7 @@ mod news_tests {
         farm.instrument_md_reqs.push((instrument, MdReqRecord {
             con_id: 756733, sec_type: "CS".into(), mode_9887: 0,
             entries: vec![MdReqEntry {
-                req_id: 1, request_type: REALTIME_BID_ASK_REQUEST_TYPE, venue: "BEST".into(),
+                req_id: 1, request_type: REALTIME_BID_ASK_REQUEST_TYPE, venue: "BEST".into(), precision: "1",
             }],
         }));
         farm.handle_subscription_ack(b"35=Q\x0176904,1,0.01,0,3,a6,,1,1", &mut context, &shared);
@@ -1953,7 +1953,7 @@ mod news_tests {
             farm.instrument_md_reqs.push((instrument, MdReqRecord {
                 con_id: 265598, sec_type: "CS".into(), mode_9887: 0,
                 entries: vec![MdReqEntry {
-                    req_id: 1, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "BEST".into(),
+                    req_id: 1, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "BEST".into(), precision: "1",
                 }],
             }));
             // Sizes counted in hundreds, as the acknowledgement's last field
@@ -2051,7 +2051,7 @@ mod news_tests {
         farm.instrument_md_reqs.push((instrument, MdReqRecord {
             con_id: 265598, sec_type: "CS".into(), mode_9887: 0,
             entries: vec![MdReqEntry {
-                req_id: 1, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "BEST".into(),
+                req_id: 1, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "BEST".into(), precision: "1",
             }],
         }));
         farm.handle_subscription_ack(b"35=Q\x0190001,1,0.01,0,2,a6,,1,1", &mut context, &shared);
@@ -3443,7 +3443,7 @@ mod news_tests {
         farm.asked_generic_ticks.insert(instrument, vec![233]);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -3505,7 +3505,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -3543,7 +3543,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         farm.also_ask_for_series(instrument, 756733, &[236], &context, &mut conn, &mut hb);
         let _ = super::drain_inner(&mut peer);
@@ -3608,7 +3608,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -3688,7 +3688,7 @@ mod news_tests {
         // The subscription on the slot went out for one contract.
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -3737,7 +3737,7 @@ mod news_tests {
         farm.note_subscription_began_under(instrument, 20);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -3799,7 +3799,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         farm.also_ask_for_series(instrument, 756733, &[233], &context, &mut conn, &mut hb);
         let _ = super::drain_inner(&mut peer);
@@ -3869,7 +3869,7 @@ mod news_tests {
         farm.note_subscription_asked_on(instrument, 10);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -3910,7 +3910,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         farm.also_ask_for_series(instrument, 756733, &[233, 236], &context, &mut conn, &mut hb);
         // One of them asked for again, by a caller that arrived after the
@@ -3963,7 +3963,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         farm.also_ask_for_series(instrument, 756733, &[236], &context, &mut conn, &mut hb);
         farm.note_series_asked_on(instrument, &[236], 4);
@@ -4004,7 +4004,7 @@ mod news_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
 
@@ -4449,7 +4449,7 @@ mod resub_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         farm.handle_disconnect(&mut None, &mut context, &None, &crate::bridge::SharedState::new());
         assert!(farm.instrument_md_reqs.is_empty(), "the disconnect clears the request list");
@@ -4464,7 +4464,7 @@ mod resub_tests {
         // so a later reconnect can retry rather than losing the subscription.
         let (id, con_id, sym, exch, st, ltd, k, r, m, mode) = targets.into_iter().next().unwrap();
         farm.send_mktdata_subscribe(
-            con_id, &sym, &exch, &st, &ltd, k, &r, &m, id, mode, false, &mut None, &mut hb,
+            con_id, &sym, &exch, &st, &ltd, k, &r, &m, id, mode, false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         assert_eq!(farm.md_resub_info.len(), 1, "the record must survive an absent connection");
     }
@@ -4520,7 +4520,7 @@ mod resub_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         farm.handle_disconnect(&mut None, &mut context, &None, &crate::bridge::SharedState::new());
         farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
@@ -4546,7 +4546,7 @@ mod resub_tests {
 
             farm.send_mktdata_subscribe(
                 756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
             );
             assert!(farm.holds_market_data(instrument), "subscribed: held");
 
@@ -4605,7 +4605,7 @@ mod resub_tests {
         let started = Instant::now();
         farm.replay_queue = farm.take_resub_targets(&context.market).into_iter().collect();
         farm.replay_not_before = None;
-        farm.drive_replay(replay, &mut conn, &mut hb);
+        farm.drive_replay(replay, &crate::bridge::SharedState::new(), &mut conn, &mut hb);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "the replay returned rather than waiting out its own pacing",
@@ -4615,18 +4615,18 @@ mod resub_tests {
         assert!(farm.replay_not_before.is_some(), "and the next burst has a time");
 
         // Before the pace elapses, nothing more goes out.
-        farm.drive_replay(replay, &mut conn, &mut hb);
+        farm.drive_replay(replay, &crate::bridge::SharedState::new(), &mut conn, &mut hb);
         assert_eq!(farm.replay_queue.len(), 4, "the pacing is still honoured");
 
         // With the pace elapsed, the next burst goes.
         farm.replay_not_before = Some(Instant::now());
-        farm.drive_replay(replay, &mut conn, &mut hb);
+        farm.drive_replay(replay, &crate::bridge::SharedState::new(), &mut conn, &mut hb);
         assert_eq!(farm.replay_queue.len(), 3);
 
         // And a book that empties stops asking for time.
         while !farm.replay_queue.is_empty() {
             farm.replay_not_before = Some(Instant::now());
-            farm.drive_replay(replay, &mut conn, &mut hb);
+            farm.drive_replay(replay, &crate::bridge::SharedState::new(), &mut conn, &mut hb);
         }
         assert!(farm.replay_queue.is_empty(), "every subscription was put back");
         assert!(farm.replay_not_before.is_none(), "nothing left to wait for");
@@ -4669,7 +4669,7 @@ mod resub_tests {
         // One goes out; three are still waiting.
         let replay = ReplayPacing { burst: 1, pace: std::time::Duration::from_secs(30) };
         farm.replay_queue = farm.take_resub_targets(&context.market).into_iter().collect();
-        farm.drive_replay(replay, &mut conn, &mut hb);
+        farm.drive_replay(replay, &crate::bridge::SharedState::new(), &mut conn, &mut hb);
         assert_eq!(farm.replay_queue.len(), 3);
 
         // And the farm goes before the rest of them do.
@@ -4773,7 +4773,7 @@ mod resub_tests {
             con_id: 756733,
             sec_type: "CS".into(),
             mode_9887: 0,
-            entries: vec![MdReqEntry { req_id: 7, request_type: 442, venue: "BEST".into() }],
+            entries: vec![MdReqEntry { req_id: 7, request_type: 442, venue: "BEST".into(), precision: "1" }],
         }));
         assert!(farm.holds_market_data(instrument), "a live subscription");
 
@@ -4807,7 +4807,7 @@ mod resub_tests {
         // A snapshot and nothing else, sent the way the engine sends one.
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "",
-            instrument, 0, true, &mut None, &mut hb,
+            instrument, 0, true, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
 
         assert!(
@@ -4823,7 +4823,7 @@ mod resub_tests {
         // And an ordinary subscription on the same contract is one.
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "",
-            instrument, 0, false, &mut None, &mut hb,
+            instrument, 0, false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         assert!(farm.holds_a_stream(instrument), "a live subscription");
     }
@@ -4840,7 +4840,7 @@ fn tag_values(tags: &[(u32, String)], tag: u32) -> Vec<&str> {
 /// futures subscription, so bid/ask never arrives.
 #[test]
 fn conid_subscribe_describes_the_actual_contract() {
-    let fut = build_conid_subscribe_tags(true, false, 1, 2, 793356225, "CME", "FUT", 0, "T", &[]);
+    let fut = build_conid_subscribe_tags(true, false,  "1", 1, 2, 793356225, "CME", "FUT", 0, "T", &[]);
     assert_eq!(tag_values(&fut, 167), ["FUT", "FUT"], "SecurityType must say FUT");
     assert_eq!(tag_values(&fut, 207), ["CME", "CME"], "Exchange must say CME");
 
@@ -4857,7 +4857,7 @@ fn conid_subscribe_describes_the_actual_contract() {
 /// number is the venue's rather than this client's.
 #[test]
 fn the_chargeable_snapshot_is_its_own_request_type() {
-    let snap = build_conid_subscribe_tags(true, true, 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
+    let snap = build_conid_subscribe_tags(true, true,  "1", 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
     assert_eq!(
         snap,
         vec![
@@ -4877,7 +4877,7 @@ fn the_chargeable_snapshot_is_its_own_request_type() {
     );
 
     // And a feed named beside it does not turn it back into a stream.
-    let frozen = build_conid_subscribe_tags(false, true, 1, 2, 265598, "SMART", "STK", 2, "T", &[]);
+    let frozen = build_conid_subscribe_tags(false, true,  "1", 1, 2, 265598, "SMART", "STK", 2, "T", &[]);
     assert_eq!(tag_values(&frozen, 264), ["624"]);
     assert_eq!(tag_values(&frozen, 146), ["1"]);
     assert!(tag_values(&frozen, 9887).is_empty(), "no feed is named beside it");
@@ -4888,7 +4888,7 @@ fn the_chargeable_snapshot_is_its_own_request_type() {
 /// the request is withdrawn once every kind a snapshot is made of has arrived.
 #[test]
 fn an_ordinary_snapshot_is_asked_for_as_a_subscription() {
-    let ordinary = build_conid_subscribe_tags(true, false, 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
+    let ordinary = build_conid_subscribe_tags(true, false,  "1", 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
     assert_eq!(tag_values(&ordinary, 263), ["1"]);
     assert_eq!(tag_values(&ordinary, 264), ["442", "443"]);
 }
@@ -4899,7 +4899,7 @@ fn an_ordinary_snapshot_is_asked_for_as_a_subscription() {
 /// dropped field is caught here too.
 #[test]
 fn conid_subscribe_is_unchanged_for_stocks() {
-    let stk = build_conid_subscribe_tags(true, false, 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
+    let stk = build_conid_subscribe_tags(true, false,  "1", 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
     assert_eq!(
         stk,
         vec![
@@ -4926,7 +4926,7 @@ fn conid_subscribe_is_unchanged_for_stocks() {
         ],
     );
 
-    let delayed = build_conid_subscribe_tags(false, false, 1, 2, 265598, "SMART", "STK", 3, "T", &[]);
+    let delayed = build_conid_subscribe_tags(false, false,  "1", 1, 2, 265598, "SMART", "STK", 3, "T", &[]);
     assert_eq!(
         delayed,
         vec![
@@ -4965,11 +4965,11 @@ fn conid_subscribe_is_unchanged_for_stocks() {
 /// that states a guess subscribes to some other instrument under this id.
 #[test]
 fn conid_subscribe_states_the_description_it_is_given() {
-    let fut = build_conid_subscribe_tags(true, false, 1, 2, 793356225, "CME", "FUT", 0, "T", &[]);
+    let fut = build_conid_subscribe_tags(true, false,  "1", 1, 2, 793356225, "CME", "FUT", 0, "T", &[]);
     assert_eq!(tag_values(&fut, 167), ["FUT", "FUT"]);
     assert_eq!(tag_values(&fut, 207), ["CME", "CME"]);
 
-    let stk = build_conid_subscribe_tags(true, false, 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
+    let stk = build_conid_subscribe_tags(true, false,  "1", 1, 2, 265598, "SMART", "STK", 0, "T", &[]);
     assert_eq!(tag_values(&stk, 167), ["CS", "CS"]);
     assert_eq!(tag_values(&stk, 207), ["BEST", "BEST"]);
     assert_ne!(fut, stk, "a future is not sent as a stock");
@@ -4986,7 +4986,7 @@ fn conid_subscribe_states_the_description_it_is_given() {
 fn a_delayed_stream_asks_for_both_legs() {
     for mode in [1, 2, 3] {
         let delayed =
-            build_conid_subscribe_tags(false, false, 7, 8, 265598, "SMART", "STK", mode, "T", &[]);
+            build_conid_subscribe_tags(false, false,  "1", 7, 8, 265598, "SMART", "STK", mode, "T", &[]);
         assert_eq!(tag_values(&delayed, 262), ["7", "8"], "both legs are numbered");
         assert_eq!(tag_values(&delayed, 264), ["442", "443"]);
         assert_eq!(tag_values(&delayed, 146), ["2"]);
@@ -4996,7 +4996,7 @@ fn a_delayed_stream_asks_for_both_legs() {
         );
     }
 
-    let realtime = build_conid_subscribe_tags(true, false, 7, 8, 265598, "SMART", "STK", 0, "T", &[]);
+    let realtime = build_conid_subscribe_tags(true, false,  "1", 7, 8, 265598, "SMART", "STK", 0, "T", &[]);
     assert!(tag_values(&realtime, 9887).is_empty(), "realtime carries no 9887");
     assert_eq!(tag_values(&realtime, 264), ["442", "443"]);
 }
@@ -5004,7 +5004,7 @@ fn a_delayed_stream_asks_for_both_legs() {
 /// Every entry must be self-contained: the server reads conId per entry.
 #[test]
 fn each_entry_carries_its_own_conid() {
-    let fut = build_conid_subscribe_tags(true, false, 1, 2, 793356225, "CME", "FUT", 0, "T", &[]);
+    let fut = build_conid_subscribe_tags(true, false,  "1", 1, 2, 793356225, "CME", "FUT", 0, "T", &[]);
     assert_eq!(tag_values(&fut, 6008), ["793356225", "793356225"]);
 
     let counts: HashMap<u32, usize> =
@@ -5030,7 +5030,7 @@ mod stale_ack_tests {
 
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         let pending: Vec<u32> = farm.md_req_to_instrument.iter().map(|(r, _)| *r).collect();
         assert!(!pending.is_empty(), "the subscribe must register at least one request");
@@ -5290,7 +5290,7 @@ mod trading_status_subscribe_tests {
 
             farm.send_mktdata_subscribe(
                 756733, "SPY", exchange, "STK", "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
             );
 
             let tags = build_trading_status_subscribe_tags(1, 756733, "STK", exchange, "t");
@@ -5676,7 +5676,7 @@ mod depth_position_tests {
         let instrument = context.market.register(756733);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         let refused = |id: u32| crate::protocol::fix::fix_build(&[
             (crate::protocol::fix::TAG_MSG_TYPE, "j"),
@@ -5758,7 +5758,7 @@ mod depth_position_tests {
         let instrument = context.market.register(756733);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         farm.send_news_subscribe(756733, instrument, "STK", "BRFG", 7, &mut None, &mut hb);
         assert_eq!(farm.news_subscriptions.len(), 1, "the news was filed for the rebuild");
@@ -5793,7 +5793,7 @@ mod depth_position_tests {
         let instrument = context.market.register(756733);
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         let quote = farm.md_req_to_instrument.iter()
             .map(|(id, _)| *id)
@@ -5824,7 +5824,7 @@ mod depth_position_tests {
         context.market.set_routing(instrument, "STK", "SMART");
         farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
         );
         let quote = farm.md_req_to_instrument.iter()
             .map(|(id, _)| *id)
@@ -5859,7 +5859,7 @@ mod depth_position_tests {
             client.core.instrument_to_req.lock().unwrap().insert(instrument, 1);
             farm.send_mktdata_subscribe(
                 756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
             );
             let mut requests = farm.md_req_to_instrument.clone();
             if reverse { requests.reverse(); }
@@ -5916,7 +5916,7 @@ mod depth_position_tests {
             client.core.instrument_to_req.lock().unwrap().insert(instrument, 1);
             farm.send_mktdata_subscribe(
                 265598, "AAPL", "SMART", sec_type, "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &shared, &mut None, &mut hb,
             );
             let quote: Vec<_> = farm.md_req_to_instrument.iter()
                 .map(|(id, _)| id.to_string())
@@ -5957,7 +5957,7 @@ mod depth_position_tests {
             farm.next_md_req_id = 17;
             farm.send_mktdata_subscribe(
                 479624278, "BTC", "PAXOS", "CRYPTO", "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
             );
             let mut acknowledgements = [
                 "35=Q\x0157921,18,0.25,0,1,ffffffff,,1,1e-08",
@@ -5991,7 +5991,7 @@ mod depth_position_tests {
             context.market.set_routing(instrument, sec_type, "SMART");
             farm.send_mktdata_subscribe(
                 756733, "SPY", "SMART", sec_type, "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
             );
             let quote = farm.md_req_to_instrument.iter()
                 .map(|(id, _)| *id)
@@ -6203,13 +6203,31 @@ mod withdrawal_wire_tests {
     /// it never asked for keep arriving under the number it happens to have
     /// given out. On a delayed feed the feed is named on the entries that were
     /// asked with it, and only on those.
+    ///
+    /// Tag 9839 is `1` on every entry but two, as a gateway states it: `2` on
+    /// the last-trade entry where the logon offers `PRCEXTRAPREC`, and on the
+    /// chargeable snapshot of a US share where it offers `ODDLOTBIDASK`.
     #[test]
     fn a_withdrawal_states_the_entries_the_subscription_stated() {
         // A realtime stock, and a delayed option with two series named beside
-        // it, one of them on the model's name.
-        for (con_id, sec_type, mode, series, numbers) in
-            [(756733, "STK", 0, vec![], 4), (805711629, "OPT", 1, vec![236, 687], 11)]
-        {
+        // it, one of them on the model's name; then the stock where the logon
+        // offers finer prices, and its snapshot where it offers odd lots, for
+        // a US share and for one classed otherwise.
+        for (con_id, sec_type, mode, series, numbers, offered, snapshot, class, precision) in [
+            (756733, "STK", 0, vec![], 4, "", false, "", "1"),
+            (805711629, "OPT", 1, vec![236, 687], 11, "", false, "", "1"),
+            (756733, "STK", 0, vec![], 4, "PRCEXTRAPREC", false, "", "2"),
+            (756733, "STK", 0, vec![], 3, "ODDLOTBIDASK", true, "USSTK", "2"),
+            (756733, "STK", 0, vec![], 3, "ODDLOTBIDASK", true, "CASTK", "1"),
+        ] {
+            let shared = SharedState::new();
+            shared.reference.set_enabled_features(vec![offered.to_string()]);
+            shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+                con_id: con_id as u32,
+                exchange: "SMART".into(),
+                market_classification: class.into(),
+                ..Default::default()
+            });
             let mut farm = FarmState::new();
             let mut context = Context::new();
             let mut hb = HeartbeatState::new();
@@ -6218,11 +6236,13 @@ mod withdrawal_wire_tests {
             let mut conn = Some(conn);
             let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
             // Each entry by its number, with every field it states.
-            let mut entries = |action: &str| -> BTreeMap<String, Vec<Option<String>>> {
+            let mut entries = |actions: &[&str]| -> BTreeMap<String, Vec<Option<String>>> {
                 let sent = super::drain_inner(&mut peer);
-                let sent: Vec<&Vec<u8>> =
-                    sent.iter().filter(|msg| values_of(msg, 263) == [action]).collect();
-                if action == "2" {
+                let sent: Vec<&Vec<u8>> = sent
+                    .iter()
+                    .filter(|msg| values_of(msg, 263).first().is_some_and(|action| actions.contains(&action.as_str())))
+                    .collect();
+                if actions == ["2"] {
                     assert!(sent.iter().all(|msg| values_of(msg, 146) == ["1"]), "one entry per withdrawal");
                 }
                 sent.iter()
@@ -6238,13 +6258,20 @@ mod withdrawal_wire_tests {
             farm.asked_generic_ticks.insert(instrument, series);
             farm.send_mktdata_subscribe(
                 con_id, "SPY", "SMART", sec_type, "", 0.0, "", "", instrument, mode,
-                false, &mut conn, &mut hb,
+                snapshot, &shared, &mut conn, &mut hb,
             );
-            let asked = entries("1");
-            assert_eq!(asked.len(), numbers, "{sec_type}: asked for under {numbers} numbers");
+            let asked = entries(&["1", "3"]);
+            assert_eq!(asked.len(), numbers, "{sec_type} {offered}: asked for under {numbers} numbers");
+            for stated in asked.values() {
+                let quote = matches!(stated[3].as_deref(), Some("443" | "624"));
+                assert_eq!(
+                    stated[6].as_deref(), Some(if quote { precision } else { "1" }),
+                    "{sec_type} {offered} {class}: {stated:?}",
+                );
+            }
 
             farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
-            assert_eq!(entries("2"), asked, "{sec_type}: every entry is withdrawn as it was asked for");
+            assert_eq!(entries(&["2"]), asked, "{sec_type} {offered}: every entry is withdrawn as it was asked for");
         }
     }
 
@@ -6278,7 +6305,7 @@ mod withdrawal_wire_tests {
             farm.asked_generic_ticks.insert(instrument, vec![735]);
             farm.send_mktdata_subscribe(
                 805711629, "AAPL", "SMART", sec_type, "20260821", 220.0, "C", "100",
-                instrument, 0, false, &mut conn, &mut hb,
+                instrument, 0, false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             let sent = super::drain_inner(&mut peer);
             let named = sent.iter().flat_map(|msg| values_of(msg, 264)).filter(|v| v == "735").count();
@@ -6318,7 +6345,7 @@ mod withdrawal_wire_tests {
             let instrument = context.market.register(con_id);
             farm.send_mktdata_subscribe(
                 con_id, "SPY", "SMART", "OPT", "20261016", 765.0, "C", "100", instrument, 0,
-                false, &mut conn, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             instrument
         }).collect();
@@ -6813,7 +6840,7 @@ fn a_subscription_after_a_withdrawal_is_answered_under_a_recycled_number() {
     let first = context.market.register(265_598);
     farm.send_mktdata_subscribe(
         265_598, "AAPL", "SMART", "STK", "", 0.0, "", "", first, 0,
-        false, &mut None, &mut hb,
+        false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
     );
     let asked_under = farm.md_req_to_instrument[0].0;
     farm.handle_subscription_ack(
@@ -6834,7 +6861,7 @@ fn a_subscription_after_a_withdrawal_is_answered_under_a_recycled_number() {
     let next = context.market.register(756_733);
     farm.send_mktdata_subscribe(
         756_733, "SPY", "SMART", "STK", "", 0.0, "", "", next, 0,
-        false, &mut None, &mut hb,
+        false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
     );
     let asked_again = farm.md_req_to_instrument.last().expect("a request is waiting").0;
     farm.handle_subscription_ack(
@@ -6899,11 +6926,11 @@ fn a_number_the_venue_hands_out_again_is_taken_for_what_it_now_names() {
             sec_type: "CS".into(),
             mode_9887: 0,
             entries: vec![
-                MdReqEntry { req_id: 7, request_type: 442, venue: "BEST".into() },
+                MdReqEntry { req_id: 7, request_type: 442, venue: "BEST".into(), precision: "1" },
                 MdReqEntry {
                     req_id: 8,
                     request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE,
-                    venue: "BEST".into(),
+                    venue: "BEST".into(), precision: "1",
                 },
             ],
         }));
@@ -6966,11 +6993,11 @@ fn a_stream_beside_snapshots_is_withdrawn_with_its_own_selector() {
         let mut conn = Some(conn);
         let mut peer = Connection::new_raw(peer).unwrap();
         farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, 0, true, &mut conn, &mut hb,
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, 0, true, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         assert!(!farm.holds_a_stream(0), "the snapshot leaves room for a stream");
         farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, mode, false, &mut conn, &mut hb,
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, mode, false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         // Read per entry: a stream states its group twice, and a map keyed by
         // the tag alone would hold only the second leg.
@@ -6983,7 +7010,7 @@ fn a_stream_beside_snapshots_is_withdrawn_with_its_own_selector() {
         // A later snapshot asks under a different mode, which must not change
         // how the already running stream is withdrawn.
         farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, 4 - mode, true, &mut conn, &mut hb,
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, 4 - mode, true, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         drain_inner(&mut peer);
         farm.send_mktdata_unsubscribe(0, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
@@ -7020,7 +7047,7 @@ mod delayed_request_tests {
             let mut peer = Connection::new_raw(peer).unwrap();
             farm.send_mktdata_subscribe(
                 12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
-                false, &mut conn, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             let sent = super::drain_inner(&mut peer);
             assert!(sent.iter().all(|message| !fix::fix_parse(message).contains_key(&9887)));
@@ -7077,7 +7104,7 @@ mod delayed_request_tests {
             let snapshot = farm.next_md_req_id;
             farm.md_req_to_instrument.push((snapshot, instrument));
             farm.instrument_md_reqs[0].1.entries.push(MdReqEntry {
-                req_id: snapshot, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "IDEALPRO".into(),
+                req_id: snapshot, request_type: REGULATORY_SNAPSHOT_REQUEST_TYPE, venue: "IDEALPRO".into(), precision: "1",
             });
             farm.handle_subscription_ack(
                 format!("35=Q\x01999,{snapshot},0.00005,0,1,ffffffff,,1,1").as_bytes(),
@@ -7107,7 +7134,7 @@ mod delayed_request_tests {
             let mut conn = Some(conn);
             farm.send_mktdata_subscribe(
                 12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
-                false, &mut conn, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
             );
             let bid = farm.instrument_md_reqs[0].1.entries[0].req_id;
             let refusal = fix::fix_build(&[(35, "3"), (262, &bid.to_string()),
@@ -7171,7 +7198,7 @@ mod delayed_request_tests {
             farm.note_data_type(instrument, 0, Some(1), &shared);
             farm.send_mktdata_subscribe(
                 12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
-                false, &mut None, &mut hb,
+                false, &crate::bridge::SharedState::new(), &mut None, &mut hb,
             );
             let refused_id = farm.instrument_md_reqs[0].1.entries[usize::from(last_only)].req_id;
             let refused = fix::fix_build(&[
@@ -7198,7 +7225,7 @@ mod delayed_request_tests {
         let mut peer = Connection::new_raw(peer).unwrap();
         farm.send_mktdata_subscribe(
             12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", instrument, 0,
-            false, &mut conn, &mut hb,
+            false, &crate::bridge::SharedState::new(), &mut conn, &mut hb,
         );
         let _ = super::drain_inner(&mut peer);
         let quote = farm.instrument_md_reqs[0].1.entries[0].req_id;
@@ -7262,6 +7289,12 @@ mod frozen_tests {
         }).collect()
     }
 
+    /// What each last-trade entry sent states on tag 9839.
+    fn last_precision(sent: &[Vec<u8>]) -> Vec<String> {
+        sent.iter().flat_map(|message| fix::fix_parse_repeating(message, 262))
+            .filter(|entry| entry[&264] == "443").map(|entry| entry[&9839].clone()).collect()
+    }
+
     fn numbers(sent: &[(String, u32, String, String, Option<String>)], asked: &str, feed: Option<&str>) -> Vec<u32> {
         sent.iter()
             .filter(|(action, _, request, _, stated)| action == asked && ["442", "443"].contains(&request.as_str()) && stated.as_deref() == feed)
@@ -7318,7 +7351,7 @@ mod frozen_tests {
             let (conn, peer) = Connection::for_test();
             let mut conn = Some(conn);
             let mut peer = Connection::new_raw(peer).unwrap();
-            farm.send_mktdata_subscribe(7, "X", exchange, sec_type, "", 0.0, "", "", instrument, 0, false, &mut conn, &mut hb);
+            farm.send_mktdata_subscribe(7, "X", exchange, sec_type, "", 0.0, "", "", instrument, 0, false, &shared, &mut conn, &mut hb);
             let watched: Vec<_> = entries(&super::drain_inner(&mut peer)).into_iter()
                 .filter(|(_, _, request, _, _)| request == "398").collect();
             assert_eq!(
@@ -7334,21 +7367,22 @@ mod frozen_tests {
     /// status saying the market is closed asks the frozen quote beside the
     /// live one and serves it, type 2, while the live one is kept up and not
     /// served; the status saying it is open withdraws the frozen quote and
-    /// serves the live one again, type 1.
+    /// serves the live one again, type 1. Where the logon offers finer
+    /// prices, the frozen last trade is asked and withdrawn in them.
     #[test]
     fn a_closed_market_serves_the_frozen_quote_until_it_opens() {
         let mut farm = FarmState::new();
         let mut context = Context::new();
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
-        shared.reference.set_enabled_features(vec!["FROZEN".into()]);
+        shared.reference.set_enabled_features(vec!["FROZEN".into(), "PRCEXTRAPREC".into()]);
         let instrument = context.market.register(851160433);
         let data_type = shared.market.subscription_data_type(instrument, 1);
         farm.note_frozen_feeds(instrument, true, false, 851160433, "BOND", "SMART", &shared);
         let (conn, peer) = Connection::for_test();
         let mut conn = Some(conn);
         let mut peer = Connection::new_raw(peer).unwrap();
-        farm.send_mktdata_subscribe(851160433, "IBM", "SMART", "BOND", "", 0.0, "", "", instrument, 0, false, &mut conn, &mut hb);
+        farm.send_mktdata_subscribe(851160433, "IBM", "SMART", "BOND", "", 0.0, "", "", instrument, 0, false, &shared, &mut conn, &mut hb);
         let sent = entries(&super::drain_inner(&mut peer));
         let live = numbers(&sent, "1", None);
         let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id).unwrap();
@@ -7366,8 +7400,10 @@ mod frozen_tests {
         farm.process_farm_message(&status(395696, 2), &mut conn, &mut context, &shared, &None, &mut hb);
         assert!(super::drain_inner(&mut peer).is_empty(), "only a status of one says the market is closed");
         farm.process_farm_message(&status(395696, 1), &mut conn, &mut context, &shared, &None, &mut hb);
-        let frozen = numbers(&entries(&super::drain_inner(&mut peer)), "1", Some("2"));
+        let asked = super::drain_inner(&mut peer);
+        let frozen = numbers(&entries(&asked), "1", Some("2"));
         assert_eq!(frozen.len(), 2, "the frozen quote is asked for beside the live one");
+        assert_eq!(last_precision(&asked), ["2"]);
         assert_eq!(data_type.load(Ordering::Relaxed), 2);
         for id in &frozen {
             farm.handle_subscription_ack(format!("35=Q\x01395693,{id},0.0001,2,1,ffffffff,,0,1").as_bytes(), &mut context, &shared);
@@ -7381,8 +7417,10 @@ mod frozen_tests {
         assert!(yields(&shared, instrument).is_empty());
 
         farm.process_farm_message(&status(395696, 0), &mut conn, &mut context, &shared, &None, &mut hb);
-        let withdrawn = entries(&super::drain_inner(&mut peer));
+        let sent = super::drain_inner(&mut peer);
+        let withdrawn = entries(&sent);
         assert_eq!(numbers(&withdrawn, "2", Some("2")), frozen, "withdrawn as it was asked for");
+        assert_eq!(last_precision(&sent), ["2"]);
         assert_eq!(data_type.load(Ordering::Relaxed), 1);
         assert_eq!((context.quote(instrument).bid, context.quote(instrument).ask), (0, 0), "the live quote as it stands");
         assert_eq!(yields(&shared, instrument), [(50, 0), (51, 0)]);
@@ -7416,7 +7454,7 @@ mod frozen_tests {
         let (conn, peer) = Connection::for_test();
         let mut conn = Some(conn);
         let mut peer = Connection::new_raw(peer).unwrap();
-        farm.send_mktdata_subscribe(910663577, "SPY", "SMART", "OPT", "20261002", 767.0, "C", "100", instrument, 0, false, &mut conn, &mut hb);
+        farm.send_mktdata_subscribe(910663577, "SPY", "SMART", "OPT", "20261002", 767.0, "C", "100", instrument, 0, false, &shared, &mut conn, &mut hb);
         let sent = entries(&super::drain_inner(&mut peer));
         assert!(sent.iter().all(|(_, _, request, ..)| request != "398"), "not watched before it falls back");
         let live = numbers(&sent, "1", None);
@@ -7503,7 +7541,7 @@ mod frozen_tests {
             let (conn, peer) = Connection::for_test();
             let mut conn = Some(conn);
             let mut peer = Connection::new_raw(peer).unwrap();
-            farm.send_mktdata_subscribe(910663577, "SPY", "SMART", "OPT", "20261002", 767.0, "C", "100", instrument, 0, false, &mut conn, &mut hb);
+            farm.send_mktdata_subscribe(910663577, "SPY", "SMART", "OPT", "20261002", 767.0, "C", "100", instrument, 0, false, &shared, &mut conn, &mut hb);
             let sent = entries(&super::drain_inner(&mut peer));
             let live = numbers(&sent, "1", None);
             let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id).unwrap();
@@ -7569,7 +7607,7 @@ mod frozen_tests {
             let (conn, peer) = Connection::for_test();
             let mut conn = Some(conn);
             let mut peer = Connection::new_raw(peer).unwrap();
-            farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", instrument, 0, false, &mut conn, &mut hb);
+            farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", instrument, 0, false, &shared, &mut conn, &mut hb);
             let sent = entries(&super::drain_inner(&mut peer));
             let watch = sent.iter().find(|(_, _, request, ..)| request == "398").map(|(_, id, ..)| *id).unwrap();
             for id in numbers(&sent, "1", None) {

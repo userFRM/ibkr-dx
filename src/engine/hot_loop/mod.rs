@@ -2537,7 +2537,7 @@ impl HotLoop {
             burst: self.reconnect_cfg.replay_burst,
             pace: self.reconnect_cfg.replay_pace,
         };
-        self.farm.drive_replay(replay, &mut self.farm_conn, &mut self.hb);
+        self.farm.drive_replay(replay, &self.shared, &mut self.farm_conn, &mut self.hb);
     }
 
     /// Replace the farm connection (after reconnection) and re-subscribe to all
@@ -5090,6 +5090,42 @@ mod tests {
         assert!(hl.md_requests.is_empty());
     }
 
+    /// A chargeable snapshot of a share whose definition is not held is looked
+    /// up first where the logon offers odd-lot sides, so the snapshot can state
+    /// whether it asks for them; a held definition, a stream, or a logon that
+    /// does not offer them sends it as it stands.
+    #[test]
+    fn an_odd_lot_snapshot_waits_for_the_contracts_definition() {
+        for (offered, snapshot, held, looked_up) in [
+            (true, true, false, true),
+            (true, true, true, false),
+            (false, true, false, false),
+            (true, false, false, false),
+        ] {
+            let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+            if offered {
+                hl.shared.reference.set_enabled_features(vec!["ODDLOTBIDASK".into()]);
+            }
+            if held {
+                hl.shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+                    con_id: 265598, exchange: "SMART".into(), market_classification: "USSTK".into(),
+                    ..Default::default()
+                });
+            }
+            let mut request = subscription(1, ContractRef {
+                con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                ..Default::default()
+            });
+            if let ControlCommand::Subscribe { regulatory_snapshot, .. } = &mut request {
+                *regulatory_snapshot = snapshot;
+            }
+            let passed = hl.ccp.hold_until_named(request, &mut None, &mut hl.hb, &hl.shared);
+            let row = (offered, snapshot, held);
+            assert_eq!(passed.is_none(), looked_up, "{row:?}");
+            assert_eq!(hl.ccp.pending_named.len(), usize::from(looked_up), "{row:?}");
+        }
+    }
+
     #[test]
     fn a_subscription_named_after_the_feed_was_given_up_is_refused() {
         let shared = Arc::new(SharedState::new());
@@ -5156,7 +5192,7 @@ mod tests {
             hl.farm.instrument_md_reqs.push((instrument, crate::engine::hot_loop::farm::MdReqRecord {
                 con_id: 756733, sec_type: "CS".into(), mode_9887: 0,
                 entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
-                    req_id: 7, request_type: if snapshot { 442 } else { 624 }, venue: "BEST".into(),
+                    req_id: 7, request_type: if snapshot { 442 } else { 624 }, venue: "BEST".into(), precision: "1",
                 }],
             }));
             let mut asked = subscription(1, ContractRef { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() });
@@ -5224,7 +5260,7 @@ mod tests {
         // kept across the outage for the replay.
         hl.farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "",
-            instrument, 0, false, &mut hl.farm_conn, &mut hl.hb,
+            instrument, 0, false, &shared, &mut hl.farm_conn, &mut hl.hb,
         );
         hl.farm.handle_disconnect_for_test();
 
@@ -5429,7 +5465,7 @@ mod tests {
             sec_type: "CS".into(),
             mode_9887: 0,
             entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
-                req_id: 7, request_type: 624, venue: "BEST".into(),
+                req_id: 7, request_type: 624, venue: "BEST".into(), precision: "1",
             }],
         }));
 
@@ -7963,7 +7999,7 @@ mod tests {
             con_id: 4001,
             sec_type: "CS".into(),
             mode_9887: 0,
-            entries: vec![crate::engine::hot_loop::farm::MdReqEntry { req_id: 7, request_type: 442, venue: "BEST".into() }],
+            entries: vec![crate::engine::hot_loop::farm::MdReqEntry { req_id: 7, request_type: 442, venue: "BEST".into(), precision: "1" }],
         }));
         hl.hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
             ignore_size: false,
@@ -8111,7 +8147,7 @@ mod tests {
             sec_type: "CS".into(),
             mode_9887: 0,
             entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
-                req_id: 7, request_type: 442, venue: "BEST".into(),
+                req_id: 7, request_type: 442, venue: "BEST".into(), precision: "1",
             }],
         }));
         for req_id in [1, 2] {
@@ -8144,7 +8180,7 @@ mod tests {
             con_id: 4002,
             sec_type: "CS".into(),
             mode_9887: 0,
-            entries: vec![crate::engine::hot_loop::farm::MdReqEntry { req_id: 8, request_type: 442, venue: "BEST".into() }],
+            entries: vec![crate::engine::hot_loop::farm::MdReqEntry { req_id: 8, request_type: 442, venue: "BEST".into(), precision: "1" }],
         }));
         hl.farm.news_subscriptions.push((id, 55, "BRFG".to_string(), 756733, "STK".to_string()));
         hl.md_requests.insert(1, market_requests::MdRequest {
@@ -8691,7 +8727,7 @@ mod tests {
         let instrument = hl.context_mut().market.register(756733);
         hl.farm.send_mktdata_subscribe(
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
-            false, &mut None, &mut HeartbeatState::new(),
+            false, &shared, &mut None, &mut HeartbeatState::new(),
         );
         hl.farm.also_ask_for_series(
             instrument, 756733, &[687, 236], &hl.context, &mut None, &mut HeartbeatState::new(),

@@ -45,6 +45,9 @@ pub(super) struct StatusWatch {
     exchange: String,
     /// Where the status is asked for.
     status_venue: String,
+    /// What the frozen quote's last-trade entry states on tag 9839, as the
+    /// subscription's does.
+    last_precision: &'static str,
     /// The number the status is asked under, once it is.
     status: Option<u32>,
     /// What the status last said: the market is closed.
@@ -146,6 +149,9 @@ impl FarmState {
                 sec_type: sec_type.to_string(),
                 exchange: exchange.to_string(),
                 status_venue: status_venue(shared, con_id, exchange),
+                last_precision: super::quote_precision(
+                    shared, REALTIME_LAST_REQUEST_TYPE, con_id, exchange, sec_type,
+                ),
                 ..StatusWatch::default()
             },
         );
@@ -167,6 +173,7 @@ impl FarmState {
             sec_type: std::mem::take(&mut watch.sec_type),
             exchange: std::mem::take(&mut watch.exchange),
             status_venue: std::mem::take(&mut watch.status_venue),
+            last_precision: watch.last_precision,
             ..StatusWatch::default()
         };
         if watch.frozen {
@@ -367,6 +374,7 @@ impl FarmState {
         let tags = build_conid_subscribe_tags(
             false,
             false,
+            watch.last_precision,
             requests[0],
             requests[1],
             watch.con_id,
@@ -407,10 +415,11 @@ impl FarmState {
         for pair in pairs {
             let Some(conn) = farm_conn.as_mut() else { continue };
             let feed = pair.feed.to_string();
-            for (req_id, request_type) in pair
+            for ((req_id, request_type), precision) in pair
                 .requests
                 .iter()
                 .zip([REALTIME_BID_ASK_REQUEST_TYPE, REALTIME_LAST_REQUEST_TYPE])
+                .zip(["1", watch.last_precision])
             {
                 if pair.refused.contains(req_id) {
                     continue;
@@ -427,7 +436,7 @@ impl FarmState {
                     (264, &request_type),
                     (6088, "Socket"),
                     (9830, "1"),
-                    (9839, "1"),
+                    (9839, precision),
                     (9887, &feed),
                 ];
                 attached_quotes::send_decorated(conn, &tags, combo);

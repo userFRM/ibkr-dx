@@ -386,6 +386,7 @@ impl HotLoop {
                 id,
                 mode_9887,
                 regulatory_snapshot,
+                &self.shared,
                 &mut self.farm_conn,
                 &mut self.hb,
             );

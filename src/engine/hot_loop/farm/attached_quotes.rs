@@ -203,7 +203,7 @@ impl FarmState {
         self.generic_tick_reqs.push((req_id, 232));
         let (venue, sec_type) =
             super::stated_venue_and_type(&contract.sec_type, &contract.exchange);
-        let entry = super::MdReqEntry { req_id, request_type: 232, venue: venue.to_string() };
+        let entry = super::MdReqEntry { req_id, request_type: 232, venue: venue.to_string(), precision: "1" };
         if let Some((_, record)) =
             self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument)
         {
@@ -311,6 +311,7 @@ impl FarmState {
                 instrument,
                 0,
                 false,
+                shared,
                 connection,
                 heartbeat,
             );
@@ -474,6 +475,7 @@ mod tests {
         let mut tags = super::super::build_conid_subscribe_tags(
             true,
             false,
+             "1",
             1,
             2,
             0,
@@ -718,6 +720,7 @@ mod tests {
             0,
             0,
             false,
+             &crate::bridge::SharedState::new(),
             &mut None,
             &mut heartbeat,
         );
@@ -748,6 +751,7 @@ mod tests {
             0,
             0,
             false,
+             &crate::bridge::SharedState::new(),
             &mut None,
             &mut heartbeat,
         );
