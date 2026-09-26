@@ -851,14 +851,10 @@ impl HotLoop {
             // security definition connection: an option's sessions and its
             // currency's rates.
             for con_id in std::mem::take(&mut self.farm.schedules_wanted) {
-                self.ccp.ask_schedule(con_id, "", &self.shared, &mut self.ccp_conn, &mut self.hb);
+                self.ccp.ask_schedule(con_id, &self.shared, &mut self.ccp_conn, &mut self.hb);
             }
             for currency in std::mem::take(&mut self.farm.rates_wanted) {
                 self.ccp.ask_currency_rates(&currency, &mut self.ccp_conn, &mut self.hb);
-            }
-            // And the sessions a day's bar kept up to date rolls over on.
-            for (con_id, exchange) in std::mem::take(&mut self.hmds.schedules_wanted) {
-                self.ccp.ask_schedule(con_id, &exchange, &self.shared, &mut self.ccp_conn, &mut self.hb);
             }
 
             // 1b. Busy-poll historical socket for tick-by-tick data
@@ -1527,6 +1523,7 @@ impl HotLoop {
                                 seconds: size.seconds(),
                                 opened_at: 0,
                                 daily_session: None,
+                                closed_at: None,
                                 bar: Default::default(),
                                 weighted: 0.0,
                             });
@@ -1534,15 +1531,6 @@ impl HotLoop {
                                 req_id, con_id, &symbol, &sec_type, &exchange, &what_to_show,
                                 use_rth, &mut self.hmds_conn, &mut self.hb,
                             );
-                            // A day's bar rolls over on the contract's own
-                            // sessions, asked for now so they are in hand when
-                            // this one ends.
-                            if size == crate::control::historical::BarSize::Day1 {
-                                self.ccp.ask_schedule(
-                                    con_id as u32, &exchange, &self.shared, &mut self.ccp_conn,
-                                    &mut self.hb,
-                                );
-                            }
                         }
                     } else {
                         self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, include_expired, &symbol, &sec_type, &exchange, &mut self.hmds_conn, &mut self.hb, &self.shared);
@@ -4885,6 +4873,7 @@ mod tests {
             seconds: 60,
             opened_at: 0,
             daily_session: None,
+            closed_at: None,
             bar: Default::default(),
             weighted: 0.0,
         });

@@ -217,12 +217,12 @@ client's own allocation; what a gateway answers the same way is on
   provided by folding the 5-second bar stream into the requested bar size,
   going on from the history's last bar as a gateway does.
   Daily updates retain the session bounds supplied with the history and use
-  its end date in the series' timezone. When that session ends, the next one is
-  the contract's own session holding the next five-second bar, dated the same
-  way; UTC calendar boundaries are used only while the contract's sessions are
-  not in hand. A contract whose definition no lookup has stated is looked up
-  first, as a gateway looks up a request's contract, to ask for them. A week and a month are folded on the calendar, opening on the Monday and on
-  the 1st at midnight UTC.
+  its end date in the series' timezone. When that session ends, the next bar
+  opens at midnight UTC of the next five-second bar's day, as a gateway opens
+  it, and ends at the next midnight UTC or at the history's close where that
+  falls between, dated by its end the same way: on a timezone east of UTC,
+  by the day after its session. A week and a month are folded on the
+  calendar, opening on the Monday and on the 1st at midnight UTC.
 - **The option-exercise interest rate series is not served.**
   `OptExInterestRate` is accepted as a tick query against an option contract
   and rejected by name against the underlying, and every window tested returns

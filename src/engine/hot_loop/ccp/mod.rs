@@ -1801,7 +1801,7 @@ impl CcpState {
                             && let Some(at) = self.definitions_asked.iter().position(|c| *c == def.con_id)
                         {
                             self.definitions_asked.swap_remove(at);
-                            self.ask_schedule(def.con_id, "", shared, ccp_conn, hb);
+                            self.ask_schedule(def.con_id, shared, ccp_conn, hb);
                         }
                         // A request held until this lookup names its contract.
                         if let Some(rid) = response_req_id.as_ref().and_then(|r| r.parse::<u32>().ok())
@@ -3439,13 +3439,11 @@ impl CcpState {
     /// key its definition is joined to them on, as a gateway asks: once for
     /// the key, whichever contracts on it wait, and not where the key's are
     /// in hand. A contract whose definition is not in hand has it looked up
-    /// first, by its id on the exchange it was asked for on, as a gateway
-    /// looks up the contract of every request; the sessions are asked for
-    /// once the definition states the key.
+    /// first, by its id, as a gateway looks up the contract of every request;
+    /// the sessions are asked for once the definition states the key.
     pub(crate) fn ask_schedule(
         &mut self,
         con_id: u32,
-        exchange: &str,
         shared: &SharedState,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
@@ -3461,7 +3459,7 @@ impl CcpState {
                         self.definitions_asked.push(con_id);
                         let req_id = self.next_internal_secdef_id;
                         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
-                        self.send_secdef_request(req_id, i64::from(con_id), exchange, ccp_conn, hb, shared, &None);
+                        self.send_secdef_request(req_id, i64::from(con_id), "", ccp_conn, hb, shared, &None);
                     }
                     return;
                 };

@@ -5646,17 +5646,18 @@ impl ClientCore {
 
     /// A continuing bar's time as the caller asked bars to be dated, on the
     /// zone its history was stated on — or by its day alone where its bars are
-    /// a day long or longer, as the history's are: by the end of the session
-    /// it belongs to, the history's or, past it, the one the contract's own
-    /// sessions place it in.
+    /// a day long or longer, as the history's are: by where it ends, the
+    /// history's last bar's end or, past it, the end of the bar it rolled over
+    /// to.
     pub fn bar_time_for_epoch(&self, req_id: i64, secs: i64, placed: Option<(u32, u32)>) -> String {
         let asks = self.historical_asks.lock().unwrap();
         let (format_date, zone, by_day) = asks
             .get(&req_id)
             .map_or((1, "", false), |ask| (ask.format_date, ask.zone.as_str(), ask.by_day));
         let placed = placed.map(|(start, end)| (i64::from(start), i64::from(end)));
+        // A bar that ends where it opens still ends there, and is dated by it.
         let end = asks.get(&req_id).and_then(|ask| ask.daily_session).into_iter().chain(placed)
-            .find(|(start, end)| *start <= secs && secs < *end).map(|(_, end)| end);
+            .find(|(start, end)| *start <= secs && (secs < *end || secs == *start)).map(|(_, end)| end);
         crate::protocol::datetime::bar_epoch_as_asked(secs, end, format_date, zone, by_day)
     }
 

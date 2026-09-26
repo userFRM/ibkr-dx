@@ -32,16 +32,18 @@ end's date on the series' timezone, as the history does, under both
 date-format settings. Timed daily history is returned as `yyyyMMdd`; explicit
 weekly and monthly date strings are preserved.
 
-When that session ends, the next bar is the contract's own session that the
-next five-second bar falls in — its liquid hours for regular hours, its trading
-hours otherwise — dated by that session's end on the series' timezone and made
-from that session's bars alone. A contract whose definition no lookup has
-stated has it looked up first, as a gateway looks up a request's contract, and
-its sessions are asked for by the key the definition states; only while they
-are not in hand does the next bar open at midnight UTC. Intraday bars open on
-whole multiples of their length from the epoch; a week opens on Monday and a
-month on its first day at midnight UTC. Updates to these calendar bars remain
-dates under both date-format settings.
+When that session ends, the next five-second bar opens the next bar at
+midnight UTC of its own day, as a gateway opens it. That bar ends at the next
+midnight UTC, or at the close the history stated where that falls between the
+two, and is dated by where it ends on the series' timezone; a bar that has
+ended is opened again by the next five-second bar. So a session that opens
+before midnight UTC, as a future's evening session does, is dated by the day
+the history closed until midnight UTC, and by the next one after it. On a
+timezone east of UTC the next midnight UTC falls on the following day there,
+so the bar a session there rolls over to is dated by the day after that
+session. Intraday bars open on whole multiples of their length from the epoch;
+a week opens on Monday and a month on its first day at midnight UTC. Updates
+to these calendar bars remain dates under both date-format settings.
 
 ## The shorter form
 

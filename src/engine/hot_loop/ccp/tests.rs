@@ -3598,7 +3598,7 @@ fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
         });
     }
     for con_id in [925_786_273, 925_786_274, 925_786_273] {
-        ccp.ask_schedule(con_id, "", &shared, &mut conn, &mut hb);
+        ccp.ask_schedule(con_id, &shared, &mut conn, &mut hb);
     }
     let asked = sent();
     assert_eq!(asked.matches("|6040=106|").count(), 1, "asked once for the key: {asked}");
@@ -3613,7 +3613,7 @@ fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
         1,
     );
     ccp.process_ccp_message(&answer, &mut None, &mut Context::new(), &shared, &None, &mut hb, "");
-    ccp.ask_schedule(925_786_275, "", &shared, &mut conn, &mut hb);
+    ccp.ask_schedule(925_786_275, &shared, &mut conn, &mut hb);
     assert!(!sent().contains("6040=106"), "and not again for any option on it once in hand");
     for con_id in [925_786_273, 925_786_274, 925_786_275] {
         let filed = shared.reference.contract_schedule(con_id, Clone::clone).expect("filed for the option");
@@ -3632,8 +3632,8 @@ fn the_rates_and_sessions_an_option_model_waits_on_are_asked_once_and_filed() {
 }
 
 /// Sessions wanted for a contract whose definition nothing has looked up have
-/// the definition looked up first, once, by the contract's id on the exchange
-/// they were wanted for, and are asked for by the key it states.
+/// the definition looked up first, once, by the contract's id, and are asked
+/// for by the key it states.
 #[test]
 fn sessions_wanted_before_the_definition_wait_on_its_lookup() {
     use std::io::Read;
@@ -3649,11 +3649,11 @@ fn sessions_wanted_before_the_definition_wait_on_its_lookup() {
         String::from_utf8_lossy(&buf[..n]).replace('\x01', "|")
     };
 
-    ccp.ask_schedule(495_512_563, "CME", &shared, &mut conn, &mut hb);
-    ccp.ask_schedule(495_512_563, "CME", &shared, &mut conn, &mut hb);
+    ccp.ask_schedule(495_512_563, &shared, &mut conn, &mut hb);
+    ccp.ask_schedule(495_512_563, &shared, &mut conn, &mut hb);
     let asked = sent();
     assert_eq!(asked.matches("|35=c|").count(), 1, "looked up once: {asked}");
-    assert!(asked.contains("|6008=495512563|6004=CME|"), "{asked}");
+    assert!(asked.contains("|6008=495512563|"), "{asked}");
     assert!(!asked.contains("6040=106"), "no sessions before the key: {asked}");
     let looked_up = asked.split("|320=").nth(1).and_then(|rest| rest.split('|').next())
         .expect("asked under an id").to_string();

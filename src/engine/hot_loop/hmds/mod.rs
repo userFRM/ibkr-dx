@@ -137,10 +137,6 @@ pub(crate) struct HmdsState {
     /// running and cannot rebuild a request, so a reconnect had nothing to
     /// send and the bars stopped for good.
     pub(crate) rtbar_resub: Vec<RtBarRequest>,
-    /// The contracts whose sessions a day's bar kept up to date waits on,
-    /// and the exchange each was asked for on, for the security definition
-    /// connection to ask for.
-    pub(crate) schedules_wanted: Vec<(u32, String)>,
     /// Every scan batch, for the engine to hand over: drained after each poll
     /// and given to `CcpState::start_scanner_enrichment`, which resolves the
     /// rows whose contracts are not yet held and releases a scan's batches in
@@ -234,40 +230,51 @@ pub(crate) struct FormingBar {
     pub(crate) seconds: u32,
     /// The moment the bar being formed opened.
     pub(crate) opened_at: u32,
-    /// The session a day's bar belongs to: the last timed daily session
-    /// supplied with the history, and after it the contract's own session it
-    /// rolled over to.
+    /// The bounds of the day's bar in hand: the last the history stated, and
+    /// after it the one it rolled over to.
     pub(crate) daily_session: Option<(u32, u32)>,
+    /// Where the history's last day's bar closed, the one close a day's bar
+    /// rolled over to can end at before midnight UTC.
+    pub(crate) closed_at: Option<u32>,
     pub(crate) bar: crate::types::RealTimeBar,
     /// Volume-weighted price needs the weights kept as they arrive.
     pub(crate) weighted: f64,
 }
 
 impl FormingBar {
-    /// Fold a five-second bar in, and answer with the bar as it now stands.
+    /// Fold a five-second bar in, and answer with the bar as it now stands, or
+    /// with nothing where a day's bar in hand opened after it.
     ///
-    /// A day's bar belongs to a session: the one the history last stated, and
-    /// after it, the one of the contract's own sessions the five-second bar
-    /// falls in, which opens the next bar from that bar.
-    fn fold(
-        &mut self,
-        five: &crate::types::RealTimeBar,
-        sessions: &[(u32, u32)],
-    ) -> crate::types::RealTimeBar {
-        let holds = |(start, end): &(u32, u32)| *start <= five.timestamp && five.timestamp < *end;
-        let session = self.daily_session.filter(holds)
-            .or_else(|| sessions.iter().copied().find(holds));
-        if session.is_some() {
-            self.daily_session = session;
-        }
-        let opened_at = session
-            .map_or_else(|| opening(self.seconds, five.timestamp), |(start, _)| start);
+    /// A day's bar is the one the history last stated until that one ends. A
+    /// five-second bar from its end on opens the next from itself, as a
+    /// gateway opens it: at midnight UTC of the five-second bar's day, ending
+    /// at the next midnight UTC, or at the close the history stated where that
+    /// falls between the two — and a bar that has ended is opened again by the
+    /// next five-second bar.
+    fn fold(&mut self, five: &crate::types::RealTimeBar) -> Option<crate::types::RealTimeBar> {
+        const DAY: u32 = 86_400;
+        let opened_at = if self.seconds == DAY {
+            let (start, end) = self.daily_session.unwrap_or_default();
+            if five.timestamp < start {
+                return None;
+            }
+            if five.timestamp >= end {
+                let opened = five.timestamp - five.timestamp % DAY;
+                let next = opened + DAY;
+                let ends = self.closed_at.filter(|close| *close >= opened).map_or(next, |close| close.min(next));
+                self.daily_session = Some((opened, ends));
+                self.opened_at = u32::MAX;
+            }
+            self.daily_session.map_or(0, |(start, _)| start)
+        } else {
+            opening(self.seconds, five.timestamp)
+        };
         if opened_at != self.opened_at {
             self.opened_at = opened_at;
             self.bar = *five;
             self.weighted = five.wap * five.volume;
             self.bar.timestamp = opened_at;
-            return self.bar;
+            return Some(self.bar);
         }
         self.bar.high = self.bar.high.max(five.high);
         // The lowest of them, whatever it is. Read as absence, a low of nought
@@ -286,30 +293,14 @@ impl FormingBar {
         } else {
             five.wap
         };
-        self.bar
+        Some(self.bar)
     }
-}
-
-/// A contract's sessions as moments, leaving out the days it is closed.
-fn sessions_of(sessions: &[crate::control::contracts::ScheduleSession]) -> Vec<(u32, u32)> {
-    let at = |stamped: &str| {
-        crate::protocol::datetime::ib_datetime_to_unix(stamped).and_then(|at| u32::try_from(at).ok())
-    };
-    sessions
-        .iter()
-        .filter_map(|session| Some((at(&session.start)?, at(&session.end)?)))
-        .filter(|(start, end)| start < end)
-        .collect()
 }
 
 /// Where the bar a moment falls in opened, for bars `seconds` long.
 ///
 /// Counted from the epoch, so a bar opens on a whole multiple of its own
-/// length. Right to the clock for every size up to an hour; for a day it is
-/// midnight UTC, which is the trading day of an instrument that trades around
-/// the clock and the middle of the evening for one that does not. A day's bar
-/// opens here only where no session holds it: neither the history's nor, with
-/// the contract's sessions in hand, one of those.
+/// length: right to the clock for every size up to an hour.
 ///
 /// A week and a month are the calendar's: a week opens on its Monday and a
 /// month on its first day, both at midnight UTC, as a gateway folds them.
@@ -478,7 +469,6 @@ impl HmdsState {
             keep_up_to_date_reqs: std::collections::HashSet::new(),
             forming_bars: Vec::new(),
             rtbar_resub: Vec::new(),
-            schedules_wanted: Vec::new(),
             scanner_batches: Vec::new(),
             held: Vec::new(),
             actions_held: std::collections::HashMap::new(),
@@ -913,6 +903,7 @@ impl HmdsState {
                                     forming.opened_at = if day {
                                         let Some(end) = at(&bar.end).filter(|end| start < *end) else { continue };
                                         forming.daily_session = Some((start, end));
+                                        forming.closed_at = Some(end);
                                         start
                                     } else {
                                         opening(forming.seconds, start)
@@ -1874,33 +1865,9 @@ impl HmdsState {
                     shared.market.push_real_time_bar(*req_id, bar);
                     continue;
                 };
-                // A day's bar past the session the history stated belongs to one
-                // of the contract's own sessions: its liquid ones for regular
-                // hours, its trading ones otherwise.
-                let asked = self.rtbar_resub.iter().find(|r| r.req_id == *req_id);
-                let sessions = match asked {
-                    Some(asked)
-                        if forming.seconds == crate::control::historical::BarSize::Day1.seconds()
-                            && !forming.daily_session.is_some_and(|(start, end)| start <= timestamp && timestamp < end) =>
-                    {
-                        let read = shared.reference.contract_schedule(asked.con_id as u32, |schedule| {
-                            sessions_of(if asked.use_rth { &schedule.liquid_hours } else { &schedule.trading_hours })
-                        });
-                        match read {
-                            Some(sessions) => sessions,
-                            None => {
-                                let wanted = (asked.con_id as u32, asked.exchange.clone());
-                                if !self.schedules_wanted.contains(&wanted) {
-                                    self.schedules_wanted.push(wanted);
-                                }
-                                Vec::new()
-                            }
-                        }
-                    }
-                    _ => Vec::new(),
-                };
-                let now = forming.fold(&bar, &sessions);
-                shared.market.push_bar_in_session(*req_id, now, forming.daily_session);
+                if let Some(now) = forming.fold(&bar) {
+                    shared.market.push_bar_in_session(*req_id, now, forming.daily_session);
+                }
             }
         }
     }
