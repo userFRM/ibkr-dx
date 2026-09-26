@@ -413,7 +413,8 @@ pub struct PresetInstrument<'a> {
     pub security_type: &'a str,
     pub underlying_security_type: &'a str,
     pub symbol: &'a str,
-    pub currency: &'a str,
+    /// The contract's local symbol, which names a currency pair's own preset.
+    pub local_symbol: &'a str,
 }
 
 /// Select the account entry for an instrument. No entry means type defaults.
@@ -475,11 +476,11 @@ pub fn select_preset_key<'a>(
     });
     let mut selected = None;
     if !instrument.symbol.is_empty() {
-        if security_type == "CASH" && !instrument.currency.is_empty() {
+        if security_type == "CASH" && !instrument.local_symbol.is_empty() {
             selected = children
                 .iter()
                 .copied()
-                .find(|entry| entry.key.symbol.as_deref() == Some(instrument.currency));
+                .find(|entry| entry.key.symbol.as_deref() == Some(instrument.local_symbol));
         }
         if selected.is_none() {
             selected = children
@@ -524,7 +525,7 @@ mod tests {
         PresetInstrument {
             security_type: "STK",
             symbol: "ABC",
-            currency: "USD",
+            local_symbol: "ABC",
             ..PresetInstrument::default()
         }
     }
@@ -885,17 +886,29 @@ mod tests {
         assert_eq!(select_preset_key(&entries, stock(), false), Some("u=ANY"));
     }
 
+    /// A currency pair's preset is the one named by its local symbol, then
+    /// the one named by its symbol, never one named by its currency; a
+    /// contract for difference on a pair takes the pair's.
     #[test]
-    fn cash_prefers_currency_and_cash_cfds_use_cash_presets() {
-        let entries = list(&[("s=CASH", "a=1"), ("s=CASH&tc=EUR", ""), ("s=CASH&tc=USD", "")]);
-        for security_type in ["CASH", "CFD"] {
+    fn cash_prefers_local_symbol_and_cash_cfds_use_cash_presets() {
+        let entries = list(&[
+            ("s=CASH", "a=1"),
+            ("s=CASH&tc=EUR", ""),
+            ("s=CASH&tc=EUR.USD", ""),
+            ("s=CASH&tc=USD", ""),
+        ]);
+        for (security_type, local_symbol, selected) in [
+            ("CASH", "EUR.USD", "s=CASH&tc=EUR.USD"),
+            ("CFD", "EUR.USD", "s=CASH&tc=EUR.USD"),
+            ("CASH", "EUR.GBP", "s=CASH&tc=EUR"),
+        ] {
             let instrument = PresetInstrument {
                 security_type,
                 underlying_security_type: "CASH",
                 symbol: "EUR",
-                currency: "USD",
+                local_symbol,
             };
-            assert_eq!(select_preset_key(&entries, instrument, true), Some("s=CASH&tc=USD"));
+            assert_eq!(select_preset_key(&entries, instrument, true), Some(selected), "{local_symbol}");
         }
     }
 

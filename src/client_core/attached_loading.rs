@@ -72,11 +72,14 @@ pub(crate) async fn load_attached_preset(
     underlying_security_type: &str,
     deadline: Instant,
 ) -> Result<AttachedPreset, Refusal> {
+    // The local symbol the venue defines the contract under, where it is held.
+    let local_symbol = super::attached_orders::contract_definition(shared, contract)
+        .map_or_else(|| contract.local_symbol.clone(), |definition| definition.local_symbol);
     let instrument = PresetInstrument {
         security_type: &contract.sec_type,
         underlying_security_type,
         symbol: &contract.symbol,
-        currency: &contract.currency,
+        local_symbol: &local_symbol,
     };
     loop {
         let mut entries = std::future::poll_fn(|_| match shared.reference.order_preset_list() {
