@@ -29,12 +29,13 @@ exclude = [
     "tests/",
     "python/ibkr_dx/*.so",
     "rustfmt.toml",
-    "uv.lock",
 ]
 
 [lib]
 name = "ibkr_dx"
-crate-type = ["lib", "cdylib"]
+# The library alone. The Python extension is a shared library that maturin asks
+# for when it builds a wheel, and a Rust caller has no use for one.
+crate-type = ["lib"]
 
 [features]
 default = []

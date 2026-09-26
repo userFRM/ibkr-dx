@@ -28,7 +28,6 @@ target
 test_data/
 
 # Local working notes and editor state
-.claude/
 DEVLOG.md
 
 # Added by cargo
@@ -53,7 +52,6 @@ target/gates/
 # a working tree reads clean rather than listing them on every status.
 .pytest_cache/
 .venv/
-.claude/worktrees/
 
 # Scratch build directories: a parallel job with its own CARGO_TARGET_DIR.
 target-*/

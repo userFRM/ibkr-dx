@@ -8,6 +8,29 @@ name: release
 #
 # A release runs the workflow as it exists at the tag, so a fix to this file
 # has to land before the tag is cut, not after.
+#
+# What the repository and the registries need before the first tag, none of
+# which this file can set:
+#   1. An environment named `release` (Settings, Environments) with a required
+#      reviewer and a deployment rule that admits only tags matching `v*`. Both
+#      publish jobs name it, so neither runs until the reviewer approves.
+#   2. On PyPI, a pending trusted publisher for the project `ibkr-dx`: owner
+#      `userFRM`, repository `ibkr-dx`, workflow `release.yml`, environment
+#      `release`. The `pypi` job then signs in with the run's identity and
+#      holds no password.
+#   3. A crates.io token with the publish-new scope and a short expiry, saved
+#      as `CARGO_REGISTRY_TOKEN` among the secrets of the `release`
+#      environment, not of the repository, so only an approved publish job
+#      can read it.
+#   4. This workflow run by hand on main, and green, before the tag is pushed.
+# A publish-new token publishes the crate's first version only; a later
+# version of a crate that exists needs publish-update. After the first
+# release, register a trusted publisher on crates.io for this workflow and
+# the `release` environment, give the `crates-io` job `id-token: write` to
+# exchange the run's identity for a token, and delete the stored one.
+# If PyPI fails after crates.io has taken the version, use "Re-run failed
+# jobs". "Re-run all jobs" runs `cargo publish` again, which the registry
+# refuses for a version it already holds, and PyPI never runs.
 on:
   push:
     tags: ["v*"]
@@ -82,14 +105,21 @@ jobs:
   # extension links against the interpreter it was built for, so a version left
   # out is one a caller finds missing at `pip install`.
   wheels:
-    name: wheel (${{ matrix.os }}, py${{ matrix.python }})
+    name: wheel (${{ matrix.platform.name }}, py${{ matrix.python }})
     needs: gate
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Intel macOS is built on the Apple silicon runner for the Intel
+        # target, with an Intel interpreter that runs there translated.
+        platform:
+          - { name: linux-x86_64, os: ubuntu-latest }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm }
+          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin, arch: x64 }
+          - { name: windows-x86_64, os: windows-latest }
         python: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +128,7 @@ jobs:
         id: python
         with:
           python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.platform.arch }}
 
       - name: Build
         uses: PyO3/maturin-action@v1
@@ -108,9 +139,10 @@ jobs:
           # The TLS layer links OpenSSL, and the manylinux image carries the
           # library without its headers.
           before-script-linux: dnf install -y openssl-devel
+          target: ${{ matrix.platform.target }}
           args: >-
             --release --out dist --interpreter
-            ${{ matrix.os == 'ubuntu-latest' && format('python{0}', matrix.python) || steps.python.outputs.python-path }}
+            ${{ runner.os == 'Linux' && format('python{0}', matrix.python) || steps.python.outputs.python-path }}
           sccache: "true"
 
       # A wheel that compiles is not a wheel that loads, or one that carries
@@ -132,7 +164,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-py${{ matrix.python }}
+          name: wheel-${{ matrix.platform.name }}-py${{ matrix.python }}
           path: dist/*.whl
 
   sdist:
@@ -172,14 +204,14 @@ jobs:
     needs: [crate, wheels, sdist]
     # A tag pushed, not a run started by hand on one.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    # The environment is where the registry tokens and the reviewers who
+    # The environment is where the crates.io token and the reviewers who
     # approve a publish are set.
     environment: release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
       # Pinned by commit: this job holds the registry token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: cargo publish
         run: cargo publish
@@ -194,25 +226,30 @@ jobs:
     # A tag pushed, not a run started by hand on one.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     environment: release
+    # PyPI takes the run's identity token in place of a password, and admits
+    # it for the publisher registered to this workflow and environment.
+    permissions:
+      id-token: write
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@v4
+      # Pinned by commit: this job can publish.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
-      # Merged by name, so two legs that built the same file leave one. Three
-      # systems by five interpreters is fifteen wheels, and one archive.
+      # Merged by name, so two legs that built the same file leave one. Five
+      # platforms by five interpreters is twenty-five wheels, and one archive.
       - name: Every wheel and the archive are here
         run: |
           ls dist
-          test "$(find dist -name '*.whl' | wc -l)" -eq 15
+          test "$(find dist -name '*.whl' | wc -l)" -eq 25
           test "$(find dist -name '*.tar.gz' | wc -l)" -eq 1
-      # Pinned by commit: this job holds the registry token. An upload that
-      # failed part-way is finished by running the job again.
+      # Pinned by commit: this job can publish. An upload that failed part-way
+      # is finished by running the job again.
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist/
           skip-existing: true
 

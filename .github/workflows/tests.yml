@@ -155,10 +155,8 @@ jobs:
           # The suites reach for the injection methods by name, so the build
           # under test asks for them. A wheel does not: see the feature.
           # Every feature, not just the added one: this replaces what
-          # pyproject configures rather than adding to it, and without
-          # `python` maturin finds no pyo3 bindings, decides the crate is
-          # cffi and fails on a missing module — after reporting the build
-          # it did not do.
+          # pyproject configures rather than adding to it, and `python` is
+          # the feature that compiles the bindings in.
           .venv/bin/maturin develop --features python,extension-module,test-helpers
 
       # A recipe is read and trusted. One naming a method the library no longer

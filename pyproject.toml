@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.9.2,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -7,7 +7,7 @@ name = "ibkr-dx"
 version = "0.1.0"
 description = "Talk directly to IBKR: an Interactive Brokers client with the TWS API's EClient/EWrapper interface, and no gateway in between."
 readme = "README.md"
-license = { text = "AGPL-3.0-only" }
+license = "AGPL-3.0-only"
 keywords = ["interactive-brokers", "ibkr", "tws-api", "ibapi", "trading"]
 requires-python = ">=3.11"
 
@@ -16,6 +16,10 @@ Repository = "https://github.com/userFRM/ibkr-dx"
 Documentation = "https://userfrm.github.io/ibkr-dx/"
 
 [tool.maturin]
+# Named rather than detected: the crate declares no shared library, which
+# maturin builds itself for the extension, and without one declared it looks
+# for a program to package instead.
+bindings = "pyo3"
 features = ["python", "extension-module"]
 python-source = "python"
 module-name = "ibkr_dx.ibkr_dx"
