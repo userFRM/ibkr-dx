@@ -3622,12 +3622,8 @@ impl ClientCore {
         }
     }
 
-    /// Stop tracking an order the venue has said does not exist.
-    ///
-    /// A cancel rejected as UnknownOrder retires the engine's record, and the
-    /// client's own record has to go with it — the open-order snapshot unions
-    /// the two, so leaving this one behind kept reporting the order the
-    /// rejection was about.
+    /// Stop tracking an order: one that is done, or a preview whose question
+    /// has ended.
     pub fn untrack_order(&self, order_id: u64) {
         self.open_orders.lock().unwrap().remove(&order_id);
     }
@@ -3711,35 +3707,32 @@ impl ClientCore {
     /// states the opposite and invites a replacement against an order still
     /// working. 10147 means "not found", which is one reason among several.
     pub(crate) fn restore_refused(&self, reject: &CancelReject) -> (i64, String) {
-        {
-            let mut orders = self.open_orders.lock().unwrap();
-            if let Some(tracked) = orders.get_mut(&reject.order_id) {
-                // The record took the cancel ahead of the venue's answer, and
-                // the answer is that the order stands. Left as it was, the
-                // order read as leaving for the rest of the session —
-                // `req_open_orders` said so — while the venue went on working
-                // it, and no later message corrected it, because a refusal is
-                // the last thing this order draws. What it goes back to is the
-                // engine's own book, not a guess from a status this record has
-                // already overwritten.
-                if let Some(status) = reject.still_working {
-                    tracked.status =
-                        crate::types::order_status::order_status_str(status).into();
-                }
-                // And the terms, where it was the modification that was
-                // refused. The record took the attempt ahead of the answer, so
-                // a refusal that put back only the status left it stating a
-                // price nothing had accepted — and every later cancel and
-                // replace restates from the record. Independent of the status
-                // above: a refusal from this side of the wire knows the change
-                // did not go without knowing where the order stands. A refused
-                // cancellation changed no terms, and rolling them back on one
-                // undid a replacement the venue may since have taken — and a
-                // refusal of a change the venue has already answered is not
-                // about the change now outstanding, so it puts nothing back.
-                if reject.reject_type == 2 && reject.answers_a_live_change {
-                    put_back_the_terms(tracked);
-                }
+        if let Some(tracked) = self.open_orders.lock().unwrap().get_mut(&reject.order_id) {
+            // The record took the cancel ahead of the venue's answer, and
+            // the answer is that the order stands. Left as it was, the
+            // order read as leaving for the rest of the session —
+            // `req_open_orders` said so — while the venue went on working
+            // it, and no later message corrected it, because a refusal is
+            // the last thing this order draws. What it goes back to is the
+            // engine's own book, not a guess from a status this record has
+            // already overwritten.
+            if let Some(status) = reject.still_working {
+                tracked.status =
+                    crate::types::order_status::order_status_str(status).into();
+            }
+            // And the terms, where it was the modification that was
+            // refused. The record took the attempt ahead of the answer, so
+            // a refusal that put back only the status left it stating a
+            // price nothing had accepted — and every later cancel and
+            // replace restates from the record. Independent of the status
+            // above: a refusal from this side of the wire knows the change
+            // did not go without knowing where the order stands. A refused
+            // cancellation changed no terms, and rolling them back on one
+            // undid a replacement the venue may since have taken — and a
+            // refusal of a change the venue has already answered is not
+            // about the change now outstanding, so it puts nothing back.
+            if reject.reject_type == 2 && reject.answers_a_live_change {
+                put_back_the_terms(tracked);
             }
         }
         // 10147 is the order the venue could not find; 10148 is the order it

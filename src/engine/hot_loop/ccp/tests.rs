@@ -3341,6 +3341,10 @@ fn a_rejection_leaves_the_order_in_place_whatever_its_reason() {
         let mut context = Context::new();
         let shared = SharedState::new();
         tracked_for_cancel(&mut context);
+        shared.orders.push_order_info(42, crate::bridge::RichOrderInfo {
+            contract: Default::default(), order: Default::default(),
+            order_state: Default::default(), last_exec: Default::default(),
+        });
 
         ccp.handle_cancel_reject(&cancel_reject_frame(code), &mut context, &shared, &None);
 
@@ -3348,6 +3352,10 @@ fn a_rejection_leaves_the_order_in_place_whatever_its_reason() {
             context.order(42).expect("still tracked").status,
             crate::types::OrderStatus::Submitted,
             "reason {code:?} does not take the order out of the book",
+        );
+        assert!(
+            shared.orders.get_order_info(42).is_some(),
+            "reason {code:?} does not take the order out of the open-orders view",
         );
     }
 }

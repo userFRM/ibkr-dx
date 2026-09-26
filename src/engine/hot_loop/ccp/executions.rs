@@ -1460,8 +1460,7 @@ impl CcpState {
                 // An order this session never saw is working by the fact of
                 // being in the push. One whose state was not known stays
                 // not known here, so the status this very message carries
-                // moves it, and the caller who was told it was unknown is
-                // told what it is.
+                // moves it, and the caller is told what it is.
                 // And where it was not known, what this very report says it
                 // is. Recorded as working at an exchange, an order the venue
                 // had said was accepted and not yet routed was published as

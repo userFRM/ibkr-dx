@@ -1001,9 +1001,11 @@ It is rebuilt on its own and the subscriptions it was serving are asked for
 again, under the request the caller made. Connections are independent: a quote
 feed reconnecting does not disturb an order in flight.
 
-When the trading connection drops, the caller hears 1100, and 1102 once it is
-back. Working orders keep the status they were last given: as on a gateway,
-nothing is said of them at the drop, and the venue restates each one after the
+A trading connection that drops is announced only once three attempts to
+rebuild it have failed, or once it cannot be rebuilt at all: the caller then
+hears 1100, and 1102 when it is back. A drop rebuilt sooner is not announced.
+Working orders keep the status they were last given: as on a gateway, nothing
+is said of them at the drop, and the venue restates each one after the
 reconnect. An order the venue does not restate keeps its last status.
 </details>
 
@@ -1050,7 +1052,7 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,217 | No |
+| Rust, unit and integration | 3,218 | No |
 | Python | 1,190 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 131 | Yes |

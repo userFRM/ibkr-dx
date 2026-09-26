@@ -2967,6 +2967,27 @@ fn a_refusal_from_this_side_states_no_reason_code() {
     );
 }
 
+/// A refused cancel stating that the venue holds no such order leaves the order
+/// on record and in the open-order answer, as every other refusal does.
+///
+/// A gateway retires no order on a refusal, whatever reason it states. Dropped
+/// here, an order the venue could still be working went missing from what the
+/// caller was told is open.
+#[test]
+fn a_refusal_stating_no_such_order_leaves_the_order_open() {
+    let (core, shared, _revision) = working_at(100.0);
+    let (code, _) = core.restore_refused(&crate::types::CancelReject {
+        order_id: 42, instrument: 0, reject_type: 1, reason_code: 1,
+        answers_a_live_change: true, still_working: Some(crate::types::OrderStatus::Submitted),
+        timestamp_ns: 0,
+    });
+    assert_eq!(code, 10147, "told as the order the venue could not find");
+    let open: Vec<_> = core.collect_open_orders(&shared).into_iter()
+        .map(|(id, o)| (id, o.status))
+        .collect();
+    assert_eq!(open, [(42, "Submitted".to_string())], "and still open, as it was");
+}
+
 /// Every reader of the slot cache is answered from a cache the engine has not
 /// already emptied under it.
 ///

@@ -31,7 +31,6 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
     let mut buy_sent_at: Option<Instant> = None;
     let mut sell_sent_at: Option<Instant> = None;
     let mut rejected_order: Option<u64> = None;
-    let mut uncertain = false;
 
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
@@ -59,14 +58,6 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
                     break;
                 }
             }
-            // The transport went away with the order on it. The client says so
-            // rather than guessing, and the phase must not read that as a
-            // market with nothing to trade: no fill follows an order whose
-            // state the venue never confirmed.
-            Ok(Event::OrderUpdate(update)) if update.status == OrderStatus::Uncertain => {
-                uncertain = true;
-                break;
-            }
             Ok(Event::OrderUpdate(update))
                 if update.status == OrderStatus::Rejected => {
                     rejected_order = Some(update.order_id);
@@ -82,7 +73,11 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
         skipped!("  SKIP: Order rejected — {}\n", reject_reason(&shared, id));
         return conns;
     }
-    if uncertain {
+    // The transport went away with an order on it, and the phase must not read
+    // that as a market with nothing to trade: no fill follows an order whose
+    // state the venue never confirmed. Nothing is said of the order at the
+    // drop, so the lost session is read off the connection.
+    if super::common::lost_unasked(&shared) {
         super::common::note_lost_session("an order's state after the session went away");
         skipped!("  SKIP: the connection went away with the order on it, so its state is not known\n");
         return conns;
@@ -337,7 +332,6 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     let mut buy_price = 0i64;
     let mut sell_price = 0i64;
     let mut rejected_order: Option<u64> = None;
-    let mut uncertain = false;
 
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
@@ -352,13 +346,6 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
                     break;
                 }
             }
-            // The transport went away with the order on it. The client reports
-            // that rather than guessing, and it is not a market with nothing to
-            // trade — no fill follows an order the venue never confirmed.
-            Ok(Event::OrderUpdate(update)) if update.status == OrderStatus::Uncertain => {
-                uncertain = true;
-                break;
-            }
             Ok(Event::OrderUpdate(update))
                 if update.status == OrderStatus::Rejected => { rejected_order = Some(update.order_id); break; }
             _ => {}
@@ -369,11 +356,6 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
 
     if let Some(id) = rejected_order {
         skipped!("  SKIP: Order rejected — {}\n", reject_reason(&shared, id));
-        return conns;
-    }
-    if uncertain {
-        super::common::note_lost_session("an order's state after the session went away");
-        skipped!("  SKIP: the connection went away with the order on it, so its state is not known\n");
         return conns;
     }
     // With no socket the engine holds an order for the reconnect rather than

@@ -29,8 +29,10 @@ pub enum OrderStatus {
     Rejected,
     /// Server reports order inactive (FIX 39=I).
     Inactive,
-    /// Order state is unknown due to an auth connection disconnect.
-    /// Will be reconciled when reconnection completes (mass status request).
+    /// The venue stated a status this client cannot name. The engine also
+    /// holds an order in this state across a lost trading connection, until
+    /// the venue states it again; the caller is not told of that one, and
+    /// keeps the status it was last given.
     Uncertain,
 }
 

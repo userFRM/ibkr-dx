@@ -4046,9 +4046,9 @@ impl CcpState {
         // The engine stops believing these statuses here, and holds back what
         // names them until the venue has named them again. The caller is told
         // nothing about them: a gateway restates no working order at a drop,
-        // the caller hears 1100, and the venue's naming restates each one
-        // after the reconnect. Announced as unknown, a status no gateway
-        // sends, every working order stopped reading as active on each drop.
+        // and the venue's naming restates each one after the reconnect.
+        // Announced as unknown, a status no gateway sends, every working
+        // order stopped reading as active on each drop.
         context.mark_orders_uncertain();
         // And what the account holds, for the same reason and at the same
         // moment. Marked only when the next connection arrived, the flag said

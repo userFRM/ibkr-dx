@@ -1015,18 +1015,18 @@ pub(crate) fn drain_and_send_orders(
                 }
             }
             Err(e) => {
-                // The caller is told, which is the whole of — it was
-                // the silence that left a phantom position. What it is told is
-                // that the state is not known: a write reporting failure may
+                // The state is not known: a write reporting failure may
                 // already have put the frame on the wire, as the transport
                 // says of TLS in as many words, so calling this a rejection
-                // invited a resubmission of an order that may be working.
+                // invited a resubmission of an order that may be working. The
+                // engine holds it in doubt, and the caller keeps the status it
+                // was last given until the venue states another.
                 //
                 // Nothing is discarded and nothing is rolled back. The failure
                 // abandons the transport, the reconnect that follows brings the
                 // server's own account of what it holds, and `last_clord` is
                 // re-recorded from that echo. Where the recovery accounts for
-                // none of it, the sweep says so rather than this guessing.
+                // none of it, the sweep logs it rather than this guessing.
                 log::error!("Failed to send order {oid}: {e} — its state is not known");
                 // Restore the last state the venue is known to hold. An
                 // attempt the venue did not accept is not the order's own
