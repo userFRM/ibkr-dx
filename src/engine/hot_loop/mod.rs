@@ -930,6 +930,8 @@ impl HotLoop {
                 }
             }
             self.ccp.sweep_recovery(&self.context);
+            self.ccp.carry_the_recovery(&mut self.ccp_conn, &mut self.hb, &self.shared, &self.context);
+            self.let_go_of_the_held();
             self.ccp.sweep_pending_matching_symbols(&self.shared);
             self.ccp.sweep_pending_advisor(&self.shared);
             self.ccp.sweep_pending_schedule_pairs(&mut self.ccp_conn, &self.shared, &self.event_tx, &mut self.hb);
@@ -2665,6 +2667,8 @@ impl HotLoop {
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id, &self.shared);
         // A connection of its own, whose drop is said again.
         self.drop_said = false;
+        // What was placed while it was down waits with what the drop left.
+        self.hold_what_waits_to_be_placed(false);
     }
 
     /// Give up any transport that can no longer be written to, or whose
@@ -2968,7 +2972,7 @@ impl HotLoop {
         if self.ccp.disconnected {
             self.back_since = None;
             self.farms_looked_at_next = None;
-            self.say_the_drop();
+            self.the_trading_connection_went();
             return;
         }
         if !self.loss_announced || !self.shared.orders.replay_done() {
@@ -3007,19 +3011,28 @@ impl HotLoop {
     fn say_what_the_attempt_let_go(&mut self) {
         for _ in 0..self.ccp_in_flight.take_gone() {
             self.drop_said = false;
-            self.say_the_drop();
+            self.the_trading_connection_went();
         }
     }
 
     /// Say the trading connection went, once for each connection that goes.
-    fn say_the_drop(&mut self) {
+    fn say_the_drop(&mut self) -> bool {
         if self.drop_said {
-            return;
+            return false;
         }
         self.drop_said = true;
         self.loss_announced = true;
         self.shared.set_connection_lost();
         emit(&self.event_tx, Event::Disconnected);
+        true
+    }
+
+    /// The trading connection went: said, and the placements it leaves
+    /// waiting held and said after it.
+    fn the_trading_connection_went(&mut self) {
+        if self.say_the_drop() {
+            self.hold_what_waits_to_be_placed(true);
+        }
     }
 
     /// The data farms this session holds, by the name the venue routed each
@@ -4377,6 +4390,7 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
     }
     None
 }
+
 
 #[cfg(test)]
 mod tests {

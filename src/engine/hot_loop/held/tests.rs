@@ -1887,3 +1887,273 @@ fn a_joiner_is_told_the_feed_the_venue_accepted() {
         }).collect();
     assert_eq!(taken, [(1, 1), (2, 4)]);
 }
+
+/// A loop with a trading connection, a logon stating `features`, and the
+/// venue's definition of SPY.
+fn over_a_drop(features: &[&str]) -> (HotLoop, Arc<SharedState>, Sender<ControlCommand>, std::net::TcpStream) {
+    let (hl, shared, tx, peer) = with_trading();
+    shared.reference.set_enabled_features(features.iter().map(|f| f.to_string()).collect());
+    shared.reference.cache_contract_definition(crate::control::contracts::ContractDefinition {
+        con_id: 756733, sec_type: crate::control::contracts::SecurityType::Stock, symbol: "SPY".into(),
+        local_symbol: "SPY".into(), exchange: "SMART".into(), primary_exchange: "ARCA".into(),
+        currency: "USD".into(), ..Default::default()
+    });
+    shared.orders.set_replay_done();
+    (hl, shared, tx, peer)
+}
+
+/// One pass of the loop over what a drop and a recovery carry.
+fn pass(hl: &mut HotLoop) {
+    hl.say_what_the_trading_connection_did();
+    hl.ccp.carry_the_recovery(&mut hl.ccp_conn, &mut hl.hb, &hl.shared, &hl.context);
+    hl.let_go_of_the_held();
+    hl.poll_once();
+}
+
+/// The trading connection goes and another comes back in its place.
+fn dropped_and_back(hl: &mut HotLoop) -> std::net::TcpStream {
+    hl.ccp.handle_disconnect(&mut hl.ccp_conn, &mut hl.context, &hl.shared, &hl.event_tx);
+    pass(hl);
+    let (conn, peer) = Connection::for_test();
+    peer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    hl.reconnect_ccp(conn);
+    peer
+}
+
+/// The report ending what the venue names, and each answer to what it has
+/// finished, as captured.
+fn the_end() -> Vec<u8> {
+    fix::fix_build(&[
+        (35, "8"), (11, "*"), (17, "82302.1790356536.2"), (150, "0"), (20, "3"), (39, "0"), (55, "*"),
+        (38, "0"), (32, "0"), (31, "0.00"), (14, "0"), (151, "0"), (6, "0"), (54, "1"), (37, "*"),
+        (40, "2"), (59, "0"),
+    ], 1)
+}
+
+/// A report of order 7 on SPY, stating `status` on tag 39 and 150, marked as
+/// restating the past where `restated`, as an answer to what the venue has
+/// finished marks its reports.
+fn order_7(status: &str, exec_type: &str, restated: bool) -> Vec<u8> {
+    fix::fix_build(&[
+        (35, "8"), (97, if restated { "Y" } else { "N" }), (11, "7.0"), (17, "82302.1790356536.0"),
+        (150, exec_type), (20, "3"), (39, status),
+        (167, "CS"), (55, "SPY"), (100, "ARCA"), (38, "1"), (44, "100"), (32, "0"), (31, "0.00"),
+        (14, "0"), (151, if status == "4" { "0" } else { "1" }), (6, "0"), (54, "1"),
+        (37, "0256d0f1.0001417e.6ab5fbe0.0001"), (1, "DU1"), (40, "2"),
+        (59, "0"), (6008, "756733"), (15, "USD"),
+    ], 1)
+}
+
+/// The same report, stating the time it was sent (tag 60).
+fn order_7_timed(status: &str, exec_type: &str, sent_at: &str) -> Vec<u8> {
+    fix::fix_build(&[
+        (35, "8"), (97, "N"), (11, "7.0"), (17, "82302.1790356536.0"),
+        (150, exec_type), (20, "3"), (39, status), (60, sent_at),
+        (167, "CS"), (55, "SPY"), (100, "ARCA"), (38, "1"), (44, "100"), (32, "0"), (31, "0.00"),
+        (14, "0"), (151, "1"), (6, "0"), (54, "1"),
+        (37, "0256d0f1.0001417e.6ab5fbe0.0001"), (1, "DU1"), (40, "2"),
+        (59, "0"), (6008, "756733"), (15, "USD"),
+    ], 1)
+}
+
+/// A placement the drop left sent and unanswered is recovered as a gateway
+/// recovers it: once the connection that replaced it has named what is
+/// working, the venue is asked what it has finished today, back to a second
+/// before the order went, and no further than a day and a second back where
+/// a report stated an older time; an order it names in either answer takes the state
+/// it states; one it names in neither is held as inactive and not sent again,
+/// and where a recovery had already sent it out, its program is told under
+/// 106 that it could not be sent. A question of what is working is answered
+/// once that is over.
+///
+/// Nothing was said of such an order at all: it stayed as it was last told,
+/// and the sweep after the reconnect wrote it in the log.
+#[test]
+fn a_placement_the_drop_left_unanswered_is_recovered_as_a_gateway_recovers_it() {
+    use crate::types::OrderStatus;
+    struct Row {
+        what: &'static str,
+        named: Vec<Vec<u8>>,
+        answered: Vec<Vec<u8>>,
+        sent_out_by_a_recovery: bool,
+        /// A report stated a time older than the day the question may ask
+        /// back to, so the question asks back to a day and a second before
+        /// now, as a gateway bounds it.
+        floor_asked: bool,
+        stands: Option<OrderStatus>,
+        said: Option<OrderStatus>,
+        told: Vec<(u64, i32, String)>,
+    }
+    let rows = [
+        Row { what: "named working", named: vec![order_7("0", "0", false)], answered: vec![], sent_out_by_a_recovery: false,
+            floor_asked: false, stands: Some(OrderStatus::Submitted), said: Some(OrderStatus::Submitted), told: vec![] },
+        Row { what: "named working on a report older than a day",
+            named: vec![order_7_timed("0", "0", "20200101-00:00:00")], answered: vec![], sent_out_by_a_recovery: false,
+            floor_asked: true, stands: Some(OrderStatus::Submitted), said: Some(OrderStatus::Submitted), told: vec![] },
+        Row { what: "stated finished", named: vec![], answered: vec![order_7("4", "4", true)], sent_out_by_a_recovery: false,
+            floor_asked: false, stands: None, said: Some(OrderStatus::Cancelled), told: vec![] },
+        Row { what: "named in neither", named: vec![], answered: vec![], sent_out_by_a_recovery: false,
+            floor_asked: false, stands: Some(OrderStatus::Inactive), said: None, told: vec![] },
+        Row { what: "named in neither, sent out by a recovery", named: vec![], answered: vec![],
+            sent_out_by_a_recovery: true, floor_asked: false, stands: Some(OrderStatus::Inactive), said: None,
+            told: vec![(7, 106, "Can't transmit order id:7, BUY 1 SPY ARCA".into())] },
+    ];
+    for Row { what, named, answered: answered_reports, sent_out_by_a_recovery, floor_asked, stands, said, told } in rows {
+        let (mut hl, shared, tx, mut peer) = over_a_drop(&["APINTLRCV", "1DAYSORDER"]);
+        if sent_out_by_a_recovery {
+            // Built and not yet sent when the connection goes, and sent out
+            // once the recovery behind the next naming is over.
+            hl.take_order_command(placement(7, spy(), 0, true));
+            hl.ccp.handle_disconnect(&mut hl.ccp_conn, &mut hl.context, &hl.shared, &hl.event_tx);
+            pass(&mut hl);
+            let (conn, back) = Connection::for_test();
+            back.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+            hl.reconnect_ccp(conn);
+            peer = back;
+            pass(&mut hl);
+            assert!(!on_the_wire(&mut peer).contains("35=D|"), "{what}: held until the naming ends");
+            hl.inject_ccp_message(&the_end());
+            pass(&mut hl);
+            pass(&mut hl);
+        } else {
+            hl.take_order_command(placement(7, spy(), 0, true));
+            pass(&mut hl);
+        }
+        assert!(on_the_wire(&mut peer).contains("35=D|"), "{what}: the order went out");
+        assert_eq!(hl.context.order(7).map(|o| o.status), Some(OrderStatus::PendingSubmit), "{what}");
+        let records = |shared: &SharedState| shared
+            .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+        records(&shared);
+
+        let mut back = dropped_and_back(&mut hl);
+        tx.send(ControlCommand::Ask(crate::types::Ask::OpenOrders(crate::types::model::Question::OpenOrders))).unwrap();
+        for report in named {
+            hl.inject_ccp_message(&report);
+        }
+        hl.inject_ccp_message(&the_end());
+        pass(&mut hl);
+        let asked = on_the_wire(&mut back);
+        let went_out = hl.context.placed_at.get(&7).map(|(at, _)| *at).expect("the order went out");
+        assert!(asked.contains("35=H|") && !asked.contains("6537="), "{what}: {asked}");
+        if floor_asked {
+            // The report's time is older than the day the question is bounded
+            // to, so it asks back to a day and a second before now.
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_millis() as i64).unwrap_or(0);
+            let early = crate::protocol::datetime::unix_to_ib_utc_dash((now - 86_400_000 + 1_000 - 10_000).div_euclid(1_000));
+            let late = crate::protocol::datetime::unix_to_ib_utc_dash((now - 86_400_000 + 1_000 + 10_000).div_euclid(1_000));
+            let value = asked.split("|6536=").nth(1)
+                .and_then(|rest| rest.split('|').next()).unwrap_or_default();
+            assert!(
+                asked.contains("|11=*|55=*|54=*|6533=1|") && value >= early.as_str() && value <= late.as_str(),
+                "{what}: the venue is asked what it has finished since a day and a second back: {asked}",
+            );
+        } else {
+            let since = crate::protocol::datetime::unix_to_ib_utc_dash((went_out - 1_000).div_euclid(1_000));
+            assert!(
+                asked.contains(&format!("|11=*|55=*|54=*|6533=1|6536={since}|")),
+                "{what}: the venue is asked what it has finished since a second before the order went: {asked}",
+            );
+        }
+        let mut heard = records(&shared);
+        let answered = |heard: &[(u64, crate::bridge::Record)]| heard.iter()
+            .any(|(_, record)| matches!(record, crate::bridge::Record::Answer(crate::bridge::Answer::OpenOrders(_))));
+        assert!(!answered(&heard), "{what}: what is working is answered once the recovery is over");
+        for report in answered_reports {
+            hl.inject_ccp_message(&report);
+        }
+        hl.inject_ccp_message(&the_end());
+        pass(&mut hl);
+        heard.extend(records(&shared));
+        assert!(answered(&heard), "{what}: and answered then");
+        assert_eq!(hl.context.order(7).map(|o| o.status), stands, "{what}");
+        let last_said = heard.iter().rev().find_map(|(_, record)| match record {
+            crate::bridge::Record::OrderUpdate(told) if told.update.order_id == 7 => Some(told.update.status),
+            _ => None,
+        });
+        assert_eq!(last_said, said, "{what}: what the program is told of it");
+        assert!(!on_the_wire(&mut back).contains("35=D|"), "{what}: and it is not sent again");
+        let noticed: Vec<(u64, i32, String)> = heard.into_iter().filter_map(|(_, record)| match record {
+            crate::bridge::Record::OrderNotice((id, code, text, ..)) => Some((id, code, text)),
+            _ => None,
+        }).collect();
+        assert_eq!(noticed, told, "{what}");
+    }
+}
+
+/// The placements a drop leaves waiting are said after its 1100, as a gateway
+/// says them where the logon recovers placements — not yet built under 1104,
+/// built and not sent under 1105, previews under 1106 — and go out once the
+/// naming behind the next logon is over. Where the logon does not recover
+/// them, every placement the drop leaves in hand is cancelled under 10328,
+/// whether it was built or not, as a gateway cancels every one of them, and
+/// nothing goes out when the connection is back.
+///
+/// Nothing was said of them: one waiting on its contract's name was refused
+/// under 504, and the rest went out as the connection came back, ahead of the
+/// venue's naming. One held is withdrawn by its cancel, as one kept for a later
+/// transmit is.
+#[test]
+fn the_placements_a_drop_leaves_waiting_are_said_and_held_as_a_gateway_holds_them() {
+    use crate::bridge::Record;
+    use crate::types::OrderStatus;
+    for (recovers, withdrawn) in [(true, false), (false, false), (true, true)] {
+        let (mut hl, shared, _tx, _peer) = over_a_drop(if recovers { &["APINTLRCV"] } else { &[] });
+        hl.take_order_command(placement(5, described(), 0, true));
+        hl.take_order_command(placement(6, spy(), 0, true));
+        let ControlCommand::Place(mut preview) = placement(8, described(), 0, true) else { unreachable!() };
+        preview.order.what_if = true;
+        hl.take_order_command(ControlCommand::Place(preview));
+        let records = |shared: &SharedState| shared
+            .take_records(shared.next_seq(), crate::bridge::Take::Dispatch { bulletins: false });
+        records(&shared);
+
+        let mut back = dropped_and_back(&mut hl);
+        let said: Vec<String> = records(&shared).into_iter().filter_map(|(_, record)| match record {
+            Record::ConnectionLost { .. } => Some("1100".to_string()),
+            Record::Refused((origin, code, text)) => Some(format!("{} {code} {text}", origin.id())),
+            Record::OrderUpdate(told) => Some(format!("{} {:?}", told.update.order_id, told.update.status)),
+            Record::OrderNotice((id, code, text, ..)) => Some(format!("{id} {code} {text}")),
+            _ => None,
+        }).collect();
+        if withdrawn {
+            hl.take_order_command(ControlCommand::CancelOrder { order_id: 6, stated: Default::default() });
+            pass(&mut hl);
+            hl.inject_ccp_message(&the_end());
+            pass(&mut hl);
+            pass(&mut hl);
+            assert!(!on_the_wire(&mut back).contains("35=D|"), "a held placement withdrawn does not go");
+            assert!(
+                records(&shared).iter().any(|(_, record)| matches!(record, Record::OrderBook(crate::bridge::OrderBook::Forgotten(6)))),
+                "and is forgotten as one never sent is",
+            );
+            assert!(shared.drain_refused().is_empty(), "and its cancel is not refused");
+        } else if recovers {
+            assert_eq!(said, [
+                "1100",
+                "-1 1104 Pending to create 1 orders: 5",
+                "-1 1105 Pending to submit 1 orders: 6",
+                "-1 1106 Pending to create 1 what-if orders: 8",
+            ]);
+            pass(&mut hl);
+            assert!(!on_the_wire(&mut back).contains("35=D|"), "held until the naming behind the logon is over");
+            hl.inject_ccp_message(&the_end());
+            pass(&mut hl);
+            pass(&mut hl);
+            assert!(on_the_wire(&mut back).contains("35=D|"), "and then it goes");
+            assert!(shared.drain_refused().is_empty(), "and nothing waiting is refused");
+        } else {
+            assert_eq!(said, [
+                "1100".to_string(),
+                format!("5 {:?}", OrderStatus::ApiCancelled),
+                "5 10328 Connection lost, order data could not be resolved".to_string(),
+                format!("8 {:?}", OrderStatus::ApiCancelled),
+                "8 10328 Connection lost, order data could not be resolved".to_string(),
+                format!("6 {:?}", OrderStatus::ApiCancelled),
+                "6 10328 Connection lost, order data could not be resolved".to_string(),
+            ]);
+            pass(&mut hl);
+            assert!(!on_the_wire(&mut back).contains("35=D|"), "what was built is given up too, not sent");
+        }
+    }
+}

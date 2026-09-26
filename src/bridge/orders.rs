@@ -53,6 +53,10 @@ struct Replay {
     done: bool,
     /// Whether the venue has named anything on this connection.
     began: bool,
+    /// Whether a question of what is working is held past the naming: from a
+    /// drop until the recovery behind the next naming is over, as a gateway
+    /// holds it.
+    held: bool,
     /// When the wait for that naming gives up, shared by everyone waiting.
     ///
     /// Set when a connection comes up — the venue starts the naming then —
@@ -880,6 +884,19 @@ impl OrderState {
 
     #[doc(hidden)] pub fn set_replay_done(&self) {
         self.replay.lock().unwrap().done = true;
+    }
+
+    /// Hold a question of what is working, or let it be answered: held from a
+    /// drop until the recovery behind the next naming is over.
+    #[doc(hidden)] pub fn hold_open_orders(&self, held: bool) {
+        self.replay.lock().unwrap().held = held;
+    }
+
+    /// Whether a question of what is working can be answered: the venue has
+    /// named it to its end, and no recovery holds it.
+    pub fn open_orders_named(&self) -> bool {
+        let replay = self.replay.lock().unwrap();
+        replay.done && !replay.held
     }
 
     /// Whether the orders already working have been received.

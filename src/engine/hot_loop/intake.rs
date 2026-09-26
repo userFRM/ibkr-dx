@@ -110,12 +110,15 @@ struct Pending {
     /// definitions, which a gateway asks once for each order that waits on it.
     asked_algorithms: bool,
     deadline: std::time::Instant,
+    /// Held until the recovery behind the next logon is over, the trading
+    /// connection having gone while it waited.
+    held: bool,
 }
 
 impl Pending {
     fn new(cmd: ControlCommand) -> Self {
         Self { cmd, lookup: None, watch: None, loading: None, wire_id: None, asked_algorithms: false,
-            deadline: std::time::Instant::now() + super::ccp::CcpState::NAMING_TIMEOUT }
+            deadline: std::time::Instant::now() + super::ccp::CcpState::NAMING_TIMEOUT, held: false }
     }
 }
 
@@ -200,6 +203,10 @@ pub(crate) struct Intake {
     /// Whether this session has warned of a moment stated without a zone,
     /// which a gateway warns of once for each connection.
     warned_zoneless: bool,
+    /// Placements a dropped trading connection left built and not yet sent,
+    /// held until the recovery after the next logon is over, as a gateway
+    /// holds them. Those not yet built wait where they are, held.
+    held_requests: Vec<OrderRequest>,
 }
 
 impl Intake {
@@ -321,7 +328,8 @@ impl HotLoop {
                 let order_id = self.shared.orders.wire_order_id(order_id as i64).unwrap_or(order_id);
                 if self.cancel_waiting_attached(Some(order_id), None) { return; }
                 let withdrawn = self.withdraw_waiting_placement(order_id)
-                    || self.withdraw_kept_placement(order_id);
+                    || self.withdraw_kept_placement(order_id)
+                    || self.withdraw_held_request(order_id);
                 self.intake.recount_waiting();
                 if withdrawn {
                     self.say_the_time_did_not_travel(order_id, &stated);
@@ -378,6 +386,9 @@ impl HotLoop {
     }
 
     fn take_one(&mut self, pending: &mut Pending) -> Step {
+        if pending.held {
+            return Step::Waits;
+        }
         match &mut pending.cmd {
             ControlCommand::Place(p) => self.take_placement(p, &mut pending.lookup, &mut pending.loading, &mut pending.wire_id, &mut pending.asked_algorithms, pending.deadline),
             ControlCommand::CancelOrder { order_id, stated } => {
@@ -646,6 +657,11 @@ impl HotLoop {
         *wire_id = Some(order_id);
         order_id
         };
+        // Nothing more is done with it while the trading connection is down:
+        // it waits with what the drop left, as a gateway holds it.
+        if self.ccp.disconnected {
+            return Step::Waits;
+        }
         let attaching = attached_checks::requested(&p.order);
         let smart_combo = (attaching || self.intake.attached.family_keys.contains_key(&order_id)) && p.contract.exchange == "SMART"
             && matches!(p.contract.sec_type.as_str(), "BAG" | "COMB" | "COMBO");
@@ -1646,6 +1662,223 @@ impl HotLoop {
         true
     }
 
+    /// Hold the placements a dropped trading connection leaves waiting until
+    /// the recovery after the next logon is over, as a gateway holds them, and
+    /// at the drop say which they are: those not yet built under 1104, those
+    /// built and not sent under 1105, and previews under 1106. Where the logon
+    /// does not recover placements, every placement the drop leaves in hand is
+    /// cancelled instead, as a gateway cancels it, whether it was built or not;
+    /// a replace built goes out when the connection is back.
+    pub(super) fn hold_what_waits_to_be_placed(&mut self, at_the_drop: bool) {
+        let recovers = self.recovers_placements();
+        if !recovers && !at_the_drop {
+            return;
+        }
+        let placing = |cmd: &ControlCommand| matches!(cmd, ControlCommand::Place(_) | ControlCommand::Bracket(_));
+        // What each waited on the connection that went for is asked again on
+        // the next.
+        for pending in self.intake.waiting.iter_mut().filter(|w| placing(&w.cmd)) {
+            if let Some(asked) = pending.lookup.take() {
+                self.ccp.orders_named.retain(|(rid, _)| *rid != asked);
+                self.intake.naming.retain(|_, rid| *rid != asked);
+            }
+            pending.loading = None;
+            pending.held = recovers;
+        }
+        if !recovers {
+            let (cancelled, rest): (Vec<Pending>, Vec<Pending>) =
+                std::mem::take(&mut self.intake.waiting).into_iter().partition(|w| placing(&w.cmd));
+            self.intake.waiting = rest.into();
+            for pending in &cancelled {
+                self.cancel_for_the_drop(&pending.cmd);
+            }
+            // A placement built and not sent is in the gateway's hands the
+            // same way: its drain of what the drop left cancels every one of
+            // them. A replace built is not a placement and still goes out.
+            let (built, keep): (Vec<OrderRequest>, Vec<OrderRequest>) = self.context.drain_pending_orders()
+                .partition(|request| matches!(request,
+                    OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. }));
+            self.context.pending_orders.requeue_front(keep);
+            for request in &built {
+                self.cancel_a_built_placement_for_the_drop(request);
+            }
+            self.intake.recount_waiting();
+            return;
+        }
+        let (built, rest): (Vec<OrderRequest>, Vec<OrderRequest>) = self.context.drain_pending_orders()
+            .partition(|request| matches!(request,
+                OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. } | OrderRequest::Modify { .. }));
+        self.context.pending_orders.requeue_front(rest);
+        self.intake.held_requests.extend(built);
+        if !at_the_drop {
+            return;
+        }
+        let preview = |cmd: &ControlCommand| matches!(cmd, ControlCommand::Place(p) if p.order.what_if);
+        let mut to_create = Vec::new();
+        let mut to_submit = Vec::new();
+        let mut previews = Vec::new();
+        for pending in self.intake.waiting.iter().filter(|w| w.held) {
+            let ids: Vec<u64> = match &pending.cmd {
+                ControlCommand::Place(p) => vec![p.order_id],
+                ControlCommand::Bracket(b) => vec![b.parent_id, b.parent_id + 1, b.parent_id + 2],
+                _ => Vec::new(),
+            };
+            if preview(&pending.cmd) { previews.extend(ids) } else { to_create.extend(ids) }
+        }
+        for request in &self.intake.held_requests {
+            let what_if = matches!(request, OrderRequest::SubmitEx { attrs, .. } if attrs.what_if);
+            let ids = request.order_ids().into_iter().map(|wire| self.shared.orders
+                .attached_order_metadata(wire).and_then(|held| held.api_order_id).map_or(wire, |api| api as u64));
+            if what_if { previews.extend(ids) } else { to_submit.extend(ids) }
+        }
+        for (code, words, ids) in [
+            (1104, "Pending to create {} orders: {}", to_create),
+            (1105, "Pending to submit {} orders: {}", to_submit),
+            (1106, "Pending to create {} what-if orders: {}", previews),
+        ] {
+            if ids.is_empty() {
+                continue;
+            }
+            let named: Vec<String> = ids.iter().take(10).map(u64::to_string).collect();
+            let mut listed = named.join(",");
+            if ids.len() > 10 {
+                listed = format!("{listed} (and {} more)", ids.len() - 10);
+            }
+            let said = words.replacen("{}", &ids.len().to_string(), 1).replacen("{}", &listed, 1);
+            self.shared.push_refused(ErrorOrigin::Session, code, said);
+        }
+    }
+
+    /// Give up a placement not yet built when the connection goes, as a
+    /// gateway gives it up where the logon does not recover placements: its
+    /// status goes to ApiCancelled and the program is told under 10328.
+    fn cancel_for_the_drop(&self, cmd: &ControlCommand) {
+        let (ids, quantity, parent) = match cmd {
+            ControlCommand::Place(p) => (vec![p.order_id], p.order.total_quantity, u64::try_from(p.order.parent_id).unwrap_or(0)),
+            ControlCommand::Bracket(b) => (vec![b.parent_id, b.parent_id + 1, b.parent_id + 2], b.quantity, 0),
+            _ => return,
+        };
+        for order_id in ids {
+            let order_id = self.shared.orders.wire_order_id(order_id as i64).unwrap_or(order_id);
+            self.shared.orders.push_order_update(crate::types::OrderUpdate {
+                order_id,
+                instrument: 0,
+                status: crate::types::OrderStatus::ApiCancelled,
+                filled_qty: 0.0,
+                remaining_qty: quantity,
+                avg_price: 0,
+                perm_id: 0,
+                parent_id: parent as i64,
+                timestamp_ns: 0,
+            });
+            self.shared.orders.push_order_notice(
+                order_id, OrderOp::Place, 10328, "Connection lost, order data could not be resolved".into(),
+            );
+        }
+    }
+
+    /// Give up a placement built and not sent when the connection goes, as a
+    /// gateway gives up every placement the drop left in its hands where the
+    /// logon does not recover placements: its status goes to ApiCancelled, the
+    /// program is told under 10328, and what was booked for it here is let go,
+    /// as it never reached the venue.
+    fn cancel_a_built_placement_for_the_drop(&mut self, request: &OrderRequest) {
+        let (legs, quantity) = match request {
+            OrderRequest::SubmitEx { order_id, qty, attrs, .. } =>
+                (vec![(*order_id, attrs.parent_id)], crate::types::qty_to_f64(*qty)),
+            OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, qty, .. } =>
+                (vec![(*parent_id, 0), (*tp_id, *parent_id), (*sl_id, *parent_id)],
+                 crate::types::qty_to_f64(*qty)),
+            _ => return,
+        };
+        for (order_id, parent) in legs {
+            self.shared.orders.push_order_update(crate::types::OrderUpdate {
+                order_id,
+                instrument: 0,
+                status: crate::types::OrderStatus::ApiCancelled,
+                filled_qty: 0.0,
+                remaining_qty: quantity,
+                avg_price: 0,
+                perm_id: 0,
+                parent_id: parent as i64,
+                timestamp_ns: 0,
+            });
+            self.shared.orders.push_order_notice(
+                order_id, OrderOp::Place, 10328, "Connection lost, order data could not be resolved".into(),
+            );
+            self.intake.placed.remove(&order_id);
+            self.intake.attached.discard_local_order(order_id);
+            self.shared.orders.forget_local_api_order(order_id);
+        }
+    }
+
+    /// Put back what the recovery held, once it is over: a placement not yet
+    /// built is taken again, and one built goes out, as a gateway sends it out
+    /// once. One the recovery had already sent out is not sent again, and its
+    /// program is told under 106 that it could not be.
+    pub(super) fn let_go_of_the_held(&mut self) {
+        if !self.ccp.recovery.is_over() {
+            return;
+        }
+        for pending in self.intake.waiting.iter_mut() {
+            pending.held = false;
+        }
+        let mut going = Vec::new();
+        for request in std::mem::take(&mut self.intake.held_requests) {
+            let placing = matches!(request, OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. });
+            if placing && request.order_ids().iter().any(|id| self.ccp.recovery.sent_once(*id)) {
+                for (order_id, description) in super::ccp::executions::request_descriptions(&request, &self.context, &self.shared) {
+                    let Some(description) = description else { continue };
+                    let api_id = self.shared.orders.attached_order_metadata(order_id)
+                        .and_then(|held| held.api_order_id).unwrap_or(order_id as i64);
+                    self.shared.orders.push_order_notice(
+                        order_id, OrderOp::Place, 106,
+                        format!("Can't transmit order id:{api_id}, {description}"),
+                    );
+                }
+                continue;
+            }
+            if placing {
+                self.ccp.recovery.sends_out(request.order_ids());
+            }
+            going.push(request);
+        }
+        self.context.pending_orders.requeue_front(going);
+    }
+
+    /// Withdraw a placement built and held for the recovery, as a withdrawal
+    /// of one kept for a later transmit withdraws it: it never reached the
+    /// venue.
+    fn withdraw_held_request(&mut self, order_id: u64) -> bool {
+        let (withdrawn, held): (Vec<OrderRequest>, Vec<OrderRequest>) =
+            std::mem::take(&mut self.intake.held_requests).into_iter().partition(|request| {
+                matches!(request, OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. })
+                    && request.order_ids().contains(&order_id)
+            });
+        self.intake.held_requests = held;
+        for order_id in withdrawn.iter().flat_map(OrderRequest::order_ids) {
+            self.intake.placed.remove(&order_id);
+            self.intake.attached.discard_local_order(order_id);
+            self.shared.orders.forget_local_api_order(order_id);
+            self.shared.push_call_record(Record::OrderBook(OrderBook::Forgotten(order_id)));
+        }
+        !withdrawn.is_empty()
+    }
+
+    /// Whether the logon recovers a program's placements across a drop, as a
+    /// gateway reads it: the venue offers it, under the name it gives a partner
+    /// brand where the login is one, and the program's own setting, which this
+    /// client has none of, is on.
+    pub(super) fn recovers_placements(&self) -> bool {
+        let broker = self.shared.reference.broker();
+        let feature = if broker.is_empty() || broker.contains("Interactive Brokers") {
+            "APINTLRCV"
+        } else {
+            "APINTLRCV-WB"
+        };
+        self.shared.reference.enables(feature)
+    }
+
     /// Withdraw everything the engine holds and has not sent: the orders
     /// kept for a later transmit, and the placements waiting for their
     /// contract's name. A kept revision goes and the order it revises stays.
@@ -1664,11 +1897,20 @@ impl HotLoop {
         self.intake
             .waiting
             .retain(|w| !matches!(w.cmd, ControlCommand::Place(_) | ControlCommand::Bracket(_)));
+        let held: Vec<u64> = self.intake.held_requests.iter()
+            .filter(|request| matches!(request, OrderRequest::SubmitEx { .. } | OrderRequest::SubmitBracket { .. }))
+            .flat_map(|request| request.order_ids())
+            .collect();
+        for order_id in held {
+            self.withdraw_held_request(order_id);
+        }
     }
 
     /// Refuse every order command still waiting, with the words a stop
     /// says them in.
     pub(crate) fn refuse_held_order_commands(&mut self, why: &str) {
+        // What the recovery held is waiting too.
+        self.context.pending_orders.requeue_front(std::mem::take(&mut self.intake.held_requests));
         self.intake.waiting_ids.clear();
         for pending in std::mem::take(&mut self.intake.waiting) {
             self.refuse_order_command(&pending.cmd, why);

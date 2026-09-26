@@ -596,6 +596,39 @@ working again on any of them. A status report stating the order working at
 its own revision, after a withdrawal this session did not send, states it
 working again.
 
+## Orders across a lost connection
+
+The venue ends what it names after a logon, and each answer to what it has
+finished, with a report stating its contract as `*`; on an account working
+nothing that report follows the day's executions directly. A question of what
+is working is answered there, and one asked from a drop until then is held, as
+a gateway holds it.
+
+An order sent and not yet answered when the trading connection goes is
+recovered as a gateway recovers it. Once the connection that replaced it has
+named what is working, the venue is asked what it has finished today, where
+the logon offers a question bounded in time (`1DAYSORDER`) from a second before
+the earliest such order went out, or from the last time a report stated where
+that is earlier, though not from before the start of yesterday. An order the venue names in
+either answer takes the state it gives, and the program is told as for any
+report. One it names in neither is held as inactive and is not sent again: a
+gateway sends no order of a program's twice. Where a recovery had already sent
+it out once, the program is told under 106, `Can't transmit order id:<id>,
+<order>`, with the order described as a message beside its status describes
+it. The recovery is given up a minute after the logon that began it, and a
+connection that replaced one mid-recovery leaves it to that minute.
+
+Where the logon offers the recovery (`APINTLRCV`, or `APINTLRCV-WB` for a
+partner's login; a gateway's own setting for it is on unless changed, and this
+client has none), the placements a drop leaves not yet sent are listed after
+the 1100: not yet built under 1104, `Pending to create 2 orders: 5,6`, built
+and not sent under 1105, previews under 1106, ten numbers at most followed by
+`(and 3 more)`. They, and placements made while the connection is down, go out
+once the recovery behind the next naming is over. Where the logon does not
+offer it, every placement the drop leaves not yet sent reads `ApiCancelled`
+and is refused under 10328, `Connection lost, order data could not be
+resolved`, whether it was built or not.
+
 ## A message beside an order's status
 
 The venue can state a message beside an order's status: an order that will not

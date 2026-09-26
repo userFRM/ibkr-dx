@@ -157,7 +157,7 @@ impl Asks {
                 // Held until the venue has named what is working to its end,
                 // however long that takes, as a gateway holds it.
                 Ask::OpenOrders(_) => {
-                    let named = shared.orders.replay_done();
+                    let named = shared.orders.open_orders_named();
                     if named {
                         held.answer(named, shared);
                     }

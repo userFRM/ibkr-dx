@@ -835,6 +835,8 @@ pub(crate) struct CcpState {
     /// Cleared on a disconnect so a second drop before the
     /// sweep cancels it rather than reaping against a dead session.
     pub(crate) recovery_sweep_at: Option<Instant>,
+    /// What the drop left sent and unanswered, and where its recovery stands.
+    pub(crate) recovery: recovery::Recovery,
     /// (req_id, is_single_shot). Single-shot = known-conId lookup whose
     /// first 35=d reply is also the last (server emits no 323=5/6 terminator
     /// for these). Multi-record by-symbol/matching-symbols requests push
@@ -1189,6 +1191,7 @@ impl CcpState {
             charges_told: HashMap::new(),
             disconnected: false,
             recovery_sweep_at: None,
+            recovery: Default::default(),
             pending_secdef: Vec::new(),
             pending_matching_symbols: Vec::new(),
             matching_symbols_abandoned: None,
@@ -4024,6 +4027,9 @@ impl CcpState {
         self.disconnected = true;
         *ccp_conn = None;
         self.recovery_sweep_at = None;
+        // Kept before anything below reads the orders as in doubt: which of
+        // them the venue had not answered is known only from here.
+        self.keep_what_the_drop_leaves(context, shared);
         // The wait for the replay belongs to the connection that replays. Left
         // armed, the next connection inherited a hold that had already expired
         // and asked what the venue has finished while its own replay was still
@@ -4244,21 +4250,21 @@ impl CcpState {
     /// What the venue names on this connection is over, or an answer to what
     /// it has finished is: the report stating its contract `*` ends both, as a
     /// gateway reads it, on an account working nothing as on any other.
-    pub(crate) fn end_what_the_venue_names(&mut self, shared: &SharedState) {
+    pub(crate) fn end_what_the_venue_names(&mut self, context: &mut Context, shared: &SharedState) {
         // A caller waiting on the answer waits on this: the answer is a run of
-        // ordinary reports and nothing else says it is over.
+        // ordinary reports and nothing else says it is over. The recovery's
+        // own answer has no caller.
+        let the_recoverys = self.the_answer_is_the_recoverys();
         if self.completed_orders_open {
             self.completed_orders_open = false;
-            self.deliver_finished_orders(shared);
-            self.end_completed_orders(self.completed_orders_asked_on, shared);
-            log::info!("The venue has stated everything it has finished");
+            if !the_recoverys {
+                self.deliver_finished_orders(shared);
+                self.end_completed_orders(self.completed_orders_asked_on, shared);
+                log::info!("The venue has stated everything it has finished");
+            }
         }
         shared.orders.set_replay_done();
-        // What the drop left in doubt is judged now: the venue has named what
-        // it was going to name.
-        if self.recovery_sweep_at.is_some() {
-            self.recovery_sweep_at = Some(Instant::now());
-        }
+        self.recover_at_the_end(context, shared, the_recoverys);
     }
 
     /// Log the orders the recovery push did not account for.
@@ -4307,6 +4313,7 @@ impl CcpState {
         // is how the same order is placed twice. Cleared here, that caller
         // waits for the new push the way it waited for the first.
         shared.orders.replay_is_pending();
+        self.begin_the_recovery();
         // And the account itself. The same flag, for the same reason: a
         // caller asking what the account holds was answered from the pre-drop
         // snapshot the moment the connection came back, before the venue had
@@ -4708,6 +4715,7 @@ mod venue_clock_tests {
 
 pub(crate) mod executions;
 mod order_message;
+mod recovery;
 pub(crate) mod positions;
 
 #[cfg(test)]

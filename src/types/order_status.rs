@@ -58,7 +58,7 @@ pub fn is_open_or_reactivatable(status: &str, completed_status: &str) -> bool {
 /// verdict here, so the two cannot answer the question differently.
 #[inline]
 pub fn is_terminal_status(status: &str, completed_status: &str) -> bool {
-    matches!(status, "Filled" | "Cancelled" | "Rejected")
+    matches!(status, "Filled" | "Cancelled" | "Rejected" | "ApiCancelled")
         || (status == "Inactive" && !completed_status.is_empty())
 }
 
@@ -74,7 +74,7 @@ pub fn is_terminal_status(status: &str, completed_status: &str) -> bool {
 /// told it was live.
 #[inline]
 pub fn is_terminal(status: OrderStatus) -> bool {
-    matches!(status, OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected)
+    matches!(status, OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::ApiCancelled)
 }
 
 /// Convert OrderStatus enum to ibapi-compatible string.
@@ -100,6 +100,7 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         // with the rejection reason carried separately on OrderState.completedStatus.
         OrderStatus::Rejected => "Inactive",
         OrderStatus::Inactive => "Inactive",
+        OrderStatus::ApiCancelled => "ApiCancelled",
         OrderStatus::Uncertain => "Unknown",
     }
 }

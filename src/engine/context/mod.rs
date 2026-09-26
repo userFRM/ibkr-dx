@@ -743,6 +743,19 @@ impl Context {
         }
     }
 
+    /// The orders sent to the venue that it has not answered: placed, and
+    /// named by no report since. A preview places nothing.
+    pub fn unanswered_orders(&self) -> Vec<OrderId> {
+        let mut unanswered: Vec<OrderId> = self.open_orders.values()
+            .filter(|order| order.status == OrderStatus::PendingSubmit
+                || (order.status == OrderStatus::Uncertain && !self.venue_orders.contains_key(&order.order_id)))
+            .filter(|order| !self.submitted.get(&order.order_id).is_some_and(|spec| spec.attrs.what_if))
+            .map(|order| order.order_id)
+            .collect();
+        unanswered.sort_unstable();
+        unanswered
+    }
+
     /// Orders still Uncertain — those the reconnect did not account for.
     pub fn uncertain_orders(&self) -> Vec<Order> {
         self.open_orders.values()

@@ -1020,8 +1020,18 @@ socket to a gateway does: `is_connected()` reads true between the 1100 and the
 carried when the connection comes back; a question of what is working is
 answered once the venue has named it to its end. Working orders keep the status
 they were last given: as on a gateway, nothing is said of them at the drop, and
-the venue restates each one after the reconnect. An order the venue does not
-restate keeps its last status.
+the venue restates each one after the reconnect. An order sent and not yet
+answered when the connection went is recovered as a gateway recovers it: once
+the venue has named what is working, it is asked what it has finished today,
+and an order it names in either answer takes the state it gives; one it names
+in neither is held as inactive and not sent again, and where a recovery had
+already sent it out once, the caller is told under 106 that it could not be
+sent. Placements not yet sent are listed after the 1100 under 1104, 1105 and
+1106 and go out once that is over, where the logon offers the recovery; where it
+does not, every placement the drop leaves not yet sent is cancelled under
+10328, whether it was built or not. A question of what is
+working asked meanwhile is answered once it is over. Any other order the venue
+does not restate keeps its last status.
 </details>
 
 <details>
@@ -1071,8 +1081,8 @@ Claims here rest on tests, and the tests are counted rather than described:
 
 | Suite | Count | Needs a session |
 | --- | ---: | :---: |
-| Rust, unit and integration | 3,195 | No |
-| Python | 1,188 | No |
+| Rust, unit and integration | 3,204 | No |
+| Python | 1,189 | No |
 | Rust, live | 9 | Yes |
 | Python, live | 123 | Yes |
 | Paper compatibility, 154 phases | 51 | Yes |

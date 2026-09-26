@@ -416,7 +416,7 @@ fn split_keeping(text: &str, separator: char) -> impl Iterator<Item = &str> {
 
 /// The order as a gateway's display describes it: side, size and contract;
 /// nothing for a kind of contract whose description is not written here.
-fn describe(order: &Described<'_>) -> Option<String> {
+pub(super) fn describe(order: &Described<'_>) -> Option<String> {
     if !describable(order.contract) {
         return None;
     }

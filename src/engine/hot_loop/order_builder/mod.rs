@@ -1837,7 +1837,7 @@ fn restate_with(kind: &crate::types::OrderKind, price: i64, stop_price: i64) -> 
 /// One statement of it: the submit records the order this way and a replace
 /// asks it which type the record describes, so the two cannot disagree about
 /// what a tracked order is.
-fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
+pub(crate) fn tracked_shape(kind: &crate::types::OrderKind) -> (u8, i64, i64) {
     use crate::types::OrderKind as K;
     // A price the order does not state is held as none, which the record
     // writes nought for.
@@ -2921,7 +2921,7 @@ fn push_order_attrs(
     order_type
 }
 
-fn build_algo_tags(algo: &AlgoParams) -> (&str, Vec<String>) {
+pub(crate) fn build_algo_tags(algo: &AlgoParams) -> (&str, Vec<String>) {
     // Name then value for each parameter the caller stated, in the order the
     // strategy lists them. One the caller did not state is not sent: the
     // venue's own default for it is not known here, and a value put in its

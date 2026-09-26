@@ -676,68 +676,188 @@ fn tell_the_venues_message(
     context: &Context,
     shared: &SharedState,
 ) {
-    use super::order_message::{self as message, Described, Faq};
+    use super::order_message::{self as message, Faq};
     let text = parsed.get(&6361).map(String::as_str).unwrap_or("");
     let code = parsed.get(&6360).map(String::as_str).unwrap_or("");
     let refused = if text.is_empty() { told_refusal(parsed, shared) } else { None };
     if text.is_empty() && refused.is_none() {
         return;
     }
-    let Some(order) = context.order(clord_id) else { return };
-    let Some(info) = shared.orders.get_order_info(clord_id) else { return };
-    if info.order.client_id != shared.orders.api_client_id() {
-        return;
+    let base = shared.reference.misc_url("faq_base_url");
+    let broker = shared.reference.broker();
+    let faq = Faq { base: base.as_deref(), own_brand: broker.is_empty() || broker.contains("Interactive Brokers") };
+    let told = with_the_order_described(clord_id, context, shared, |described| match refused {
+        None => message::for_the_venues_message(code, text, described, faq),
+        Some(refused) => message::for_the_venues_refusal(code, &refused, described, faq),
+    });
+    if let Some(Some((code, text))) = told {
+        shared.orders.push_order_notice_sent(clord_id, api::OrderOp::Venue, code, text, sent(parsed));
     }
-    let Some(contract) = u32::try_from(info.contract.con_id).ok()
-        .and_then(|con_id| shared.reference.contract_definition(con_id, &info.contract.exchange))
-    else {
-        return;
+}
+
+/// An order this session placed, as a gateway describes it to the program
+/// that placed it: side, size and contract, read from what this session sent.
+/// Nothing where it is not written here.
+pub(crate) fn order_description(clord_id: u64, context: &Context, shared: &SharedState) -> Option<String> {
+    let order = context.order(clord_id)?;
+    let spec = context.submitted.get(&clord_id);
+    let terms = Terms {
+        side: order.side,
+        qty: order.qty,
+        ord_type: order.ord_type,
+        ladder: context.ladder_sizes.get(&clord_id).copied(),
+        cash: spec.map(|spec| spec.attrs.cash_qty).filter(|cash| *cash > 0 && *cash != crate::types::Price::MAX)
+            .map(|cash| cash as f64 / crate::types::PRICE_SCALE as f64),
+        algo: spec.and_then(|spec| algo_of(&spec.kind)),
+        con_id: context.market.con_id(order.instrument)?,
+        exchange: context.market.order_routing(order.instrument).1,
     };
+    described_as(&terms, shared, super::order_message::describe).flatten()
+}
+
+/// The orders a request would place, each as a gateway describes it to the
+/// program that placed it, where it is written here.
+pub(crate) fn request_descriptions(request: &crate::types::OrderRequest, context: &Context, shared: &SharedState) -> Vec<(u64, Option<String>)> {
+    use crate::types::OrderRequest as R;
+    let exchange = |instrument| context.market.order_routing(instrument).1;
+    match request {
+        R::SubmitEx { order_id, instrument, con_id, side, qty, kind, attrs, .. } => {
+            let terms = Terms {
+                side: *side, qty: *qty, ord_type: crate::engine::hot_loop::order_builder::tracked_shape(kind).0, ladder: context.ladder_sizes.get(order_id).copied(),
+                cash: Some(attrs.cash_qty).filter(|cash| *cash > 0 && *cash != crate::types::Price::MAX)
+                    .map(|cash| cash as f64 / crate::types::PRICE_SCALE as f64),
+                algo: algo_of(kind),
+                con_id: *con_id, exchange: exchange(*instrument),
+            };
+            vec![(*order_id, described_as(&terms, shared, super::order_message::describe).flatten())]
+        }
+        R::SubmitBracket { con_id, parent_id, tp_id, sl_id, instrument, side, qty, .. } => {
+            let exit = match side { crate::types::Side::Buy => crate::types::Side::Sell, _ => crate::types::Side::Buy };
+            [(*parent_id, *side, b'2'), (*tp_id, exit, b'2'), (*sl_id, exit, b'3')].into_iter().map(|(order_id, side, ord_type)| {
+                let terms = Terms {
+                    side, qty: *qty, ord_type, ladder: None, cash: None, algo: None,
+                    con_id: *con_id, exchange: exchange(*instrument),
+                };
+                (order_id, described_as(&terms, shared, super::order_message::describe).flatten())
+            }).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// What a description of an order is read from.
+struct Terms {
+    side: crate::types::Side,
+    qty: crate::types::Qty,
+    ord_type: u8,
+    ladder: Option<i64>,
+    cash: Option<f64>,
+    /// The algorithm the order goes through, where it names one: its name
+    /// and its parameters as the session would state them.
+    algo: Option<(String, Vec<crate::types::model::TagValue>)>,
+    con_id: i64,
+    exchange: String,
+}
+
+/// The algorithm an engine's order kind carries: its name, and its
+/// parameters as the session states them on the wire.
+fn algo_of(kind: &crate::types::OrderKind) -> Option<(String, Vec<crate::types::model::TagValue>)> {
+    match kind {
+        crate::types::OrderKind::Adaptive { .. } => Some(("Adaptive".to_string(), Vec::new())),
+        crate::types::OrderKind::Algo { algo, .. } => {
+            let (name, flat) = crate::engine::hot_loop::order_builder::build_algo_tags(algo);
+            let params = flat
+                .chunks(2)
+                .map(|pair| crate::types::model::TagValue {
+                    tag: pair[0].clone(),
+                    value: pair.get(1).cloned().unwrap_or_default(),
+                })
+                .collect();
+            Some((name.to_string(), params))
+        }
+        _ => None,
+    }
+}
+
+/// What an order is, as a message about it describes it, handed to `say`.
+/// Nothing where the order is not the program's own — a gateway tells the
+/// connection of the order's client and no other — or its contract is not
+/// held.
+fn with_the_order_described<R>(
+    clord_id: u64,
+    context: &Context,
+    shared: &SharedState,
+    say: impl FnOnce(&super::order_message::Described<'_>) -> R,
+) -> Option<R> {
+    let order = context.order(clord_id)?;
+    let info = shared.orders.get_order_info(clord_id)?;
+    if info.order.client_id != shared.orders.api_client_id() {
+        return None;
+    }
+    let terms = Terms {
+        side: order.side,
+        qty: order.qty,
+        ord_type: order.ord_type,
+        ladder: context.ladder_sizes.get(&clord_id).copied(),
+        cash: Some(info.order.cash_qty).filter(|cash| cash.is_finite() && *cash > 0.0 && *cash != f64::MAX),
+        algo: (!info.order.algo_strategy.is_empty())
+            .then(|| (info.order.algo_strategy.clone(), info.order.algo_params.clone())),
+        con_id: info.contract.con_id,
+        exchange: info.contract.exchange.clone(),
+    };
+    described_as(&terms, shared, say)
+}
+
+fn described_as<R>(
+    terms: &Terms,
+    shared: &SharedState,
+    say: impl FnOnce(&super::order_message::Described<'_>) -> R,
+) -> Option<R> {
+    use super::order_message::{self as message, Described};
+    let contract = u32::try_from(terms.con_id).ok()
+        .and_then(|con_id| shared.reference.contract_definition(con_id, &terms.exchange))?;
     let rule = contract.market_rule_id
         .and_then(|id| i32::try_from(id).ok())
         .and_then(|id| shared.reference.market_rule(id));
-    let quantity = message::quantity(order.qty);
-    let terms = shared.reference.money_orders();
+    let quantity = message::quantity(terms.qty);
+    let money = shared.reference.money_orders();
     let size_fraction = shared.reference.size_fraction();
     let described = Described {
-        side: order.side,
+        side: terms.side,
         quantity: &quantity,
-        ladder: context.ladder_sizes.get(&clord_id).copied(),
-        cash: Some(info.order.cash_qty).filter(|cash| cash.is_finite() && *cash > 0.0 && *cash != f64::MAX),
+        ladder: terms.ladder,
+        cash: terms.cash,
         contract: &contract,
         rule: rule.as_ref(),
         whole_listing: shared.reference.enables("SEPLSTDIV"),
         isin_with_cusip: shared.reference.enables("CUSIPD"),
-        order_type: crate::types::ord_type_fix_str(order.ord_type),
-        algo: if info.order.algo_strategy.is_empty() {
-            None
-        } else {
-            match shared.reference.algorithm_set(&contract) {
-                None => Some(None),
-                Some(held) => crate::client_core::cash_quantity::ibalgo_amount(held.as_ref(), &info.order).map(Some),
+        order_type: crate::types::ord_type_fix_str(terms.ord_type),
+        algo: match &terms.algo {
+            None => None,
+            Some((strategy, params)) => {
+                let stub = crate::types::model::Order {
+                    algo_strategy: strategy.clone(),
+                    algo_params: params.clone(),
+                    ..Default::default()
+                };
+                match shared.reference.algorithm_set(&contract) {
+                    None => Some(None),
+                    Some(held) => crate::client_core::cash_quantity::ibalgo_amount(held.as_ref(), &stub).map(Some),
+                }
             }
         },
         money: message::Money {
-            types: &terms.types,
-            order_types: &terms.order_types,
-            account: terms.account,
+            types: &money.types,
+            order_types: &money.order_types,
+            account: money.account,
             refusals_told: shared.reference.refusals_told(),
             crypto: shared.reference.order_permissions().contains_key("CRYPTO"),
             precise: !shared.reference.enables("NOCASHQTYPRECISION"),
-            product_defaults: &terms.product_defaults,
+            product_defaults: &money.product_defaults,
         },
         size_fraction: &size_fraction,
     };
-    let base = shared.reference.misc_url("faq_base_url");
-    let broker = shared.reference.broker();
-    let faq = Faq { base: base.as_deref(), own_brand: broker.is_empty() || broker.contains("Interactive Brokers") };
-    let told = match refused {
-        None => message::for_the_venues_message(code, text, &described, faq),
-        Some(refused) => message::for_the_venues_refusal(code, &refused, &described, faq),
-    };
-    if let Some((code, text)) = told {
-        shared.orders.push_order_notice_sent(clord_id, api::OrderOp::Venue, code, text, sent(parsed));
-    }
+    Some(say(&described))
 }
 
 /// The venue's refusal of an order stated on a status report, where a gateway
@@ -1683,7 +1803,7 @@ impl CcpState {
         // reads it: on an account working nothing it follows the day's
         // executions directly.
         if parsed.get(&55).map(String::as_str) == Some("*") {
-            self.end_what_the_venue_names(shared);
+            self.end_what_the_venue_names(context, shared);
             return;
         }
         // CCP recovery push format A (, captured against live):
@@ -1856,6 +1976,11 @@ impl CcpState {
                 || (context.order(clord_id).is_none()
                     && (marked_resend || !shared.orders.the_order_went_out(clord_id))))
         {
+            // The recovery's own question is asked for the orders it holds,
+            // which take their ordinary path; nobody asked for the rest.
+            if self.the_answer_is_the_recoverys() {
+                return;
+            }
             let finished = status_of(
                 parsed.get(&39).map(String::as_str).unwrap_or(""), clord_id, parsed,
             );
@@ -2194,6 +2319,8 @@ impl CcpState {
             );
             return;
         }
+        // The time it states, which a recovery asks the venue back to.
+        self.recovery.note_report_time(parsed);
 
         // The venue has named this id, and that is true of every report it can
         // send about one — a working order, a fill, a refusal, the replayed

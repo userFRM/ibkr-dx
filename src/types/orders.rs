@@ -29,6 +29,10 @@ pub enum OrderStatus {
     Rejected,
     /// Server reports order inactive (FIX 39=I).
     Inactive,
+    /// Given up before it reached the venue, the connection having gone while
+    /// it had not been sent, as a gateway gives such a placement up where the
+    /// logon does not recover placements.
+    ApiCancelled,
     /// The venue stated a status this client cannot name. The engine also
     /// holds an order in this state across a lost trading connection, until
     /// the venue states it again; the caller is not told of that one, and
@@ -55,13 +59,13 @@ impl OrderStatus {
             // A partially filled order can still be cancelled, and a fill
             // can land while a cancel is pending.
             Self::PendingCancel | Self::PartiallyFilled => 4,
-            Self::Filled | Self::Cancelled | Self::Rejected => 5,
+            Self::Filled | Self::Cancelled | Self::Rejected | Self::ApiCancelled => 5,
         }
     }
 
     /// Terminal states are absorbing: no ordinary frame may leave them.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected)
+        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected | Self::ApiCancelled)
     }
 }
 
